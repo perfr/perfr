@@ -1,0 +1,141 @@
+# End-to-end suite and screenshot generator
+
+One script does both jobs: it drives the Rust perfr service through a real
+capture and asserts on the answers, and it photographs the viewer showing
+each result.
+
+```
+python3 tools/e2e/perfr_e2e.py                  # everything
+python3 tools/e2e/perfr_e2e.py --only symbols --keep-going
+python3 tools/e2e/perfr_e2e.py --no-shots       # assertions only, no browser
+```
+
+## Why both halves
+
+A test that only checks JSON cannot catch a feature that is computed
+correctly and drawn invisibly. That is not hypothetical: the per-sample tick
+row was complete, tested and unreachable for days because `event_color` had no
+arm for `kind::SAMPLE`, so the ticks were painted the same colour as the flame
+graph beneath them. Every assertion about that data passed.
+
+A screenshot nobody asserts on is decoration. So each scenario does both, and
+`Run.shot` additionally fails a screenshot under 20 KB -- a blank canvas
+compresses to a few KB, which is what a headless browser produces when it
+loads the page and never paints.
+
+## Requirements
+
+- `google-chrome` on PATH (headless, SwiftShader for WebGL).
+- Box3D checked out and built at `~/git/box3d` (`--box3d` to point elsewhere).
+- The service built: `cargo build --release --manifest-path
+  crates/perfr/Cargo.toml`.
+
+No pip packages. `cdp.py` is a ~100-line Chrome DevTools Protocol client on
+the standard library, because this machine's Python refuses installs (PEP 668)
+and a test harness should not depend on a working package index. It talks
+WebSocket to Chrome directly.
+
+## The target
+
+`box3d_target.c` links Box3D and runs falling-box worlds, one per thread,
+until stopped. Box3D's own `test` and `benchmark` binaries are not usable
+here: they exit in seconds, and a capture cannot follow a pid that is gone.
+
+Note the mutex around world creation. Box3D keeps worlds in a process-global
+table, so `b3CreateWorld` and `b3DestroyWorld` are not thread safe, and three
+threads creating worlds at once crashed with SIGILL. The suite found that on
+its first run.
+
+## Screenshots
+
+Written to `../perfr-web/screenshots/` when the website checkout is beside
+this repository, else to `target/e2e/screenshots/`. Report tabs are reached with `?report=`
+(`flat`, `top_down`, `bottom_up`, `modules`, `live`, `flame`) where a deep
+link will do: egui paints to a canvas, so a tab pill has no DOM node.
+
+## Clicking by name
+
+The feature scenarios (`thread-focus`, `scope-report`, `live-tab`, `clear`,
+`agent-scopes`, `hook-from-report`, `report-filter`, ...) do click, but never at a fixed pixel. The viewer
+publishes three readouts on the page:
+
+- `window.__perfr_ui` -- the rectangle of every pill, report tab, scope-menu
+  item, Live row and track row painted this frame, keyed by label:
+  `"Clear"`, `"Live"`, `"menu:report"`, `"live:solve contacts"`,
+  `"row:thread:<pid>:<tid>"`, `"row:process:<pid>"`,
+  `"row:lane:<pid>:<tid>:<kind>"`, `"row:scheduler"`. Rows below the fold
+  are listed too, with a y past the canvas.
+- `window.__perfr_sel` -- the selection: thread, scope, focus, measure, the open scope menu's pick,
+  sample ranges, report tab, scope-report, wire format, socket rate, view
+  window, content span, event count.
+- `window.__perfr_self` -- the viewer's frame-phase breakdown, published
+  while the Self pane is open.
+
+`Run.click("Clear")` reads the first, clicks the middle of the rectangle,
+and `Run.wait_for(lambda: run.sel()...)` asserts on the second. A layout
+change moves the rectangles and nothing else. Right-clicks are a quick
+press and release: the scope menu opens on release, and a press held longer
+than a beat is a drag.
+
+## The report
+
+Every run writes `docs/e2e/report.md` (`--report` to move it): the verdict
+and note of each scenario, the numbers the scenarios measured (bundle and
+slice sizes, socket rate, the viewer's phase totals under headless
+SwiftShader), and an index of the screenshots. `docs/manual/features.md`
+lists every feature with its screenshot. The user guide is
+`docs/manual/index.md`.
+
+## The shared capture
+
+The feature scenarios share one PerfrTestRust capture, taken by
+`_week_capture` on first use and kept on the service between scenarios,
+with `perfr-scope` scopes on the agent track and symbols loaded. A scenario
+that empties the ring (`save-slice-open`, `clear`) marks it stale and the
+next one re-takes it.
+
+## The web site
+
+`website` exports the shared capture as a `.perfr.stream`, builds the site
+into the scratch directory with `build_site.py` from the perfr-web checkout beside this repository
+(skipped when there is none), serves it with that repository's `serve.py` on the service's port + 7, and reads the embedded
+viewer's `__perfr_sel` through the iframe (same origin) to check every
+event arrived with no service behind the page.
+
+## The Python reader
+
+`python-reader` runs `crates/perfr-capture/python/open_capture.py` on
+the bundle `save-slice-open` exported. It needs pyarrow, which this
+machine's system Python refuses to install; point
+`PERFR_E2E_PYARROW_PYTHON` at an interpreter that has it (a venv) or the
+scenario reports `skipped` with that hint.
+
+## Known skip
+
+`instrumentation` reports `skipped` rather than failing when uprobes cannot be
+armed. The kernel requires CAP_PERFMON in `perf_uprobe_event_init` before
+`perf_event_paranoid` is consulted, so an unprivileged run cannot arm a probe.
+The scenario still asserts that the refusal names the capability, because
+silence there is the actual failure mode.
+
+The focused `toolbar_layout.py` Playwright check covers the single-row toolbar,
+CPU reordering while the process menu is open, symbol progress, shortcuts, and
+Inspector/Selection sharing the right pane. Run it against a current service:
+`python3 tools/e2e/toolbar_layout.py --url http://127.0.0.1:44771/`.
+
+Preset regression:
+
+    python3 tools/e2e/presets.py --url http://127.0.0.1:44771/
+
+Browser API fixtures exercise multi-file import, portable JSON download,
+additive/idempotent selection, missing/ambiguous symbols, invalid files, and
+process switching with a late response.
+
+## Capture sharing smoke test
+
+After rebuilding the viewer pack and the debug service, run
+`python3 tools/e2e/share_capture.py`. It uses a local AWS CLI stand-in and an
+HTTPS object server, makes no AWS writes, and checks one-click Share, exact
+slice archive preservation, signed URL encoding, cross-origin browser loading
+under COOP/COEP, and the complete archive download. It requires `openssl` in
+addition to `google-chrome`.

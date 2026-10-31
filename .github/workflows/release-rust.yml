@@ -1,0 +1,254 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+#
+# Rust perfr release for Linux x86-64 and macOS (universal).
+#
+# Tags are perfr-vX.Y.Z (optional suffix, e.g. perfr-v0.1.0-rc.1).
+# That scheme does not collide with the legacy C++ line (v1.* and
+# nightly-*). A plain perfr-vX.Y.Z becomes GitHub's Latest release.
+# A suffix is published as a prerelease and is not Latest.
+#
+# workflow_dispatch with an empty tag builds the same artifacts and
+# does not create a release or a tag. Set tag to an existing perfr-v*
+# tag to attach a release to it. This workflow never creates a tag.
+
+name: release-rust
+
+on:
+  push:
+    tags:
+      - "perfr-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing perfr-vX.Y.Z tag to publish. Empty builds artifacts only."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-rust-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    name: Linux x86-64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Build static perfr
+        run: |
+          set -euo pipefail
+          test -f crates/perfr-live-viewer/viewer-dist/index.html
+          test -f crates/perfr-live-viewer/viewer-dist/perfr_live_viewer_bg.wasm
+          # perfr-live-server's build script embeds viewer-dist into the binary.
+          cargo +1.88.0 build --locked --release --target x86_64-unknown-linux-musl \
+            -p perfr
+          bin=target/x86_64-unknown-linux-musl/release/perfr
+          file "$bin"
+          file "$bin" | grep -q 'statically linked'
+
+      - name: Build Frida companions, API library, and GPU helper
+        run: |
+          set -euo pipefail
+          # Frida and the GPU helper are glibc binaries. The service stays
+          # static musl and looks for these next to its own executable.
+          ./tools/frida/devkits.sh x86_64-unknown-linux-gnu
+          cargo +1.88.0 build --locked --release \
+            -p perfr-frida-helper
+          cargo +1.88.0 build --locked --release \
+            -p perfr-frida-agent --features native
+          cargo +1.88.0 build --locked --release \
+            -p perfr-api -p perfr-gpu-helper
+
+      - name: Pack archive
+        run: |
+          set -euo pipefail
+          stage=dist/perfr
+          mkdir -p "$stage/licenses"
+          cp target/x86_64-unknown-linux-musl/release/perfr "$stage/"
+          cp target/release/libperfr_frida_agent.so "$stage/"
+          cp target/release/perfr-frida-helper "$stage/"
+          cp target/release/libperfr_api.so "$stage/"
+          cp crates/perfr-api/include/perfr.h "$stage/"
+          cp target/release/perfr-gpu-helper "$stage/"
+          cp tools/frida/licenses/* "$stage/licenses/"
+          chmod 755 "$stage/perfr" "$stage/perfr-frida-helper" "$stage/perfr-gpu-helper"
+          tar -C dist -czf perfr-linux-x86_64.tar.gz perfr
+          sha256sum perfr-linux-x86_64.tar.gz | tee perfr-linux-x86_64.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfr-linux-x86_64
+          path: |
+            perfr-linux-x86_64.tar.gz
+            perfr-linux-x86_64.tar.gz.sha256
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+
+      - name: Build universal service
+        run: tools/build/build-service-macos.sh --universal
+
+      - name: Pack archive
+        run: |
+          set -euo pipefail
+          stage=dist/perfr
+          mkdir -p "$stage"
+          # tools/build/build-service-macos.sh --universal writes dist/macos-universal,
+          # including the Frida files the service loads from its own directory.
+          cp -R dist/macos-universal/. "$stage/"
+          test -f "$stage/perfr"
+          test -f "$stage/libperfr_frida_agent.dylib"
+          test -f "$stage/perfr-frida-helper"
+          test -f "$stage/libperfr_api.dylib"
+          file "$stage/perfr" | grep -q 'universal'
+          tar -C dist -czf perfr-macos-universal.tar.gz perfr
+          shasum -a 256 perfr-macos-universal.tar.gz | tee perfr-macos-universal.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfr-macos-universal
+          path: |
+            perfr-macos-universal.tar.gz
+            perfr-macos-universal.tar.gz.sha256
+          if-no-files-found: error
+
+  windows:
+    name: Windows x86-64
+    runs-on: windows-2022
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+
+      - name: Build service and SDK
+        run: .\tools\build\build-service-windows.ps1
+
+      - name: Pack archive
+        run: |
+          $stage = 'dist\perfr'
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item -Path 'dist\windows\*' -Destination $stage -Recurse -Force
+          foreach ($required in 'perfr.exe', 'perfr_frida_agent.dll', 'perfr-frida-helper.exe', 'perfr_api.dll', 'include\perfr.h') {
+            if (-not (Test-Path (Join-Path $stage $required))) { throw "missing $required" }
+          }
+          Compress-Archive -Path $stage -DestinationPath perfr-windows-x86_64.zip -Force
+          $hash = (Get-FileHash -Algorithm SHA256 perfr-windows-x86_64.zip).Hash.ToLowerInvariant()
+          "$hash  perfr-windows-x86_64.zip" | Out-File -Encoding ascii -NoNewline perfr-windows-x86_64.zip.sha256
+          Get-Content perfr-windows-x86_64.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfr-windows-x86_64
+          path: |
+            perfr-windows-x86_64.zip
+            perfr-windows-x86_64.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [linux, macos]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Combined checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ./*.tar.gz ./*.zip | tee SHA256SUMS
+
+      - name: Publish, or stop after the artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          TAG_INPUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || '' }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" = "tag" ]; then
+            tag="$REF_NAME"
+          elif [ -n "${TAG_INPUT:-}" ]; then
+            tag="$TAG_INPUT"
+          else
+            echo "workflow_dispatch without a tag: artifacts only, no GitHub Release and no tag."
+            exit 0
+          fi
+          if ! [[ "$tag" =~ ^perfr-v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$ ]]; then
+            echo "refusing tag '$tag'"
+            echo "use perfr-vX.Y.Z or perfr-vX.Y.Z-suffix. v1.* is the legacy C++ line."
+            exit 1
+          fi
+          notes=$(mktemp)
+          python3 - "$notes" <<'PY'
+          import pathlib, sys
+          pathlib.Path(sys.argv[1]).write_text(
+              "Rust `perfr` for Linux, macOS and Windows. The viewer is in the binary; open it in a browser.\n\n"
+              "**Linux x86-64** (`perfr-linux-x86_64.tar.gz`): static musl binary with the WASM viewer embedded. "
+              "Beside it, the files the service loads from its own directory:\n\n"
+              "- `libperfr_frida_agent.so` and `perfr-frida-helper` (function hooks)\n"
+              "- `libperfr_api.so` and `perfr.h` (manual instrumentation)\n"
+              "- `perfr-gpu-helper` (optional NVIDIA lanes; dynamically linked)\n"
+              "- `licenses/` (Frida)\n\n"
+              "**macOS** (`perfr-macos-universal.tar.gz`): universal binary (Apple silicon and Intel) from "
+              "`tools/build/build-service-macos.sh --universal`. Ad-hoc signed, not notarized. "
+              "Manual scopes and Frida function hooks. Attaching needs a task port. "
+              "No call-stack sampling, scheduler, live disassembly, or auto-profiling. No GPU helper.\n\n"
+              "**Windows x86-64** (`perfr-windows-x86_64.zip`): static-CRT binaries from "
+              "`.\\build-service-windows.ps1`. Beside `perfr.exe`: `perfr_frida_agent.dll` and "
+              "`perfr-frida-helper.exe` (function hooks), `perfr_api.dll`, `perfr_api.lib` and `include\\perfr.h` "
+              "(manual instrumentation), `PerfrTestRust.exe`, `licenses/`. Call-stack sampling, the scheduler and "
+              "thread states come from the kernel logger (ETW) and need an elevated prompt; manual scopes and Frida "
+              "hooks do not. No auto-profiling, no kernel hook engine, no GPU helper.\n\n"
+              "Checksums: `SHA256SUMS` and the per-archive `.sha256` files.\n\n"
+              "Install (fails with a clear message until a non-prerelease `perfr-v*` tag exists):\n\n"
+              "```\n"
+              "curl -fsSL https://perfr.dev/install.sh | sh\n"
+              "```\n\n"
+              "Windows (PowerShell):\n\n"
+              "```\n"
+              "irm https://perfr.dev/install.ps1 | iex\n"
+              "```\n\n"
+              "This is not a legacy C++ nightly (`nightly-*` / `v1.*`).\n"
+          )
+          PY
+          args=(--verify-tag --title "perfr $tag" --notes-file "$notes")
+          if [[ "$tag" =~ ^perfr-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            args+=(--latest)
+          else
+            args+=(--prerelease --latest=false)
+          fi
+          gh release create "$tag" dist/* "${args[@]}"

@@ -1,0 +1,55 @@
+/.idea/
+/.vscode/
+
+# Ignore generated and compiled Python code
+*_pb2.py
+*.egg-info
+__pycache__
+*.pyc
+
+# Visual Studio
+/.vs/
+
+# Cargo build output
+target/
+
+# Packaged macOS service and manual instrumentation SDK
+/dist/macos/
+/dist/macos-universal/
+
+/dist/frida/
+
+# Prebuilt binaries staged into the pip packages by tools/release/build_wheels.sh
+/crates/perfr-api/python/perfr_api/libperfr_api.*
+/crates/perfr-api/python/perfr_api/perfr_api.dll
+/crates/perfr/python/perfr/perfr
+/crates/perfr/python/perfr/perfr.exe
+/crates/perfr/python/perfr/libperfr_api.*
+/crates/perfr/python/perfr/perfr_api.dll
+/crates/perfr/python/perfr/perfr.h
+/dist/wheels/
+/crates/perfr-api/python/build/
+/crates/perfr-api/python/dist/
+/crates/perfr-api/python/*.egg-info/
+/crates/perfr/python/build/
+/crates/perfr/python/dist/
+/crates/perfr/python/*.egg-info/
+integrations/unreal/PerfrProfiler/Intermediate/
+integrations/unreal/PerfrProfiler/Binaries/
+
+# MSVC outputs of the test apps (tools/test-programs/PerfrTestC/build.ps1, tools/test-programs/PerfrTestCpp/build.ps1)
+tools/test-programs/PerfrTestC/*.exe
+tools/test-programs/PerfrTestC/*.obj
+tools/test-programs/PerfrTestC/*.pdb
+tools/test-programs/PerfrTestC/*.ilk
+tools/test-programs/PerfrTestCpp/*.exe
+tools/test-programs/PerfrTestCpp/*.obj
+tools/test-programs/PerfrTestCpp/*.pdb
+tools/test-programs/PerfrTestCpp/*.ilk
+
+# Packaged Windows service and SDK (tools/build/build-service-windows.ps1)
+/dist/windows/
+
+# Local CMake build tree and the elevated-test log on Windows
+/build/
+/tools/windows/elevated-tests.log

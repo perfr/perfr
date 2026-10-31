@@ -1,0 +1,95 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# One workspace: the capture service and everything it is built from, the
+# browser viewer and its server, the instrumentation API, the test program.
+# `cargo build -p perfr` compiles only that graph, so the viewer's
+# eframe/wgpu tree never enters a service build; `cargo test --workspace`
+# covers all of it. crates/README.md describes the crates.
+#
+# See docs/rust-port-plan.html for how the C++ service was ported, and
+# https://perfr.dev/blog/ for the running write-up of what each step cost. The C++ tree
+# itself lives on the `cpp` branch of the Orbit repository.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/perfr-api",
+    "crates/perfr-capture",
+    "crates/perfr-collector",
+    "crates/perfr-etw",
+    "crates/perfr-frida-agent",
+    "crates/perfr-frida-helper",
+    "crates/perfr-frida-transport",
+    "crates/perfr-gpu-helper",
+    "crates/perfr-live-chrome",
+    "crates/perfr-live-event",
+    "crates/perfr-live-protocol",
+    "crates/perfr-live-render",
+    "crates/perfr-live-ring",
+    "crates/perfr-live-server",
+    "crates/perfr-live-viewer",
+    "crates/perfr-maps",
+    "crates/perfr-object",
+    "crates/perfr-perf-merge",
+    "crates/perfr-perf-records",
+    "crates/perfr-perf-ring",
+    "crates/perfr-pod-dump",
+    "crates/perfr-ptrace",
+    "crates/perfr-scope-ring",
+    "crates/perfr",
+    "crates/perfr-test-rust",
+    "crates/perfr-thread-states",
+    "crates/perfr-tracing-state",
+    "crates/perfr-trampoline",
+    "crates/perfr-unwind",
+    "crates/perfr-wire",
+]
+
+[workspace.package]
+edition = "2021"
+license = "BSD-2-Clause"
+repository = "https://github.com/perfr/perfr"
+rust-version = "1.88"
+
+# Shared by the live-viewer crates (`clap.workspace = true` and friends).
+[workspace.dependencies]
+clap = "=4.5.23"
+criterion = { version = "0.5.1", features = ["html_reports"] }
+parking_lot = "0.12"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.135"
+tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "net", "sync", "time", "signal"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+# The symbol table stays -- a profiler's own binaries, the service and the
+# test apps, must symbolize -- and so does the line table: the code views
+# interleave a function's disassembly with its source, which needs
+# .debug_line, and the example disassembly is of the service itself.
+# Nothing else of DWARF (no .debug_info beyond what the line table needs).
+debug = "line-tables-only"
+strip = "none"
+
+# The dependencies carry no debug info at all: their line tables were 35 MB
+# on the service, for code nobody disassembles from here.
+[profile.release.package."*"]
+debug = false
+
+[profile.bench]
+lto = false
+debug = true
+
+# The wasm32 viewer pack (crates/perfr-live-viewer/build_wasm.sh). A plain
+# release build with no DWARF: the pack is shipped to browsers, where line
+# tables and thin LTO buy nothing and cost download size and build time.
+[profile.wasm]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug = false
+panic = "abort"

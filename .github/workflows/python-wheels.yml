@@ -1,0 +1,110 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+#
+# Builds the pip wheels for perfr:
+#   perfr-api       manual instrumentation for Python (bundles libperfr_api)
+#   perfr  the perfr binary + library + header, one command
+#
+# Both wheels for a platform come from one build (tools/release/build_wheels.sh)
+# so the ring protocol matches between the library that writes and the service
+# that reads. Wheels are uploaded as artifacts. On a perfr-v* tag (the Rust
+# release scheme, not the legacy C++ v1.* tags) they publish to PyPI via
+# Trusted Publishing once those publishers exist. workflow_dispatch builds
+# wheels and does not publish.
+
+name: python-wheels
+on:
+  workflow_dispatch:
+  push:
+    tags:
+    - 'perfr-v*'
+
+permissions: read-all
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - { runner: ubuntu-22.04, key: linux-x86_64 }
+        - { runner: ubuntu-22.04, key: linux-aarch64 }
+        - { runner: macos-14,     key: macos-arm64 }
+        - { runner: macos-14,     key: macos-x86_64 }
+        - { runner: windows-2022, key: windows-x86_64 }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        # Git Bash on the Windows runner: build_wheels.sh is the one script.
+        shell: bash
+    timeout-minutes: 120
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Rust toolchain
+      run: |
+        rustup toolchain install 1.88.0 --profile minimal
+        rustup default 1.88.0
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Build tooling
+      run: pip install cargo-zigbuild ziglang build wheel
+
+    - name: MSVC on PATH (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        . .\tools\windows\msvc-env.ps1
+        "PATH=$env:PATH" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+        foreach ($name in 'INCLUDE', 'LIB', 'LIBPATH') { "$name=$((Get-Item Env:$name).Value)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV }
+
+    - name: Build wheels
+      run: tools/release/build_wheels.sh ${{ matrix.key }}
+
+    - name: Smoke test (Linux only; the runner arch matches x86_64)
+      if: matrix.key == 'linux-x86_64'
+      run: |
+        python -m venv /tmp/v
+        /tmp/v/bin/pip install --no-index --find-links dist/wheels perfr
+        env -u PERFR_API_LIB PATH=/usr/bin:/bin /tmp/v/bin/python -c \
+          "import perfr_api as o; assert o.init() == 0 and o.available(); print('ok', o.library_path())"
+        /tmp/v/bin/python -c '
+          import os, perfr as p
+          root = os.path.dirname(p.binary_path())
+          for name in ("perfr", "perfr-frida-helper", "libperfr_frida_agent.so"):
+              path = os.path.join(root, name)
+              assert os.path.isfile(path), path
+          print("frida companions ok", root)
+        '
+        /tmp/v/bin/perfr --help >/dev/null
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: wheels-${{ matrix.key }}
+        path: dist/wheels/*.whl
+        if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    environment: pypi
+    permissions:
+      id-token: write # Trusted Publishing; no API token stored
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        path: dist
+        pattern: wheels-*
+        merge-multiple: true
+    - uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        packages-dir: dist

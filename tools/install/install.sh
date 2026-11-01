@@ -13,17 +13,19 @@
 # SHA-256 and installs the Frida files the service looks for in the same
 # directory. No compiler and no package manager.
 #
-# Download host for the release archives (the script itself is served at
-# https://perfr.dev/install.sh). To serve the archives from perfr.dev too,
-# point this at a prefix that serves the same file names
-# (perfr-linux-x86_64.tar.gz, perfr-macos-universal.tar.gz, and the
-# matching .sha256 files).
-DEFAULT_BASE="https://github.com/perfr/perfr/releases/latest/download"
+# Download host for the release archives. perfr.dev serves the assets of the
+# latest stable GitHub Release under /download/ (perfr-linux-x86_64.tar.gz,
+# perfr-macos-universal.tar.gz, and the matching .sha256 files); its deploy
+# fetches them, since the repository is private and GitHub will not hand
+# them to an anonymous download.
+DEFAULT_BASE="https://perfr.dev/download"
 #
 # Overridable:
 #   PERFR_INSTALL_BASE   full prefix of the asset URLs (overrides DEFAULT_BASE
 #                        and PERFR_VERSION)
-#   PERFR_VERSION        tag to download, e.g. perfr-v0.1.0 (default: latest)
+#   PERFR_VERSION        tag to download from GitHub, e.g. perfr-v0.1.0
+#                        (default: latest, from perfr.dev). GitHub serves it
+#                        only once the repository is public.
 #   PERFR_INSTALL_DIR    where to install (default: ~/.local/bin)
 
 set -eu
@@ -95,16 +97,16 @@ if ! fetch "$url" "$archive"; then
     die "download failed: ${url}
 
 No Rust release is published at that URL yet, or this platform's archive is missing.
-Releases are tagged perfr-vX.Y.Z (see docs/releasing.md). A prerelease suffix
-(perfr-vX.Y.Z-rc.1) is not Latest, so this default URL will not see it.
+perfr.dev serves the latest stable release, tagged perfr-vX.Y.Z (see
+docs/releasing.md). A prerelease suffix (perfr-vX.Y.Z-rc.1) is not Latest, so
+it is not served there.
 The v1.* and nightly-* releases are the legacy C++ build and do not contain perfr.
 
 Build from source:
   Linux x86-64:  ./tools/build/build-service-musl.sh
   macOS:         tools/build/build-service-macos.sh
 
-Or set PERFR_INSTALL_BASE to a URL prefix that already serves the files.
-To serve the archives from perfr.dev, change DEFAULT_BASE at the top of this script."
+Or set PERFR_INSTALL_BASE to a URL prefix that already serves the files."
 fi
 
 # --- checksum is required ----------------------------------------------------

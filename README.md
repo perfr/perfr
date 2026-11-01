@@ -29,9 +29,9 @@ perfr
 # http://127.0.0.1:44766/
 ```
 
-The installer downloads the GitHub Release for this machine, Linux x86-64 or
-macOS universal, tagged `perfr-vX.Y.Z`. Until that tag exists, the script
-stops and says so. The `v1.*` and `nightly-*` releases are the legacy C++
+The installer downloads the release for this machine, Linux x86-64 or macOS
+universal, from perfr.dev, which serves the latest GitHub Release tagged
+`perfr-vX.Y.Z`. Until that tag exists, the script stops and says so. The `v1.*` and `nightly-*` releases are the legacy C++
 build and are not what this installs.
 
 Windows, in PowerShell:

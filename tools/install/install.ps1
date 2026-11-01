@@ -2,8 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Installs the Rust perfr on Windows x64 from the GitHub Release:
-# the twin of install.sh. Downloads perfr-windows-x86_64.zip and its
+# Installs the Rust perfr on Windows x64 from the latest release, which
+# perfr.dev serves under /download/: the twin of install.sh. Downloads perfr-windows-x86_64.zip and its
 # .sha256, refuses to install without a matching checksum, unpacks into
 # %LOCALAPPDATA%\Programs\perfr (perfr.exe with the Frida files,
 # perfr_api.dll and perfr.h beside it), and says how to put it on PATH.
@@ -28,7 +28,7 @@ if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
 
 $base = if ($env:PERFR_INSTALL_BASE) { $env:PERFR_INSTALL_BASE }
         elseif ($env:PERFR_VERSION) { "https://github.com/perfr/perfr/releases/download/$($env:PERFR_VERSION)" }
-        else { 'https://github.com/perfr/perfr/releases/latest/download' }
+        else { 'https://perfr.dev/download' }
 $version = if ($env:PERFR_VERSION) { $env:PERFR_VERSION } else { 'latest' }
 $installDir = if ($env:PERFR_INSTALL_DIR) { $env:PERFR_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\perfr' }
 $asset = 'perfr-windows-x86_64.zip'

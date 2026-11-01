@@ -17,7 +17,7 @@ trigger.
 
 | Tag | GitHub Release |
 |---|---|
-| `perfr-vX.Y.Z` | Stable. This becomes **Latest**, which is what `install.sh` downloads. |
+| `perfr-vX.Y.Z` | Stable. This becomes **Latest**, which perfr.dev serves and `install.sh` downloads. |
 | `perfr-vX.Y.Z-suffix` | Prerelease. It is not Latest, so the installer ignores it. |
 
 `/releases/latest` stays empty until the first stable `perfr-vX.Y.Z`. The
@@ -110,10 +110,18 @@ the tag if you do not want that publish attempt.
 
 The installers are fetched from `https://perfr.dev/install.sh` and
 `https://perfr.dev/install.ps1`; the website's `build_site.py` (the perfr-web repository) copies them to
-the site root. [`tools/install/install.sh`](../tools/install/install.sh)
-downloads the archives from GitHub's `/releases/latest/download/`. The only
-line to change if perfr.dev serves the same file names is `DEFAULT_BASE` at
-the top of that script. `PERFR_INSTALL_BASE` overrides it for one run.
+the site root. They download the archives from `https://perfr.dev/download/`
+(`DEFAULT_BASE` at the top of
+[`tools/install/install.sh`](../tools/install/install.sh), `$base` in
+`install.ps1`; `PERFR_INSTALL_BASE` overrides it for one run).
+
+The repository is private, so GitHub will not serve release assets to an
+anonymous download. The perfr.dev server fetches them instead: every minute
+its deploy (`deploy/fetch_release.py` in perfr-web) asks GitHub for the
+latest stable release with a read-only token kept on the server, downloads
+the assets of a new one, checks them against `SHA256SUMS` and rebuilds the
+site with them under `/download/`. A release shows up there a minute or two
+after the publish job is green.
 
 Until a stable `perfr-v*` release exists, the script exits with an error that
 says so and points at a source build. It does not install a C++ nightly.

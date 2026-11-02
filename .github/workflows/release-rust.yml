@@ -246,7 +246,8 @@ jobs:
               "This is not a legacy C++ nightly (`nightly-*` / `v1.*`).\n"
           )
           PY
-          args=(--verify-tag --title "perfr $tag" --notes-file "$notes")
+          # No checkout in this job: name the repository so gh uses the API alone.
+          args=(--repo "$GITHUB_REPOSITORY" --verify-tag --title "perfr $tag" --notes-file "$notes")
           if [[ "$tag" =~ ^perfr-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             args+=(--latest)
           else

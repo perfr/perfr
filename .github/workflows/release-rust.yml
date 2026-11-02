@@ -58,7 +58,8 @@ jobs:
             -p perfr
           bin=target/x86_64-unknown-linux-musl/release/perfr
           file "$bin"
-          file "$bin" | grep -q 'statically linked'
+          # musl 1.88 emits a static PIE; file(1) says "static-pie linked" for it.
+          file "$bin" | grep -qE 'static(ally|-pie) linked'
 
       - name: Build Frida companions, API library, and GPU helper
         run: |
@@ -175,7 +176,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [linux, macos]
+    needs: [linux, macos, windows]
     runs-on: ubuntu-22.04
     permissions:
       contents: write

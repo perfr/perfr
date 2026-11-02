@@ -42,7 +42,9 @@ puts back to the 1 ms default when the capture stops.
   the helper compile with its `cl` through the `cc` crate; the C and C++
   test apps are built with it.
 - Git for Windows, for `tools/frida/devkits.sh`, or use
-  `tools/frida/devkits.ps1`, the PowerShell twin.
+  `tools/frida/devkits.ps1`, the PowerShell twin. Either way the devkits
+  are `.tar.xz`, and Windows' own `tar.exe` is built without xz (it hangs
+  on them), so Git for Windows or 7-Zip has to be installed.
 - Python 3 with `pyarrow`, for the end-to-end smoke tests.
 
 `tools/windows/msvc-env.ps1` puts the x64 MSVC toolchain on a PowerShell

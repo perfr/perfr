@@ -47,6 +47,9 @@ jobs:
           rustup toolchain install 1.88.0 --profile minimal
           rustup default 1.88.0
           rustup target add x86_64-unknown-linux-musl
+          # GNU build-id survives objcopy --strip-debug. Without it the
+          # symbol store has nothing to key the debug file on.
+          echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-Wl,--build-id=sha1" >> "$GITHUB_ENV"
 
       - name: Build static perfr
         run: |
@@ -74,21 +77,68 @@ jobs:
           cargo +1.88.0 build --locked --release \
             -p perfr-api -p perfr-gpu-helper
 
-      - name: Pack archive
+      - name: Pack core, hooks, and debug symbols
         run: |
           set -euo pipefail
+          pkg=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/perfr/Cargo.toml | head -1)
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            ver="${GITHUB_REF_NAME#perfr-}"
+          else
+            ver="v${pkg}-dev"
+          fi
+          python3 tools/release/split_debug.py split \
+            --os linux \
+            --debug-dir dist/debug \
+            --symstore-dir dist/symstore \
+            --stripped-dir dist/stripped \
+            target/x86_64-unknown-linux-musl/release/perfr \
+            target/release/libperfr_api.so \
+            target/release/perfr-gpu-helper \
+            target/release/perfr-frida-helper \
+            target/release/libperfr_frida_agent.so
+          file dist/stripped/perfr | grep -qE 'static(ally|-pie) linked'
+          # The symbol table stays (a profiler symbolizes its own binary).
+          # DWARF does not: it is in dist/debug, linked by .gnu_debuglink.
+          readelf -S dist/stripped/perfr | grep -q '.gnu_debuglink'
+          readelf -n dist/stripped/perfr | grep -q 'Build ID'
+
           stage=dist/perfr
-          mkdir -p "$stage/licenses"
-          cp target/x86_64-unknown-linux-musl/release/perfr "$stage/"
-          cp target/release/libperfr_frida_agent.so "$stage/"
-          cp target/release/perfr-frida-helper "$stage/"
-          cp target/release/libperfr_api.so "$stage/"
+          mkdir -p "$stage"
+          cp dist/stripped/perfr "$stage/"
+          cp dist/stripped/libperfr_api.so "$stage/"
           cp crates/perfr-api/include/perfr.h "$stage/"
-          cp target/release/perfr-gpu-helper "$stage/"
-          cp tools/frida/licenses/* "$stage/licenses/"
-          chmod 755 "$stage/perfr" "$stage/perfr-frida-helper" "$stage/perfr-gpu-helper"
+          cp dist/stripped/perfr-gpu-helper "$stage/"
+          chmod 755 "$stage/perfr" "$stage/perfr-gpu-helper"
           tar -C dist -czf perfr-linux-x86_64.tar.gz perfr
           sha256sum perfr-linux-x86_64.tar.gz | tee perfr-linux-x86_64.tar.gz.sha256
+
+          hooks=dist/perfr-hooks
+          mkdir -p "$hooks/licenses"
+          cp dist/stripped/perfr-frida-helper "$hooks/"
+          cp dist/stripped/libperfr_frida_agent.so "$hooks/"
+          cp tools/frida/licenses/* "$hooks/licenses/"
+          printf '%s\n' "$pkg" > "$hooks/perfr-hooks-version"
+          chmod 755 "$hooks/perfr-frida-helper"
+          tar -C dist -czf perfr-hooks-linux-x86_64.tar.gz perfr-hooks
+          sha256sum perfr-hooks-linux-x86_64.tar.gz | tee perfr-hooks-linux-x86_64.tar.gz.sha256
+
+          debug_top="perfr-${ver}-linux-x86_64-debug"
+          store_top="perfr-${ver}-linux-x86_64-symstore"
+          mv dist/debug "dist/${debug_top}"
+          mv dist/symstore "dist/${store_top}"
+          tar -C dist -czf "${debug_top}.tar.gz" "$debug_top"
+          tar -C dist -czf "${store_top}.tar.gz" "$store_top"
+          sha256sum "${debug_top}.tar.gz" | tee "${debug_top}.tar.gz.sha256"
+          sha256sum "${store_top}.tar.gz" | tee "${store_top}.tar.gz.sha256"
+          python3 tools/release/split_debug.py measure \
+            --label linux-x86_64 \
+            --out sizes-linux-x86_64.txt \
+            --core-archive perfr-linux-x86_64.tar.gz \
+            --hooks-archive perfr-hooks-linux-x86_64.tar.gz \
+            --debug-archive "${debug_top}.tar.gz" \
+            --symstore-archive "${store_top}.tar.gz" \
+            --core-dir dist/perfr \
+            --hooks-dir dist/perfr-hooks
 
       - uses: actions/upload-artifact@v4
         with:
@@ -96,6 +146,13 @@ jobs:
           path: |
             perfr-linux-x86_64.tar.gz
             perfr-linux-x86_64.tar.gz.sha256
+            perfr-hooks-linux-x86_64.tar.gz
+            perfr-hooks-linux-x86_64.tar.gz.sha256
+            perfr-*-linux-x86_64-debug.tar.gz
+            perfr-*-linux-x86_64-debug.tar.gz.sha256
+            perfr-*-linux-x86_64-symstore.tar.gz
+            perfr-*-linux-x86_64-symstore.tar.gz.sha256
+            sizes-linux-x86_64.txt
           if-no-files-found: error
 
   macos:
@@ -113,21 +170,76 @@ jobs:
       - name: Build universal service
         run: tools/build/build-service-macos.sh --universal
 
-      - name: Pack archive
+      - name: Pack core, hooks, and debug symbols
         run: |
           set -euo pipefail
+          pkg=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/perfr/Cargo.toml | head -1)
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            ver="${GITHUB_REF_NAME#perfr-}"
+          else
+            ver="v${pkg}-dev"
+          fi
+          python3 tools/release/split_debug.py split \
+            --os macos \
+            --debug-dir dist/debug \
+            --symstore-dir dist/symstore \
+            --stripped-dir dist/stripped \
+            dist/macos-universal/perfr \
+            dist/macos-universal/libperfr_api.dylib \
+            dist/macos-universal/perfr-frida-helper \
+            dist/macos-universal/libperfr_frida_agent.dylib
+          # strip -S invalidates the ad-hoc signature the build script wrote.
+          for bin in dist/stripped/perfr dist/stripped/libperfr_api.dylib \
+                     dist/stripped/perfr-frida-helper dist/stripped/libperfr_frida_agent.dylib; do
+            codesign --force --sign - "$bin"
+          done
+          file dist/stripped/perfr | grep -q 'universal'
+
           stage=dist/perfr
-          mkdir -p "$stage"
-          # tools/build/build-service-macos.sh --universal writes dist/macos-universal,
-          # including the Frida files the service loads from its own directory.
-          cp -R dist/macos-universal/. "$stage/"
-          test -f "$stage/perfr"
-          test -f "$stage/libperfr_frida_agent.dylib"
-          test -f "$stage/perfr-frida-helper"
-          test -f "$stage/libperfr_api.dylib"
-          file "$stage/perfr" | grep -q 'universal'
+          mkdir -p "$stage/include"
+          cp dist/stripped/perfr "$stage/"
+          cp dist/stripped/libperfr_api.dylib "$stage/"
+          cp dist/macos-universal/libperfr_api.a "$stage/"
+          cp dist/macos-universal/perfr.h "$stage/"
+          cp -R dist/macos-universal/include/. "$stage/include/"
+          if [ -f dist/macos-universal/perfr_api.py ]; then
+            cp dist/macos-universal/perfr_api.py "$stage/"
+          fi
+          if [ -f dist/macos-universal/README.md ]; then
+            cp dist/macos-universal/README.md "$stage/"
+          fi
+          chmod 755 "$stage/perfr"
           tar -C dist -czf perfr-macos-universal.tar.gz perfr
           shasum -a 256 perfr-macos-universal.tar.gz | tee perfr-macos-universal.tar.gz.sha256
+
+          hooks=dist/perfr-hooks
+          mkdir -p "$hooks/licenses"
+          cp dist/stripped/perfr-frida-helper "$hooks/"
+          cp dist/stripped/libperfr_frida_agent.dylib "$hooks/"
+          cp tools/frida/licenses/* "$hooks/licenses/"
+          printf '%s\n' "$pkg" > "$hooks/perfr-hooks-version"
+          chmod 755 "$hooks/perfr-frida-helper"
+          codesign --force --sign - "$hooks/perfr-frida-helper" "$hooks/libperfr_frida_agent.dylib"
+          tar -C dist -czf perfr-hooks-macos-universal.tar.gz perfr-hooks
+          shasum -a 256 perfr-hooks-macos-universal.tar.gz | tee perfr-hooks-macos-universal.tar.gz.sha256
+
+          debug_top="perfr-${ver}-macos-universal-debug"
+          store_top="perfr-${ver}-macos-universal-symstore"
+          mv dist/debug "dist/${debug_top}"
+          mv dist/symstore "dist/${store_top}"
+          tar -C dist -czf "${debug_top}.tar.gz" "$debug_top"
+          tar -C dist -czf "${store_top}.tar.gz" "$store_top"
+          shasum -a 256 "${debug_top}.tar.gz" | tee "${debug_top}.tar.gz.sha256"
+          shasum -a 256 "${store_top}.tar.gz" | tee "${store_top}.tar.gz.sha256"
+          python3 tools/release/split_debug.py measure \
+            --label macos-universal \
+            --out sizes-macos-universal.txt \
+            --core-archive perfr-macos-universal.tar.gz \
+            --hooks-archive perfr-hooks-macos-universal.tar.gz \
+            --debug-archive "${debug_top}.tar.gz" \
+            --symstore-archive "${store_top}.tar.gz" \
+            --core-dir dist/perfr \
+            --hooks-dir dist/perfr-hooks
 
       - uses: actions/upload-artifact@v4
         with:
@@ -135,6 +247,13 @@ jobs:
           path: |
             perfr-macos-universal.tar.gz
             perfr-macos-universal.tar.gz.sha256
+            perfr-hooks-macos-universal.tar.gz
+            perfr-hooks-macos-universal.tar.gz.sha256
+            perfr-*-macos-universal-debug.tar.gz
+            perfr-*-macos-universal-debug.tar.gz.sha256
+            perfr-*-macos-universal-symstore.tar.gz
+            perfr-*-macos-universal-symstore.tar.gz.sha256
+            sizes-macos-universal.txt
           if-no-files-found: error
 
   windows:
@@ -153,18 +272,68 @@ jobs:
       - name: Build service and SDK
         run: .\tools\build\build-service-windows.ps1
 
-      - name: Pack archive
+      - name: Pack core, hooks, and debug symbols
         run: |
+          $ErrorActionPreference = 'Stop'
+          $pkg = (Select-String -Path crates\perfr\Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $ver = $env:GITHUB_REF_NAME -replace '^perfr-', ''
+          } else {
+            $ver = "v$pkg-dev"
+          }
+          python tools/release/split_debug.py split --os windows `
+            --debug-dir dist/debug --symstore-dir dist/symstore --stripped-dir dist/stripped `
+            dist\windows\perfr.exe dist\windows\perfr_api.dll `
+            dist\windows\perfr-frida-helper.exe dist\windows\perfr_frida_agent.dll `
+            dist\windows\PerfrTestRust.exe
+
           $stage = 'dist\perfr'
-          New-Item -ItemType Directory -Force $stage | Out-Null
-          Copy-Item -Path 'dist\windows\*' -Destination $stage -Recurse -Force
-          foreach ($required in 'perfr.exe', 'perfr_frida_agent.dll', 'perfr-frida-helper.exe', 'perfr_api.dll', 'include\perfr.h') {
+          New-Item -ItemType Directory -Force $stage, "$stage\include" | Out-Null
+          Copy-Item dist\stripped\perfr.exe $stage
+          Copy-Item dist\stripped\perfr_api.dll $stage
+          Copy-Item dist\stripped\PerfrTestRust.exe $stage
+          foreach ($extra in 'perfr_api.dll.lib', 'perfr_api.lib', 'perfr_api.py', 'README.md') {
+            $src = Join-Path 'dist\windows' $extra
+            if (Test-Path $src) { Copy-Item $src $stage }
+          }
+          Copy-Item dist\windows\include\perfr.h "$stage\include\perfr.h"
+          foreach ($required in 'perfr.exe', 'perfr_api.dll', 'include\perfr.h') {
             if (-not (Test-Path (Join-Path $stage $required))) { throw "missing $required" }
           }
+          if (Test-Path "$stage\perfr.pdb") { throw 'core archive must not contain PDBs' }
           Compress-Archive -Path $stage -DestinationPath perfr-windows-x86_64.zip -Force
           $hash = (Get-FileHash -Algorithm SHA256 perfr-windows-x86_64.zip).Hash.ToLowerInvariant()
           "$hash  perfr-windows-x86_64.zip" | Out-File -Encoding ascii -NoNewline perfr-windows-x86_64.zip.sha256
-          Get-Content perfr-windows-x86_64.zip.sha256
+
+          $hooks = 'dist\perfr-hooks'
+          New-Item -ItemType Directory -Force $hooks, "$hooks\licenses" | Out-Null
+          Copy-Item dist\stripped\perfr-frida-helper.exe $hooks
+          Copy-Item dist\stripped\perfr_frida_agent.dll $hooks
+          Copy-Item tools\frida\licenses\* "$hooks\licenses\"
+          Set-Content -Encoding ascii -NoNewline "$hooks\perfr-hooks-version" "$pkg`n"
+          Compress-Archive -Path $hooks -DestinationPath perfr-hooks-windows-x86_64.zip -Force
+          $hash = (Get-FileHash -Algorithm SHA256 perfr-hooks-windows-x86_64.zip).Hash.ToLowerInvariant()
+          "$hash  perfr-hooks-windows-x86_64.zip" | Out-File -Encoding ascii -NoNewline perfr-hooks-windows-x86_64.zip.sha256
+
+          $debugTop = "perfr-$ver-windows-x86_64-debug"
+          $storeTop = "perfr-$ver-windows-x86_64-symstore"
+          Rename-Item dist\debug $debugTop
+          Rename-Item dist\symstore $storeTop
+          tar -C dist -czf "${debugTop}.tar.gz" $debugTop
+          tar -C dist -czf "${storeTop}.tar.gz" $storeTop
+          foreach ($name in @("${debugTop}.tar.gz", "${storeTop}.tar.gz")) {
+            $h = (Get-FileHash -Algorithm SHA256 $name).Hash.ToLowerInvariant()
+            "$h  $name" | Out-File -Encoding ascii -NoNewline "${name}.sha256"
+          }
+          python tools/release/split_debug.py measure `
+            --label windows-x86_64 `
+            --out sizes-windows-x86_64.txt `
+            --core-archive perfr-windows-x86_64.zip `
+            --hooks-archive perfr-hooks-windows-x86_64.zip `
+            --debug-archive "${debugTop}.tar.gz" `
+            --symstore-archive "${storeTop}.tar.gz" `
+            --core-dir dist\perfr `
+            --hooks-dir dist\perfr-hooks
 
       - uses: actions/upload-artifact@v4
         with:
@@ -172,6 +341,13 @@ jobs:
           path: |
             perfr-windows-x86_64.zip
             perfr-windows-x86_64.zip.sha256
+            perfr-hooks-windows-x86_64.zip
+            perfr-hooks-windows-x86_64.zip.sha256
+            perfr-*-windows-x86_64-debug.tar.gz
+            perfr-*-windows-x86_64-debug.tar.gz.sha256
+            perfr-*-windows-x86_64-symstore.tar.gz
+            perfr-*-windows-x86_64-symstore.tar.gz.sha256
+            sizes-windows-x86_64.txt
           if-no-files-found: error
 
   publish:
@@ -181,6 +357,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -191,6 +369,33 @@ jobs:
           set -euo pipefail
           cd dist
           sha256sum ./*.tar.gz ./*.zip | tee SHA256SUMS
+
+      - name: Upload symbol store, or skip
+        env:
+          PERFR_SYMBOL_STORE_BUCKET: ${{ secrets.PERFR_SYMBOL_STORE_BUCKET }}
+          PERFR_SYMBOL_STORE_ENDPOINT: ${{ secrets.PERFR_SYMBOL_STORE_ENDPOINT }}
+          PERFR_SYMBOL_STORE_REGION: ${{ secrets.PERFR_SYMBOL_STORE_REGION }}
+          PERFR_SYMBOL_STORE_PREFIX: ${{ secrets.PERFR_SYMBOL_STORE_PREFIX }}
+          PERFR_SYMBOL_STORE_ACCESS_KEY_ID: ${{ secrets.PERFR_SYMBOL_STORE_ACCESS_KEY_ID }}
+          PERFR_SYMBOL_STORE_SECRET_ACCESS_KEY: ${{ secrets.PERFR_SYMBOL_STORE_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          # Skips with a message when the bucket or credentials are unset.
+          # The symstore archives are still release assets. docs/releasing.md.
+          shopt -s nullglob
+          mkdir -p /tmp/perfr-symstore
+          found=0
+          for archive in dist/*-symstore.tar.gz; do
+            tar -C /tmp/perfr-symstore -xzf "$archive"
+            found=1
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "symbol store upload: no symstore archives were built"
+            exit 0
+          fi
+          mapfile -t dirs < <(find /tmp/perfr-symstore -mindepth 1 -maxdepth 1 -type d | sort)
+          chmod +x tools/release/upload-symbols.sh
+          tools/release/upload-symbols.sh "${dirs[@]}"
 
       - name: Publish, or stop after the artifacts
         env:
@@ -218,24 +423,31 @@ jobs:
           import pathlib, sys
           pathlib.Path(sys.argv[1]).write_text(
               "Rust `perfr` for Linux, macOS and Windows. The viewer is in the binary; open it in a browser.\n\n"
-              "**Linux x86-64** (`perfr-linux-x86_64.tar.gz`): static musl binary with the WASM viewer embedded. "
-              "Beside it, the files the service loads from its own directory:\n\n"
-              "- `libperfr_frida_agent.so` and `perfr-frida-helper` (function hooks)\n"
+              "The core archive is the service, the manual-instrumentation library, and (on Linux) the GPU helper. "
+              "Function hooks are a separate `perfr-hooks-*` archive. Debug info is split out, not deleted: "
+              "`perfr-<version>-<target>-debug.tar.gz` and a symbol-store layout in "
+              "`perfr-<version>-<target>-symstore.tar.gz` (debuginfod `buildid/<id>/debuginfo`, "
+              "SymSrv `<name>/<GUIDAGE>/<name>`).\n\n"
+              "**Linux x86-64** (`perfr-linux-x86_64.tar.gz`): static musl binary with the WASM viewer embedded, "
+              "DWARF removed and a GNU build-id plus `.gnu_debuglink` left in place. Beside it:\n\n"
               "- `libperfr_api.so` and `perfr.h` (manual instrumentation)\n"
-              "- `perfr-gpu-helper` (optional NVIDIA lanes; dynamically linked)\n"
-              "- `licenses/` (Frida)\n\n"
-              "**macOS** (`perfr-macos-universal.tar.gz`): universal binary (Apple silicon and Intel) from "
-              "`tools/build/build-service-macos.sh --universal`. Ad-hoc signed, not notarized. "
-              "Manual scopes and Frida function hooks. Attaching needs a task port. "
-              "No call-stack sampling, scheduler, live disassembly, or auto-profiling. No GPU helper.\n\n"
-              "**Windows x86-64** (`perfr-windows-x86_64.zip`): static-CRT binaries from "
-              "`.\\build-service-windows.ps1`. Beside `perfr.exe`: `perfr_frida_agent.dll` and "
-              "`perfr-frida-helper.exe` (function hooks), `perfr_api.dll`, `perfr_api.lib` and `include\\perfr.h` "
-              "(manual instrumentation), `PerfrTestRust.exe`, `licenses/`. Call-stack sampling, the scheduler and "
-              "thread states come from the kernel logger (ETW) and need an elevated prompt; manual scopes and Frida "
-              "hooks do not. No auto-profiling, no kernel hook engine, no GPU helper.\n\n"
+              "- `perfr-gpu-helper` (optional NVIDIA lanes; dynamically linked)\n\n"
+              "Function hooks: `perfr-hooks-linux-x86_64.tar.gz` (`libperfr_frida_agent.so`, `perfr-frida-helper`, "
+              "Frida `licenses/`).\n\n"
+              "**macOS** (`perfr-macos-universal.tar.gz`): universal binary (Apple silicon and Intel). Ad-hoc signed, "
+              "not notarized. Manual scopes. Attaching needs a task port. No call-stack sampling, scheduler, live "
+              "disassembly, or auto-profiling. No GPU helper. Hooks: `perfr-hooks-macos-universal.tar.gz`.\n\n"
+              "**Windows x86-64** (`perfr-windows-x86_64.zip`): static-CRT binaries. Beside `perfr.exe`: "
+              "`perfr_api.dll`, `perfr_api.lib` and `include\\perfr.h`, `PerfrTestRust.exe`. PDBs are in the debug "
+              "archive, not this zip. Hooks: `perfr-hooks-windows-x86_64.zip`. Call-stack sampling, the scheduler and "
+              "thread states need an elevated prompt; manual scopes and Frida hooks do not.\n\n"
+              "Install hooks with the core archive:\n\n"
+              "```\n"
+              "curl -fsSL https://perfr.dev/install.sh | sh -s -- --with-hooks\n"
+              "```\n\n"
+              "or later: `perfr hooks install`.\n\n"
               "Checksums: `SHA256SUMS` and the per-archive `.sha256` files.\n\n"
-              "Install (fails with a clear message until a non-prerelease `perfr-v*` tag exists):\n\n"
+              "Install the core (fails with a clear message until a non-prerelease `perfr-v*` tag exists):\n\n"
               "```\n"
               "curl -fsSL https://perfr.dev/install.sh | sh\n"
               "```\n\n"
@@ -246,7 +458,16 @@ jobs:
               "This is not a legacy C++ nightly (`nightly-*` / `v1.*`).\n"
           )
           PY
-          # No checkout in this job: name the repository so gh uses the API alone.
+          {
+            echo
+            echo "Sizes from this run, in bytes:"
+            echo
+            echo '```'
+            cat dist/sizes-*.txt
+            echo '```'
+          } >> "$notes"
+          # The repository is checked out so the symbol-store upload script is here.
+          # gh still gets --repo: the release is attached to the tag, not to this branch.
           args=(--repo "$GITHUB_REPOSITORY" --verify-tag --title "perfr $tag" --notes-file "$notes")
           if [[ "$tag" =~ ^perfr-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             args+=(--latest)

@@ -36,6 +36,13 @@ loads them from the directory that contains `perfr`. The script
 builds them for the wheel target. `PERFR_COMPANIONS_DIR=<dir>` skips that
 build and copies a directory already produced by `tools/frida/build.sh`.
 
+The GitHub release is different: the core archive has no Frida files.
+`perfr-hooks-<platform>` is the optional archive, and `perfr hooks install`
+downloads it. The wheel keeps the companions so `pip install perfr` can hook
+without a second download. Debug symbols for the release binaries are split
+out by `tools/release/split_debug.py` and published beside the release; see
+[docs/releasing.md](../../docs/releasing.md).
+
 Local check:
 
 ```bash

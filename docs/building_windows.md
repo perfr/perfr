@@ -60,7 +60,10 @@ writes `dist\windows\`:
 
 - `perfr.exe`, the service with the viewer embedded.
 - `perfr_frida_agent.dll` and `perfr-frida-helper.exe`, looked up beside the
-  service (or `PERFR_FRIDA_AGENT` / `PERFR_FRIDA_HELPER`).
+  service, then in the hooks data directory (or `PERFR_FRIDA_AGENT` /
+  `PERFR_FRIDA_HELPER`). The GitHub release ships them in
+  `perfr-hooks-windows-x86_64.zip`, not in the core zip. `perfr hooks install`
+  downloads that zip for the running version.
 - `perfr_api.dll` (with `perfr_api.dll.lib`), `perfr_api.lib` and
   `include\perfr.h`, the manual instrumentation SDK; `perfr_api.py`.
 - `PerfrTestRust.exe`, an instrumented test program.

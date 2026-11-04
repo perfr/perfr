@@ -56,6 +56,7 @@ mod cli;
 mod preflight;
 mod skill;
 mod update;
+mod hook_dist;
 
 #[cfg(target_os = "linux")]
 use interner::CallstackInterner;
@@ -201,6 +202,7 @@ fn parse_args() -> Args {
                 });
             }
             "--no-preflight" => {}
+            "--hooks-auto" => hook_dist::set_auto_from_flag(),
             other => log::warn!("ignoring unknown argument {other}"),
         }
     }

@@ -138,6 +138,7 @@ pub fn doctor() -> i32 {
         "{}",
         render_doctor(&inspect_host(), color_stdout(), "perfr doctor")
     );
+    print!("{}", crate::hook_dist::doctor_line());
     0
 }
 
@@ -970,7 +971,7 @@ fn color_stdout() -> bool {
     std::env::var_os("NO_COLOR").is_none() && stdout_is_tty()
 }
 
-fn stdin_is_tty() -> bool {
+pub(crate) fn stdin_is_tty() -> bool {
     #[cfg(unix)]
     {
         unsafe { libc::isatty(libc::STDIN_FILENO) == 1 }

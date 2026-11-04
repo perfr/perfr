@@ -12,6 +12,26 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
+fn hook_file(env_key: &str, name: &str) -> Result<std::path::PathBuf, String> {
+    if let Some(path) = std::env::var_os(env_key) {
+        let path = std::path::PathBuf::from(path);
+        return path
+            .canonicalize()
+            .map_err(|error| format!("{env_key} {}: {error}", path.display()));
+    }
+    if let Some(path) = crate::hook_dist::find_installed(name) {
+        if crate::hook_dist::installed_version_ok() {
+            return path.canonicalize().map_err(|error| error.to_string());
+        }
+    }
+    crate::hook_dist::ensure_for_launch()?;
+    let path = crate::hook_dist::find_installed(name).ok_or_else(|| {
+        crate::hook_dist::missing_hooks_message(crate::build_info::package_version())
+    })?;
+    path.canonicalize()
+        .map_err(|error| format!("{}: {error}", path.display()))
+}
+
 fn agent_path() -> Result<std::path::PathBuf, String> {
     let name = if cfg!(target_os = "macos") {
         "libperfr_frida_agent.dylib"
@@ -20,9 +40,7 @@ fn agent_path() -> Result<std::path::PathBuf, String> {
     } else {
         "libperfr_frida_agent.so"
     };
-    let path = std::env::var_os("PERFR_FRIDA_AGENT").map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_file_name(name));
-    path.canonicalize().map_err(|e| format!("Frida agent {}: {e}; run tools/frida/build.sh or set PERFR_FRIDA_AGENT", path.display()))
+    hook_file("PERFR_FRIDA_AGENT", name)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,10 +62,14 @@ impl Engine {
 // Their timestamps use the host-wide scope clock; receipt time is irrelevant.
 // They must not participate in the synchronous capture-loop nesting stack.
 fn record_profile(value: &serde_json::Value) -> bool {
-    let Some(p) = value.get("profile") else { return false };
-    if let (Some(name), Some(start), Some(end)) =
-        (p["name"].as_str(), p["start_ns"].as_u64(), p["end_ns"].as_u64())
-    {
+    let Some(p) = value.get("profile") else {
+        return false;
+    };
+    if let (Some(name), Some(start), Some(end)) = (
+        p["name"].as_str(),
+        p["start_ns"].as_u64(),
+        p["end_ns"].as_u64(),
+    ) {
         if name.starts_with("Frida: ") && name.len() <= 4096 && end >= start {
             perfr_api::span_async(name, start, end);
         }
@@ -65,18 +87,26 @@ impl Helper {
     fn launch(mut config: serde_json::Value) -> Result<Self, String> {
         let _phase = perfr_api::scope("Frida: launch helper");
         config["self_profile"] = true.into();
-        config["agent"] = agent_path()?.into_os_string().to_string_lossy().into_owned().into();
-        let helper_name = if cfg!(target_os = "windows") { "perfr-frida-helper.exe" } else { "perfr-frida-helper" };
-        let helper_path = std::env::var_os("PERFR_FRIDA_HELPER").map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_file_name(helper_name));
-        let mut child = Command::new(helper_path)
+        config["agent"] = agent_path()?
+            .into_os_string()
+            .to_string_lossy()
+            .into_owned()
+            .into();
+        let helper_name = if cfg!(target_os = "windows") {
+            "perfr-frida-helper.exe"
+        } else {
+            "perfr-frida-helper"
+        };
+        let helper_path = hook_file("PERFR_FRIDA_HELPER", helper_name)?;
+        let mut child = Command::new(&helper_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| {
                 format!(
-                    "start Frida helper: {e}; run tools/frida/build.sh or set PERFR_FRIDA_HELPER"
+                    "start Frida helper {}: {e}. Run `perfr hooks install` or set PERFR_FRIDA_HELPER.",
+                    helper_path.display()
                 )
             })?;
         // What the helper (and Frida inside it) says on stderr still reaches
@@ -95,7 +125,9 @@ impl Helper {
                 let result = serde_json::from_str(&line).unwrap_or_else(
                     |_| serde_json::json!({"error": "invalid Frida helper response"}),
                 );
-                if record_profile(&result) { continue; }
+                if record_profile(&result) {
+                    continue;
+                }
                 if send.send(result).is_err() {
                     break;
                 }
@@ -130,7 +162,9 @@ impl Helper {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             if let Some(status) = self.child.try_wait().map_err(|e| e.to_string())? {
-                if let Some(reader) = self.reader.take() { let _ = reader.join(); }
+                if let Some(reader) = self.reader.take() {
+                    let _ = reader.join();
+                }
                 return if status.success() {
                     Ok(())
                 } else {
@@ -171,7 +205,13 @@ impl FridaSession {
     /// `name_ids` name each hook's spans; `label_ids` name the marker a hook
     /// leaves on the timeline when it switches itself off ("auto-unhooked:
     /// <function>"), both interned by the service up front.
-    pub fn arm(pid: i32, hooks: &[HookSpec], name_ids: &[u32], label_ids: &[u32], max_calls_per_s: u64) -> Result<Self, String> {
+    pub fn arm(
+        pid: i32,
+        hooks: &[HookSpec],
+        name_ids: &[u32],
+        label_ids: &[u32],
+        max_calls_per_s: u64,
+    ) -> Result<Self, String> {
         let _phase = perfr_api::scope("Frida: arm hooks");
         if pid <= 0 || pid as u32 == std::process::id() {
             return Err("Frida requires a target process other than perfr".into());
@@ -179,7 +219,11 @@ impl FridaSession {
         let agent = agent_path()?;
         // /tmp on POSIX, where an unprivileged target can reach it; the
         // user's temp directory on Windows.
-        let lease_dir = if cfg!(windows) { std::env::temp_dir() } else { std::path::PathBuf::from("/tmp") };
+        let lease_dir = if cfg!(windows) {
+            std::env::temp_dir()
+        } else {
+            std::path::PathBuf::from("/tmp")
+        };
         let file = tempfile::Builder::new()
             .prefix("perfr-frida-")
             .tempfile_in(lease_dir)

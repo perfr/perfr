@@ -8,6 +8,8 @@
 //! behavior they had before subcommands. `perfr serve`, `capture`, and
 //! `slice` are the same work with help text.
 
+use std::path::PathBuf;
+
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
@@ -26,6 +28,7 @@ Examples:
   perfr skill install --dry-run
   perfr doctor
   perfr setup
+  perfr hooks install
   perfr update --check
 
 `perfr --serve`, `perfr --pid`, and `perfr --slice` still work.
@@ -33,7 +36,7 @@ perfr runs on Linux, macOS, and Windows. Sampling and the scheduler need
 Linux, or an elevated Windows prompt. macOS records manual scopes and Frida hooks.";
 
 const SUBCOMMANDS: &[&str] = &[
-    "serve", "capture", "slice", "mcp", "skill", "update", "doctor", "setup", "version",
+    "serve", "capture", "slice", "mcp", "skill", "hooks", "update", "doctor", "setup", "version",
 ];
 
 #[derive(Clone, Debug)]
@@ -95,8 +98,10 @@ pub fn command() -> Command {
         .subcommand(skill_cmd())
         .subcommand(doctor_cmd())
         .subcommand(setup_cmd())
+        .subcommand(hooks_cmd())
         .subcommand(update_cmd())
         .subcommand(version_cmd())
+        .arg(hooks_auto_arg())
 }
 
 /// Top-level help. Clap 4 styles one subcommand heading, so the groups are
@@ -138,6 +143,7 @@ pub fn render_top_help(color: bool) -> String {
                     "setup",
                     "Apply permission fixes for sampling and instrumentation",
                 ),
+                ("hooks", "Install optional Frida function hooks"),
                 ("update", "Update this install from a GitHub release"),
                 ("version", "Print the version, git hash, and build date"),
             ],
@@ -153,6 +159,7 @@ pub fn render_top_help(color: bool) -> String {
         }
     }
     out.push_str(&format!("\n{header}Options:{header:#}\n"));
+    out.push_str("      --hooks-auto    Download function hooks without prompting\n");
     out.push_str("      --no-preflight  Skip the permission check on startup\n");
     out.push_str("  -h, --help          Print help\n");
     out.push_str("  -V, --version       Print version\n\n");
@@ -204,6 +211,9 @@ fn clap_front(args: &[String]) -> Front {
             return Front::Exit(code);
         }
     };
+    if matches.get_flag("hooks-auto") {
+        crate::hook_dist::set_auto_from_flag();
+    }
     match matches.subcommand() {
         Some(("serve", sub)) => Front::Serve(serve_opts(sub)),
         Some(("capture", sub)) => Front::Capture(capture_opts(sub)),
@@ -212,6 +222,7 @@ fn clap_front(args: &[String]) -> Front {
         Some(("skill", sub)) => Front::Exit(run_skill(sub)),
         Some(("update", sub)) => Front::Exit(crate::update::run(update_opts(sub))),
         Some(("doctor", _)) => Front::Exit(crate::preflight::doctor()),
+        Some(("hooks", sub)) => Front::Exit(run_hooks(sub)),
         Some(("setup", sub)) => Front::Exit(crate::preflight::setup(setup_opts(sub))),
         Some(("version", _)) => {
             println!("{}", crate::build_info::version_line());
@@ -555,6 +566,57 @@ fn skill_verb(name: &'static str, about: &'static str) -> Command {
         )
 }
 
+fn hooks_auto_arg() -> Arg {
+    Arg::new("hooks-auto")
+        .long("hooks-auto")
+        .global(true)
+        .action(ArgAction::SetTrue)
+        .help("Download function hooks without prompting when they are missing")
+}
+
+fn run_hooks(matches: &ArgMatches) -> i32 {
+    let Some((name, sub)) = matches.subcommand() else {
+        eprintln!("perfr hooks: expected install, status, or uninstall");
+        return 2;
+    };
+    let opts = crate::hook_dist::HooksOpts {
+        dir: sub.get_one::<String>("dir").map(PathBuf::from),
+    };
+    crate::hook_dist::command(name, &opts)
+}
+
+fn hooks_cmd() -> Command {
+    Command::new("hooks")
+        .about("Install optional Frida function hooks")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("install")
+                .about("Download the hooks archive for this perfr version")
+                .after_help(
+                    "Verifies the published SHA-256 and refuses a hooks archive whose \
+                     version does not match this binary.\n\n\
+                     Examples:\n  \
+                     perfr hooks install\n  \
+                     perfr hooks install --dir ~/.local/share/perfr/hooks",
+                )
+                .arg(
+                    Arg::new("dir")
+                        .long("dir")
+                        .value_name("DIR")
+                        .help("Install directory (default: beside perfr, or the hooks data dir)"),
+                )
+                .arg(
+                    Arg::new("yes")
+                        .long("yes")
+                        .action(ArgAction::SetTrue)
+                        .help("Accepted for scripts; install does not prompt"),
+                ),
+        )
+        .subcommand(Command::new("status").about("Show whether function hooks are installed"))
+        .subcommand(Command::new("uninstall").about("Remove installed function hooks"))
+}
+
 fn doctor_cmd() -> Command {
     Command::new("doctor")
         .about("Print sampling and instrumentation checks")
@@ -668,7 +730,8 @@ mod tests {
             assert!(help.contains(heading), "missing {heading}:\n{help}");
         }
         let order = [
-            "serve", "capture", "slice", "mcp", "skill", "doctor", "setup", "update", "version",
+            "serve", "capture", "slice", "mcp", "skill", "doctor", "setup", "hooks", "update",
+            "version",
         ];
         let mut at = 0;
         for name in order {
@@ -697,6 +760,12 @@ mod tests {
         let setup = render(&["setup", "--help"]);
         assert!(setup.contains("--check"), "{setup}");
         assert!(setup.contains("--persist"), "{setup}");
+        let hooks = render(&["hooks", "--help"]);
+        assert!(hooks.contains("install"), "{hooks}");
+        assert!(hooks.contains("status"), "{hooks}");
+        assert!(hooks.contains("uninstall"), "{hooks}");
+        let hooks_install = render(&["hooks", "install", "--help"]);
+        assert!(hooks_install.contains("--dir"), "{hooks_install}");
     }
 
     #[test]

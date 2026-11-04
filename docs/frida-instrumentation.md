@@ -6,6 +6,28 @@ select Frida. Linux's existing uprobes remain available through the **Uprobes**
 selector or `dynamic_instrumentation_method: "kernel_uprobes"`. Failures are
 reported at Start, without silently switching engines.
 
+## Installed builds
+
+The GitHub release does not put the helper or the agent in the core archive.
+`perfr hooks install` downloads `perfr-hooks-<platform>` for this binary's
+version, checks the SHA-256, and requires `perfr-hooks-version` to match.
+`perfr hooks status` and `perfr doctor` show whether that copy is present.
+`perfr update` replaces it when hooks are already installed.
+
+The first time a capture needs hooks:
+
+- an interactive terminal is asked before downloading
+- MCP and any other non-interactive session get an error that says to run
+  `perfr hooks install`
+- `PERFR_HOOKS_AUTO_INSTALL=1` or `--hooks-auto` downloads without asking
+- `PERFR_HOOKS_NO_PROMPT=1` forces the error even on a terminal
+
+Lookup order, for the helper and the agent separately: the environment
+variable, the directory that contains `perfr`, then the hooks data directory
+(`PERFR_HOOKS_DIR`, `%LOCALAPPDATA%\perfr\hooks`, or
+`~/.local/share/perfr/hooks`). A development build can keep using
+`PERFR_FRIDA_HELPER` and `PERFR_FRIDA_AGENT`.
+
 ## Build and run
 
 On Linux, install Rust 1.88.0, a C compiler, curl and tar/xz, then:

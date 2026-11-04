@@ -237,10 +237,14 @@ fn find_eocd(bytes: &[u8]) -> Result<usize, String> {
     Err("zip end of central directory not found".into())
 }
 
-/// Drop the leading `perfr/` directory the release archives use.
+/// Drop the leading `perfr/` or `perfr-hooks/` directory the release archives use.
 pub fn install_relative(path: &str) -> Option<String> {
     let path = path.trim_start_matches("./").replace('\\', "/");
-    let rest = path.strip_prefix("perfr/").unwrap_or(path.as_str());
+    // `perfr-hooks/` has to be tried first: it also starts with `perfr`.
+    let rest = path
+        .strip_prefix("perfr-hooks/")
+        .or_else(|| path.strip_prefix("perfr/"))
+        .unwrap_or(path.as_str());
     if rest.is_empty() || rest.ends_with('/') || rest.split('/').any(|part| part == "..") {
         return None;
     }
@@ -396,5 +400,14 @@ mod tests {
             Some("include/perfr.h")
         );
         assert_eq!(install_relative("perfr/../../etc/passwd"), None);
+        assert_eq!(
+            install_relative("perfr-hooks/perfr-frida-helper").as_deref(),
+            Some("perfr-frida-helper")
+        );
+        assert_eq!(
+            install_relative("perfr-hooks/licenses/frida").as_deref(),
+            Some("licenses/frida")
+        );
+        assert_eq!(install_relative("perfr-hooks/../../etc/passwd"), None);
     }
 }

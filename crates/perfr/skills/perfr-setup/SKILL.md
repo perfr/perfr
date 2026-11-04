@@ -15,11 +15,21 @@ If `perfr` is not on `PATH`:
 curl -fsSL https://perfr.dev/install.sh | sh
 ```
 
+That is the core archive: the service, manual instrumentation, and on Linux the GPU helper. Function hooks are separate. Add them in the same step:
+
+```
+curl -fsSL https://perfr.dev/install.sh | sh -s -- --with-hooks
+```
+
 On Windows, in PowerShell:
 
 ```
 irm https://perfr.dev/install.ps1 | iex
 ```
+
+With hooks: `$env:PERFR_WITH_HOOKS = '1'` before that command.
+
+If the service is already installed and a capture says function hooks are not installed, run `perfr hooks install`. `perfr hooks status` prints the version and directory. `perfr doctor` includes the same row. Do not guess a path and copy the files by hand.
 
 If `perfr update --check` says a package manager owns the binary, use the command it prints. Do not replace that binary by hand.
 

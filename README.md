@@ -47,20 +47,31 @@ from a prompt opened with *Run as administrator* to record the scheduler,
 thread states and call stacks (the kernel logger is administrators-only);
 manual scopes and function hooks need no privilege.
 
-`pip install perfr` is the same service in a wheel, including the
-Frida files. Wheels are built on the same tags and are not on PyPI yet.
+`pip install perfr` is the same service in a wheel. That wheel still
+carries the Frida files; the GitHub release archive does not. Wheels are
+built on the same tags and are not on PyPI yet.
 
 Privileges, capture files, and the manual API:
 [docs/manual/index.md](docs/manual/index.md).
 
-Function hooks need `libperfr_frida_agent` and `perfr-frida-helper` in the
-same directory as `perfr` (or `PERFR_FRIDA_AGENT` /
-`PERFR_FRIDA_HELPER`); on Windows the files are `perfr_frida_agent.dll` and
-`perfr-frida-helper.exe`. The release archive and the installer put them
-there. Without them, starting a capture with hooks fails the Frida setup; it
-does not switch engines on its own. On Linux the kernel engine is a separate
-choice and needs root or `CAP_SYS_ADMIN`. It is not in the macOS or Windows
-builds.
+Function hooks are optional. They need `libperfr_frida_agent` and
+`perfr-frida-helper` beside `perfr`, or in the hooks data directory
+(`PERFR_FRIDA_AGENT` / `PERFR_FRIDA_HELPER` override the lookup); on Windows
+the files are `perfr_frida_agent.dll` and `perfr-frida-helper.exe`. The core
+release archive does not include them. Install with
+`curl -fsSL https://perfr.dev/install.sh | sh -s -- --with-hooks`, or later:
+
+```sh
+perfr hooks install
+```
+
+The first hook in an interactive terminal offers to download them. MCP and
+other non-interactive sessions get an error that names that command;
+`PERFR_HOOKS_AUTO_INSTALL=1` or `--hooks-auto` downloads without asking.
+Without the files, a capture that asks for Frida hooks fails the Frida
+setup; it does not switch engines on its own. On Linux the kernel engine is
+a separate choice and needs root or `CAP_SYS_ADMIN`. It is not in the macOS
+or Windows builds.
 
 With no arguments, `perfr` listens on `127.0.0.1:44766`.
 

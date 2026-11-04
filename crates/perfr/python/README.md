@@ -26,6 +26,10 @@ The Linux binary samples, records the scheduler, and hooks functions. The
 macOS binary records manual scopes and Frida function hooks; sampling, the
 scheduler, live disassembly, and auto-profiling are not in that build.
 Manual instrumentation through the API (C, C++, Rust, Python) is in both.
+The GitHub release keeps function hooks in a separate archive
+(`perfr hooks install`). This wheel still ships `libperfr_frida_agent` and
+`perfr-frida-helper` next to the `perfr` console script.
+
 Function hooks need `libperfr_frida_agent` and `perfr-frida-helper` in the
 same directory as `perfr`. The wheel includes them (see
 `tools/release/build_wheels.sh`).

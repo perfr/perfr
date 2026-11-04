@@ -10,8 +10,14 @@
 //! The bytes come from the module file on disk at the function's file
 //! offset, not from the process's memory: the same bytes, and no ptrace.
 //! The source line of an address comes from the module's DWARF line table
-//! (or its detached debug file), through `perfr_object::line_info`, which
-//! follows LLVM's rules for inlined code. A source file is served only if
+//! or its detached debug file, through `perfr_object::line_info`, which
+//! follows LLVM's rules for inlined code. Release archives strip DWARF out
+//! of the binary and publish it separately. The lookup is `.gnu_debuglink`
+//! (next to the file, in `.debug/`, or under `/usr/lib/debug`), then
+//! `/usr/lib/debug/.build-id`, then a debuginfod store at
+//! `PERFR_SYMBOL_PATH/buildid/<id>/debuginfo` or the debuginfod client
+//! cache. A local `cargo build --release` still has the line table in the
+//! binary, because cargo is not asked to strip. A source file is served only if
 //! a disassembly named it or it sits under `PERFR_SOURCE_ROOTS`: the
 //! service often runs as root, and a file endpoint that took any path
 //! would be a way to read anything.
@@ -219,9 +225,14 @@ pub fn source_json(path: &str, allow: &SourceAllowList) -> Result<String, String
 }
 
 /// A disassembly to look at with nothing captured: a function of this
-/// service's own binary, with its source lines when the binary carries a
-/// line table. `perfr::uprobes` is the module it looks for, a
-/// function big enough to read; failing that, the largest function.
+/// service's own binary. Source lines come from `.debug_line` in that
+/// binary or, once the release packager has split debug info out, from the
+/// detached file named by `.gnu_debuglink` (`perfr.debug` beside the
+/// binary, or the debuginfod `buildid/<id>/debuginfo` file). The line table
+/// is not left in the release binary. Without the detached file the
+/// instructions still disassemble; the source column is empty.
+/// `perfr::uprobes` is the module it looks for, a function big enough to
+/// read; failing that, the largest function.
 pub fn example_disassembly_json(allow: &SourceAllowList) -> Result<String, String> {
     if cfg!(target_os = "macos") {
         return Err("Live Mach-O disassembly is not yet supported on macOS".into());

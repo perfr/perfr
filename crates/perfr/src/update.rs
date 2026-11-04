@@ -5,9 +5,10 @@
 //! `perfr update`: replace this install with a GitHub release of perfr/perfr.
 //!
 //! The asset names and the on-disk layout match `tools/install/install.sh`
-//! and `tools/install/install.ps1`: a `perfr/` directory of the binary plus
-//! the Frida files beside it, checksummed by the `.sha256` asset (sha256sum
-//! format) or `SHA256SUMS`. A cargo, Homebrew, or pip install is not
+//! and `tools/install/install.ps1`: a `perfr/` directory of the binary,
+//! checksummed by the `.sha256` asset (sha256sum format) or `SHA256SUMS`.
+//! Function hooks are a separate `perfr-hooks` archive and are updated only
+//! when they are already installed. A cargo, Homebrew, or pip install is not
 //! overwritten; the command that owns it is printed instead.
 
 use std::fs;
@@ -116,6 +117,7 @@ impl Fetch for CommandFetch {
 
 pub fn run(opts: UpdateOpts) -> i32 {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("perfr"));
+    let hooks_data = crate::hook_dist::hooks_data_dir();
     match run_with(
         &opts,
         &CommandFetch,
@@ -123,6 +125,7 @@ pub fn run(opts: UpdateOpts) -> i32 {
         Platform::host(),
         ReplaceStyle::host(),
         &real_manager_hints(&exe),
+        &hooks_data,
     ) {
         Ok(text) => {
             print!("{text}");
@@ -145,6 +148,7 @@ pub fn run_with(
     platform: Platform,
     style: ReplaceStyle,
     manager: &Option<Manager>,
+    hooks_data: &Path,
 ) -> Result<String, String> {
     let tag = match &opts.tag {
         Some(tag) => Some(normalize_tag(tag)?),
@@ -227,8 +231,49 @@ pub fn run_with(
     let dest = exe.parent().ok_or("the running binary has no directory")?;
     install_tree(dest, &files, style)?;
     text.push_str(&format!("replaced install in {}\n", dest.display()));
+    let hooks =
+        crate::hook_dist::update_installed(fetch, &release, dest, hooks_data, platform, style)?;
+    text.push_str(&hooks);
     text.push_str("restart perfr to run the new binary\n");
     Ok(text)
+}
+
+pub fn release_for_tag(fetch: &dyn Fetch, tag: &str) -> Result<Release, String> {
+    let url = format!("{TAG_URL}{tag}");
+    let body = fetch
+        .get(&url)
+        .map_err(|error| format!("{error}\n({url})"))?;
+    parse_release(&String::from_utf8_lossy(&body))
+}
+
+pub fn fetch_verified(
+    fetch: &dyn Fetch,
+    release: &Release,
+    asset_name: &str,
+) -> Result<Vec<u8>, String> {
+    let asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == asset_name)
+        .cloned()
+        .ok_or_else(|| format!("release {} has no {asset_name}", release.tag))?;
+    let checksum = checksum_asset(release, asset_name)
+        .ok_or_else(|| format!("no checksum published for {asset_name}; refusing to install"))?;
+    let bytes = fetch.get(&asset.url)?;
+    let sums = fetch.get(&checksum.url)?;
+    verify_checksum(&bytes, &String::from_utf8_lossy(&sums), asset_name)?;
+    Ok(bytes)
+}
+
+/// `perfr-v0.1.0` and `perfr-v0.1.0-rc.1` become `0.1.0` and `0.1.0-rc.1`.
+pub fn package_version_of_tag(tag: &str) -> Option<String> {
+    let sem = parse_semver(tag)?;
+    let mut text = format!("{}.{}.{}", sem.major, sem.minor, sem.patch);
+    if !sem.pre.is_empty() {
+        text.push('-');
+        text.push_str(&sem.pre.join("."));
+    }
+    Some(text)
 }
 
 pub fn parse_release(text: &str) -> Result<Release, String> {
@@ -428,6 +473,15 @@ pub fn install_tree(
     files: &[PackedFile],
     style: ReplaceStyle,
 ) -> Result<(), String> {
+    install_files(dest_dir, files, style, true)
+}
+
+pub fn install_files(
+    dest_dir: &Path,
+    files: &[PackedFile],
+    style: ReplaceStyle,
+    require_service: bool,
+) -> Result<(), String> {
     let mut staged = Vec::new();
     for file in files {
         let Some(relative) = archive::install_relative(&file.path) else {
@@ -448,14 +502,24 @@ pub fn install_tree(
         set_mode(&tmp, file.executable || is_binary_name(&relative));
         staged.push((tmp, dest));
     }
-    if !staged
-        .iter()
-        .any(|(_, dest)| is_binary_name(&dest.file_name().unwrap_or_default().to_string_lossy()))
-    {
+    let has_service = staged.iter().any(|(_, dest)| {
+        matches!(
+            dest.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .as_ref(),
+            "perfr" | "perfr.exe"
+        )
+    });
+    if staged.is_empty() || (require_service && !has_service) {
         for (tmp, _) in &staged {
             let _ = fs::remove_file(tmp);
         }
-        return Err("archive has no perfr binary".into());
+        return Err(if require_service {
+            "archive has no perfr binary".into()
+        } else {
+            "archive has no files to install".into()
+        });
     }
     // Companions first, the running binary last, so a failure leaves the
     // previous binary in place.
@@ -732,7 +796,7 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     out
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -895,6 +959,7 @@ mod tests {
             },
             ReplaceStyle::Atomic,
             &None,
+            Path::new("."),
         )
         .unwrap();
         assert!(text.contains("latest release: perfr-v9.9.9"), "{text}");
@@ -947,6 +1012,7 @@ mod tests {
             },
             ReplaceStyle::Atomic,
             &Some(brew),
+            Path::new("."),
         )
         .unwrap_err();
         assert!(err.contains("brew upgrade perfr"), "{err}");
@@ -956,8 +1022,7 @@ mod tests {
     fn yes_verifies_the_checksum_and_replaces_the_tree() {
         let archive = archive::pack_tar_gz(&[
             ("perfr/perfr", b"new-binary", 0o755),
-            ("perfr/perfr-frida-helper", b"helper", 0o755),
-            ("perfr/libperfr_frida_agent.so", b"agent", 0o644),
+            ("perfr/libperfr_api.so", b"api", 0o644),
         ]);
         let hash = hex_encode(&sha256(&archive));
         let sums = format!("{hash}  perfr-linux-x86_64.tar.gz\n");
@@ -998,14 +1063,17 @@ mod tests {
             },
             ReplaceStyle::WindowsAside,
             &None,
+            &dir.path().join("hooks-data"),
         )
         .unwrap();
         assert!(text.contains("replaced install"), "{text}");
+        assert!(text.contains("function hooks: not installed"), "{text}");
         assert_eq!(fs::read(dir.path().join("perfr")).unwrap(), b"new-binary");
         assert_eq!(
-            fs::read(dir.path().join("perfr-frida-helper")).unwrap(),
-            b"helper"
+            fs::read(dir.path().join("libperfr_api.so")).unwrap(),
+            b"api"
         );
+        assert!(!dir.path().join("perfr-frida-helper").exists());
         assert!(!dir.path().join("perfr.exe.old").exists());
         assert!(!dir.path().join("perfr.old").exists());
     }
@@ -1047,6 +1115,7 @@ mod tests {
             },
             ReplaceStyle::Atomic,
             &None,
+            &dir.path().join("hooks-data"),
         )
         .unwrap_err();
         assert!(err.contains("checksum mismatch"), "{err}");

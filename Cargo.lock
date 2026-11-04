@@ -2910,7 +2910,9 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "perfr"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "cpp_demangle",
+ "flate2",
  "iced-x86",
  "libc",
  "log",

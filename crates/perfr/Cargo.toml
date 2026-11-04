@@ -16,6 +16,8 @@ name = "perfr"
 path = "src/main.rs"
 
 [dependencies]
+clap = { workspace = true }
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 tempfile = "3"
 # The log facade; logging.rs is the one implementation (stderr and a file).
 log = "0.4"

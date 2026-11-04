@@ -50,6 +50,12 @@ mod thread_state;
 mod uprobes;
 mod visible;
 mod mcp;
+mod archive;
+mod build_info;
+mod cli;
+mod preflight;
+mod skill;
+mod update;
 
 #[cfg(target_os = "linux")]
 use interner::CallstackInterner;
@@ -146,35 +152,7 @@ fn parse_args() -> Args {
                 let output = iter.next().unwrap_or_default();
                 let t0: u64 = iter.next().and_then(|v| v.parse().ok()).unwrap_or(0);
                 let t1: u64 = iter.next().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX);
-                if input.is_empty() || output.is_empty() {
-                    eprintln!("perfr --slice <in.perfr.zip> <out.perfr.zip> <t0_ns> <t1_ns>");
-                    std::process::exit(2);
-                }
-                let started = std::time::Instant::now();
-                match perfr_capture::slice_bundle_file(&input, t0, t1) {
-                    Ok((bundle, stats)) => match bundle.to_zip().and_then(|zip| std::fs::write(&output, zip).map_err(Into::into)) {
-                        Ok(()) => {
-                            eprintln!(
-                                "perfr: {output}: {} events, {} samples, {} frames from {} of {} event row groups in {:.3} s",
-                                bundle.events.len(),
-                                bundle.samples.len(),
-                                bundle.frames.len(),
-                                stats.event_row_groups_read,
-                                stats.event_row_groups,
-                                started.elapsed().as_secs_f64()
-                            );
-                            std::process::exit(0);
-                        }
-                        Err(error) => {
-                            eprintln!("perfr: could not write {output}: {error}");
-                            std::process::exit(2);
-                        }
-                    },
-                    Err(error) => {
-                        eprintln!("perfr: could not slice {input}: {error}");
-                        std::process::exit(2);
-                    }
-                }
+                std::process::exit(run_slice(&input, &output, t0, t1));
             }
             "--python-probes" => {
                 // perfr --python-probes <pid | path-to-python>
@@ -216,58 +194,49 @@ fn parse_args() -> Args {
                 }
                 args.serve = Some(port);
             }
-            "--help" | "-h" => {
-                eprintln!(
-                    "                     perfr                       serve the live viewer UI\n\
-                     perfr mcp                   MCP server on stdin for agents\n\
-                     perfr mcp --http [127.0.0.1:44767]  the same tools over streamable HTTP\n\
-                     perfr --serve [port]        ... on a specific port\n\
-                     perfr --host <addr> --serve  ... bound to one address \
-                     (default 0.0.0.0; 127.0.0.1 keeps it off the network)\n\
-                     perfr --wire raw|packed|deflate --serve  event batches on the \
-                     WebSocket as 32-byte records, delta-varint packed (default), or \
-                     packed and deflated\n\
-                     perfr --join <hub[:port]>   stream this machine into the service at hub, \
-                     whose viewer then shows both machines and whose Record captures both\n\
-                     perfr --connect <host[:port]>[,...]  the other way round: pull those \
-                     machines' services into this one's timeline\n\
-                     perfr --slice <in.perfr.zip> <out.perfr.zip> <t0_ns> <t1_ns>  cut a \
-                     saved capture to a window, reading only the row groups inside it\n\
-                     perfr [--pid <tid>] [--duration-ms <n>] [--freq-hz <n>] \
-                     [--out <path>] [--gpu-helper <path>]\n\
-                     \n\
-                     Every run also logs to ~/.perfr/logs/perfr-<time>-<pid>.log \
-                     (the invoking user's home under sudo). --log-dir <dir> or PERFR_LOG_DIR \
-                     puts it elsewhere; PERFR_LOG=debug says more."
-                );
-                if cfg!(target_os = "macos") {
-                    eprintln!("macOS: manual capture only; --out must end in .perfr.zip; --freq-hz is unused");
-                }
-                if cfg!(target_os = "windows") {
-                    eprintln!("Windows: --out must end in .perfr.zip; the scheduler and sampling need an elevated prompt; --freq-hz is fixed at 1000");
-                }
-                std::process::exit(0);
+            "--help" | "-h" | "--version" | "-V" => {
+                std::process::exit(match cli::front(&[flag]) {
+                    cli::Front::Exit(code) => code,
+                    _ => 0,
+                });
             }
+            "--no-preflight" => {}
             other => log::warn!("ignoring unknown argument {other}"),
         }
     }
-    if args.serve.is_some() || args.join.is_some() || !args.connect.is_empty() {
-        let port = args.serve.unwrap_or(serve::DEFAULT_PORT);
-        // The viewer is meant to be opened from another machine on the
-        // network -- that is how a profiler gets used -- so the default
-        // binds every interface. There is no authentication in front of
-        // it; --host 127.0.0.1 keeps it to this machine.
-        let host = args.host.clone().unwrap_or_else(|| "0.0.0.0".to_string());
-        let links = serve::Links { join: args.join.clone(), connect: args.connect.clone() };
-        if let Err(error) =
-            serve::run_on(&host, port, args.gpu_helper.clone().or_else(default_gpu_helper), args.wire, links)
-        {
-            log::error!("could not start the live viewer: {error}");
-            std::process::exit(2);
-        }
-        std::process::exit(0);
-    }
     args
+}
+
+fn run_slice(input: &str, output: &str, t0: u64, t1: u64) -> i32 {
+    if input.is_empty() || output.is_empty() {
+        eprintln!("perfr slice <in.perfr.zip> <out.perfr.zip> <t0_ns> <t1_ns>");
+        return 2;
+    }
+    let started = std::time::Instant::now();
+    match perfr_capture::slice_bundle_file(input, t0, t1) {
+        Ok((bundle, stats)) => match bundle.to_zip().and_then(|zip| std::fs::write(output, zip).map_err(Into::into)) {
+            Ok(()) => {
+                eprintln!(
+                    "perfr: {output}: {} events, {} samples, {} frames from {} of {} event row groups in {:.3} s",
+                    bundle.events.len(),
+                    bundle.samples.len(),
+                    bundle.frames.len(),
+                    stats.event_row_groups_read,
+                    stats.event_row_groups,
+                    started.elapsed().as_secs_f64()
+                );
+                0
+            }
+            Err(error) => {
+                eprintln!("perfr: could not write {output}: {error}");
+                2
+            }
+        },
+        Err(error) => {
+            eprintln!("perfr: could not slice {input}: {error}");
+            2
+        }
+    }
 }
 
 /// Sampled-register layout for kSampleRegsUserAll on x86_64: ax,bx,cx,dx,
@@ -282,10 +251,22 @@ fn start_regs(regs: &[u64]) -> StartRegs {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
     // MCP must not write a log line, or anything else, to stdout: that
-    // stream is the JSON-RPC channel. Handle it before the logger starts.
-    if std::env::args().nth(1).as_deref() == Some("mcp") {
-        std::process::exit(mcp::entry());
+    // stream is the JSON-RPC channel. The permission warning goes to stderr
+    // before the server starts. --help and --version never get here.
+    match cli::front(&args) {
+        cli::Front::Exit(code) => std::process::exit(code),
+        cli::Front::Mcp => {
+            if !preflight::suppressed(&args) {
+                preflight::emit_warning();
+            }
+            std::process::exit(mcp::entry());
+        }
+        cli::Front::Serve(opts) => run_serve(opts),
+        cli::Front::Capture(opts) => run_capture(opts),
+        cli::Front::Slice(opts) => std::process::exit(run_slice(&opts.input, &opts.output, opts.t0, opts.t1)),
+        cli::Front::Legacy => {}
     }
     // stderr from here on, and the file once a real run begins (serve mode
     // or a file capture; --help and the one-shot tools leave no log behind).
@@ -293,7 +274,10 @@ fn main() {
     // No arguments at all means "bring up the UI": start the live viewer and
     // let the operator drive captures from it, rather than guessing what they
     // wanted to profile.
-    if std::env::args().count() == 1 {
+    if args.is_empty() {
+        if !preflight::suppressed(&args) {
+            preflight::emit_warning();
+        }
         if let Err(error) = serve::run(serve::DEFAULT_PORT, default_gpu_helper()) {
             log::error!("could not start the live viewer: {error}");
             std::process::exit(2);
@@ -301,11 +285,86 @@ fn main() {
         return;
     }
 
-    let args = parse_args();
+    let parsed = parse_args();
+    // `--slice` and `--python-probes` exit inside parse_args. What remains
+    // is a viewer or a file capture, both of which want the permission check.
+    if !preflight::suppressed(&args) {
+        preflight::emit_warning();
+    }
+    if parsed.serve.is_some() || parsed.join.is_some() || !parsed.connect.is_empty() {
+        let port = parsed.serve.unwrap_or(serve::DEFAULT_PORT);
+        // The flag form binds every interface. There is no authentication
+        // in front of it; --host 127.0.0.1 keeps it on this machine.
+        // `perfr serve` binds loopback unless --host is set.
+        let host = parsed.host.clone().unwrap_or_else(|| "0.0.0.0".to_string());
+        let links = serve::Links { join: parsed.join.clone(), connect: parsed.connect.clone() };
+        if let Err(error) = serve::run_on(
+            &host,
+            port,
+            parsed.gpu_helper.clone().or_else(default_gpu_helper),
+            parsed.wire,
+            links,
+        ) {
+            log::error!("could not start the live viewer: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     if let Err(error) = logging::open_file(None) {
         log::warn!("no log file: {error}");
     }
+    dispatch_capture(parsed);
+}
 
+fn run_serve(opts: cli::ServeOpts) -> ! {
+    if !opts.no_preflight && !preflight::env_suppressed() {
+        preflight::emit_warning();
+    }
+    logging::install();
+    let port = opts.port.unwrap_or(serve::DEFAULT_PORT);
+    let host = opts.host.unwrap_or_else(|| "127.0.0.1".to_string());
+    let wire = match opts.wire.as_deref() {
+        Some(text) => match perfr_live_server::WireFormat::parse(text) {
+            Some(wire) => wire,
+            None => {
+                log::warn!("unknown --wire {text:?}; use raw, packed or deflate");
+                perfr_live_server::env_wire()
+            }
+        },
+        None => perfr_live_server::env_wire(),
+    };
+    if let Err(error) = serve::run_on(&host, port, default_gpu_helper(), wire, serve::Links::default()) {
+        log::error!("could not start the live viewer: {error}");
+        std::process::exit(2);
+    }
+    std::process::exit(0);
+}
+
+fn run_capture(opts: cli::CaptureOpts) -> ! {
+    if !opts.no_preflight && !preflight::env_suppressed() {
+        preflight::emit_warning();
+    }
+    logging::install();
+    let args = Args {
+        pid: opts.pid,
+        duration: Duration::from_millis(opts.duration_ms),
+        frequency_hz: opts.freq_hz,
+        out: opts.out,
+        gpu_helper: opts.gpu_helper,
+        host: None,
+        wire: perfr_live_server::env_wire(),
+        out_arrow: opts.out_arrow,
+        serve: None,
+        join: None,
+        connect: Vec::new(),
+    };
+    if let Err(error) = logging::open_file(None) {
+        log::warn!("no log file: {error}");
+    }
+    dispatch_capture(args);
+}
+
+fn dispatch_capture(args: Args) -> ! {
     #[cfg(target_os = "macos")]
     if let Err(error) = macos::capture_file(args) {
         log::error!("{error}");
@@ -318,6 +377,7 @@ fn main() {
     }
     #[cfg(target_os = "linux")]
     capture_file_linux(args);
+    std::process::exit(0);
 }
 
 #[cfg(target_os = "linux")]

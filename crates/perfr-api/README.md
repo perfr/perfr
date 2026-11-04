@@ -7,7 +7,13 @@ scopes, async spans, instants, links and values that a running
 ```rust
 let _frame = perfr_api::scope("frame");
 perfr_api::value("fps", 59.9);
+let _sim = perfr_api::ChannelGuard::named("simulation");
+perfr_api::log_info("tick");
 ```
+
+`log` is a no-op until a service is capturing, then the line is another event
+on the same ring as scopes. A channel guard only changes thread-local state;
+the next scope enter records that channel. Log lines do not carry it.
 
 Every call is safe from any thread at any time and is a single predictable
 branch until a service is capturing the process. The producer is a lock-free

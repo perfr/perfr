@@ -72,6 +72,7 @@ pub fn router(service: Arc<LiveService>) -> Router {
         .route("/api/sampling/tree", get(sampling_tree))
         .route("/api/sampling/callstacks", get(sampling_callstacks))
         .route("/api/functions/stats", get(function_stats))
+        .route("/api/logs", get(capture_logs))
         .route("/api/symbols/modules", get(symbols_modules))
         .route("/api/capture/export", get(capture_export))
         .route("/api/capture/share", post(capture_share))
@@ -845,6 +846,149 @@ struct StatsQuery {
     #[serde(default)]
     offset: u32,
     limit: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct LogsQuery {
+    #[serde(default)]
+    t0: u64,
+    #[serde(default)]
+    t1: u64,
+    tid: Option<u32>,
+    /// Channel id, or a registered channel name. Filters scopes, then the
+    /// log lines that fall inside those scopes.
+    channel: Option<String>,
+    /// Scope name. Lines inside every instance of that scope on `tid`
+    /// (or every thread, when `tid` is omitted). Several instances come
+    /// back grouped, with a count.
+    scope: Option<String>,
+    #[serde(default)]
+    offset: u32,
+    limit: Option<u32>,
+}
+
+fn level_name(level: u8) -> &'static str {
+    match level {
+        0 => "trace",
+        1 => "debug",
+        2 => "info",
+        3 => "warn",
+        4 => "error",
+        _ => "fatal",
+    }
+}
+
+/// `GET /api/logs` — log lines in a time range, optionally one thread.
+/// A channel limits the lines to those inside scopes of that channel.
+/// A scope name limits them to that scope's intervals; repeated instances
+/// are grouped.
+async fn capture_logs(State(svc): State<Arc<LiveService>>, Query(q): Query<LogsQuery>) -> Response {
+    let offset = q.offset as usize;
+    let limit = q.limit.unwrap_or(50).clamp(1, 200) as usize;
+    let t0 = q.t0;
+    let t1 = if q.t1 == 0 { u64::MAX } else { q.t1.max(t0) };
+    let tid = q.tid;
+    let scope_name = q.scope.unwrap_or_default();
+    let channel_text = q.channel.unwrap_or_default();
+    match tokio::task::spawn_blocking(move || {
+        let channels = svc.channel_names();
+        let channel = if channel_text.is_empty() {
+            None
+        } else if let Ok(id) = channel_text.parse::<u8>() {
+            Some(id)
+        } else if channel_text == "default" {
+            Some(0)
+        } else {
+            match channels.iter().find(|(_, name)| name == &channel_text) {
+                Some((id, _)) => Some(*id),
+                None => return serde_json::json!({ "error": format!("unknown channel {channel_text}") }).to_string(),
+            }
+        };
+        let (_gen, events) = svc.ring().snapshot();
+        let intern = svc.intern.lock();
+        let name_of = |id: u32| intern.get(id).unwrap_or("").to_string();
+        use perfr_live_event::logs::{aggregate, logs_in_spans, logs_in_window, scope_spans};
+        let (rows, grouped) = if !scope_name.is_empty() {
+            let mut spans = Vec::new();
+            for event in &events {
+                if event.kind != perfr_live_event::kind::API_SCOPE && event.kind != perfr_live_event::kind::API_TRACK {
+                    continue;
+                }
+                if name_of(event.name_id) != scope_name {
+                    continue;
+                }
+                if let Some(span) = perfr_live_event::logs::ScopeSpan::from_event(event) {
+                    if tid.is_none_or(|t| span.tid == t) && channel.is_none_or(|c| span.channel == c) {
+                        spans.push(span);
+                    }
+                }
+            }
+            let logs = logs_in_spans(&events, &spans);
+            let groups = aggregate(&logs);
+            let rows: Vec<serde_json::Value> = groups
+                .into_iter()
+                .map(|g| serde_json::json!({
+                    "t_ns": g.first_ns,
+                    "last_ns": g.last_ns,
+                    "tid": g.tid,
+                    "level": level_name(g.level),
+                    "message": name_of(g.name_id),
+                    "count": g.count,
+                    "truncated": g.truncated,
+                }))
+                .collect();
+            (rows, true)
+        } else if let Some(channel) = channel {
+            let spans = scope_spans(&events, tid, Some(channel));
+            let mut logs = logs_in_spans(&events, &spans);
+            logs.retain(|e| e.start_ns >= t0 && e.start_ns <= t1);
+            let rows = logs
+                .into_iter()
+                .map(|e| serde_json::json!({
+                    "t_ns": e.start_ns,
+                    "tid": e.tid,
+                    "pid": e.pid,
+                    "level": level_name(e.log_level().unwrap_or(0)),
+                    "message": name_of(e.name_id),
+                    "truncated": e.log_truncated(),
+                    "count": 1,
+                }))
+                .collect();
+            (rows, false)
+        } else {
+            let logs = logs_in_window(&events, t0, t1, tid);
+            let rows = logs
+                .into_iter()
+                .map(|e| serde_json::json!({
+                    "t_ns": e.start_ns,
+                    "tid": e.tid,
+                    "pid": e.pid,
+                    "level": level_name(e.log_level().unwrap_or(0)),
+                    "message": name_of(e.name_id),
+                    "truncated": e.log_truncated(),
+                    "count": 1,
+                }))
+                .collect();
+            (rows, false)
+        };
+        let total = rows.len();
+        let page: Vec<_> = rows.into_iter().skip(offset).take(limit).collect();
+        serde_json::json!({
+            "t0": t0,
+            "t1": if t1 == u64::MAX { 0 } else { t1 },
+            "total": total,
+            "offset": offset,
+            "grouped": grouped,
+            "channels": channels.iter().map(|(id, name)| serde_json::json!({"id": id, "name": name})).collect::<Vec<_>>(),
+            "logs": page,
+        })
+        .to_string()
+    })
+    .await
+    {
+        Ok(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 /// `GET /api/functions/stats` — one row per measured hook or manual scope.

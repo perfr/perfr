@@ -259,6 +259,8 @@ pub struct LiveService {
     clock: Mutex<Option<Arc<dyn Fn() -> u64 + Send + Sync>>>,
     /// This machine's name, as other machines' viewers label its rows.
     machine_name: Mutex<String>,
+    /// Scope channel id → name. Logs do not carry a channel; scopes do.
+    channel_names: Mutex<Vec<(u8, String)>>,
 }
 
 struct CachedIndex {
@@ -390,6 +392,7 @@ impl LiveService {
             peers: peers::Peers::default(),
             clock: Mutex::new(None),
             machine_name: Mutex::new(default_machine_name()),
+            channel_names: Mutex::new(Vec::new()),
         });
         Ok(svc)
     }
@@ -421,6 +424,28 @@ impl LiveService {
 
     pub fn machine_name(&self) -> String {
         self.machine_name.lock().clone()
+    }
+
+    /// Remembers a scope channel and tells connected viewers. The same id and
+    /// name twice does not send a second frame.
+    pub fn note_channel(&self, id: u8, name: &str) {
+        {
+            let mut names = self.channel_names.lock();
+            if let Some((_, existing)) = names.iter_mut().find(|(i, _)| *i == id) {
+                if existing == name {
+                    return;
+                }
+                *existing = name.to_string();
+            } else {
+                names.push((id, name.to_string()));
+                names.sort_by_key(|(i, _)| *i);
+            }
+        }
+        self.broadcast_frame(&LiveFrame::ChannelName { id: u32::from(id), name: name.to_string() });
+    }
+
+    pub fn channel_names(&self) -> Vec<(u8, String)> {
+        self.channel_names.lock().clone()
     }
 
     pub fn set_instrumentation_status(&self, status: impl Into<String>) {
@@ -881,6 +906,9 @@ impl LiveService {
             for (pid, name) in names.processes.iter() {
                 frames.push(encode_frame(&LiveFrame::ProcessName { pid: *pid, name: name.clone() }));
             }
+        }
+        for (id, name) in self.channel_names() {
+            frames.push(encode_frame(&LiveFrame::ChannelName { id: u32::from(id), name }));
         }
         let stats = self.stats();
         frames.push(encode_frame(&self.status_frame(&stats)));

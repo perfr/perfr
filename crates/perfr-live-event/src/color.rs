@@ -45,6 +45,17 @@ pub const BOX_BORDER: u32 = 0xFFFF_FFFF;
 /// "when was this thread sampled", so colouring ticks by what was running
 /// would turn a density readout into a second, noisier flame graph. The
 /// colour follows the active scheme.
+/// Trace and debug are quiet, info is green, warn is amber, error and
+/// fatal are red. AARRGGBB, same packing as the scope palette.
+pub fn log_level_color(level: u8) -> u32 {
+    match level {
+        0 | 1 => 0xFF90_A4AE,
+        2 => 0xFF66_BB6A,
+        3 => 0xFFFF_C107,
+        _ => 0xFFF4_4336,
+    }
+}
+
 pub fn sample_tick() -> u32 {
     crate::theme::active().sample_tick
 }
@@ -210,6 +221,8 @@ pub fn event_color_hashed(
         // name_id so hovering it says what was running, and colouring by that
         // name is exactly what must not happen here.
         kind::SAMPLE => sample_tick(),
+        kind::LOG => log_level_color(extra),
+        kind::DROP => 0xFFF4_4336,
         kind::API_SCOPE | kind::API_TRACK | kind::VALUE => {
             let hash = name_hash.unwrap_or_else(|| self::name_hash(&name_id.to_le_bytes()));
             apply_even_depth(palette_index(hash), depth)

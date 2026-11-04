@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 mod color;
+pub mod logs;
 pub mod dev;
 pub mod theme;
 pub use color::{
@@ -42,6 +43,13 @@ pub mod kind {
     /// `duration_ns` is the sampling period, not a measured duration:
     /// what the mark means is "a sample landed here".
     pub const SAMPLE: u8 = 7;
+    /// A log line. An instant: `duration_ns` is 0. `extra` is the level.
+    /// `depth` is unused (the lane ignores it). There is no channel and no
+    /// scope id on the line; correlation is by timestamp and thread.
+    pub const LOG: u8 = 8;
+    /// A loss marker. `duration_ns` is the count, not a duration.
+    /// `extra` is the ring-record kind that was lost, or 0xFF if unknown.
+    pub const DROP: u8 = 9;
 }
 
 /// The process id agent scopes are filed under (TODO item 12): scopes an
@@ -79,6 +87,8 @@ pub mod thread_state {
 pub mod event_flags {
     pub const DYNAMIC: u8 = 1 << 7;
     pub const COLOR_MASK: u8 = 0x7f;
+    /// A log line that lost a chunk. The text has a hole marker in it too.
+    pub const TRUNCATED: u8 = 1 << 6;
 }
 
 /// Packed 32-byte event. Layout is little-endian on the wire.
@@ -103,7 +113,11 @@ impl LiveEvent {
         // `duration_ns` carries the sampling period for tooltips, but what it
         // means is "a sample landed at this timestamp", so it must draw as a
         // tick at every zoom rather than widening into a box.
-        if self.kind == kind::VALUE || self.kind == kind::SAMPLE {
+        if self.kind == kind::VALUE
+            || self.kind == kind::SAMPLE
+            || self.kind == kind::LOG
+            || self.kind == kind::DROP
+        {
             self.start_ns.saturating_add(1)
         } else {
             self.start_ns.saturating_add(self.duration_ns)
@@ -111,6 +125,25 @@ impl LiveEvent {
     }
 
     /// Decode a [`kind::VALUE`] sample. `duration_ns` stores `f32` bits.
+    /// Channel recorded on a scope at enter. 0 is the default channel.
+    /// Log lines do not carry one; this is `None` for them.
+    pub fn scope_channel(self) -> Option<u8> {
+        (self.kind == kind::API_SCOPE || self.kind == kind::API_TRACK).then_some(self.extra)
+    }
+
+    pub fn log_level(self) -> Option<u8> {
+        (self.kind == kind::LOG).then_some(self.extra)
+    }
+
+    pub fn log_truncated(self) -> bool {
+        self.kind == kind::LOG && self._pad & event_flags::TRUNCATED != 0
+    }
+
+    /// How many events a [`kind::DROP`] marker accounts for.
+    pub fn drop_count(self) -> Option<u64> {
+        (self.kind == kind::DROP).then_some(self.duration_ns)
+    }
+
     pub fn value_f32(self) -> Option<f32> {
         if self.kind == kind::VALUE {
             Some(f32::from_bits(self.duration_ns as u32))
@@ -155,6 +188,17 @@ impl LiveEvent {
     pub fn lane_key(self) -> LaneKey {
         if self.kind == kind::SCHEDULING_SLICE {
             return LaneKey::scheduler(self.extra);
+        }
+        if self.kind == kind::LOG || self.kind == kind::DROP {
+            // One strip per thread. Level and the lost kind stay on the
+            // event; they must not split the lane.
+            return LaneKey {
+                pid: self.pid,
+                tid: self.tid,
+                kind: self.kind,
+                depth: 0,
+                extra: 0,
+            };
         }
         if self.kind == kind::VALUE {
             // One graph per value name, not one per thread: a thread that

@@ -27,10 +27,11 @@
 //! on that thread is skewed.
 
 use crate::visible::VisibleProcesses;
-use perfr_live_event::{kind, LiveEvent};
+use perfr_live_event::{event_flags, kind, LiveEvent};
 use perfr_scope_ring::event::{flags, kind as rk};
+use perfr_scope_ring::logmsg::{LogAssembler, LogMessage};
 use perfr_scope_ring::merge::{drain_from, Cursors, Producer};
-use perfr_scope_ring::text::TextAssembler;
+use perfr_scope_ring::text::{Completeness, TextAssembler};
 use perfr_scope_ring::{NameInterner, ScopeEvent, ScopeRingReader};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -65,6 +66,8 @@ struct Open {
     depth: u8,
     is_async: bool,
     dynamic: bool,
+    /// Channel id at enter. 0 is the default. Not copied onto log lines.
+    channel: u8,
 }
 
 /// One instrumented process's segment and the reader state over it.
@@ -73,6 +76,9 @@ struct Segment {
     reader: ScopeRingReader,
     cursors: Cursors,
     text: TextAssembler,
+    logs: LogAssembler,
+    /// Drop-table totals already turned into capture markers.
+    drops_seen: HashMap<(u32, u8), u32>,
     /// Heads whose names are still arriving in continuation records.
     awaiting_name: HashMap<(u32, u64), ScopeEvent>,
     /// Open scopes by handle, which is what a stop carries.
@@ -99,6 +105,8 @@ pub struct ScopeSource {
     /// Open scopes dropped because their ring lost records underneath them
     /// (see `drain`): the spans that would otherwise have been drawn wrong.
     pub scopes_discarded_on_loss: u64,
+    /// Losses attributed to a thread and a record kind, for the status line.
+    drop_totals: HashMap<(u32, u8), u64>,
     /// Name ids of hooks the Frida agent switched off for firing over its
     /// call-rate limit (a `\x02` marker record), in the order they arrived.
     pub auto_unhooked: Vec<u32>,
@@ -124,6 +132,7 @@ impl ScopeSource {
             events_pushed: 0,
             events_lost: 0,
             scopes_discarded_on_loss: 0,
+            drop_totals: HashMap::new(),
             auto_unhooked: Vec::new(),
         }
     }
@@ -182,10 +191,14 @@ impl ScopeSource {
                 reader,
                 cursors,
                 text: TextAssembler::new(),
+                logs: LogAssembler::new(),
+                drops_seen: HashMap::new(),
                 awaiting_name: HashMap::new(),
                 open: HashMap::new(),
                 sync_depth: HashMap::new(),
             });
+            let added = self.segments.last().unwrap();
+            added.reader.publish_read_cursors(&added.cursors.read);
         }
     }
 
@@ -303,10 +316,14 @@ impl ScopeSource {
             reader,
             cursors,
             text: TextAssembler::new(),
+            logs: LogAssembler::new(),
+            drops_seen: HashMap::new(),
             awaiting_name: HashMap::new(),
             open: HashMap::new(),
             sync_depth: HashMap::new(),
         });
+        let added = self.segments.last().unwrap();
+        added.reader.publish_read_cursors(&added.cursors.read);
     }
 
     /// A drain with no discovery, for the segments already adopted: the
@@ -345,6 +362,10 @@ impl ScopeSource {
             // a lie. Their STOPs, if they do arrive, are ignored as
             // stop-without-start.
             if pass.dropped > 0 {
+                let pending = self.segments[index].logs.finish();
+                for msg in pending {
+                    self.emit_log(index, msg, batch);
+                }
                 let segment = &mut self.segments[index];
                 let discarded = segment.open.len() + segment.awaiting_name.len();
                 segment.open.clear();
@@ -365,10 +386,21 @@ impl ScopeSource {
             let mut events: Vec<ScopeEvent> =
                 pass.slices.into_iter().flat_map(|s| s.events).collect();
 
-            events.sort_by_key(|e| e.timestamp_ns);
+            // Thread id breaks ties. Chunks of one line share a timestamp, and
+            // a stable sort keeps the order that thread wrote them. Two threads
+            // that stamped the same nanosecond stay separated by tid.
+            events.sort_by(|a, b| a.timestamp_ns.cmp(&b.timestamp_ns).then(a.tid.cmp(&b.tid)));
             for event in events {
                 self.accept(index, event, batch);
             }
+            self.segments[index].reader.publish_read_cursors(&self.segments[index].cursors.read);
+            let attributed = self.emit_new_drops(index, now_ns, batch);
+            if pass.dropped > attributed {
+                let rest = pass.dropped - attributed;
+                *self.drop_totals.entry((0, 0xFF)).or_insert(0) += rest;
+                self.emit_drop_marker(index, now_ns, 0, 0xFF, rest, batch);
+            }
+            self.publish_channels(index);
             new_names.extend(self.names.take_new());
         }
         for (id, name) in new_names {
@@ -393,14 +425,20 @@ impl ScopeSource {
                 // there is nothing to draw and nothing to complain about.
             }
             rk::LINK => self.links_seen += 1,
+            rk::LOG => {
+                if let Some(msg) = self.segments[index].logs.accept(&event) {
+                    self.emit_log(index, msg, batch);
+                }
+            }
             rk::TEXT => {
                 // Continuation: feed the assembler; on completion, the head
                 // it belongs to can finally be named and processed.
                 let done = self.segments[index].text.accept(&event);
-                if let Some((name, _)) = done {
+                if let Some((name, completeness)) = done {
                     let key = (event.tid, event.scope_id);
                     if let Some(head) = self.segments[index].awaiting_name.remove(&key) {
-                        self.named(index, head, name.as_bytes(), batch);
+                        let owned = mark_cut(name.as_bytes(), completeness == Completeness::Truncated);
+                        self.named(index, head, &owned, batch);
                     }
                 }
             }
@@ -413,7 +451,8 @@ impl ScopeSource {
                     self.segments[index].text.accept(&event);
                     self.segments[index].awaiting_name.insert(key, event);
                 } else {
-                    let name = event.text_bytes().to_vec();
+                    let cut = event.flags & flags::CUT != 0;
+                    let name = mark_cut(event.text_bytes(), cut);
                     self.named(index, event, &name, batch);
                 }
             }
@@ -477,7 +516,16 @@ impl ScopeSource {
                 };
                 segment.open.insert(
                     event.scope_id,
-                    Open { start_ns: event.timestamp_ns, pid, tid: event.tid, name_id, depth, is_async, dynamic: event.flags & flags::DYNAMIC != 0 },
+                    Open {
+                        start_ns: event.timestamp_ns,
+                        pid,
+                        tid: event.tid,
+                        name_id,
+                        depth,
+                        is_async,
+                        dynamic: event.flags & flags::DYNAMIC != 0,
+                        channel: event.depth,
+                    },
                 );
             }
             rk::INSTANT => {
@@ -504,6 +552,103 @@ impl ScopeSource {
         }
     }
 
+    /// Per-thread, per-kind losses for the status line and the log.
+    pub fn loss_summary(&self) -> String {
+        if self.events_lost == 0 && self.drop_totals.is_empty() {
+            return String::new();
+        }
+        let mut keys: Vec<(u32, u8)> = self.drop_totals.keys().copied().collect();
+        keys.sort_unstable();
+        let mut parts: Vec<String> = keys
+            .into_iter()
+            .map(|(tid, kind_id)| {
+                let n = self.drop_totals[&(tid, kind_id)];
+                let who = if tid == 0 { "unattributed".to_string() } else { format!("tid {tid}") };
+                format!("{who} {}={n}", kind_label(kind_id))
+            })
+            .collect();
+        let attributed: u64 = self.drop_totals.values().copied().sum();
+        if self.events_lost > attributed {
+            parts.push(format!("{} not broken down by thread", self.events_lost - attributed));
+        }
+        if parts.is_empty() {
+            format!("{} records lost", self.events_lost)
+        } else {
+            parts.join(", ")
+        }
+    }
+
+    fn emit_log(&mut self, index: usize, msg: LogMessage, batch: &mut Vec<LiveEvent>) {
+        let pid = self.segments[index].pid;
+        let truncated = msg.completeness == Completeness::Truncated;
+        let name_id = self.names.id_for(msg.message.as_bytes());
+        batch.push(LiveEvent {
+            start_ns: msg.timestamp_ns,
+            duration_ns: 0,
+            tid: msg.tid,
+            pid,
+            kind: kind::LOG,
+            depth: 0,
+            extra: msg.level,
+            _pad: if truncated { event_flags::TRUNCATED } else { 0 },
+            name_id,
+        });
+        self.events_pushed += 1;
+    }
+
+    /// New drop-table counts since the previous drain, as capture markers.
+    /// Returns how many losses were attributed this pass.
+    fn emit_new_drops(&mut self, index: usize, now_ns: u64, batch: &mut Vec<LiveEvent>) -> u64 {
+        let snap = self.segments[index].reader.rings().snapshot_drops();
+        let mut attributed = 0u64;
+        for tally in snap {
+            let key = (tally.tid, tally.kind);
+            let seen = self.segments[index].drops_seen.get(&key).copied().unwrap_or(0);
+            if tally.count <= seen {
+                continue;
+            }
+            let delta = u64::from(tally.count - seen);
+            self.segments[index].drops_seen.insert(key, tally.count);
+            *self.drop_totals.entry(key).or_insert(0) += delta;
+            attributed += delta;
+            self.emit_drop_marker(index, now_ns, tally.tid, tally.kind, delta, batch);
+        }
+        attributed
+    }
+
+    fn emit_drop_marker(
+        &mut self,
+        index: usize,
+        now_ns: u64,
+        tid: u32,
+        kind_id: u8,
+        count: u64,
+        batch: &mut Vec<LiveEvent>,
+    ) {
+        if count == 0 {
+            return;
+        }
+        let pid = self.segments[index].pid;
+        batch.push(LiveEvent {
+            start_ns: now_ns,
+            duration_ns: count,
+            tid,
+            pid,
+            kind: kind::DROP,
+            depth: 0,
+            extra: kind_id,
+            _pad: 0,
+            name_id: 0,
+        });
+        self.events_pushed += 1;
+    }
+
+    fn publish_channels(&self, index: usize) {
+        for (id, name) in self.segments[index].reader.rings().read_channels() {
+            self.service.note_channel(id, &name);
+        }
+    }
+
     /// Closes every scope still open at `end_ns`, so the last frame of a
     /// capture is drawn rather than lost, and tells every producer to stop
     /// writing.
@@ -515,6 +660,12 @@ impl ScopeSource {
             segment.reader.set_capturing(false);
         }
         self.drain(end_ns, batch);
+        for index in 0..self.segments.len() {
+            let pending = self.segments[index].logs.finish();
+            for msg in pending {
+                self.emit_log(index, msg, batch);
+            }
+        }
         for segment in &mut self.segments {
             for (_, open) in segment.open.drain() {
                 batch.push(span(open, end_ns));
@@ -540,9 +691,30 @@ fn span(open: Open, end_ns: u64) -> LiveEvent {
         pid: open.pid,
         kind: if open.is_async { kind::API_TRACK } else { kind::API_SCOPE },
         depth: open.depth,
-        extra: 0,
+        extra: open.channel,
         _pad: if open.dynamic { perfr_live_event::event_flags::DYNAMIC } else { 0 },
         name_id: open.name_id,
+    }
+}
+
+fn mark_cut(name: &[u8], cut: bool) -> Vec<u8> {
+    let mut out = name.to_vec();
+    if cut {
+        out.extend_from_slice("…".as_bytes());
+    }
+    out
+}
+
+fn kind_label(kind_id: u8) -> &'static str {
+    match kind_id {
+        rk::SCOPE_START => "scope_start",
+        rk::SCOPE_STOP => "scope_stop",
+        rk::INSTANT => "instant",
+        rk::VALUE => "value",
+        rk::TEXT => "text",
+        rk::LINK => "link",
+        rk::LOG => "log",
+        _ => "unknown",
     }
 }
 

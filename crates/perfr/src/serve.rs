@@ -2031,9 +2031,16 @@ fn capture_loop(
         }
         if lost_delta > 0 && !overflow_stopped {
             service.set_instrumentation_status(format!(
-                "DROPPING EVENTS: {} scope records lost, {} open scopes discarded -- hook fewer or colder functions, or hook with Uprobes (kernel), which does not go through the shared ring",
-                scopes.events_lost, scopes.scopes_discarded_on_loss
+                "DROPPING EVENTS: {} records lost ({}); {} open scopes discarded -- hook fewer or colder functions, or hook with Uprobes (kernel), which does not go through the shared ring",
+                scopes.events_lost,
+                scopes.loss_summary(),
+                scopes.scopes_discarded_on_loss
             ));
+            log::warn!(
+                "DROPPING EVENTS: {} lost ({})",
+                scopes.events_lost,
+                scopes.loss_summary()
+            );
         }
 
         if !batch.is_empty() {
@@ -2176,6 +2183,13 @@ fn capture_loop(
                 scopes.segment_count(),
                 scopes.events_pushed,
                 scopes.links_seen
+            );
+        }
+        if scopes.events_lost > 0 {
+            log::warn!(
+                "capture lost {} events: {}",
+                scopes.events_lost,
+                scopes.loss_summary()
             );
         }
         let refused = service.dropped_before_start();
@@ -2419,10 +2433,15 @@ pub fn run_on(
         let (_, events) = bundle_service.ring().snapshot();
         let (threads, processes) = bundle_service.capture_names();
         let target_pid = bundle_target.load(Ordering::Relaxed).max(0) as u32;
-        let bundle = {
+        let mut bundle = {
             let intern = bundle_service.intern.lock();
             crate::names::capture_bundle(&events, &intern, &bundle_store, &threads, &processes, target_pid)
         };
+        bundle.channels = bundle_service
+            .channel_names()
+            .into_iter()
+            .map(|(id, name)| perfr_capture::ChannelName { id, name })
+            .collect();
         match window {
             Some((a, b)) => bundle.slice(a, b),
             None => bundle,

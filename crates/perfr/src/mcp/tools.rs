@@ -187,6 +187,7 @@ impl Mcp {
             "perfr_sampling_report" => self.sampling_report(args),
             "perfr_callstacks" => self.callstacks(args),
             "perfr_function_stats" => self.function_stats(args),
+            "perfr_logs" => self.logs(args),
             _ => Err(format!("unknown tool {name}")),
         }
     }
@@ -586,6 +587,38 @@ impl Mcp {
         }
     }
 
+    fn logs(&self, args: &Value) -> Result<Value, String> {
+        let limit = page_limit(args, 30, 100);
+        let offset = page_offset(args);
+        let mut path = format!("/api/logs?offset={offset}&limit={limit}");
+        if let Some(t0) = arg_u64(args, "t0_ns") {
+            path.push_str(&format!("&t0={t0}"));
+        }
+        if let Some(t1) = arg_u64(args, "t1_ns") {
+            path.push_str(&format!("&t1={t1}"));
+        }
+        if let Some(tid) = arg_u32(args, "tid") {
+            path.push_str(&format!("&tid={tid}"));
+        }
+        if let Some(channel) = arg_str(args, "channel") {
+            if !channel.is_empty() {
+                path.push_str("&channel=");
+                path.push_str(&urlencode(channel));
+            }
+        }
+        if let Some(scope) = arg_str(args, "scope") {
+            if !scope.is_empty() {
+                path.push_str("&scope=");
+                path.push_str(&urlencode(scope));
+            }
+        }
+        let body = self.http.get_json(&path, Duration::from_secs(60))?;
+        if let Some(error) = body.get("error").and_then(|v| v.as_str()) {
+            return Err(error.to_string());
+        }
+        Ok(body)
+    }
+
     fn function_stats(&self, args: &Value) -> Result<Value, String> {
         let limit = page_limit(args, 15, 40);
         let offset = page_offset(args);
@@ -869,6 +902,23 @@ pub fn tool_specs() -> Vec<Value> {
                 "properties": {
                     "limit": { "type": "integer", "description": "Page size. Default 8, max 20." },
                     "offset": { "type": "integer", "description": "Stacks to skip. Default 0." }
+                },
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_logs",
+            "Log lines from the current capture. Filter by time range (t0_ns, t1_ns; omit t1_ns for everything after t0), thread id, and channel name or id. A channel filter keeps scopes recorded with that channel and the log lines inside them. Pass scope to the name of a scope to list lines emitted during its interval on that thread; when the name occurs more than once the lines are grouped with counts. Logs are correlated to scopes by timestamp and thread, not by an id stored on the line.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "t0_ns": { "type": "integer", "description": "Range start, inclusive. Default 0." },
+                    "t1_ns": { "type": "integer", "description": "Range end, inclusive. Omit or 0 for no end." },
+                    "tid": { "type": "integer", "description": "Only this thread." },
+                    "channel": { "type": "string", "description": "Channel name or id. Filters scopes, then their logs." },
+                    "scope": { "type": "string", "description": "Scope name. Lines inside its instances, grouped when it recurs." },
+                    "limit": { "type": "integer", "description": "Page size. Default 30, max 100." },
+                    "offset": { "type": "integer", "description": "Rows to skip. Default 0." }
                 },
                 "additionalProperties": false,
             }),

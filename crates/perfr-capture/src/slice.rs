@@ -164,7 +164,7 @@ pub fn slice_bundle_bytes(file: Bytes, t0: u64, t1: u64) -> Result<(CaptureBundl
         Some(t) => read_frames_parquet(t)?,
         None => Vec::new(),
     };
-    let whole = CaptureBundle { target_pid, slice_ns: None, processes, threads, events, samples, frames };
+    let whole = CaptureBundle { target_pid, slice_ns: None, processes, threads, channels: Vec::new(), events, samples, frames };
     // `slice` prunes the frames to those referenced and the names to what
     // is left; the events and samples are already inside the window.
     Ok((
@@ -240,6 +240,7 @@ mod tests {
             slice_ns: None,
             processes: vec![ProcessName { pid: 7, name: "game".into() }],
             threads: vec![ThreadName { pid: 7, tid: 70, name: "a".into() }, ThreadName { pid: 7, tid: 71, name: "b".into() }],
+            channels: Vec::new(),
             events,
             samples,
             frames: (0..3).map(|i| FrameRow { id: i, name: format!("f{i}"), module: "m".into(), address: i as u64 }).collect(),

@@ -25,6 +25,11 @@ pub mod kind {
     /// against the events it has seen. Text past the target, if any, labels
     /// the arrow.
     pub const LINK: u8 = 5;
+    /// One chunk of a log line. Every chunk of a line shares `timestamp_ns`
+    /// and `tid`; `scope_id` carries the message id and the chunk's place in
+    /// the line (see [`crate::logmsg`]). The line has no channel and no scope
+    /// id: the viewer attaches it to a scope by timestamp and thread.
+    pub const LOG: u8 = 6;
 }
 
 /// Bits in `ScopeEvent::flags`.
@@ -62,9 +67,12 @@ pub struct ScopeEvent {
     pub scope_id: u64,
     pub tid: u32,
     pub kind: u8,
-    /// Nesting depth, stamped from thread-local storage. The ring never
-    /// tracks hierarchy. On a [`kind::TEXT`] record this is the chain
-    /// position instead, starting at 1.
+    /// Nesting depth is *not* stored here: the reader computes it.
+    ///
+    /// On a [`kind::SCOPE_START`] this is the thread's channel id at enter
+    /// (0 is the default channel). On a [`kind::TEXT`] record it is the
+    /// chain position, starting at 1. On a [`kind::LOG`] record it is 0;
+    /// logs do not carry a channel.
     pub depth: u8,
     pub flags: u8,
     /// Bytes of `text` in use.

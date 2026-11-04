@@ -129,7 +129,13 @@ pub const READER_LEASES_OFFSET: usize = CACHE_LINE;
 const _: () = assert!(READER_LEASES_OFFSET + std::mem::size_of::<ReaderLeases>() <= 4096);
 
 /// Semantic version of the API. Bumped when the meaning of a call changes.
-pub const API_VERSION: u32 = 1;
+///
+/// 2: a [`crate::event::kind::SCOPE_START`] record's `depth` is the channel
+/// id captured at enter, and [`crate::event::kind::LOG`] records carry log
+/// lines. The byte layout of the record and the segment is unchanged from
+/// version 1, so a reader still accepts a version-2 segment either way.
+/// Older captures (files, not segments) have no log rows and channel 0.
+pub const API_VERSION: u32 = 2;
 
 const _: () = assert!(std::mem::size_of::<Header>() == CACHE_LINE);
 
@@ -346,10 +352,15 @@ impl Rings {
     /// the oldest unread slot is overwritten, which the consumer detects.
     ///
     /// The whole write path: one relaxed bump, plain stores, one release
-    /// store.
+    /// store. If the consumer has published its read cursor and this claim
+    /// will overwrite an unread slot, the event still sitting in that slot
+    /// is counted against its own thread and kind before the bytes are
+    /// replaced. The count lives on the control page, so a lap cannot erase
+    /// the fact of the loss.
     pub fn push(&self, ring: usize, event: ScopeEvent) {
         let ring = ring.min(self.ring_count.saturating_sub(1));
         let claim = self.ring_header(ring).write_cursor.fetch_add(1, Ordering::Relaxed);
+        self.note_overwrite(ring, claim);
         let slot = self.slot(ring, claim);
         // SAFETY: this claim is ours alone -- fetch_add handed it out once --
         // so writing the payload needs no further synchronisation. The
@@ -358,6 +369,62 @@ impl Rings {
             std::ptr::write_volatile(slot.event.get(), event);
         }
         slot.seq.store(claim + 1, Ordering::Release);
+    }
+
+    /// Counts the event about to be overwritten, if this claim laps the
+    /// consumer. The producer mapping is writable, which is the only place
+    /// this runs; the load of the old slot is the same handshake as a read.
+    fn note_overwrite(&self, ring: usize, claim: u64) {
+        let Some(read) = self.published_read(ring) else {
+            return;
+        };
+        let capacity = self.slots_per_ring as u64;
+        if capacity == 0 || claim.saturating_sub(read) < capacity {
+            return;
+        }
+        let old_claim = claim - capacity;
+        // SAFETY: `base` is the producer's writable mapping, and the drop
+        // table sits on its control page.
+        unsafe {
+            match self.committed(ring, old_claim) {
+                Some(old) => crate::meta::note_drop(self.base, old.tid, old.kind),
+                None => crate::meta::note_drop(self.base, 0, crate::meta::DROP_KIND_UNKNOWN),
+            }
+        }
+    }
+
+    /// The consumer's published read claim for `ring`, if it has said.
+    pub fn published_read(&self, ring: usize) -> Option<u64> {
+        // SAFETY: the control page is inside the mapping `base` points at.
+        unsafe { crate::meta::published_read(self.base, ring) }
+    }
+
+    /// Publishes read claims. Tests and the producer use this. A service
+    /// reader must publish through its writable control mapping instead:
+    /// its ring mapping is read-only.
+    pub fn publish_read_cursors(&self, reads: &[u64]) {
+        for (ring, read) in reads.iter().copied().enumerate() {
+            // SAFETY: same mapping as `published_read`.
+            unsafe { crate::meta::publish_read_cursor(self.base, ring, read) }
+        }
+    }
+
+    /// Drop totals the producer has recorded, per thread and record kind.
+    pub fn snapshot_drops(&self) -> Vec<crate::meta::DropTally> {
+        // SAFETY: the drop table is on the control page of this mapping.
+        unsafe { crate::meta::snapshot_drops(self.base) }
+    }
+
+    /// Publishes a channel name. `id` is 1-based.
+    pub fn write_channel(&self, id: u8, name: &[u8]) -> bool {
+        // SAFETY: the channel table is on the control page of this mapping.
+        unsafe { crate::meta::write_channel(self.base, id, name) }
+    }
+
+    /// Channel names a producer has published.
+    pub fn read_channels(&self) -> Vec<(u8, String)> {
+        // SAFETY: the channel table is on the control page of this mapping.
+        unsafe { crate::meta::read_channels(self.base) }
     }
 
     /// Claims a slot and publishes its timestamp, but never commits it:

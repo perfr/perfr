@@ -31,3 +31,7 @@ path = "src/bin/perfr-scope.rs"
 [dependencies]
 libc = "0.2"
 perfr-scope-ring = { path = "../perfr-scope-ring" }
+
+[[bench]]
+name = "log_throughput"
+harness = false

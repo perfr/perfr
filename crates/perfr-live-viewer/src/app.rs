@@ -1057,6 +1057,9 @@ pub struct PerfrLiveApp {
     trace_flows: Vec<FlowEdge>,
     thread_names: HashMap<(u32, u32), String>,
     trace_processes: Vec<ProcessJson>,
+    /// Log window: lines in the visible range, or the lines inside a clicked
+    /// scope. Channel names arrive as their own frames.
+    log_ui: crate::logs::LogUi,
     #[cfg(target_arch = "wasm32")]
     pending_file: chrome_load::PendingFile,
 }
@@ -1473,6 +1476,7 @@ impl PerfrLiveApp {
         self.selected_thread = None;
         self.measure = None;
         self.scope_menu = None;
+        self.log_ui.scope = None;
         if self.scope_report.take().is_some() {
             self.sampling_ranges.clear();
             self.request_reports();
@@ -1787,6 +1791,7 @@ impl PerfrLiveApp {
             trace_flows: Vec::new(),
             thread_names: HashMap::new(),
             trace_processes: Vec::new(),
+            log_ui: crate::logs::LogUi::default(),
             #[cfg(target_arch = "wasm32")]
             pending_file: {
                 let p = chrome_load::new_pending_file();
@@ -2893,6 +2898,9 @@ impl PerfrLiveApp {
                 self.clear_file_trace();
                 self.index.clear();
                 self.live_all.clear();
+                self.log_ui.channels.clear();
+                self.log_ui.scope = None;
+                self.log_ui.highlight_ns = None;
                 self.selected = None;
                 self.hover = None;
                 self.measure = None;
@@ -2975,6 +2983,9 @@ impl PerfrLiveApp {
                     }),
                 }
             }
+            LiveFrame::ChannelName { id, name } => {
+                self.log_ui.note_channel(id as u8, name);
+            }
             LiveFrame::CaptureFinished => {
                 self.live_resort_pending = true;
                 // A live capture that just stopped stays where it was -- the
@@ -3014,6 +3025,8 @@ impl PerfrLiveApp {
                 if !self.file_trace_active() {
                     self.index.clear();
                     self.live_all.clear();
+                    self.log_ui.channels.clear();
+                    self.log_ui.scope = None;
                     self.thread_names.clear();
                     self.trace_processes.clear();
                     self.hover = None;
@@ -3459,6 +3472,13 @@ impl PerfrLiveApp {
                 self.paint_process_picker(ui, "perfr_processes_strip");
             }
             self.paint_search(ui);
+            if ui
+                .selectable_label(self.log_ui.open, "Logs")
+                .on_hover_text("Log lines for the visible time range")
+                .clicked()
+            {
+                self.log_ui.open = !self.log_ui.open;
+            }
             self.paint_track_filter(ui);
             self.paint_symbols_status(ui);
             self.paint_capture_timer(ui);
@@ -4690,6 +4710,18 @@ impl PerfrLiveApp {
                 );
                 if let Some(x) = self.hover_body_x {
                     paint_cursor_line(ui, body, x);
+                }
+                crate::logs::paint_ticks(
+                    ui,
+                    body,
+                    self.t0,
+                    self.t1,
+                    &self.index,
+                    self.tracks.layout(),
+                    self.tracks.scale,
+                );
+                if let Some(ns) = self.log_ui.highlight_ns {
+                    crate::logs::paint_highlight(ui, body, self.t0, self.t1, ns);
                 }
                 paint_playhead(
                     ui,
@@ -6284,6 +6316,17 @@ impl PerfrLiveApp {
         self.lane_scroll = next;
     }
 
+    fn focus_log_time(&mut self, ns: u64) {
+        let span = (self.t1 - self.t0).max(1.0);
+        let mid = ns as f64;
+        self.t0 = mid - span * 0.5;
+        self.t1 = self.t0 + span;
+        self.follow = false;
+        self.user_set_view = true;
+        self.log_ui.highlight_ns = Some(ns);
+        self.needs_repaint = true;
+    }
+
     fn zoom_to_scope(&mut self, pick: ScopePick) {
         if pick.kind == kind::VALUE {
             return;
@@ -6346,6 +6389,14 @@ impl PerfrLiveApp {
                     }
                     // A click on a sample tick puts its callstack on the
                     // clipboard, leaf first, one frame a line.
+                    if pick.kind == kind::API_SCOPE || pick.kind == kind::API_TRACK {
+                        self.log_ui.scope = Some(crate::logs::ScopeFocus {
+                            pid: pick.pid,
+                            tid: pick.tid,
+                            name_id: pick.name_id,
+                        });
+                        self.log_ui.open = true;
+                    }
                     if pick.kind == kind::SAMPLE {
                         let stack = sample_callstack(&self.index, &self.intern, pick);
                         if !stack.is_empty() {
@@ -9273,6 +9324,104 @@ impl PerfrLiveApp {
     }
 }
 
+impl PerfrLiveApp {
+    /// Fills the timeline with a small log capture so the log window can be
+    /// shown without a running service. Used by `perfr-log-preview`.
+    pub fn seed_log_preview(&mut self) {
+        use perfr_live_event::{kind, LiveEvent};
+        self.intern.insert_id(1, "frame");
+        self.intern.insert_id(2, "step");
+        self.intern.insert_id(10, "tick");
+        self.intern.insert_id(11, "contact");
+        self.log_ui.note_channel(1, "simulation".into());
+        self.log_ui.note_channel(2, "procedure".into());
+        let pid = 42u32;
+        let main = 7u32;
+        let worker = 8u32;
+        for i in 0..6u64 {
+            let start = 1_000_000 + i * 20_000;
+            self.index.insert(LiveEvent {
+                start_ns: start,
+                duration_ns: 16_000,
+                tid: main,
+                pid,
+                kind: kind::API_SCOPE,
+                depth: 0,
+                extra: 1,
+                _pad: 0,
+                name_id: 1,
+            });
+            self.index.insert(LiveEvent {
+                start_ns: start + 2_000,
+                duration_ns: 6_000,
+                tid: main,
+                pid,
+                kind: kind::API_SCOPE,
+                depth: 1,
+                extra: 2,
+                _pad: 0,
+                name_id: 2,
+            });
+            self.index.insert(LiveEvent {
+                start_ns: start + 1_000,
+                duration_ns: 0,
+                tid: main,
+                pid,
+                kind: kind::LOG,
+                depth: 0,
+                extra: 2,
+                _pad: 0,
+                name_id: 10,
+            });
+            if i % 2 == 0 {
+                self.index.insert(LiveEvent {
+                    start_ns: start + 3_000,
+                    duration_ns: 0,
+                    tid: main,
+                    pid,
+                    kind: kind::LOG,
+                    depth: 0,
+                    extra: 3,
+                    _pad: 0,
+                    name_id: 11,
+                });
+            }
+        }
+        self.index.insert(LiveEvent {
+            start_ns: 1_012_000,
+            duration_ns: 0,
+            tid: worker,
+            pid,
+            kind: kind::LOG,
+            depth: 0,
+            extra: 4,
+            _pad: 0,
+            name_id: 11,
+        });
+        self.thread_names.insert((pid, main), "Main".into());
+        self.thread_names.insert((pid, worker), "Worker".into());
+        self.t0 = 980_000.0;
+        self.t1 = 1_130_000.0;
+        self.follow = false;
+        self.user_set_view = true;
+        self.content_t0 = Some(self.t0);
+        self.content_t1 = Some(self.t1);
+        self.log_ui.open = true;
+        self.log_ui.scope = Some(crate::logs::ScopeFocus { pid, tid: main, name_id: 1 });
+        self.selected = Some(perfr_live_render::ScopePick::from_event(LiveEvent {
+            start_ns: 1_000_000,
+            duration_ns: 16_000,
+            tid: main,
+            pid,
+            kind: kind::API_SCOPE,
+            depth: 0,
+            extra: 1,
+            _pad: 0,
+            name_id: 1,
+        }));
+    }
+}
+
 impl eframe::App for PerfrLiveApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.presets.receive();
@@ -9489,6 +9638,24 @@ impl eframe::App for PerfrLiveApp {
                 self.self_pane(ctx, dt, &devf);
             }
             self.publish_selection();
+
+            if self.log_ui.open {
+                let t0 = self.t0;
+                let t1 = self.t1;
+                egui::TopBottomPanel::bottom("perfr_logs")
+                    .resizable(true)
+                    .default_height(180.0)
+                    .height_range(72.0..=480.0)
+                    .show_separator_line(true)
+                    .frame(Frame::new().fill(theme::PANEL()).inner_margin(8))
+                    .show(ctx, |ui| {
+                        if let Some(crate::logs::LogAction::Focus(ns)) =
+                            crate::logs::show(ui, &mut self.log_ui, &self.index, &self.intern, t0, t1)
+                        {
+                            self.focus_log_time(ns);
+                        }
+                    });
+            }
 
             egui::CentralPanel::default()
                 .frame(Frame::new().fill(theme::CANVAS()).inner_margin(0))

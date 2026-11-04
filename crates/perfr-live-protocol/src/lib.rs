@@ -29,6 +29,10 @@ pub const FRAME_PROCESS_NAME: u8 = 8;
 pub const FRAME_EVENT_BATCH_PACKED: u8 = 9;
 /// A packed batch, deflated on top (see [`WireFormat::Deflate`]).
 pub const FRAME_EVENT_BATCH_DEFLATE: u8 = 10;
+/// A scope channel's name. Id 0 is the default and is not sent. Older
+/// viewers that do not know this frame fail the stream only if a capture
+/// actually registered a channel; the service and the viewer ship together.
+pub const FRAME_CHANNEL_NAME: u8 = 11;
 
 /// Sanity cap on a decoded batch, so a corrupt count cannot ask for gigabytes.
 const MAX_BATCH_EVENTS: usize = 1 << 24;
@@ -116,6 +120,11 @@ pub enum LiveFrame {
     },
     ProcessName {
         pid: u32,
+        name: String,
+    },
+    /// A named scope channel. `id` is the small integer scopes store.
+    ChannelName {
+        id: u32,
         name: String,
     },
 }
@@ -219,6 +228,13 @@ pub fn encode_frame(frame: &LiveFrame) -> Vec<u8> {
             payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
             payload.extend_from_slice(bytes);
             FRAME_PROCESS_NAME
+        }
+        LiveFrame::ChannelName { id, name } => {
+            let bytes = name.as_bytes();
+            payload.extend_from_slice(&id.to_le_bytes());
+            payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            payload.extend_from_slice(bytes);
+            FRAME_CHANNEL_NAME
         }
     };
     let mut out = Vec::with_capacity(5 + payload.len());
@@ -554,6 +570,14 @@ fn decode_payload(typ: u8, payload: &[u8]) -> Result<LiveFrame, ProtocolError> {
             let pid = u32::from_le_bytes(payload[0..4].try_into().unwrap());
             let name = utf8_field(&payload[4..], "process name")?;
             Ok(LiveFrame::ProcessName { pid, name })
+        }
+        FRAME_CHANNEL_NAME => {
+            if payload.len() < 8 {
+                return Err(ProtocolError::Truncated);
+            }
+            let id = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+            let name = utf8_field(&payload[4..], "channel name")?;
+            Ok(LiveFrame::ChannelName { id, name })
         }
         other => Err(ProtocolError::UnknownFrame(other)),
     }

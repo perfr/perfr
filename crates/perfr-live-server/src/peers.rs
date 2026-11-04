@@ -645,7 +645,8 @@ impl Ingest {
             LiveFrame::Hello { .. }
             | LiveFrame::CaptureStarted { .. }
             | LiveFrame::CaptureFinished
-            | LiveFrame::Status { .. } => {}
+            | LiveFrame::Status { .. }
+            | LiveFrame::ChannelName { .. } => {}
         }
     }
 

@@ -54,6 +54,14 @@ pub struct ProcessName {
     pub name: String,
 }
 
+/// A scope channel. Id 0 is the default and is usually absent. Logs do not
+/// store a channel; a scope's `extra` byte is this id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelName {
+    pub id: u8,
+    pub name: String,
+}
+
 /// Everything a capture is. See the module docs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CaptureBundle {
@@ -63,6 +71,9 @@ pub struct CaptureBundle {
     pub slice_ns: Option<(u64, u64)>,
     pub processes: Vec<ProcessName>,
     pub threads: Vec<ThreadName>,
+    /// Scope channel names. Empty in a capture written before channels,
+    /// which still loads: every scope then reads as the default channel.
+    pub channels: Vec<ChannelName>,
     pub events: Vec<EventRow>,
     pub samples: Vec<SampleRow>,
     pub frames: Vec<FrameRow>,
@@ -130,6 +141,7 @@ impl CaptureBundle {
             slice_ns: Some((t0, t1)),
             processes: self.processes.iter().filter(|p| pids.contains(&p.pid)).cloned().collect(),
             threads: self.threads.iter().filter(|t| tids.contains(&(t.pid, t.tid))).cloned().collect(),
+            channels: self.channels.clone(),
             events,
             samples,
             frames,
@@ -168,6 +180,7 @@ impl CaptureBundle {
                 "slice_ns": self.slice_ns.map(|(a, b)| serde_json::json!({"start": a, "end": b})),
                 "processes": self.processes.iter().map(|p| serde_json::json!({"pid": p.pid, "name": p.name})).collect::<Vec<_>>(),
                 "threads": self.threads.iter().map(|t| serde_json::json!({"pid": t.pid, "tid": t.tid, "name": t.name})).collect::<Vec<_>>(),
+                "channels": self.channels.iter().map(|c| serde_json::json!({"id": c.id, "name": c.name})).collect::<Vec<_>>(),
             },
         })
     }
@@ -196,6 +209,7 @@ impl CaptureBundle {
         for f in &self.frames { append(LiveFrame::InternedString { id: frame_ids[&f.id], text: f.name.clone() }); }
         for p in &self.processes { append(LiveFrame::ProcessName { pid: p.pid, name: p.name.clone() }); }
         for t in &self.threads { append(LiveFrame::ThreadName { pid: t.pid, tid: t.tid, name: t.name.clone() }); }
+        for c in &self.channels { append(LiveFrame::ChannelName { id: u32::from(c.id), name: c.name.clone() }); }
         let mut events: Vec<LiveEvent> = self.events.iter().map(|r| r.event)
             .filter(|e| e.kind != kind::SAMPLE && !(e.kind == kind::FUNCTION_CALL && e.extra == extra::SAMPLED_FRAME)).collect();
         let periods: HashMap<(u32, u64), u64> = self.events.iter()
@@ -301,11 +315,25 @@ impl CaptureBundle {
             }
             _ => None,
         };
+        let channels = b["channels"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|c| {
+                        Some(ChannelName {
+                            id: u8::try_from(c["id"].as_u64()?).ok()?,
+                            name: c["name"].as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(CaptureBundle {
             target_pid,
             slice_ns,
             processes,
             threads,
+            channels,
             events,
             samples,
             frames,
@@ -401,6 +429,7 @@ mod tests {
                 ThreadName { pid: 7, tid: 71, name: "Worker".into() },
                 ThreadName { pid: 9, tid: 90, name: "Idle".into() },
             ],
+            channels: Vec::new(),
             events: vec![
                 ev(100, 50, 7, 70, 1, "Tick"),      // 100..150
                 ev(140, 100, 7, 71, 2, "Physics"),  // 140..240, straddles 200
@@ -490,6 +519,49 @@ mod tests {
         let rows = read_events_parquet(std::fs::File::open(dir.join(EVENTS_PARQUET)).unwrap()).unwrap();
         assert_eq!(rows.len(), 4);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_rows_and_channel_names_round_trip_and_a_v1_bundle_still_opens() {
+        let mut bundle = sample_bundle();
+        bundle.channels.push(ChannelName { id: 2, name: "simulation".into() });
+        bundle.events.push(EventRow {
+            event: LiveEvent {
+                start_ns: 120,
+                duration_ns: 0,
+                tid: 70,
+                pid: 7,
+                kind: kind::LOG,
+                depth: 0,
+                extra: 2,
+                _pad: 0,
+                name_id: 9,
+            },
+            name: "tick".into(),
+        });
+        let again = CaptureBundle::from_zip(&bundle.to_zip().unwrap()).unwrap();
+        assert_eq!(again.channels, bundle.channels);
+        assert!(again.events.iter().any(|r| r.event.kind == kind::LOG && r.name == "tick"));
+        // A capture from before channels: format perfr-capture/1, no channels key.
+        let mut manifest = bundle.manifest_json();
+        manifest["format"] = serde_json::json!("perfr-capture/1");
+        manifest["bundle"].as_object_mut().unwrap().remove("channels");
+        let entries = read_store_zip(&bundle.to_zip().unwrap()).unwrap();
+        let mut files: Vec<(&str, Vec<u8>)> = entries
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.clone()))
+            .filter(|(n, _)| *n != crate::MANIFEST_FILE)
+            .collect();
+        let manifest = serde_json::to_vec_pretty(&manifest).unwrap();
+        files.push((crate::MANIFEST_FILE, manifest));
+        let zipped = crate::zipstore::write_zip(
+            &files.iter().map(|(n, b)| (*n, b.as_slice())).collect::<Vec<_>>(),
+            None,
+        )
+        .unwrap();
+        let old = CaptureBundle::from_zip(&zipped).unwrap();
+        assert!(old.channels.is_empty(), "a v1 capture has no channel table and still loads");
+        assert!(old.events.iter().any(|r| r.event.kind == kind::API_SCOPE));
     }
 
     #[test]

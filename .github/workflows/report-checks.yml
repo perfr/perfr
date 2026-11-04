@@ -15,6 +15,8 @@ permissions: read-all
 jobs:
   report-missing-license-headers:
     permissions:
+      contents: read
+      actions: read
       checks: write
       statuses: write
     runs-on: ubuntu-latest

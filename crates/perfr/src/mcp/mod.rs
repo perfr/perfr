@@ -63,6 +63,7 @@ fn run() -> Result<(), String> {
                 eprintln!("{HELP}");
                 return Ok(());
             }
+            "--no-preflight" => {}
             "--allow-remote" => allow_remote = true,
             "--url" => {
                 i += 1;

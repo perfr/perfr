@@ -7,8 +7,11 @@
 //! The asset names and the on-disk layout match `tools/install/install.sh`
 //! and `tools/install/install.ps1`: a `perfr/` directory of the binary plus
 //! the Frida files beside it, checksummed by the `.sha256` asset (sha256sum
-//! format) or `SHA256SUMS`. A cargo, Homebrew, or pip install is not
-//! overwritten; the command that owns it is printed instead.
+//! format) or `SHA256SUMS`. `perfr.h` is installed to the sibling `include`
+//! of that directory on Linux and macOS (`~/.local/include`) and to
+//! `<install>\include` on Windows. Retired files from the split-library
+//! layout are deleted from the install directory. A cargo, Homebrew, or pip
+//! install is not overwritten; the command that owns it is printed instead.
 
 use std::fs;
 use std::io::Write;
@@ -225,7 +228,7 @@ pub fn run_with(
     verify_checksum(&archive, &String::from_utf8_lossy(&sums), &asset.name)?;
     let files = archive::unpack_named(&asset.name, &archive)?;
     let dest = exe.parent().ok_or("the running binary has no directory")?;
-    install_tree(dest, &files, style)?;
+    install_tree(dest, &files, style, platform)?;
     let removed = remove_retired(dest)?;
     text.push_str(&format!("replaced install in {}\n", dest.display()));
     for path in &removed {
@@ -451,6 +454,8 @@ const RETIRED_INSTALL_FILES: &[&str] = &[
     "perfr_frida_agent.dll.lib",
     "perfr_api.pdb",
     "perfr_api.dll.lib",
+    // Left in the bin dir by older installers. The header now lives in include/.
+    "perfr.h",
 ];
 
 /// Delete retired files that sit directly in `dir`. Prints nothing itself;
@@ -475,22 +480,57 @@ pub fn remove_retired(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(removed)
 }
 
+/// Where `perfr.h` is written. Linux and macOS use the sibling `include` of
+/// the directory that holds the binary. Windows uses `<install>\include`.
+pub fn header_install_path(dest_dir: &Path, platform: Platform) -> PathBuf {
+    let include = if platform.os == "windows" {
+        dest_dir.join("include")
+    } else {
+        match dest_dir.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.join("include"),
+            _ => dest_dir.join("include"),
+        }
+    };
+    include.join("perfr.h")
+}
+
+fn installed_path(dest_dir: &Path, relative: &str, platform: Platform) -> PathBuf {
+    if relative == "perfr.h" || relative.ends_with("/perfr.h") {
+        header_install_path(dest_dir, platform)
+    } else {
+        dest_dir.join(relative)
+    }
+}
+
 pub fn install_tree(
     dest_dir: &Path,
     files: &[PackedFile],
     style: ReplaceStyle,
+    platform: Platform,
 ) -> Result<(), String> {
+    // `include/perfr.h` is the archive layout. A root `perfr.h` is the older
+    // layout; ignore it when both are present so the include copy wins.
+    let nested_header = files.iter().any(|file| {
+        archive::install_relative(&file.path).is_some_and(|relative| relative.ends_with("/perfr.h"))
+    });
     let mut staged = Vec::new();
     for file in files {
         let Some(relative) = archive::install_relative(&file.path) else {
             continue;
         };
-        let dest = dest_dir.join(&relative);
+        if relative == "perfr.h" && nested_header {
+            continue;
+        }
+        let dest = installed_path(dest_dir, &relative, platform);
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
         }
-        let tmp = dest.with_extension(format!("new-{}", std::process::id()));
+        let tmp = dest.with_file_name(format!(
+            ".{}.new-{}",
+            dest.file_name().unwrap_or_default().to_string_lossy(),
+            staged.len()
+        ));
         {
             let mut out = fs::File::create(&tmp)
                 .map_err(|error| format!("cannot write {}: {error}", tmp.display()))?;
@@ -526,11 +566,7 @@ pub fn install_tree(
 fn is_binary_name(name: &str) -> bool {
     matches!(
         name,
-        "perfr"
-            | "perfr.exe"
-            | "perfr-hook"
-            | "perfr-hook.exe"
-            | "perfr-gpu"
+        "perfr" | "perfr.exe" | "perfr-hook" | "perfr-hook.exe" | "perfr-gpu"
     )
 }
 
@@ -1054,10 +1090,7 @@ mod tests {
         .unwrap();
         assert!(text.contains("replaced install"), "{text}");
         assert_eq!(fs::read(dir.path().join("perfr")).unwrap(), b"new-binary");
-        assert_eq!(
-            fs::read(dir.path().join("perfr-hook")).unwrap(),
-            b"helper"
-        );
+        assert_eq!(fs::read(dir.path().join("perfr-hook")).unwrap(), b"helper");
         assert!(!dir.path().join("perfr.exe.old").exists());
         assert!(!dir.path().join("perfr.old").exists());
         assert!(!text.contains("removed "), "{text}");
@@ -1130,8 +1163,14 @@ mod tests {
         }
         assert_eq!(fs::read(dir.path().join("perfr")).unwrap(), b"new-binary");
         assert_eq!(fs::read(dir.path().join("libperfr.so")).unwrap(), b"agent");
-        assert_eq!(fs::read(dir.path().join("perfr_api.lib")).unwrap(), b"static-lib");
-        assert_eq!(fs::read(dir.path().join("libperfr_api.a")).unwrap(), b"static-a");
+        assert_eq!(
+            fs::read(dir.path().join("perfr_api.lib")).unwrap(),
+            b"static-lib"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("libperfr_api.a")).unwrap(),
+            b"static-a"
+        );
         assert_eq!(
             fs::read(dir.path().join("include").join("perfr.h")).unwrap(),
             b"header"
@@ -1185,5 +1224,135 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("checksum mismatch"), "{err}");
         assert_eq!(fs::read(&exe).unwrap(), b"old");
+    }
+
+    fn apply_release(exe: &Path, platform: Platform, asset: &str, archive: Vec<u8>) -> String {
+        let hash = hex_encode(&sha256(&archive));
+        let sums = format!("{hash}  {asset}\n");
+        let sidecar = format!("{asset}.sha256");
+        let json = release_json("perfr-v9.9.9", &[asset, sidecar.as_str()]);
+        let fetch = MapFetch {
+            files: HashMap::from([
+                (LATEST_URL.to_string(), json),
+                (format!("https://example.test/{asset}"), archive),
+                (format!("https://example.test/{sidecar}"), sums.into_bytes()),
+            ]),
+        };
+        run_with(
+            &UpdateOpts {
+                check: false,
+                tag: None,
+                yes: true,
+            },
+            &fetch,
+            exe,
+            platform,
+            ReplaceStyle::Atomic,
+            &None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn unix_update_installs_the_header_beside_the_bin_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join(".local").join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("perfr");
+        fs::write(&exe, b"old").unwrap();
+        fs::write(bin.join("perfr.h"), b"stale").unwrap();
+        let archive = archive::pack_tar_gz(&[
+            ("perfr/perfr", b"new-binary", 0o755),
+            ("perfr/perfr.h", b"from-root", 0o644),
+            ("perfr/include/perfr.h", b"from-include", 0o644),
+            ("perfr/libperfr.so", b"agent", 0o644),
+        ]);
+        let text = apply_release(
+            &exe,
+            Platform {
+                os: "linux",
+                arch: "x86_64",
+            },
+            "perfr-linux-x86_64.tar.gz",
+            archive,
+        );
+        let header = root.path().join(".local").join("include").join("perfr.h");
+        assert_eq!(fs::read(&header).unwrap(), b"from-include");
+        assert!(!bin.join("perfr.h").exists());
+        assert!(text.contains("removed "), "{text}");
+        assert!(text.contains("perfr.h"), "{text}");
+        assert_eq!(fs::read(bin.join("libperfr.so")).unwrap(), b"agent");
+
+        // An older archive carries the header only at perfr/perfr.h.
+        fs::write(bin.join("perfr.h"), b"stale-again").unwrap();
+        let archive = archive::pack_tar_gz(&[
+            ("perfr/perfr", b"newer", 0o755),
+            ("perfr/perfr.h", b"only-root", 0o644),
+        ]);
+        apply_release(
+            &exe,
+            Platform {
+                os: "macos",
+                arch: "aarch64",
+            },
+            "perfr-macos-universal.tar.gz",
+            archive,
+        );
+        assert_eq!(fs::read(&header).unwrap(), b"only-root");
+        assert!(!bin.join("perfr.h").exists());
+    }
+
+    #[test]
+    fn windows_update_installs_the_header_under_the_install_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("perfr");
+        fs::create_dir_all(&install).unwrap();
+        let exe = install.join("perfr.exe");
+        fs::write(&exe, b"old").unwrap();
+        fs::write(install.join("perfr.h"), b"stale").unwrap();
+        let archive = archive::pack_zip_stored(&[
+            ("perfr/perfr.exe", b"exe"),
+            ("perfr/perfr.h", b"from-root"),
+            ("perfr/include/perfr.h", b"win-header"),
+        ]);
+        let text = apply_release(
+            &exe,
+            Platform {
+                os: "windows",
+                arch: "x86_64",
+            },
+            "perfr-windows-x86_64.zip",
+            archive,
+        );
+        assert_eq!(
+            fs::read(install.join("include").join("perfr.h")).unwrap(),
+            b"win-header"
+        );
+        assert!(!install.join("perfr.h").exists());
+        assert!(
+            text.contains(&format!("removed {}", install.join("perfr.h").display())),
+            "{text}"
+        );
+        assert_eq!(fs::read(&exe).unwrap(), b"exe");
+
+        fs::write(install.join("perfr.h"), b"stale-again").unwrap();
+        let archive = archive::pack_zip_stored(&[
+            ("perfr/perfr.exe", b"exe2"),
+            ("perfr/perfr.h", b"only-root"),
+        ]);
+        apply_release(
+            &exe,
+            Platform {
+                os: "windows",
+                arch: "aarch64",
+            },
+            "perfr-windows-x86_64.zip",
+            archive,
+        );
+        assert_eq!(
+            fs::read(install.join("include").join("perfr.h")).unwrap(),
+            b"only-root"
+        );
+        assert!(!install.join("perfr.h").exists());
     }
 }

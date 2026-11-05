@@ -34,17 +34,30 @@
  * agree, and fixing the producer means updating the service, not rebuilding
  * every program that includes this file.
  *
+ * WHERE THIS HEADER IS INSTALLED
+ *
+ * Linux and macOS: ~/.local/include/perfr.h. Compile with -I~/.local/include.
+ * If PERFR_INSTALL_DIR overrides the bin directory, the header is that
+ * directory's sibling ../include/perfr.h. Windows: <install dir>\include\perfr.h
+ * (default %LOCALAPPDATA%\Programs\perfr\include\perfr.h). The header is not
+ * installed beside the perfr binary. This file does not look for the library
+ * next to itself.
+ *
  * WHERE THE LIBRARY IS LOOKED FOR, IN ORDER
+ *
+ * libperfr still ships beside perfr. perfr_init() finds that copy by
+ * searching PATH for the perfr binary, not by looking next to this header.
  *
  *   1. $PERFR_LIB          the full path of the library file. When set it
  *                              is the only place tried, so a wrong path fails
  *                              visibly instead of loading some other copy.
  *   2. beside perfr    every $PATH directory that holds a perfr,
- *                              then ~/.local/bin (where install.sh puts it) and
- *                              ~/.perfr/bin. The service is the authority on
- *                              the ring protocol version -- it refuses a segment
- *                              written at any other -- so its own library wins
- *                              over a copy shipped beside an application.
+ *                              then ~/.local/bin (where install.sh puts the
+ *                              binary) and ~/.perfr/bin. The service is the
+ *                              authority on the ring protocol version -- it
+ *                              refuses a segment written at any other -- so
+ *                              its own library wins over a copy shipped beside
+ *                              an application.
  *   3. beside the executable   <directory of the running program>/libperfr.so,
  *                              for a machine with no service installed.
  *   4. the system loader       dlopen("libperfr.so")

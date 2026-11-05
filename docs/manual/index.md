@@ -18,11 +18,11 @@ The [home page](../index.html) opens a saved capture in the viewer. Attach, the 
 curl -fsSL https://perfr.dev/install.sh | sh
 ```
 
-The script downloads a GitHub Release tagged `perfr-vX.Y.Z` and puts `perfr` in `~/.local/bin` (`PERFR_INSTALL_DIR` to choose another directory), with `libperfr` (the library profiled programs load, and the agent for function hooks) and `perfr-hook` beside it. Until a stable `perfr-v*` release exists, the script stops and says how to build from source. `PERFR_INSTALL_BASE` overrides the download prefix; `DEFAULT_BASE` in the script is the one line to point at a custom domain later.
+The script downloads a GitHub Release tagged `perfr-vX.Y.Z` and puts `perfr` in `~/.local/bin` (`PERFR_INSTALL_DIR` to choose another directory), with `libperfr` (the library profiled programs load, and the agent for function hooks) and `perfr-hook` beside it. `perfr.h` goes in `~/.local/include`, or in the sibling `include` directory when `PERFR_INSTALL_DIR` is set. Compile with `-I~/.local/include`. The header still finds `libperfr` beside `perfr` on `PATH`. Until a stable `perfr-v*` release exists, the script stops and says how to build from source. `PERFR_INSTALL_BASE` overrides the download prefix; `DEFAULT_BASE` in the script is the one line to point at a custom domain later.
 
 The published binaries are a static Linux x86-64 build, one universal macOS binary (Intel and Apple silicon), and a Windows x86-64 zip. Linux arm64 compiles and is not in the release or in CI. If the install directory is not on `PATH`, the script prints the `export` line to add.
 
-On Windows the installer is a PowerShell script that downloads the zip, checks its SHA-256 and unpacks it into `%LOCALAPPDATA%\Programs\perfr`:
+On Windows the installer is a PowerShell script that downloads the zip, checks its SHA-256 and unpacks it into `%LOCALAPPDATA%\Programs\perfr`. `perfr.h` is `<install dir>\include\perfr.h`; compile with `-I` pointing at that `include` directory.
 
 ```powershell
 irm https://perfr.dev/install.ps1 | iex
@@ -80,7 +80,7 @@ perfr_stop(s);
 PERFR_VALUE("fps", 59.9);
 ```
 
-`perfr_init()` looks for `libperfr` in `$PERFR_LIB`, beside `perfr` on `PATH` (then `~/.local/bin`), beside the executable, then the system loader. The header is `crates/perfr-api/include/perfr.h`.
+`perfr_init()` looks for `libperfr` in `$PERFR_LIB`, beside `perfr` on `PATH` (then `~/.local/bin`), beside the executable, then the system loader. After install the header is `~/.local/include/perfr.h` (`-I~/.local/include`); on Windows it is `<install dir>\include\perfr.h`. In this repository it is `crates/perfr-api/include/perfr.h`.
 
 Rust, from the `perfr-api` crate:
 

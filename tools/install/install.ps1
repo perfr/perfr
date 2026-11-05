@@ -6,7 +6,7 @@
 # perfr.dev serves under /download/: the twin of install.sh. Downloads perfr-windows-x86_64.zip and its
 # .sha256, refuses to install without a matching checksum, unpacks into
 # %LOCALAPPDATA%\Programs\perfr (perfr.exe with the Frida files,
-# libperfr.dll and perfr.h beside it), and says how to put it on PATH.
+# libperfr.dll beside it and perfr.h in include\), and says how to put it on PATH.
 #
 #   irm https://perfr.dev/install.ps1 | iex
 #
@@ -96,8 +96,20 @@ try {
         'perfr_frida_agent.lib',
         'perfr_frida_agent.dll.lib',
         'perfr_api.pdb',
-        'perfr_api.dll.lib'
+        'perfr_api.dll.lib',
+        # A header left next to perfr.exe. The copy that ships lives in include\.
+        'perfr.h'
     )
+    $headerInArchive = Join-Path $root 'include\perfr.h'
+    if (-not (Test-Path -LiteralPath $headerInArchive)) {
+        $headerInArchive = Join-Path $root 'perfr.h'
+    }
+    if (Test-Path -LiteralPath $headerInArchive) {
+        $includeDir = Join-Path $installDir 'include'
+        New-Item -ItemType Directory -Force $includeDir | Out-Null
+        Copy-Item -LiteralPath $headerInArchive -Destination (Join-Path $includeDir 'perfr.h') -Force
+        Say "installed $(Join-Path $includeDir 'perfr.h')"
+    }
     foreach ($name in $retired) {
         $stale = Join-Path $installDir $name
         if (Test-Path -LiteralPath $stale -PathType Leaf) {
@@ -128,7 +140,7 @@ logger (ETW), which needs an elevated prompt: start perfr from a
 terminal opened with "Run as administrator" to record them. Auto-profiling
 and the kernel hook engine are Linux only.
 
-To instrument your own code: include\perfr.h is beside perfr
-(nothing to link; it finds libperfr.dll there), or use the perfr-api crate
-or the perfr_api.py module.
+To instrument your own code, compile with -I"$installDir\include".
+perfr.h is there. It links nothing and finds libperfr.dll beside
+perfr.exe on PATH. Or use the perfr-api crate or the perfr_api.py module.
 "@

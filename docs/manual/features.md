@@ -452,8 +452,11 @@ in the URL opens a tab on load.
   project includes; it links nothing. `perfr_init()` loads `libperfr`
   at run time -- from `$PERFR_LIB`, beside the executable, beside the
   `perfr` on `PATH` (then `~/.local/bin`, `~/.perfr/bin`), or the
-  system loader -- checks the ABI version, and fills a process-wide table;
-  without a library every call is one predictable branch and `perfr_init()`
+  system loader -- checks the ABI version, and fills a process-wide table.
+  Installers put the header in `~/.local/include` (Windows:
+  `<install dir>\include`), not beside the binary; compile with
+  `-I~/.local/include`. The library stays beside `perfr`. Without a
+  library every call is one predictable branch and `perfr_init()`
   returns `PERFR_E_NOLIB`. The ring protocol therefore lives only in the
   library that ships beside the service (`build-service-musl.sh`,
   `tools/build/build-service-macos.sh` and `install.sh` place it there), never in a

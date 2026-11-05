@@ -47,6 +47,11 @@ from a prompt opened with *Run as administrator* to record the scheduler,
 thread states and call stacks (the kernel logger is administrators-only);
 manual scopes and function hooks need no privilege.
 
+`perfr.h` is installed to `~/.local/include` (the sibling `include` of
+`PERFR_INSTALL_DIR` when that is set). On Windows it is
+`<install dir>\include\perfr.h`. Compile C and C++ with `-I~/.local/include`.
+The header still loads `libperfr` from beside `perfr` on `PATH`.
+
 `pip install perfr` is the same service in a wheel, including the
 Frida files. Wheels are built on the same tags and are not on PyPI yet.
 

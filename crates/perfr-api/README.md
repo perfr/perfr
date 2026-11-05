@@ -18,7 +18,10 @@ This crate is also the one implementation behind every other language:
 
 - **C and C++** include `include/perfr.h`, a single header that links nothing
   and loads `libperfr` at run time (the shared library `crates/perfr-lib`
-  builds from this crate).
+  builds from this crate). The installers copy it to `~/.local/include`
+  (`-I~/.local/include`; the sibling `include` of `PERFR_INSTALL_DIR` when
+  that is set) or `<install dir>\include` on Windows. It still finds
+  `libperfr` beside `perfr` on `PATH`.
 - **Python** uses the `perfr-api` package on PyPI, pure Python over the same
   library.
 

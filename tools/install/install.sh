@@ -40,6 +40,10 @@ if [ -z "${PERFR_INSTALL_BASE:-}" ] && [ -n "${PERFR_VERSION:-}" ]; then
 fi
 VERSION="${PERFR_VERSION:-latest}"
 INSTALL_DIR="${PERFR_INSTALL_DIR:-$HOME/.local/bin}"
+# A trailing slash would make the sibling include path `bin/include`.
+case "$INSTALL_DIR" in
+    */) INSTALL_DIR=${INSTALL_DIR%/} ;;
+esac
 
 say() { printf 'perfr: %s\n' "$1" >&2; }
 die() { printf 'perfr: error: %s\n' "$1" >&2; exit 1; }
@@ -166,8 +170,18 @@ install_bin "$root/perfr" "$INSTALL_DIR/perfr"
 install_bin "$root/perfr-hook" "$INSTALL_DIR/perfr-hook"
 install_file "$root/$agent" "$INSTALL_DIR/$agent"
 
-if [ -f "$root/perfr.h" ]; then
-    install_file "$root/perfr.h" "$INSTALL_DIR/perfr.h"
+# perfr.h does not belong beside the binary. ~/.local/bin -> ~/.local/include.
+# An overridden PERFR_INSTALL_DIR uses that directory's sibling ../include.
+INCLUDE_DIR="$(dirname "$INSTALL_DIR")/include"
+header=""
+if [ -f "$root/include/perfr.h" ]; then
+    header="$root/include/perfr.h"
+elif [ -f "$root/perfr.h" ]; then
+    header="$root/perfr.h"
+fi
+if [ -n "$header" ]; then
+    mkdir -p "$INCLUDE_DIR" || die "cannot create $INCLUDE_DIR"
+    install_file "$header" "$INCLUDE_DIR/perfr.h"
 fi
 if [ -f "$root/perfr-gpu" ]; then
     install_bin "$root/perfr-gpu" "$INSTALL_DIR/perfr-gpu"
@@ -201,7 +215,8 @@ for retired in \
     perfr_frida_agent.lib \
     perfr_frida_agent.dll.lib \
     perfr_api.pdb \
-    perfr_api.dll.lib
+    perfr_api.dll.lib \
+    perfr.h
 do
     stale="$INSTALL_DIR/$retired"
     if [ -f "$stale" ] || [ -L "$stale" ]; then
@@ -209,6 +224,22 @@ do
         say "removed $stale"
     fi
 done
+
+# Shown in the end-of-install note. The default is the tilde form so the
+# line matches the documented compile flag.
+if [ "$INCLUDE_DIR" = "$HOME/.local/include" ]; then
+    include_flag='-I~/.local/include'
+else
+    include_flag="-I${INCLUDE_DIR}"
+fi
+if [ -n "$header" ]; then
+    instrument_note="To instrument your own code, compile with ${include_flag}.
+perfr.h is in ${INCLUDE_DIR}. It links nothing and finds libperfr
+beside perfr on PATH. Or use the perfr-api crate or package."
+else
+    instrument_note="This archive has no perfr.h. Use the perfr-api crate or package.
+perfr.h finds libperfr beside perfr on PATH."
+fi
 
 # --- PATH hint ---------------------------------------------------------------
 case ":$PATH:" in
@@ -238,6 +269,5 @@ that sysctl. Auto-profiling uses the kernel hook engine and needs root
 or CAP_SYS_ADMIN. Sampling, the scheduler, and auto-profiling are not
 in the macOS build.
 
-To instrument your own code: perfr.h is beside perfr (nothing to
-link; it finds libperfr there), or use the perfr-api crate or package.
+${instrument_note}
 EOF

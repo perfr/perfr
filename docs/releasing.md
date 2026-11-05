@@ -65,8 +65,9 @@ Three build jobs run in parallel, then `publish`.
 | `macos` | `macos-15` | `tools/build/build-service-macos.sh --universal`: universal `perfr`, `perfr-hook`, `libperfr.dylib`. Ad-hoc signed, not notarized. No GPU helper. | `perfr-macos-universal.tar.gz` |
 | `windows` | `windows-2022` | `tools/build/build-service-windows.ps1`: static-CRT `perfr.exe`, `perfr-hook.exe`, `libperfr.dll`. Not code-signed. No GPU helper. | `perfr-windows-x86_64.zip` |
 
-Each archive has a top-level `perfr/` directory with `perfr.h` and
-`licenses/` (the Frida notices). Frida is linked statically: Core into
+Each archive has a top-level `perfr/` directory and `licenses/` (the Frida
+notices). `perfr.h` is `include/perfr.h` in that directory, not beside the
+binary. Frida is linked statically: Core into
 `perfr-hook`, Gum into `libperfr`, from the devkits that
 `tools/frida/devkits.sh` downloads. Linux arm64 is not released.
 
@@ -100,6 +101,47 @@ The disassembly view finds detached Linux debug info through
 3. Validates the tag, writes the release notes and runs
    `gh release create --verify-tag` with every file, as `--latest` for a
    stable tag or `--prerelease` for a suffixed one.
+
+## Install layout
+
+The installers and `perfr update` do not leave `perfr.h` beside the binary.
+The header still loads `libperfr` from beside `perfr` on `PATH`.
+
+- Linux and macOS: binaries go in `~/.local/bin` (`PERFR_INSTALL_DIR`
+  overrides that directory). The header goes in the sibling include
+  directory, `~/.local/include/perfr.h` by default. `install.sh` creates
+  the directory and tells the user to compile with `-I~/.local/include`,
+  or `-I` plus the overridden path.
+- Windows: the zip already has `include\perfr.h`. `install.ps1` leaves it
+  at `<install dir>\include\perfr.h` (default
+  `%LOCALAPPDATA%\Programs\perfr\include\perfr.h`) and prints `-I` for
+  that directory.
+
+`perfr update` writes the header to the same place. An older archive that
+still has `perfr/perfr.h` at the top is installed there. When both
+`perfr/perfr.h` and `perfr/include/perfr.h` are present, the `include/`
+copy is the one installed.
+
+## Retired files
+
+`install.sh`, `install.ps1`, and `perfr update` delete files a previous
+install left in the install directory, and print each path they remove:
+
+- `perfr-frida-helper`, `libperfr_frida_agent.so`,
+  `libperfr_frida_agent.dylib`, `libperfr_api.so`, `libperfr_api.dylib`,
+  `perfr-gpu-helper`
+- `perfr_frida_agent.dll`, `perfr_api.dll`, `perfr-frida-helper.exe`,
+  `perfr-gpu-helper.exe`, and the `.pdb` / `.lib` siblings those builds
+  shipped (`perfr-frida-helper.pdb`, `perfr-frida-helper.lib`,
+  `perfr-gpu-helper.pdb`, `perfr-gpu-helper.lib`, `perfr_frida_agent.pdb`,
+  `perfr_frida_agent.lib`, `perfr_frida_agent.dll.lib`, `perfr_api.pdb`,
+  `perfr_api.dll.lib`)
+- a `perfr.h` left next to the binary, now that the header lives under
+  `include`
+
+`perfr_api.lib` and `libperfr_api.a` stay; they are the static libraries.
+The list is `RETIRED_INSTALL_FILES` in `crates/perfr/src/update.rs`, and
+the two installers keep the same names.
 
 ## python-wheels.yml
 

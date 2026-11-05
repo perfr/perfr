@@ -3,13 +3,18 @@
 # found in the LICENSE file.
 
 [package]
-name = "perfr-frida-agent"
+name = "perfr-lib"
 version = "0.1.0"
-description = "The Frida Gum agent loaded into the target: hooks functions and emits scopes through the perfr API"
+description = "libperfr: the manual-instrumentation API and, with `native`, the Frida Gum hook agent, in the one library loaded into profiled processes"
 edition = "2021"
 license = "BSD-2-Clause"
 
+# `libperfr.so` / `libperfr.dylib`. Without `native` it is the manual API alone
+# (what the perfr-api wheel ships); with `native` it also carries the Gum
+# agent that perfr-hook injects. On Windows the DLL is built by
+# crates/perfr-lib-windows instead, so its PDB does not collide with perfr.exe's.
 [lib]
+name = "perfr"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

@@ -41,7 +41,7 @@ impl TelemetryHelper {
             .stderr(Stdio::piped())
             .spawn()?;
         if let Some(stderr) = child.stderr.take() {
-            crate::logging::relay_stderr(stderr, "perfr-gpu-helper");
+            crate::logging::relay_stderr(stderr, "perfr-gpu");
         }
         // The pipe must not block the capture pass: a blocking read here
         // waited for the helper's next line -- ~75 ms -- on every pass, and
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn a_missing_helper_is_an_error_not_a_panic() {
-        let result = TelemetryHelper::spawn("/nonexistent/perfr-gpu-helper", &[]);
+        let result = TelemetryHelper::spawn("/nonexistent/perfr-gpu", &[]);
         assert!(result.is_err());
     }
 }

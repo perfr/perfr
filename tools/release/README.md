@@ -6,8 +6,8 @@
 
 | Package | Wheel carries | Command it adds |
 |---|---|---|
-| `perfr-api` | prebuilt `libperfr_api` (glibc 2.17 on Linux) | — (`import perfr_api`) |
-| `perfr` | `perfr` binary + `libperfr_api` + `perfr.h`, depends on `perfr-api` | `perfr` |
+| `perfr-api` | prebuilt `libperfr`, the manual API alone (glibc 2.17 on Linux) | — (`import perfr_api`) |
+| `perfr` | `perfr` binary + the full `libperfr` (API and hook agent) + `perfr-hook` + `perfr.h`, depends on `perfr-api` | `perfr` |
 
 Both wheels for a platform are cut from **one** build, so the ring protocol
 version matches between the library that writes scopes and the service that
@@ -30,11 +30,13 @@ The script refuses to run if the release version drifts between
 `perfr-api==` pin in perfr, and the two `__version__`s: bump all of
 them together.
 
-The perfr wheel includes the Frida companions
-(`libperfr_frida_agent`, `perfr-frida-helper`, `licenses/`). The service
-loads them from the directory that contains `perfr`. The script
-builds them for the wheel target. `PERFR_COMPANIONS_DIR=<dir>` skips that
-build and copies a directory already produced by `tools/frida/build.sh`.
+The perfr wheel's `libperfr` is the full one (`--features native`: the
+manual API plus the Gum hook agent) and comes with `perfr-hook` and
+`licenses/`; the service loads them from the directory that contains
+`perfr`. The script builds them for the wheel target.
+`PERFR_COMPANIONS_DIR=<dir>` skips that build and copies a directory already
+produced by `tools/frida/build.sh`. The perfr-api wheel's `libperfr` is the
+API alone, cross-built against the glibc floor.
 
 Debug symbols for the GitHub release binaries are split out by
 `tools/release/split_debug.py` and published beside the release; see

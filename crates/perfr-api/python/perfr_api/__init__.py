@@ -6,7 +6,7 @@
 
     import perfr_api as perfr
 
-    perfr.init()                      # finds libperfr_api, or stays quiet
+    perfr.init()                      # finds libperfr, or stays quiet
     with perfr.scope("update"):
         ...
     perfr.value("fps", 59.9)
@@ -16,14 +16,14 @@
 
 Pure Python, no dependencies, no compiled wheel. The producer -- the
 shared-memory ring a running perfr drains -- is the same
-``libperfr_api`` that C and C++ load through ``perfr.h``, found by the same
+``libperfr`` that C and C++ load through ``perfr.h``, found by the same
 rules and loaded with ctypes. Doing the ring in Python instead would be slower
 and, on ARM, wrong: the claim is an atomic add and the commit a release store,
 and Python can emit neither.
 
 Where the library is looked for, in order:
 
-1. ``$PERFR_API_LIB``: the full path of the library file. When set it is the
+1. ``$PERFR_LIB``: the full path of the library file. When set it is the
    only place tried, so a wrong path fails visibly.
 2. beside ``perfr``: the directory of the ``perfr`` on
    ``PATH``, then ``~/.local/bin`` (the install script's default) and
@@ -63,11 +63,11 @@ _lib_path = None
 _lib_error = None
 
 if sys.platform == "win32":
-    _LIB_FILE, _SERVICE_FILE = "perfr_api.dll", "perfr.exe"
+    _LIB_FILE, _SERVICE_FILE = "libperfr.dll", "perfr.exe"
 elif sys.platform == "darwin":
-    _LIB_FILE, _SERVICE_FILE = "libperfr_api.dylib", "perfr"
+    _LIB_FILE, _SERVICE_FILE = "libperfr.dylib", "perfr"
 else:
-    _LIB_FILE, _SERVICE_FILE = "libperfr_api.so", "perfr"
+    _LIB_FILE, _SERVICE_FILE = "libperfr.so", "perfr"
 
 
 def _candidates():
@@ -76,9 +76,9 @@ def _candidates():
     # match the service that reads. When a service is reachable, its own
     # library is therefore preferred over the copy bundled in this wheel, which
     # matters only when the two drift (a pinned wheel against a newer service).
-    # With PERFR_API_LIB set, that path is the only one tried, so a wrong path
+    # With PERFR_LIB set, that path is the only one tried, so a wrong path
     # fails visibly instead of loading some other copy.
-    env = os.environ.get("PERFR_API_LIB")
+    env = os.environ.get("PERFR_LIB")
     if env:
         yield env
         return
@@ -90,7 +90,7 @@ def _candidates():
         yield os.path.join(home, *sub, _LIB_FILE)
     # The copy shipped inside this wheel, always version-matched to the package.
     yield os.path.join(os.path.dirname(os.path.abspath(__file__)), _LIB_FILE)
-    found = ctypes.util.find_library("perfr_api")
+    found = ctypes.util.find_library("perfr")
     if found:
         yield found
     yield _LIB_FILE
@@ -104,7 +104,7 @@ def _open(path):
     lib.perfr_api_table_v1.argtypes = (ctypes.c_uint32,)
     lib.perfr_api_table_v1.restype = ctypes.c_void_p
     if not lib.perfr_api_table_v1(ABI_VERSION):
-        raise OSError(E_ABI, "libperfr_api speaks another ABI")
+        raise OSError(E_ABI, "libperfr speaks another ABI")
     lib.perfr_init.argtypes = ()
     lib.perfr_init.restype = ctypes.c_int
     lib.perfr_shutdown.argtypes = ()
@@ -150,7 +150,7 @@ def _name(name):
 
 
 def init():
-    """Finds and loads ``libperfr_api``, then creates this process's segment
+    """Finds and loads ``libperfr``, then creates this process's segment
     so a running ``perfr`` can find it. Idempotent.
 
     Returns 0 on success, ``E_NOLIB`` or ``E_ABI`` when no usable library was

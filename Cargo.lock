@@ -2985,35 +2985,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "perfr-frida-agent"
-version = "0.1.0"
-dependencies = [
- "libc",
- "perfr-api",
- "perfr-frida-build",
- "perfr-frida-transport",
- "perfr-scope-ring",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "perfr-frida-build"
 version = "0.1.0"
 dependencies = [
  "cc",
-]
-
-[[package]]
-name = "perfr-frida-helper"
-version = "0.1.0"
-dependencies = [
- "cc",
- "libc",
- "perfr-frida-build",
- "perfr-frida-transport",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -3027,12 +3002,44 @@ dependencies = [
 ]
 
 [[package]]
-name = "perfr-gpu-helper"
+name = "perfr-gpu"
 version = "0.1.0"
 dependencies = [
  "libc",
  "perfr-tracing-state",
  "perfr-wire",
+]
+
+[[package]]
+name = "perfr-hook"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "libc",
+ "perfr-frida-build",
+ "perfr-frida-transport",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "perfr-lib"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "perfr-api",
+ "perfr-frida-build",
+ "perfr-frida-transport",
+ "perfr-scope-ring",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "perfr-lib-windows"
+version = "0.1.0"
+dependencies = [
+ "perfr-lib",
 ]
 
 [[package]]

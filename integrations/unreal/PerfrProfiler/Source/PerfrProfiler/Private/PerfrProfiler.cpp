@@ -117,17 +117,17 @@ static TUniquePtr<FPerfrExternalProfiler> GPerfrExternalProfiler;
 
 void FPerfrProfilerModule::StartupModule()
 {
-	// Finds libperfr_api ($PERFR_API_LIB, beside perfr on PATH,
+	// Finds libperfr ($PERFR_LIB, beside perfr on PATH,
 	// beside the executable, then the system loader) or stays quiet: with
 	// no library every instrumentation call is one predictable branch.
 	const int Status = perfr_init();
 	if (Status == 0)
 	{
-		UE_LOG(LogPerfr, Log, TEXT("perfr: libperfr_api loaded; scopes reach a capturing perfr"));
+		UE_LOG(LogPerfr, Log, TEXT("perfr: libperfr loaded; scopes reach a capturing perfr"));
 	}
 	else if (Status == PERFR_E_NOLIB)
 	{
-		UE_LOG(LogPerfr, Log, TEXT("perfr: no libperfr_api found (set PERFR_API_LIB or put perfr on PATH); instrumentation is off"));
+		UE_LOG(LogPerfr, Log, TEXT("perfr: no libperfr found (set PERFR_LIB or put perfr on PATH); instrumentation is off"));
 	}
 	else
 	{

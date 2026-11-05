@@ -99,7 +99,7 @@ macro_rules! required {
         match symbol($handle, $name) {
             Some(pointer) => std::mem::transmute::<*mut c_void, $ty>(pointer),
             None => {
-                eprintln!("perfr-gpu-helper: libnvidia-ml has no {}", $name);
+                eprintln!("perfr-gpu: libnvidia-ml has no {}", $name);
                 libc::dlclose($handle);
                 return None;
             }
@@ -121,13 +121,13 @@ impl Nvml {
                 handle = libc::dlopen(fallback.as_ptr(), libc::RTLD_NOW);
             }
             if handle.is_null() {
-                eprintln!("perfr-gpu-helper: libnvidia-ml not found; no GPU telemetry");
+                eprintln!("perfr-gpu: libnvidia-ml not found; no GPU telemetry");
                 return None;
             }
 
             let init = required!(handle, "nvmlInit_v2", unsafe extern "C" fn() -> c_int);
             if init() != NVML_SUCCESS {
-                eprintln!("perfr-gpu-helper: nvmlInit failed (no NVIDIA driver?)");
+                eprintln!("perfr-gpu: nvmlInit failed (no NVIDIA driver?)");
                 libc::dlclose(handle);
                 return None;
             }

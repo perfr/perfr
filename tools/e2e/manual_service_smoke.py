@@ -123,7 +123,7 @@ def main():
                 request("/api/capture/start", b'{"pid":0}')
                 if child is None:
                     # Initialize only after capture starts, exercising discovery.
-                    env = dict(os.environ, PERFR_API_LIB=str(Path(args.api_lib).resolve()))
+                    env = dict(os.environ, PERFR_LIB=str(Path(args.api_lib).resolve()))
                     child = subprocess.Popen([sys.executable, __file__, "--producer"],
                                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                              text=True, env=env)

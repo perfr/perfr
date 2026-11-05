@@ -13,12 +13,12 @@ if [[ "$mode" == all ]]; then
   cargo +1.88.0 build --locked --release -p perfr
   cp target/release/perfr "$output/"
 fi
-cargo +1.88.0 build --locked --release -p perfr-frida-helper
-cargo +1.88.0 build --locked --release -p perfr-frida-agent --features native
-if [[ $(uname -s) == Darwin ]]; then library=libperfr_frida_agent.dylib; else library=libperfr_frida_agent.so; fi
+cargo +1.88.0 build --locked --release -p perfr-hook
+cargo +1.88.0 build --locked --release -p perfr-lib --features native
+if [[ $(uname -s) == Darwin ]]; then library=libperfr.dylib; else library=libperfr.so; fi
 # The development build points output at target/release itself; cp refuses to
 # copy a file onto itself, so skip the copies that would be no-ops.
-for built in "target/release/$library" target/release/perfr-frida-helper; do
+for built in "target/release/$library" target/release/perfr-hook; do
   [[ "$built" -ef "$output/$(basename "$built")" ]] || cp "$built" "$output/"
 done
 rm -rf "$output/frida-python" # obsolete generated runtime from the scripted integration

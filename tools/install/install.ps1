@@ -6,7 +6,7 @@
 # perfr.dev serves under /download/: the twin of install.sh. Downloads perfr-windows-x86_64.zip and its
 # .sha256, refuses to install without a matching checksum, unpacks into
 # %LOCALAPPDATA%\Programs\perfr (perfr.exe with the Frida files,
-# perfr_api.dll and perfr.h beside it), and says how to put it on PATH.
+# libperfr.dll and perfr.h beside it), and says how to put it on PATH.
 #
 #   irm https://perfr.dev/install.ps1 | iex
 #
@@ -60,7 +60,7 @@ try {
     $unpacked = Join-Path $temp 'unpacked'
     Expand-Archive -Path $archive -DestinationPath $unpacked -Force
     $root = Join-Path $unpacked 'perfr'
-    foreach ($required in 'perfr.exe', 'perfr-frida-helper.exe', 'perfr_frida_agent.dll', 'perfr_api.dll') {
+    foreach ($required in 'perfr.exe', 'perfr-hook.exe', 'libperfr.dll') {
         if (-not (Test-Path (Join-Path $root $required))) { Die "archive is missing $required" }
     }
     New-Item -ItemType Directory -Force $installDir | Out-Null
@@ -95,6 +95,6 @@ terminal opened with "Run as administrator" to record them. Auto-profiling
 and the kernel hook engine are Linux only.
 
 To instrument your own code: include\perfr.h is beside perfr
-(nothing to link; it finds perfr_api.dll there), or use the perfr-api crate
+(nothing to link; it finds libperfr.dll there), or use the perfr-api crate
 or the perfr_api.py module.
 "@

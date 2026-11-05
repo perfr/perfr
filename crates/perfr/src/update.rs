@@ -476,9 +476,9 @@ fn is_binary_name(name: &str) -> bool {
         name,
         "perfr"
             | "perfr.exe"
-            | "perfr-frida-helper"
-            | "perfr-frida-helper.exe"
-            | "perfr-gpu-helper"
+            | "perfr-hook"
+            | "perfr-hook.exe"
+            | "perfr-gpu"
     )
 }
 
@@ -956,8 +956,8 @@ mod tests {
     fn yes_verifies_the_checksum_and_replaces_the_tree() {
         let archive = archive::pack_tar_gz(&[
             ("perfr/perfr", b"new-binary", 0o755),
-            ("perfr/perfr-frida-helper", b"helper", 0o755),
-            ("perfr/libperfr_frida_agent.so", b"agent", 0o644),
+            ("perfr/perfr-hook", b"helper", 0o755),
+            ("perfr/libperfr.so", b"agent", 0o644),
         ]);
         let hash = hex_encode(&sha256(&archive));
         let sums = format!("{hash}  perfr-linux-x86_64.tar.gz\n");
@@ -1003,7 +1003,7 @@ mod tests {
         assert!(text.contains("replaced install"), "{text}");
         assert_eq!(fs::read(dir.path().join("perfr")).unwrap(), b"new-binary");
         assert_eq!(
-            fs::read(dir.path().join("perfr-frida-helper")).unwrap(),
+            fs::read(dir.path().join("perfr-hook")).unwrap(),
             b"helper"
         );
         assert!(!dir.path().join("perfr.exe.old").exists());

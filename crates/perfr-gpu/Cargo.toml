@@ -3,16 +3,16 @@
 # found in the LICENSE file.
 
 [package]
-name = "perfr-gpu-helper"
+name = "perfr-gpu"
 version = "0.1.0"
-description = "GPU telemetry helper: polls NVML and writes pod events to stdout"
+description = "perfr-gpu: polls NVML and writes GPU telemetry pod events to stdout for perfr"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "perfr-gpu-helper"
+name = "perfr-gpu"
 path = "src/main.rs"
 
 [dependencies]

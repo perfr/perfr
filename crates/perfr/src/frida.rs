@@ -14,15 +14,15 @@ use std::time::Duration;
 
 fn agent_path() -> Result<std::path::PathBuf, String> {
     let name = if cfg!(target_os = "macos") {
-        "libperfr_frida_agent.dylib"
+        "libperfr.dylib"
     } else if cfg!(target_os = "windows") {
-        "perfr_frida_agent.dll"
+        "libperfr.dll"
     } else {
-        "libperfr_frida_agent.so"
+        "libperfr.so"
     };
-    let path = std::env::var_os("PERFR_FRIDA_AGENT").map(std::path::PathBuf::from)
+    let path = std::env::var_os("PERFR_LIB").map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_file_name(name));
-    path.canonicalize().map_err(|e| format!("Frida agent {}: {e}; run tools/frida/build.sh or set PERFR_FRIDA_AGENT", path.display()))
+    path.canonicalize().map_err(|e| format!("Frida agent {}: {e}; run tools/frida/build.sh or set PERFR_LIB", path.display()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,8 +66,8 @@ impl Helper {
         let _phase = perfr_api::scope("Frida: launch helper");
         config["self_profile"] = true.into();
         config["agent"] = agent_path()?.into_os_string().to_string_lossy().into_owned().into();
-        let helper_name = if cfg!(target_os = "windows") { "perfr-frida-helper.exe" } else { "perfr-frida-helper" };
-        let helper_path = std::env::var_os("PERFR_FRIDA_HELPER").map(std::path::PathBuf::from)
+        let helper_name = if cfg!(target_os = "windows") { "perfr-hook.exe" } else { "perfr-hook" };
+        let helper_path = std::env::var_os("PERFR_HOOK").map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_file_name(helper_name));
         let mut child = Command::new(helper_path)
             .stdin(Stdio::piped())
@@ -76,13 +76,13 @@ impl Helper {
             .spawn()
             .map_err(|e| {
                 format!(
-                    "start Frida helper: {e}; run tools/frida/build.sh or set PERFR_FRIDA_HELPER"
+                    "start Frida helper: {e}; run tools/frida/build.sh or set PERFR_HOOK"
                 )
             })?;
         // What the helper (and Frida inside it) says on stderr still reaches
         // the terminal, and now the log file too.
         if let Some(stderr) = child.stderr.take() {
-            crate::logging::relay_stderr(stderr, "perfr-frida-helper");
+            crate::logging::relay_stderr(stderr, "perfr-hook");
         }
         let input = child.stdin.take();
         let stdout = child.stdout.take().unwrap();

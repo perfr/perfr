@@ -228,7 +228,7 @@ impl ScopeSource {
             let opened = ScopeRingReader::open(pid);
             if opened.is_err() {
                 // Distinguish a real version mismatch -- a process built
-                // against another perfr's libperfr_api -- from a segment that
+                // against another perfr's libperfr -- from a segment that
                 // is simply absent or half-written, which open() reports the
                 // same way. Only the mismatch is worth telling the operator
                 // about, and only once: the fix is to match the library to
@@ -240,7 +240,7 @@ impl ScopeSource {
                     {
                         let ours = perfr_scope_ring::VERSION;
                         log::warn!(
-                            "manual instrumentation: pid {pid} has a perfr                              segment at protocol version {found}, but this service reads                              version {ours}. Its scopes are skipped -- update its libperfr_api                              (or the perfr-api package) to match this service."
+                            "manual instrumentation: pid {pid} has a perfr                              segment at protocol version {found}, but this service reads                              version {ours}. Its scopes are skipped -- update its libperfr                              (or the perfr-api package) to match this service."
                         );
                     }
                 }

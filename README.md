@@ -53,11 +53,11 @@ Frida files. Wheels are built on the same tags and are not on PyPI yet.
 Privileges, capture files, and the manual API:
 [docs/manual/index.md](docs/manual/index.md).
 
-Function hooks need `libperfr_frida_agent` and `perfr-frida-helper` in the
-same directory as `perfr` (or `PERFR_FRIDA_AGENT` /
-`PERFR_FRIDA_HELPER`); on Windows the files are `perfr_frida_agent.dll` and
-`perfr-frida-helper.exe`. The release archive and the installer put them
-there. Without them, starting a capture with hooks fails the Frida setup; it
+Function hooks need `perfr-hook` and `libperfr` in the same directory as
+`perfr` (or `PERFR_HOOK` / `PERFR_LIB`); on Windows the files are
+`perfr-hook.exe` and `libperfr.dll`. `libperfr` is also the library programs
+load for manual instrumentation. The release archive and the installer put
+them there. Without them, starting a capture with hooks fails the Frida setup; it
 does not switch engines on its own. On Linux the kernel engine is a separate
 choice and needs root or `CAP_SYS_ADMIN`. It is not in the macOS or Windows
 builds.

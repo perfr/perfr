@@ -11,7 +11,7 @@ Engine/Source/Runtime/Core/Public/ProfilingDebugging/ first, then
  
 +// perfr: every TRACE_CPUPROFILER_EVENT_SCOPE* also opens a scope in a
 +// capturing perfr. One header, nothing to link; without a loaded
-+// libperfr_api this is a single predictable branch per scope, the same
++// libperfr this is a single predictable branch per scope, the same
 +// cost as the CpuChannel check. See <perfr>/integrations/unreal/README.md.
 +#ifndef UE_PERFR_CPU_TRACE
 +#define UE_PERFR_CPU_TRACE 1

@@ -20,6 +20,7 @@ fn main() {
     let mut coalesce_lag: u64 = 4;
     let mut control_per_sec = DEFAULT_CONTROL_PER_SEC;
     let mut ingest = None;
+    let mut synthetic: Option<u64> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -55,6 +56,16 @@ fn main() {
                     std::process::exit(2);
                 });
             }
+            "--synthetic" => {
+                synthetic = Some(synthetic.unwrap_or(10_000));
+            }
+            "--rate" => {
+                let rate: u64 = value().parse().unwrap_or_else(|_| {
+                    eprintln!("--rate wants events per second");
+                    std::process::exit(2);
+                });
+                synthetic = Some(rate);
+            }
             "--ingest" => {
                 let addr: std::net::SocketAddr = value().parse().unwrap_or_else(|err| {
                     eprintln!("--ingest: {err}");
@@ -74,7 +85,7 @@ fn main() {
             }
             "--help" | "-h" => {
                 eprintln!(
-                    "perfr-relay [--bind ADDR] [--ingest ADDR] [--idle-secs N] [--ring-slots N] [--coalesce-lag N] [--control-per-sec N]"
+                    "perfr-relay [--bind ADDR] [--ingest ADDR] [--synthetic] [--rate N] [--idle-secs N] [--ring-slots N] [--coalesce-lag N] [--control-per-sec N]"
                 );
                 std::process::exit(0);
             }
@@ -98,6 +109,9 @@ fn main() {
         .build()
         .expect("runtime");
     runtime.block_on(async move {
+        if let Some(rate) = synthetic {
+            perfr_relay::start_synthetic(std::sync::Arc::clone(&relay), rate);
+        }
         serve(bind, relay).await.unwrap_or_else(|err| {
             eprintln!("perfr-relay: {err}");
             std::process::exit(1);

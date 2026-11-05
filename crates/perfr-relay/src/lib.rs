@@ -27,9 +27,11 @@ mod seqlock;
 mod server;
 mod session;
 mod sync;
+mod synthetic;
 mod wire;
 
 pub use control::{ControlUpdate, KnobSnapshot, DEFAULT_CONTROL_PER_SEC};
 pub use ring::{BroadcastRing, Cursor, Poll, SharedFrame};
 pub use server::{serve, serve_ephemeral, Relay, RelayConfig};
 pub use session::{Expiry, Session, DEFAULT_IDLE, HARD_CAP};
+pub use synthetic::start as start_synthetic;

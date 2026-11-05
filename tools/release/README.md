@@ -36,6 +36,10 @@ loads them from the directory that contains `perfr`. The script
 builds them for the wheel target. `PERFR_COMPANIONS_DIR=<dir>` skips that
 build and copies a directory already produced by `tools/frida/build.sh`.
 
+Debug symbols for the GitHub release binaries are split out by
+`tools/release/split_debug.py` and published beside the release; see
+[docs/releasing.md](../../docs/releasing.md).
+
 Local check:
 
 ```bash

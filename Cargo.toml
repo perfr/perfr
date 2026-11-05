@@ -67,16 +67,27 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 panic = "abort"
-# The symbol table stays -- a profiler's own binaries, the service and the
-# test apps, must symbolize -- and so does the line table: the code views
-# interleave a function's disassembly with its source, which needs
-# .debug_line, and the example disassembly is of the service itself.
-# Nothing else of DWARF (no .debug_info beyond what the line table needs).
-debug = "line-tables-only"
+# Full debug info for the crate being built (DWARF on Linux and macOS, PDB
+# on Windows). The release packagers split that out and publish it; they do
+# not delete it. `strip = "none"` is load-bearing: cargo's strip would throw
+# the debug info away instead of leaving a .gnu_debuglink, a .dSYM, or a PDB.
+# Linux links with --build-id=sha1 (the release workflow sets RUSTFLAGS) so
+# the note survives objcopy --strip-debug.
+#
+# The disassembly example reads .debug_line from the binary when it is still
+# there (a local `cargo build --release`) and otherwise from the detached
+# file: .gnu_debuglink next to the binary, /usr/lib/debug/.build-id, or a
+# debuginfod-style buildid/<id>/debuginfo under PERFR_SYMBOL_PATH. See
+# docs/releasing.md.
+debug = true
 strip = "none"
 
-# The dependencies carry no debug info at all: their line tables were 35 MB
-# on the service, for code nobody disassembles from here.
+# Dependencies are compiled without debug info. Their line tables alone were
+# 35 MB on the service, for code the disassembly example does not show. That
+# is a compile-time choice: nothing that was generated is discarded later.
+# `package."*"` does not apply to the package currently being built, so
+# `perfr`, the Frida companions, libperfr_api, and perfr-gpu-helper still get
+# the full debug info above.
 [profile.release.package."*"]
 debug = false
 

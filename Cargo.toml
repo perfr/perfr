@@ -38,6 +38,7 @@ members = [
     "crates/perfr-perf-ring",
     "crates/perfr-pod-dump",
     "crates/perfr-ptrace",
+    "crates/perfr-relay",
     "crates/perfr-scope-ring",
     "crates/perfr",
     "crates/perfr-test-rust",

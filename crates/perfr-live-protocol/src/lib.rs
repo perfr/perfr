@@ -255,10 +255,12 @@ fn utf8_field(bytes: &[u8], what: &'static str) -> Result<String, ProtocolError>
     }
     std::str::from_utf8(&bytes[4..4 + len])
         .map(str::to_string)
-        .map_err(|_| ProtocolError::InvalidPayload(match what {
-            "thread name" => "thread name is not utf-8",
-            _ => "process name is not utf-8",
-        }))
+        .map_err(|_| {
+            ProtocolError::InvalidPayload(match what {
+                "thread name" => "thread name is not utf-8",
+                _ => "process name is not utf-8",
+            })
+        })
 }
 
 // ------------------------------------------------------------ varints ---
@@ -343,7 +345,9 @@ pub fn unpack_events(payload: &[u8]) -> Result<Vec<LiveEvent>, ProtocolError> {
     // Each event is at least 7 bytes, each thread at least 2: a count the
     // payload cannot hold is corruption, not a large batch.
     if count > MAX_BATCH_EVENTS || count * 7 > payload.len() || nthreads * 2 > payload.len() {
-        return Err(ProtocolError::InvalidPayload("packed batch count exceeds payload"));
+        return Err(ProtocolError::InvalidPayload(
+            "packed batch count exceeds payload",
+        ));
     }
     let mut threads: Vec<(u32, u32)> = Vec::with_capacity(nthreads);
     for _ in 0..nthreads {
@@ -362,7 +366,9 @@ pub fn unpack_events(payload: &[u8]) -> Result<Vec<LiveEvent>, ProtocolError> {
         prev = start_ns;
         let duration_ns = get_varint(payload, &mut pos)?;
         let ti = get_varint(payload, &mut pos)? as usize;
-        let (pid, tid) = *threads.get(ti).ok_or(ProtocolError::InvalidPayload("thread index out of range"))?;
+        let (pid, tid) = *threads
+            .get(ti)
+            .ok_or(ProtocolError::InvalidPayload("thread index out of range"))?;
         if pos + 3 > payload.len() {
             return Err(ProtocolError::Truncated);
         }
@@ -424,12 +430,16 @@ fn inflate_batch(payload: &[u8]) -> Result<Vec<u8>, ProtocolError> {
     let mut pos = 0usize;
     let packed_len = get_varint(payload, &mut pos)? as usize;
     if packed_len > MAX_BATCH_EVENTS * 40 {
-        return Err(ProtocolError::InvalidPayload("deflated batch claims an absurd size"));
+        return Err(ProtocolError::InvalidPayload(
+            "deflated batch claims an absurd size",
+        ));
     }
     let out = miniz_oxide::inflate::decompress_to_vec_with_limit(&payload[pos..], packed_len)
         .map_err(|_| ProtocolError::InvalidPayload("deflate stream is corrupt"))?;
     if out.len() != packed_len {
-        return Err(ProtocolError::InvalidPayload("deflated batch length mismatch"));
+        return Err(ProtocolError::InvalidPayload(
+            "deflated batch length mismatch",
+        ));
     }
     Ok(out)
 }
@@ -533,10 +543,14 @@ fn decode_payload(typ: u8, payload: &[u8]) -> Result<LiveFrame, ProtocolError> {
                 ring_bytes: vals[7],
             })
         }
-        FRAME_EVENT_BATCH_PACKED => Ok(LiveFrame::EventBatch { events: unpack_events(payload)? }),
+        FRAME_EVENT_BATCH_PACKED => Ok(LiveFrame::EventBatch {
+            events: unpack_events(payload)?,
+        }),
         FRAME_EVENT_BATCH_DEFLATE => {
             let packed = inflate_batch(payload)?;
-            Ok(LiveFrame::EventBatch { events: unpack_events(&packed)? })
+            Ok(LiveFrame::EventBatch {
+                events: unpack_events(&packed)?,
+            })
         }
         FRAME_THREAD_NAME => {
             if payload.len() < 12 {
@@ -557,6 +571,84 @@ fn decode_payload(typ: u8, payload: &[u8]) -> Result<LiveFrame, ProtocolError> {
         }
         other => Err(ProtocolError::UnknownFrame(other)),
     }
+}
+
+/// Fields the relay appends to a [`FRAME_STATUS`] payload, after the 68-byte
+/// status the viewer already understands. Older decoders stop at that prefix
+/// and ignore the tail, so a periodic stats message can carry the viewer
+/// count without a new frame type.
+///
+/// Layout, little-endian, immediately after the standard status payload:
+/// `clients`, `events_per_sec`, `uptime_ms`, `session_expires_unix_ms`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RelayStatusExt {
+    pub clients: u64,
+    pub events_per_sec: u64,
+    pub uptime_ms: u64,
+    /// Hard-cap deadline, unix epoch milliseconds. The idle timer is separate
+    /// and is not this value.
+    pub session_expires_unix_ms: u64,
+}
+
+/// Byte length of [`RelayStatusExt`] on the wire.
+pub const RELAY_STATUS_EXT_LEN: usize = 32;
+
+/// Standard [`FRAME_STATUS`] payload size: 2 flags, 2 bytes of padding, 8×u64.
+pub const STATUS_PAYLOAD_LEN: usize = 4 + 8 * 8;
+
+/// Hello payload the original decoder reads: magic, version, event size.
+pub const HELLO_PAYLOAD_LEN: usize = 8;
+
+/// Appends [`RelayStatusExt`] to a frame produced by [`encode_frame`] for
+/// [`LiveFrame::Status`]. The length prefix is patched. `frame` must be a
+/// single status frame.
+pub fn append_relay_status(mut frame: Vec<u8>, ext: &RelayStatusExt) -> Vec<u8> {
+    debug_assert!(frame.len() >= 5 && frame[4] == FRAME_STATUS);
+    let len = u32::from_le_bytes(frame[0..4].try_into().unwrap()) + RELAY_STATUS_EXT_LEN as u32;
+    frame[0..4].copy_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&ext.clients.to_le_bytes());
+    frame.extend_from_slice(&ext.events_per_sec.to_le_bytes());
+    frame.extend_from_slice(&ext.uptime_ms.to_le_bytes());
+    frame.extend_from_slice(&ext.session_expires_unix_ms.to_le_bytes());
+    frame
+}
+
+/// Reads a relay stats tail from one status frame. `None` when the frame is
+/// not a status frame or has no tail (the original 68-byte payload).
+pub fn read_relay_status(frame: &[u8]) -> Option<RelayStatusExt> {
+    if frame.len() < 5 || frame[4] != FRAME_STATUS {
+        return None;
+    }
+    let payload_len = u32::from_le_bytes(frame[0..4].try_into().ok()?) as usize;
+    let payload = frame.get(5..5 + payload_len)?;
+    let ext = payload.get(STATUS_PAYLOAD_LEN..STATUS_PAYLOAD_LEN + RELAY_STATUS_EXT_LEN)?;
+    Some(RelayStatusExt {
+        clients: u64::from_le_bytes(ext[0..8].try_into().ok()?),
+        events_per_sec: u64::from_le_bytes(ext[8..16].try_into().ok()?),
+        uptime_ms: u64::from_le_bytes(ext[16..24].try_into().ok()?),
+        session_expires_unix_ms: u64::from_le_bytes(ext[24..32].try_into().ok()?),
+    })
+}
+
+/// Appends the session hard-cap deadline (unix epoch milliseconds) to a Hello
+/// frame. The original decoder reads 8 payload bytes and ignores the rest.
+pub fn append_hello_expiry(mut frame: Vec<u8>, expires_unix_ms: u64) -> Vec<u8> {
+    debug_assert!(frame.len() >= 5 && frame[4] == FRAME_HELLO);
+    let len = u32::from_le_bytes(frame[0..4].try_into().unwrap()) + 8;
+    frame[0..4].copy_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&expires_unix_ms.to_le_bytes());
+    frame
+}
+
+/// The hard-cap deadline carried on a Hello, if the relay wrote one.
+pub fn read_hello_expiry(frame: &[u8]) -> Option<u64> {
+    if frame.len() < 5 || frame[4] != FRAME_HELLO {
+        return None;
+    }
+    let payload_len = u32::from_le_bytes(frame[0..4].try_into().ok()?) as usize;
+    let payload = frame.get(5..5 + payload_len)?;
+    let ext = payload.get(HELLO_PAYLOAD_LEN..HELLO_PAYLOAD_LEN + 8)?;
+    Some(u64::from_le_bytes(ext.try_into().ok()?))
 }
 
 /// Decode a concatenated stream of frames.
@@ -643,9 +735,20 @@ mod tests {
     #[test]
     fn thread_and_process_names_round_trip() {
         for frame in [
-            LiveFrame::ThreadName { pid: 7, tid: 70, name: "Worker-1".into() },
-            LiveFrame::ProcessName { pid: 7, name: "game".into() },
-            LiveFrame::ThreadName { pid: 1, tid: 1, name: String::new() },
+            LiveFrame::ThreadName {
+                pid: 7,
+                tid: 70,
+                name: "Worker-1".into(),
+            },
+            LiveFrame::ProcessName {
+                pid: 7,
+                name: "game".into(),
+            },
+            LiveFrame::ThreadName {
+                pid: 1,
+                tid: 1,
+                name: String::new(),
+            },
         ] {
             let bytes = encode_frame(&frame);
             let (back, used) = decode_frame(&bytes).unwrap();
@@ -653,10 +756,17 @@ mod tests {
             assert_eq!(used, bytes.len());
         }
         // A name cut short is truncated, not garbage.
-        let bytes = encode_frame(&LiveFrame::ThreadName { pid: 7, tid: 70, name: "Worker-1".into() });
+        let bytes = encode_frame(&LiveFrame::ThreadName {
+            pid: 7,
+            tid: 70,
+            name: "Worker-1".into(),
+        });
         let mut short = bytes.clone();
         short[0] = 10; // payload length claims fewer bytes than the name needs
-        assert_eq!(decode_frame(&short[..15]).unwrap_err(), ProtocolError::Truncated);
+        assert_eq!(
+            decode_frame(&short[..15]).unwrap_err(),
+            ProtocolError::Truncated
+        );
     }
 
     /// A batch shaped like a capture: a few threads, sorted starts a few
@@ -688,7 +798,12 @@ mod tests {
         for wire in [WireFormat::Raw, WireFormat::Packed, WireFormat::Deflate] {
             let bytes = encode_event_batch_with(&events, wire);
             let (frame, _) = decode_frame(&bytes).unwrap();
-            assert_eq!(frame, LiveFrame::EventBatch { events: events.clone() });
+            assert_eq!(
+                frame,
+                LiveFrame::EventBatch {
+                    events: events.clone()
+                }
+            );
         }
     }
 
@@ -700,7 +815,13 @@ mod tests {
             let bytes = encode_event_batch_with(&events, wire);
             let (frame, used) = decode_frame(&bytes).unwrap();
             assert_eq!(used, bytes.len(), "{wire:?}");
-            assert_eq!(frame, LiveFrame::EventBatch { events: events.clone() }, "{wire:?}");
+            assert_eq!(
+                frame,
+                LiveFrame::EventBatch {
+                    events: events.clone()
+                },
+                "{wire:?}"
+            );
             if wire == WireFormat::Raw {
                 assert_eq!(bytes, raw);
             }
@@ -715,10 +836,50 @@ mod tests {
     #[test]
     fn packing_handles_out_of_order_starts_and_extreme_values() {
         let events = vec![
-            LiveEvent { start_ns: u64::MAX, duration_ns: u64::MAX, tid: u32::MAX, pid: u32::MAX, kind: 255, depth: 255, extra: 255, _pad: 0, name_id: u32::MAX },
-            LiveEvent { start_ns: 0, duration_ns: 0, tid: 0, pid: 0, kind: 0, depth: 0, extra: 0, _pad: 0, name_id: 0 },
-            LiveEvent { start_ns: 5, duration_ns: 1, tid: 0, pid: 7, kind: 1, depth: 0, extra: 0, _pad: 0, name_id: 1 },
-            LiveEvent { start_ns: 3, duration_ns: 1, tid: 0, pid: 7, kind: 1, depth: 0, extra: 0, _pad: 0, name_id: 1 },
+            LiveEvent {
+                start_ns: u64::MAX,
+                duration_ns: u64::MAX,
+                tid: u32::MAX,
+                pid: u32::MAX,
+                kind: 255,
+                depth: 255,
+                extra: 255,
+                _pad: 0,
+                name_id: u32::MAX,
+            },
+            LiveEvent {
+                start_ns: 0,
+                duration_ns: 0,
+                tid: 0,
+                pid: 0,
+                kind: 0,
+                depth: 0,
+                extra: 0,
+                _pad: 0,
+                name_id: 0,
+            },
+            LiveEvent {
+                start_ns: 5,
+                duration_ns: 1,
+                tid: 0,
+                pid: 7,
+                kind: 1,
+                depth: 0,
+                extra: 0,
+                _pad: 0,
+                name_id: 1,
+            },
+            LiveEvent {
+                start_ns: 3,
+                duration_ns: 1,
+                tid: 0,
+                pid: 7,
+                kind: 1,
+                depth: 0,
+                extra: 0,
+                _pad: 0,
+                name_id: 1,
+            },
         ];
         let packed = pack_events(&events);
         assert_eq!(unpack_events(&packed).unwrap(), events);
@@ -733,7 +894,12 @@ mod tests {
         let per = |b: f64| b / events.len() as f64;
         assert!((per(raw) - 32.0).abs() < 0.01);
         assert!(per(packed) < 12.0, "packed {} B/event", per(packed));
-        assert!(deflated < packed, "deflate {} vs packed {}", per(deflated), per(packed));
+        assert!(
+            deflated < packed,
+            "deflate {} vs packed {}",
+            per(deflated),
+            per(packed)
+        );
     }
 
     #[test]
@@ -755,7 +921,10 @@ mod tests {
         huge[0..4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
         huge[4] = FRAME_EVENT_BATCH_PACKED;
         huge.extend_from_slice(&payload);
-        assert!(matches!(decode_frame(&huge), Err(ProtocolError::InvalidPayload(_))));
+        assert!(matches!(
+            decode_frame(&huge),
+            Err(ProtocolError::InvalidPayload(_))
+        ));
         // A deflate stream that is not one.
         let mut bad = vec![0u8; 5];
         let mut payload = Vec::new();
@@ -764,7 +933,10 @@ mod tests {
         bad[0..4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
         bad[4] = FRAME_EVENT_BATCH_DEFLATE;
         bad.extend_from_slice(&payload);
-        assert!(matches!(decode_frame(&bad), Err(ProtocolError::InvalidPayload(_))));
+        assert!(matches!(
+            decode_frame(&bad),
+            Err(ProtocolError::InvalidPayload(_))
+        ));
     }
 
     #[test]
@@ -867,7 +1039,9 @@ mod tests {
         for _ in 0..iters {
             // What push_events does today: clone the slice into the enum,
             // then encode.
-            let bytes = encode_frame(&LiveFrame::EventBatch { events: events.to_vec() });
+            let bytes = encode_frame(&LiveFrame::EventBatch {
+                events: events.to_vec(),
+            });
             total += bytes.len();
         }
         let per_batch_us = t.elapsed().as_secs_f64() * 1e6 / iters as f64;
@@ -898,8 +1072,79 @@ mod tests {
             .collect();
         assert_eq!(
             encode_event_batch(&events),
-            encode_frame(&LiveFrame::EventBatch { events: events.clone() })
+            encode_frame(&LiveFrame::EventBatch {
+                events: events.clone()
+            })
         );
-        assert_eq!(encode_event_batch(&[]), encode_frame(&LiveFrame::EventBatch { events: vec![] }));
+        assert_eq!(
+            encode_event_batch(&[]),
+            encode_frame(&LiveFrame::EventBatch { events: vec![] })
+        );
+    }
+
+    #[test]
+    fn relay_status_tail_is_ignored_by_the_original_decoder() {
+        let base = encode_frame(&LiveFrame::Status {
+            capturing: true,
+            demo: true,
+            events_live: 4,
+            events_capacity: 8,
+            dropped: 3,
+            spilled: 0,
+            produced: 9,
+            oldest_start_ns: 0,
+            newest_end_ns: 0,
+            ring_bytes: 128,
+        });
+        let ext = RelayStatusExt {
+            clients: 42,
+            events_per_sec: 1000,
+            uptime_ms: 5_000,
+            session_expires_unix_ms: 1_700_000_000_000,
+        };
+        let frame = append_relay_status(base, &ext);
+        let (decoded, n) = decode_frame(&frame).unwrap();
+        assert_eq!(n, frame.len());
+        match decoded {
+            LiveFrame::Status { dropped, demo, .. } => {
+                assert!(demo);
+                assert_eq!(dropped, 3);
+            }
+            other => panic!("expected status, got {other:?}"),
+        }
+        assert_eq!(read_relay_status(&frame), Some(ext));
+        // A status without the tail still decodes, and the helper reports none.
+        let plain = encode_frame(&LiveFrame::Status {
+            capturing: false,
+            demo: false,
+            events_live: 0,
+            events_capacity: 0,
+            dropped: 0,
+            spilled: 0,
+            produced: 0,
+            oldest_start_ns: 0,
+            newest_end_ns: 0,
+            ring_bytes: 0,
+        });
+        assert_eq!(read_relay_status(&plain), None);
+    }
+
+    #[test]
+    fn hello_expiry_is_ignored_by_the_original_decoder() {
+        let base = encode_frame(&LiveFrame::Hello {
+            version: VERSION,
+            event_size: LIVE_EVENT_SIZE as u16,
+        });
+        let frame = append_hello_expiry(base, 1_700_000_123_456);
+        let (decoded, n) = decode_frame(&frame).unwrap();
+        assert_eq!(n, frame.len());
+        assert_eq!(
+            decoded,
+            LiveFrame::Hello {
+                version: VERSION,
+                event_size: LIVE_EVENT_SIZE as u16,
+            }
+        );
+        assert_eq!(read_hello_expiry(&frame), Some(1_700_000_123_456));
     }
 }

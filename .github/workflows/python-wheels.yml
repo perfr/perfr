@@ -79,10 +79,10 @@ jobs:
         /tmp/v/bin/python -c '
           import os, perfr as p
           root = os.path.dirname(p.binary_path())
-          for name in ("perfr", "perfr-frida-helper", "libperfr_frida_agent.so"):
+          for name in ("perfr", "perfr-inject-helper", "libperfr_agent.so"):
               path = os.path.join(root, name)
               assert os.path.isfile(path), path
-          print("frida companions ok", root)
+          print("inject helper and agent ok", root)
         '
         /tmp/v/bin/perfr --help >/dev/null
 

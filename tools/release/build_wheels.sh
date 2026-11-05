@@ -24,7 +24,7 @@
 # on any modern Linux; the service binary is a fully static musl build.
 #
 # The perfr wheel always includes the Frida companions. The service
-# loads libperfr_frida_agent and spawns perfr-frida-helper from the directory
+# loads libperfr_agent and spawns perfr-inject-helper from the directory
 # that contains the perfr executable. This script builds those for the
 # wheel's target (glibc or macOS, not the musl service triple). Set
 # PERFR_COMPANIONS_DIR to skip that build and copy a directory already laid
@@ -92,7 +92,7 @@ companion_triple() {
 }
 
 # build_frida_companions <key> <dest>
-# Writes libperfr_frida_agent.*, perfr-frida-helper, and licenses/ into dest.
+# Writes libperfr_agent.*, perfr-inject-helper, and licenses/ into dest.
 build_frida_companions() {
   local key=$1 dest=$2 triple lib host
   triple=$(companion_triple "$key")
@@ -108,11 +108,11 @@ build_frida_companions() {
   fi
   "${cargo[@]}" --manifest-path "$ROOT/Cargo.toml" -p perfr-frida-helper >/dev/null
   "${cargo[@]}" --manifest-path "$ROOT/Cargo.toml" -p perfr-frida-agent --features native >/dev/null
-  local helper=perfr-frida-helper
+  local helper=perfr-inject-helper
   case "$key" in
-    macos-*) lib=libperfr_frida_agent.dylib ;;
-    windows-*) lib=perfr_frida_agent.dll; helper=perfr-frida-helper.exe ;;
-    *) lib=libperfr_frida_agent.so ;;
+    macos-*) lib=libperfr_agent.dylib ;;
+    windows-*) lib=perfr_agent.dll; helper=perfr-inject-helper.exe ;;
+    *) lib=libperfr_agent.so ;;
   esac
   mkdir -p "$dest/licenses"
   cp "$ROOT/target/$triple/release/$lib" "$dest/"
@@ -184,7 +184,7 @@ for key in "$@"; do
     companions_src=$companions_tmp
   fi
   shopt -s nullglob
-  for f in "$companions_src"/libperfr_frida_agent.* "$companions_src"/perfr_frida_agent.dll "$companions_src"/perfr-frida-helper "$companions_src"/perfr-frida-helper.exe; do
+  for f in "$companions_src"/libperfr_agent.* "$companions_src"/perfr_agent.dll "$companions_src"/perfr-inject-helper "$companions_src"/perfr-inject-helper.exe; do
     cp "$f" "$SVC_PKG/perfr/"
     staged_companions+=("$SVC_PKG/perfr/$(basename "$f")")
   done
@@ -193,9 +193,9 @@ for key in "$@"; do
     cp -r "$companions_src/licenses" "$SVC_PKG/perfr/licenses"; staged_companions+=("$SVC_PKG/perfr/licenses")
   fi
   [[ -z "${companions_tmp}" ]] || rm -rf "$companions_tmp"
-  if [[ ! -f "$SVC_PKG/perfr/perfr-frida-helper" && ! -f "$SVC_PKG/perfr/perfr-frida-helper.exe" ]] || \
-     [[ ! -f "$SVC_PKG/perfr/libperfr_frida_agent.so" && ! -f "$SVC_PKG/perfr/libperfr_frida_agent.dylib" && ! -f "$SVC_PKG/perfr/perfr_frida_agent.dll" ]]; then
-    echo "Frida companions were not staged for $key" >&2
+  if [[ ! -f "$SVC_PKG/perfr/perfr-inject-helper" && ! -f "$SVC_PKG/perfr/perfr-inject-helper.exe" ]] || \
+     [[ ! -f "$SVC_PKG/perfr/libperfr_agent.so" && ! -f "$SVC_PKG/perfr/libperfr_agent.dylib" && ! -f "$SVC_PKG/perfr/perfr_agent.dll" ]]; then
+    echo "inject helper and agent were not staged for $key" >&2
     exit 1
   fi
   echo "-- Frida companions: ${#staged_companions[@]} item(s)"

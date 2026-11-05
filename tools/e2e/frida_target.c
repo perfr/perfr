@@ -130,7 +130,7 @@ int main(void) {
       puts("released"); fflush(stdout);
       continue;
     }
-    uint64_t manual = perfr_start("manual alongside Frida", 22);
+    uint64_t manual = perfr_start("manual alongside hooks", 22);
 #ifndef _WIN32
     pid_t child = fork();
     if (child == 0) { perfr_frida_test_outer(); _exit(0); }

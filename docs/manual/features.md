@@ -35,7 +35,7 @@ Instructions for the manual writer:
   on x86-64. Sampling, the scheduler and thread states come from the NT
   Kernel Logger and need the service started from an elevated prompt; the
   status line under the Capture strip says so otherwise. Manual scopes and
-  Frida hooks need no privilege. Auto-profiling and kernel uprobes are
+  Function hooks need no privilege. Auto-profiling and kernel uprobes are
   refused with a sentence. See `docs/building_windows.md`.
 - **Privileges.** Sampling this process needs `perf_event_paranoid` <= 2.
   System-wide scheduling (the CSW track) needs `perf_event_paranoid` <= 0.
@@ -151,7 +151,7 @@ opens on first load with a service and closes with its ×. Its rows:
   scan of the thread list is the safety net and logs if it ever finds
   a thread no fork record announced.
 - **UNWIND** is a two-way switch, **DWARF** or **FP**. **HOOKS** is another:
-  **Frida** (the default) or **Uprobes**. Frida's note reads "requires
+  **Inject** (the default) or **Uprobes**. Inject's note reads "requires
   permission to attach to the target". Uprobes reads "requires Linux
   uprobe permissions" and needs `CAP_SYS_ADMIN`; `CAP_PERFMON` alone is
   refused with EACCES. **Dedupe**, shown only while Uprobes is selected
@@ -167,7 +167,7 @@ opens on first load with a service and closes with its ×. Its rows:
   status line after the capture counts what each rule did.
 - **Auto-unhook** (on by default, 100k calls/s) switches off a hooked
   function that fires past the rate, mid-capture, on both engines: the
-  Frida agent mutes it in the target, the uprobe session disables its
+  inject agent mutes it in the target, the uprobe session disables its
   probes. A function that hot is not something to time with a hook -- the
   samples already show it -- and hooked it costs the target about a core
   for spans no timeline can draw. When it fires, the instrumentation line

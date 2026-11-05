@@ -46,7 +46,7 @@ When no probe arms, the instrumentation line is:
 no hooks armed: uprobes need CAP_SYS_ADMIN. Run the service with sudo, or: sudo setcap cap_sys_admin,cap_perfmon,cap_dac_read_search+ep <perfr>
 ```
 
-Frida does not use that capability. Its note on the HOOKS row is “requires permission to attach to the target”.
+The default hook engine does not use that capability. Its note on the HOOKS row is “requires permission to attach to the target”.
 
 `CAP_SYS_ADMIN` is root in all but name. A passwordless sudo rule on a binary you can overwrite is a root shell for anything running as you. Fine on a personal machine, not on a shared one.
 
@@ -58,11 +58,11 @@ If the kernel was built without `CONFIG_UPROBE_EVENTS`, opening a uprobe fails w
 this kernel has no uprobe PMU (CONFIG_UPROBE_EVENTS)
 ```
 
-Switch **HOOKS** to **Frida**, or boot a kernel that has the uprobe PMU. There is no userspace flag that adds the PMU.
+Switch **HOOKS** to **Inject**, or boot a kernel that has the uprobe PMU. There is no userspace flag that adds the PMU.
 
 ## Windows: the kernel logger needs an elevated prompt
 
-On Windows the scheduler, thread states and call-stack samples come from the NT Kernel Logger, an ETW session only administrators may start. From an ordinary prompt the capture runs with manual scopes and Frida hooks only, and the status line reads:
+On Windows the scheduler, thread states and call-stack samples come from the NT Kernel Logger, an ETW session only administrators may start. From an ordinary prompt the capture runs with manual scopes and function hooks only, and the status line reads:
 
 ```
 Windows: no kernel logger (needs an elevated prompt): no scheduler, thread states or samples
@@ -72,7 +72,7 @@ Open a terminal with *Run as administrator* and start `perfr` there. A UAC-filte
 
 Only one kernel logger session exists per machine. A session another tool left running (`xperf`, `wpr`, a profiler that crashed) is stopped when a capture starts; a tool recording at the same time loses its session.
 
-Frida hooks from an elevated service into an unelevated target of the same user work. An unelevated service cannot hook or read an elevated target.
+Function hooks from an elevated service into an unelevated target of the same user work. An unelevated service cannot hook or read an elevated target.
 
 ## Opening or clearing while a capture is running
 

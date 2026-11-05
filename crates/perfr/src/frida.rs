@@ -12,35 +12,9 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
-fn hook_file(env_key: &str, name: &str) -> Result<std::path::PathBuf, String> {
-    if let Some(path) = std::env::var_os(env_key) {
-        let path = std::path::PathBuf::from(path);
-        return path
-            .canonicalize()
-            .map_err(|error| format!("{env_key} {}: {error}", path.display()));
-    }
-    if let Some(path) = crate::hook_dist::find_installed(name) {
-        if crate::hook_dist::installed_version_ok() {
-            return path.canonicalize().map_err(|error| error.to_string());
-        }
-    }
-    crate::hook_dist::ensure_for_launch()?;
-    let path = crate::hook_dist::find_installed(name).ok_or_else(|| {
-        crate::hook_dist::missing_hooks_message(crate::build_info::package_version())
-    })?;
-    path.canonicalize()
-        .map_err(|error| format!("{}: {error}", path.display()))
-}
-
 fn agent_path() -> Result<std::path::PathBuf, String> {
-    let name = if cfg!(target_os = "macos") {
-        "libperfr_frida_agent.dylib"
-    } else if cfg!(target_os = "windows") {
-        "perfr_frida_agent.dll"
-    } else {
-        "libperfr_frida_agent.so"
-    };
-    hook_file("PERFR_FRIDA_AGENT", name)
+    let name = crate::hook_dist::names_for(crate::hook_dist::host_os()).agent;
+    crate::hook_dist::resolve("PERFR_AGENT", name).map_err(|error| format!("inject agent: {error}"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,7 +44,7 @@ fn record_profile(value: &serde_json::Value) -> bool {
         p["start_ns"].as_u64(),
         p["end_ns"].as_u64(),
     ) {
-        if name.starts_with("Frida: ") && name.len() <= 4096 && end >= start {
+        if name.starts_with("Inject: ") && name.len() <= 4096 && end >= start {
             perfr_api::span_async(name, start, end);
         }
     }
@@ -85,19 +59,16 @@ struct Helper {
 }
 impl Helper {
     fn launch(mut config: serde_json::Value) -> Result<Self, String> {
-        let _phase = perfr_api::scope("Frida: launch helper");
+        let _phase = perfr_api::scope("Inject: launch helper");
         config["self_profile"] = true.into();
         config["agent"] = agent_path()?
             .into_os_string()
             .to_string_lossy()
             .into_owned()
             .into();
-        let helper_name = if cfg!(target_os = "windows") {
-            "perfr-frida-helper.exe"
-        } else {
-            "perfr-frida-helper"
-        };
-        let helper_path = hook_file("PERFR_FRIDA_HELPER", helper_name)?;
+        let helper_name = crate::hook_dist::names_for(crate::hook_dist::host_os()).helper;
+        let helper_path = crate::hook_dist::resolve("PERFR_INJECT_HELPER", helper_name)
+            .map_err(|error| format!("inject helper: {error}"))?;
         let mut child = Command::new(&helper_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -105,14 +76,13 @@ impl Helper {
             .spawn()
             .map_err(|e| {
                 format!(
-                    "start Frida helper {}: {e}. Run `perfr hooks install` or set PERFR_FRIDA_HELPER.",
+                    "inject helper: start {}: {e}. Set PERFR_INJECT_HELPER.",
                     helper_path.display()
                 )
             })?;
-        // What the helper (and Frida inside it) says on stderr still reaches
-        // the terminal, and now the log file too.
+        // What the helper says on stderr still reaches the terminal, and the log.
         if let Some(stderr) = child.stderr.take() {
-            crate::logging::relay_stderr(stderr, "perfr-frida-helper");
+            crate::logging::relay_stderr(stderr, "perfr-inject-helper");
         }
         let input = child.stdin.take();
         let stdout = child.stdout.take().unwrap();
@@ -123,7 +93,7 @@ impl Helper {
                     break;
                 };
                 let result = serde_json::from_str(&line).unwrap_or_else(
-                    |_| serde_json::json!({"error": "invalid Frida helper response"}),
+                    |_| serde_json::json!({"error": "invalid inject helper response"}),
                 );
                 if record_profile(&result) {
                     continue;
@@ -143,16 +113,16 @@ impl Helper {
         Ok(helper)
     }
     fn response(&self) -> Result<serde_json::Value, String> {
-        let _phase = perfr_api::scope("Frida: wait for agent");
+        let _phase = perfr_api::scope("Inject: wait for agent");
         let value = self
             .replies
             .recv_timeout(Duration::from_secs(30))
-            .map_err(|e| format!("Frida helper did not become ready: {e}"))?;
+            .map_err(|e| format!("inject helper did not become ready: {e}"))?;
         if let Some(error) = value.get("error") {
-            return Err(format!("Frida: {error}"));
+            return Err(format!("Inject: {error}"));
         }
         if let Some(reason) = value.get("detached") {
-            return Err(format!("Frida detached: {reason}"));
+            return Err(format!("inject engine detached: {reason}"));
         }
         Ok(value)
     }
@@ -168,12 +138,12 @@ impl Helper {
                 return if status.success() {
                     Ok(())
                 } else {
-                    Err(format!("Frida helper exited: {status}"))
+                    Err(format!("inject helper exited: {status}"))
                 };
             }
             if std::time::Instant::now() >= deadline {
                 return Err(
-                    "Frida detach timed out; outstanding target calls may defer cleanup".into(),
+                    "inject detach timed out; outstanding target calls may defer cleanup".into(),
                 );
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -212,9 +182,9 @@ impl FridaSession {
         label_ids: &[u32],
         max_calls_per_s: u64,
     ) -> Result<Self, String> {
-        let _phase = perfr_api::scope("Frida: arm hooks");
+        let _phase = perfr_api::scope("Inject: arm hooks");
         if pid <= 0 || pid as u32 == std::process::id() {
-            return Err("Frida requires a target process other than perfr".into());
+            return Err("function hooks require a target process other than perfr".into());
         }
         let agent = agent_path()?;
         // /tmp on POSIX, where an unprivileged target can reach it; the
@@ -225,7 +195,7 @@ impl FridaSession {
             std::path::PathBuf::from("/tmp")
         };
         let file = tempfile::Builder::new()
-            .prefix("perfr-frida-")
+            .prefix("perfr-inject-")
             .tempfile_in(lease_dir)
             .map_err(|e| e.to_string())?;
         let mapping = Transport::create(file.as_file(), pid as u32).map_err(|e| e.to_string())?;
@@ -269,7 +239,7 @@ impl FridaSession {
         )?;
         let ready = helper.response()?;
         if ready["armed"].as_u64() != Some(hooks.len() as u64) {
-            return Err(format!("Frida did not arm every hook: {ready}"));
+            return Err(format!("inject engine did not arm every hook: {ready}"));
         }
         Ok(Self {
             helper,
@@ -285,7 +255,7 @@ impl FridaSession {
     pub fn poll(&mut self) {
         if !self.stopped {
             if let Ok(Some(status)) = self.helper.child.try_wait() {
-                self.error = Some(format!("Frida helper exited during capture: {status}"));
+                self.error = Some(format!("inject helper exited during capture: {status}"));
                 self.mapping.disable();
             }
         }
@@ -297,7 +267,7 @@ impl FridaSession {
         self.calls = self.mapping.calls();
     }
     pub fn stop(&mut self) {
-        let _phase = perfr_api::scope("Frida: stop instrumentation");
+        let _phase = perfr_api::scope("Inject: stop instrumentation");
         self.stopped = true;
         if let Err(e) = self.helper.stop() {
             self.error = Some(e);
@@ -307,7 +277,7 @@ impl FridaSession {
     /// The status line. `auto_unhooked` are the name ids the agent reported
     /// switching off (see `scopes.rs`).
     pub fn status(&self, shared_records_lost: u64, auto_unhooked: &[u32]) -> String {
-        let mut line = format!("Frida: {} completed API scopes", self.calls);
+        let mut line = format!("Inject: {} completed API scopes", self.calls);
         if shared_records_lost > 0 {
             // The shared scope ring lapped: STOPs were among the losses and
             // the open spans were discarded rather than drawn wrong.
@@ -350,7 +320,7 @@ pub fn symbols(pid: i32) -> Result<Vec<serde_json::Value>, String> {
     response["symbols"]
         .as_array()
         .cloned()
-        .ok_or_else(|| "Frida returned no symbol list".into())
+        .ok_or_else(|| "inject engine returned no symbol list".into())
 }
 
 #[cfg(test)]

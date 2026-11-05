@@ -242,7 +242,7 @@ pub fn capture_loop(
     if gpu_helper.is_some() {
         log::warn!("GPU helper capture is not supported on macOS");
     }
-    service.set_instrumentation_status(if frida.is_some() { "Frida: functions armed" } else { "macOS: manual instrumentation; CPU sampling and scheduling are not yet available" });
+    service.set_instrumentation_status(if frida.is_some() { "function hooks: functions armed" } else { "macOS: manual instrumentation; CPU sampling and scheduling are not yet available" });
     service.mark_capture_started(target_pid.max(0) as u32, capture_start_ns);
     let mut visible = VisibleProcesses::new(target_pid, show_all_processes);
     visible.add_instrumented(std::process::id());

@@ -202,7 +202,6 @@ fn parse_args() -> Args {
                 });
             }
             "--no-preflight" => {}
-            "--hooks-auto" => hook_dist::set_auto_from_flag(),
             other => log::warn!("ignoring unknown argument {other}"),
         }
     }

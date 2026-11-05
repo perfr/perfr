@@ -23,21 +23,20 @@ for instrumenting Python.
 ## What is in the wheel, and what is not
 
 The Linux binary samples, records the scheduler, and hooks functions. The
-macOS binary records manual scopes and Frida function hooks; sampling, the
+macOS binary records manual scopes and function hooks; sampling, the
 scheduler, live disassembly, and auto-profiling are not in that build.
 Manual instrumentation through the API (C, C++, Rust, Python) is in both.
-The GitHub release keeps function hooks in a separate archive
-(`perfr hooks install`). This wheel still ships `libperfr_frida_agent` and
-`perfr-frida-helper` next to the `perfr` console script.
+The GitHub release and this wheel both ship `libperfr_agent` and
+`perfr-inject-helper` next to the `perfr` console script.
 
-Function hooks need `libperfr_frida_agent` and `perfr-frida-helper` in the
+Function hooks need `libperfr_agent` and `perfr-inject-helper` in the
 same directory as `perfr`. The wheel includes them (see
 `tools/release/build_wheels.sh`).
-The console script marks `perfr-frida-helper` executable, because a wheel
+The console script marks `perfr-inject-helper` executable, because a wheel
 does not keep that bit. NVIDIA GPU lanes need `perfr-gpu-helper` beside the
 service; the release archive has it, this wheel does not.
 
-Frida hooks do not need root on either OS. On macOS, attaching needs a
+Function hooks do not need root on either OS. On macOS, attaching needs a
 task port. On Linux, sampling needs `perf_event_paranoid` at 2 or below,
 and the scheduler needs 0 or below. Root, `CAP_PERFMON`, or `CAP_SYS_ADMIN`
 bypass that sysctl. Auto-profiling uses the kernel hook engine and needs

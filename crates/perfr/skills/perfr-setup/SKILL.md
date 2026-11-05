@@ -15,11 +15,7 @@ If `perfr` is not on `PATH`:
 curl -fsSL https://perfr.dev/install.sh | sh
 ```
 
-That is the core archive: the service, manual instrumentation, and on Linux the GPU helper. Function hooks are separate. Add them in the same step:
-
-```
-curl -fsSL https://perfr.dev/install.sh | sh -s -- --with-hooks
-```
+That archive is the service, function hooks (`perfr-inject-helper` and `libperfr_agent`), manual instrumentation, and on Linux the GPU helper.
 
 On Windows, in PowerShell:
 
@@ -27,9 +23,7 @@ On Windows, in PowerShell:
 irm https://perfr.dev/install.ps1 | iex
 ```
 
-With hooks: `$env:PERFR_WITH_HOOKS = '1'` before that command.
-
-If the service is already installed and a capture says function hooks are not installed, run `perfr hooks install`. `perfr hooks status` prints the version and directory. `perfr doctor` includes the same row. Do not guess a path and copy the files by hand.
+If a capture says the helper or agent is missing, run `perfr hooks status`. `perfr doctor` includes the same row. The files belong beside `perfr`. Do not download a separate archive and do not guess a path.
 
 If `perfr update --check` says a package manager owns the binary, use the command it prints. Do not replace that binary by hand.
 
@@ -74,10 +68,10 @@ What the rows mean:
 - `kernel.perf_event_paranoid` above 2 blocks sampling. Above 0 blocks the scheduler. `sudo sysctl -w kernel.perf_event_paranoid=0` allows both. Root, `CAP_PERFMON`, or `CAP_SYS_ADMIN` bypass the sysctl.
 - `kernel.kptr_restrict` above 0 hides kernel addresses from an unprivileged process. Userspace samples still have their own symbols.
 - tracefs (`/sys/kernel/tracing` or `/sys/kernel/debug/tracing`) has to be readable for scheduler tracepoints. `CAP_PERFMON` or root is the usual grant.
-- Uprobes need `CAP_SYS_ADMIN`. Frida is the default hook engine and does not. A kernel built without `CONFIG_UPROBE_EVENTS` has no uprobe PMU; switch hooks to Frida. There is no sysctl that adds the PMU.
-- `kernel.yama.ptrace_scope` above 0 blocks Frida from attaching to a process that is not a child. `sudo sysctl -w kernel.yama.ptrace_scope=0`, or `CAP_SYS_PTRACE`.
-- On Windows, sampling and the scheduler come from the kernel logger and need a token from **Run as administrator**. Manual scopes and Frida hooks do not. A normal prompt of an administrator account is not elevated.
-- On macOS this build records manual scopes and Frida hooks. Attach needs a task port. `sudo perfr` is the practical grant. SIP and the hardened runtime can still refuse system processes. This build does not sample through dtrace.
+- Uprobes need `CAP_SYS_ADMIN`. The default hook engine does not. A kernel built without `CONFIG_UPROBE_EVENTS` has no uprobe PMU; leave HOOKS on the default. There is no sysctl that adds the PMU.
+- `kernel.yama.ptrace_scope` above 0 blocks the default hook engine from attaching to a process that is not a child. `sudo sysctl -w kernel.yama.ptrace_scope=0`, or `CAP_SYS_PTRACE`.
+- On Windows, sampling and the scheduler come from the kernel logger and need a token from **Run as administrator**. Manual scopes and function hooks do not. A normal prompt of an administrator account is not elevated.
+- On macOS this build records manual scopes and function hooks. Attach needs a task port. `sudo perfr` is the practical grant. SIP and the hardened runtime can still refuse system processes. This build does not sample through dtrace.
 
 `CAP_SYS_ADMIN` is root in all but name. Say that before a setcap that includes it.
 

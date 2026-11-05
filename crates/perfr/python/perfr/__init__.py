@@ -9,7 +9,7 @@
 
 The wheel carries the prebuilt ``perfr`` binary -- the capture service
 that also serves the web viewer -- plus ``libperfr_api`` and ``perfr.h`` for
-instrumenting C and C++, the Frida agent and helper the service loads from
+instrumenting C and C++, the inject helper and agent the service loads from
 the same directory, and a dependency on ``perfr-api`` so ``import perfr_api``
 works for Python. The ``perfr`` console command runs the bundled
 binary; ``perfr.binary_path()`` returns its location.
@@ -67,10 +67,12 @@ def main():
     binary = binary_path()
     if not os.path.exists(binary):
         sys.exit("perfr: the perfr binary is missing from this wheel")
-    # The service spawns perfr-frida-helper from the same directory. Both
+    # The service spawns perfr-inject-helper from the same directory. Both
     # need the executable bit, which a wheel does not record.
     _ensure_executable(binary)
-    _ensure_executable(_here("perfr-frida-helper"))
+    _ensure_executable(_here("perfr-inject-helper"))
+    if sys.platform == "win32":
+        _ensure_executable(_here("perfr-inject-helper.exe"))
     argv = [binary] + sys.argv[1:]
     if sys.platform == "win32":
         import subprocess

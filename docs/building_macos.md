@@ -79,8 +79,8 @@ Process and thread discovery uses libproc, including XNU’s private
 `PROC_PIDLISTTHREADIDS` selector to obtain kernel IDs rather than pthread handles.
 If enumeration is unavailable, event recording still works; thread enumeration
 and names may be incomplete. Producer and service use
-the same host's `CLOCK_MONOTONIC` clock. Frida dynamic hooks and Mach-O symbol discovery are now integrated; see
-[Frida instrumentation](frida-instrumentation.md) for attachment requirements
+the same host's `CLOCK_MONOTONIC` clock. Function hooks and Mach-O symbol discovery are integrated; see
+[dynamic instrumentation](frida-instrumentation.md) for attachment requirements
 and validation limits. CPU sampling, scheduler events, live Mach-O disassembly
 and GPU capture are not implemented.
 

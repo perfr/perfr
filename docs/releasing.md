@@ -26,8 +26,8 @@ They were not deleted or retagged.
 
 ## What the workflow builds
 
-Each stable tag publishes, per platform, a core archive, a hooks archive,
-a debug-symbol archive, and a symbol-store archive. Platforms: static Linux
+Each stable tag publishes, per platform, a core archive, a debug-symbol
+archive, and a symbol-store archive. Platforms: static Linux
 x86-64, universal macOS (Apple silicon and Intel), and Windows x86-64.
 Linux arm64 is not in the release.
 
@@ -63,6 +63,13 @@ with this layout:
   CodeView GUID in mixed endian plus the age in unpadded lowercase hex.
 - macOS: `dsym/<uuid>/<name>.dSYM/`
 
+The detached files are named from the binaries. Function hooks are
+`perfr-inject-helper.debug` and `libperfr_agent.so.debug` on Linux,
+`perfr-inject-helper.dSYM` and `libperfr_agent.dylib.dSYM` on macOS, and
+`perfr-inject-helper.pdb` and `perfr_agent.pdb` on Windows. The macOS
+symbol store copies those `.dSYM` bundles. The Windows symbol store keys
+SymSrv on those filenames.
+
 If `PERFR_SYMBOL_STORE_BUCKET` and an access key are set
 (`PERFR_SYMBOL_STORE_ACCESS_KEY_ID` or `AWS_ACCESS_KEY_ID`, and the matching
 secret), the publish job syncs that tree to the bucket with the AWS CLI.
@@ -89,14 +96,18 @@ Linux x86-64, on `ubuntu-22.04`, `perfr-linux-x86_64.tar.gz`:
 - `libperfr_api.so` and `perfr.h`, for manual instrumentation.
 - `perfr-gpu-helper`, the optional NVIDIA helper. It is a glibc binary on
   purpose (the static service cannot `dlopen`).
+- `perfr-inject-helper` and `libperfr_agent.so`, stripped the same way, and
+  `licenses/` for the libraries they link. Function hooks are part of this
+  archive.
 
 macOS, on `macos-15`, via `tools/build/build-service-macos.sh --universal`,
 `perfr-macos-universal.tar.gz`:
 
 - One universal `perfr` (Apple silicon and Intel), `libperfr_api.dylib`,
   `libperfr_api.a`, `perfr.h`, and the SDK extras the build script writes.
+- `perfr-inject-helper`, `libperfr_agent.dylib`, and `licenses/`.
 - Ad-hoc signed (`codesign --sign -`), not notarized.
-- Records manual scopes and, once hooks are installed, Frida function hooks.
+- Records manual scopes and function hooks.
   No call-stack sampling, scheduler, live disassembly, or auto-profiling.
 - No GPU helper. That binary is Linux-only.
 
@@ -105,42 +116,31 @@ Windows x86-64, on `windows-2022`, via `.\tools\build\build-service-windows.ps1`
 
 - `perfr.exe` with the viewer embedded, linked against the static C runtime
   (`.cargo/config.toml`); the build script checks that with `dumpbin /dependents`.
+- `perfr-inject-helper.exe`, `perfr_agent.dll`, and `licenses/`.
 - `perfr_api.dll`, `perfr_api.dll.lib`, `perfr_api.lib` and `include\perfr.h`;
   `perfr_api.py`; `PerfrTestRust.exe`. No PDBs in this zip.
-- Records manual scopes without privilege, and Frida hooks once the hooks
-  archive is installed. Call-stack sampling, the scheduler and thread states
-  come from the NT Kernel Logger (ETW) and need an elevated prompt. No
-  auto-profiling, no kernel hook engine, no GPU helper.
+- Records manual scopes and function hooks without privilege. Call-stack
+  sampling, the scheduler and thread states come from the NT Kernel Logger
+  (ETW) and need an elevated prompt. No auto-profiling, no kernel hook
+  engine, no GPU helper.
 - Not code-signed.
 
-### Hooks archive
-
-`perfr-hooks-linux-x86_64.tar.gz`, `perfr-hooks-macos-universal.tar.gz`, and
-`perfr-hooks-windows-x86_64.zip`. Top directory `perfr-hooks/`:
-
-- `perfr-frida-helper` (`.exe` on Windows), stripped the same way
-- `libperfr_frida_agent.so` / `.dylib`, or `perfr_frida_agent.dll`
-- `licenses/` for the Frida devkits
-- `perfr-hooks-version`, the cargo package version (`0.1.0`)
-
-`perfr hooks install` downloads the archive for `perfr-v` plus
-`CARGO_PKG_VERSION`, checks the `.sha256`, and refuses a version that does
-not match. `perfr update` refreshes hooks only when they are already
-installed. The installers take `--with-hooks` / `PERFR_WITH_HOOKS=1` and
-otherwise install the core only. An older core archive that still contains
-the Frida files is still unpacked.
+`perfr update` replaces the whole core archive, including the helper and
+the agent. `perfr hooks status` and `perfr doctor` report whether those
+files are beside the binary. `PERFR_INJECT_HELPER` and `PERFR_AGENT`
+override the lookup.
 
 Linux arm64 is not in the release. The service compiles for arm64; it is not
 run in CI, and the static musl build in this workflow is x86-64 only.
 
-The Linux and macOS archives are gzipped tars, the Windows core and hooks
-are zips; debug and symstore archives are gzipped tars on every platform.
+The Linux and macOS archives are gzipped tars and the Windows archive is a
+zip; debug and symstore archives are gzipped tars on every platform.
 Core archives use the top-level directory `perfr/`. Beside the archives the
 release has `SHA256SUMS` and a `.sha256` file per archive (`sha256sum`
 format: hash, two spaces, file name). `tools/install/install.ps1` is the
 Windows installer and reads the zip's `.sha256` the way `install.sh` reads
-the tars'. The pip wheels are a separate channel and still bundle the Frida
-files inside the `perfr` wheel; see `tools/release/README.md`.
+the tars'. The pip wheel bundles the same helper and agent; see
+`tools/release/README.md`.
 
 ## How to cut one
 

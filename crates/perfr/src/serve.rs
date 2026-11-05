@@ -373,7 +373,7 @@ fn hooks_from_ids(index: &FunctionIndex, ids: &[u64]) -> (Vec<HookSpec>, Vec<Str
 /// request line that carried the ids was cut off before them.
 fn hook_list_lines(pid: i32, engine: crate::frida::Engine, hooks: &[HookSpec], sizes: &[u64]) -> Vec<String> {
     let method = match engine {
-        crate::frida::Engine::Frida => "Frida",
+        crate::frida::Engine::Frida => "inject",
         crate::frida::Engine::Uprobes => "uprobes",
     };
     let mut lines = vec![format!("hooking {} function(s) in pid {pid} with {method}:", hooks.len())];
@@ -1401,7 +1401,7 @@ fn capture_loop(
     let mut uprobes = {
       let _phase = perfr_api::scope("arm instrumentation");
       if frida.is_some() {
-        service.set_instrumentation_status(format!("Frida: {} functions armed", hooks.len()));
+        service.set_instrumentation_status(format!("function hooks: {} functions armed", hooks.len()));
         visible.add_instrumented(target_pid as u32);
         None
       } else if hooks.is_empty() || !has_target {
@@ -2574,7 +2574,7 @@ pub fn run_on(
             #[cfg(target_os = "linux")]
             let engine = if wants_auto_profile(body) { crate::frida::Engine::Uprobes } else { engine };
             if cfg!(any(target_os = "macos", target_os = "windows")) && engine == crate::frida::Engine::Uprobes && !hook_request(body).0.is_empty() {
-                return Err("Kernel uprobes are only available on Linux; select Frida".into());
+                return Err("Kernel uprobes are only available on Linux; use function hooks".into());
             }
             if cfg!(target_os = "windows") && wants_auto_profile(body) {
                 return Err("Auto-profiling is not available on Windows yet; pick functions to hook".into());

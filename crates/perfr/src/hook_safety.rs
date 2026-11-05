@@ -183,7 +183,7 @@ pub fn assess(code: &[u8], size: u64, is_64_bit: bool) -> HookSafety {
         if hazard {
             return HookSafety::new(
                 SafetyLevel::Risky,
-                format!("`{ins}` is within the first {TRAMPOLINE_BYTES} bytes -- an inline hook (Frida) may relocate its target wrongly; kernel uprobes are unaffected"),
+                format!("`{ins}` is within the first {TRAMPOLINE_BYTES} bytes -- an inline hook may relocate its target wrongly; kernel uprobes are unaffected"),
                 entry,
                 entry_hex,
             );

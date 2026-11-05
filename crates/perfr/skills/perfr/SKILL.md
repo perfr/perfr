@@ -48,9 +48,9 @@ Typical loop:
 
 A capture that is already running keeps the hooks it started with. `perfr_unhook` edits the set for the next start.
 
-Sampling and the scheduler are recorded on Linux, and on Windows when the service was started from an elevated prompt. On macOS those tools return `supported: false`. Frida hooks and manual scopes still work there. Do not invent an empty profile when the tool says the feature is unsupported.
+Sampling and the scheduler are recorded on Linux, and on Windows when the service was started from an elevated prompt. On macOS those tools return `supported: false`. Function hooks and manual scopes still work there. Do not invent an empty profile when the tool says the feature is unsupported.
 
-Function hooks are not in the core install. If arming hooks returns "Run `perfr hooks install`", run that command and then arm again. Do not prompt the user to download a file by URL. In a non-interactive session the service does not ask; set `PERFR_HOOKS_AUTO_INSTALL=1` or start perfr with `--hooks-auto` only when the user has already agreed to install hooks. `PERFR_HOOKS_NO_PROMPT=1` forces the error instead of a question on the service's terminal.
+Function hooks ship with perfr (`perfr-inject-helper` and `libperfr_agent`, or the Windows names `perfr-inject-helper.exe` and `perfr_agent.dll`). If arming hooks says those files are missing, run `perfr hooks status` and reinstall perfr, or set `PERFR_INJECT_HELPER` and `PERFR_AGENT`. Do not download a separate hooks archive.
 
 `perfr_capabilities` saying sampling is supported, then a report with `"samples": 0`, means the feature is allowed but recorded nothing. On Linux that is often `perf_event_paranoid`. Say so. The perfr-setup skill has the checks.
 

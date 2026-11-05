@@ -40,7 +40,8 @@ packages = ["perfr"]
 perfr = [
   "perfr", "perfr.exe",
   "libperfr_api.so", "libperfr_api.dylib", "perfr_api.dll", "perfr.h",
-  # The Frida engine's companions, present when the wheel was built with
-  # PERFR_COMPANIONS_DIR (see tools/release/build_wheels.sh).
-  "libperfr_frida_agent.so", "libperfr_frida_agent.dylib", "perfr-frida-helper", "licenses/*",
+  # The function-hook helper and agent, present when the wheel was built
+  # with PERFR_COMPANIONS_DIR (see tools/release/build_wheels.sh).
+  "libperfr_agent.so", "libperfr_agent.dylib", "perfr_agent.dll",
+  "perfr-inject-helper", "perfr-inject-helper.exe", "licenses/*",
 ]

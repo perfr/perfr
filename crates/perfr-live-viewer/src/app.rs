@@ -3749,7 +3749,7 @@ impl PerfrLiveApp {
             }
             vsep(ui);
             section_label(ui, "HOOKS");
-            if let Some(i) = segmented(ui, "perfr_hook_method", &["Frida", "Uprobes"], usize::from(!self.user_space_hooks)) {
+            if let Some(i) = segmented(ui, "perfr_hook_method", &["Inject", "Uprobes"], usize::from(!self.user_space_hooks)) {
                 self.user_space_hooks = i == 0;
             }
             if !self.user_space_hooks && pill(ui, "Dedupe", self.uprobe_duplicate_filter)
@@ -10000,7 +10000,7 @@ fn thread_state_label(code: u8) -> (&'static str, &'static str) {
 
 /// The Live tab's "type" column legend, shown on hover.
 const INSTRUMENTATION_TYPE_LEGEND: &str = "Instrumentation type\n\
-    D — dynamic: a function hooked with Frida or a kernel uprobe, no recompile\n\
+    D — dynamic: a function hooked with the inject engine or a kernel uprobe, no recompile\n\
     MS — manual scope: perfr_start / perfr_stop in the code\n\
     MA — manual async: an async span drawn on its own track";
 

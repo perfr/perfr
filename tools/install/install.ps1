@@ -5,18 +5,15 @@
 # Installs the Rust perfr on Windows x64 from the latest release, which
 # perfr.dev serves under /download/: the twin of install.sh. Downloads perfr-windows-x86_64.zip and its
 # .sha256, refuses to install without a matching checksum, unpacks into
-# %LOCALAPPDATA%\Programs\perfr (perfr.exe, perfr_api.dll and perfr.h beside it),
-# and says how to put it on PATH. Function hooks are a separate zip. Set
-# PERFR_WITH_HOOKS=1, or pass -WithHooks / --with-hooks, to install them too.
-# `perfr hooks install` does the same later.
+# %LOCALAPPDATA%\Programs\perfr (perfr.exe, perfr-inject-helper.exe,
+# perfr_agent.dll, perfr_api.dll and perfr.h beside it), and says how to
+# put it on PATH.
 #
 #   irm https://perfr.dev/install.ps1 | iex
-#   $env:PERFR_WITH_HOOKS = '1'; irm https://perfr.dev/install.ps1 | iex
 #
 # Environment overrides, as for install.sh: PERFR_INSTALL_BASE (the URL the
 # assets are under), PERFR_VERSION (a tag such as perfr-v0.1.0; default
-# latest), PERFR_INSTALL_DIR (default %LOCALAPPDATA%\Programs\perfr),
-# PERFR_WITH_HOOKS=1.
+# latest), PERFR_INSTALL_DIR (default %LOCALAPPDATA%\Programs\perfr).
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -29,9 +26,6 @@ if ([IntPtr]::Size -ne 8 -or $env:PROCESSOR_ARCHITECTURE -notin 'AMD64', 'ARM64'
 if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
     Say 'this is an ARM64 machine; the x64 build runs under emulation and the kernel logger is untested there'
 }
-
-$withHooks = $env:PERFR_WITH_HOOKS -in @('1', 'true', 'yes', 'TRUE', 'YES') `
-    -or ($args -contains '--with-hooks') -or ($args -contains '-WithHooks')
 
 $base = if ($env:PERFR_INSTALL_BASE) { $env:PERFR_INSTALL_BASE }
         elseif ($env:PERFR_VERSION) { "https://github.com/perfr/perfr/releases/download/$($env:PERFR_VERSION)" }
@@ -72,7 +66,7 @@ try {
     $unpacked = Join-Path $temp 'unpacked'
     Expand-Archive -Path $archive -DestinationPath $unpacked -Force
     $root = Join-Path $unpacked 'perfr'
-    foreach ($required in 'perfr.exe', 'perfr_api.dll') {
+    foreach ($required in 'perfr.exe', 'perfr-inject-helper.exe', 'perfr_agent.dll', 'perfr_api.dll') {
         if (-not (Test-Path (Join-Path $root $required))) { Die "archive is missing $required" }
     }
     New-Item -ItemType Directory -Force $installDir | Out-Null
@@ -81,31 +75,8 @@ try {
         Say "stopping perfr (pid $($_.Id)) in $installDir"
         $_ | Stop-Process -Force
     }
-    # Copy the core tree. An older archive may still contain the Frida files;
-    # those get copied too. A current archive leaves them for --with-hooks.
     Copy-Item -Path (Join-Path $root '*') -Destination $installDir -Recurse -Force
     Say "installed to $installDir"
-    if ($withHooks) {
-        $hooksAsset = 'perfr-hooks-windows-x86_64.zip'
-        $hooksUrl = "$base/$hooksAsset"
-        Say "installing function hooks from $hooksUrl"
-        $hooksArchive = Join-Path $temp $hooksAsset
-        try {
-            Invoke-WebRequest -Uri $hooksUrl -OutFile $hooksArchive -UseBasicParsing
-        } catch {
-            Die ("could not download $hooksUrl`n" +
-                 "The core install is already in place. Function hooks are perfr-hooks-windows-x86_64.zip on the same release. Run ``perfr hooks install``.")
-        }
-        Verify-Sha256 $hooksArchive $hooksUrl $hooksAsset
-        $hooksUnpacked = Join-Path $temp 'hooks'
-        Expand-Archive -Path $hooksArchive -DestinationPath $hooksUnpacked -Force
-        $hooksRoot = Join-Path $hooksUnpacked 'perfr-hooks'
-        foreach ($required in 'perfr-frida-helper.exe', 'perfr_frida_agent.dll') {
-            if (-not (Test-Path (Join-Path $hooksRoot $required))) { Die "hooks archive is missing $required" }
-        }
-        Copy-Item -Path (Join-Path $hooksRoot '*') -Destination $installDir -Recurse -Force
-        Say "installed function hooks to $installDir"
-    }
 } finally {
     Remove-Item -Recurse -Force $temp -ErrorAction SilentlyContinue
 }
@@ -123,17 +94,13 @@ perfr is installed. Start it and open the viewer in a browser:
   perfr
   # then open http://127.0.0.1:44766/
 
-Manual scopes need no privilege. Function hooks are optional; this install
-included them only when PERFR_WITH_HOOKS=1 (or -WithHooks). Otherwise run:
-
-  perfr hooks install
-
-perfr looks for perfr_frida_agent.dll and perfr-frida-helper.exe beside
-itself, or in %LOCALAPPDATA%\perfr\hooks. Call-stack
-sampling, the scheduler and thread states come from the Windows kernel
-logger (ETW), which needs an elevated prompt: start perfr from a
-terminal opened with "Run as administrator" to record them. Auto-profiling
-and the kernel hook engine are Linux only.
+Manual scopes and function hooks need no privilege. perfr looks for
+perfr_agent.dll and perfr-inject-helper.exe beside itself.
+`perfr hooks status` prints the paths. Call-stack sampling, the scheduler
+and thread states come from the Windows kernel logger (ETW), which needs
+an elevated prompt: start perfr from a terminal opened with
+"Run as administrator" to record them. Auto-profiling and the kernel hook
+engine are Linux only.
 
 To instrument your own code: include\perfr.h is beside perfr
 (nothing to link; it finds perfr_api.dll there), or use the perfr-api crate

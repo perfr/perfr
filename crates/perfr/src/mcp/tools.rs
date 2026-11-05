@@ -67,7 +67,7 @@ impl Platform {
     }
 
     /// Windows: the kernel logger gives sampling, the scheduler and thread
-    /// states (with an elevated prompt); Frida hooks and manual scopes
+    /// states (with an elevated prompt); function hooks and manual scopes
     /// need no privilege. Kernel uprobes are Linux, and auto-profiling
     /// rides on them.
     pub fn windows() -> Self {
@@ -216,7 +216,7 @@ impl Mcp {
                 "dynamic_hooks": {
                     "supported": p.dynamic_hooks,
                     "engines": engines,
-                    "detail": "Frida hooks a running process with no rebuild. kernel_uprobes is Linux-only and needs root or CAP_SYS_ADMIN; it is never the default.",
+                    "detail": "Function hooks instrument a running process with no rebuild. kernel_uprobes is Linux-only and needs root or CAP_SYS_ADMIN; it is never the default.",
                 },
                 "auto_profile": feature(p.auto_profile, "The service chooses hooks from samples and prunes them to a budget. Linux only, off unless requested."),
                 "disassembly": feature(p.disassembly, "Disassembly next to source. Linux and Windows (no source lines from a PDB yet)."),
@@ -466,7 +466,7 @@ impl Mcp {
                 "platform": self.platform.name,
                 "unsupported": unsupported,
                 "message": format!(
-                    "{} perfr does not support {}. Start again without those fields. Function timing from Frida hooks still works via perfr_function_stats.",
+                    "{} perfr does not support {}. Start again without those fields. Function timing from function hooks still works via perfr_function_stats.",
                     self.platform.name,
                     unsupported.join(", ")
                 ),
@@ -695,7 +695,7 @@ fn unsupported_feature(feature: &str) -> Value {
         "supported": false,
         "feature": feature,
         "message": format!(
-            "{feature} is not available on this platform. macOS records Frida hooks and manual scopes; read those with perfr_function_stats."
+            "{feature} is not available on this platform. macOS records function hooks and manual scopes; read those with perfr_function_stats."
         ),
     })
 }
@@ -748,7 +748,7 @@ pub fn tool_specs() -> Vec<Value> {
     vec![
         tool(
             "perfr_capabilities",
-            "Read this first. Platform, which profiling features this machine supports, whether perfr is reachable, and the session (attached pid, armed hooks). Sampling, the scheduler, kernel uprobes and auto-profiling are Linux-only. macOS supports Frida hooks and manual scopes. Does not modify anything.",
+            "Read this first. Platform, which profiling features this machine supports, whether perfr is reachable, and the session (attached pid, armed hooks). Sampling, the scheduler, kernel uprobes and auto-profiling are Linux-only. macOS supports function hooks and manual scopes. Does not modify anything.",
             json!({
                 "type": "object",
                 "properties": {},
@@ -825,7 +825,7 @@ pub fn tool_specs() -> Vec<Value> {
         ),
         tool(
             "perfr_start_capture",
-            "Start a capture of the attached pid. Instruments the armed hooks with Frida unless instrumentation is kernel_uprobes (Linux, and only when you set it). sampling and scheduler default on where the platform supports them. Asking for an unsupported feature does not start the capture; the result lists what to drop. auto_profile defaults off. Starting replaces the previous capture.",
+            "Start a capture of the attached pid. Instruments the armed hooks with the default engine unless instrumentation is kernel_uprobes (Linux, and only when you set it). sampling and scheduler default on where the platform supports them. Asking for an unsupported feature does not start the capture; the result lists what to drop. auto_profile defaults off. Starting replaces the previous capture.",
             json!({
                 "type": "object",
                 "properties": {

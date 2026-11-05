@@ -149,7 +149,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let raw = profile::measure(
         &mut std::io::stdout().lock(),
         value["self_profile"].as_bool().unwrap_or(false),
-        "Frida: inject native agent",
+        "Inject: inject native agent",
         || unsafe {
             perfr_core_inject(
                 pid,

@@ -17,7 +17,7 @@ application is not in this tree; its history is on the `cpp` branch of the
 Orbit repository.
 
 Both systems attach to a process that is already running. Both can hook
-functions with Frida, and both take manual scopes from Rust, C, C++, and
+functions without a rebuild, and both take manual scopes from Rust, C, C++, and
 Python. A loaded capture in the viewer is capped at a 2 GiB heap. What else
 each system records is in the table below.
 
@@ -47,37 +47,27 @@ from a prompt opened with *Run as administrator* to record the scheduler,
 thread states and call stacks (the kernel logger is administrators-only);
 manual scopes and function hooks need no privilege.
 
-`pip install perfr` is the same service in a wheel. That wheel still
-carries the Frida files; the GitHub release archive does not. Wheels are
-built on the same tags and are not on PyPI yet.
+`pip install perfr` is the same service in a wheel, including the
+function-hook helper and agent. Wheels are built on the same tags and are
+not on PyPI yet.
 
 Privileges, capture files, and the manual API:
 [docs/manual/index.md](docs/manual/index.md).
 
-Function hooks are optional. They need `libperfr_frida_agent` and
-`perfr-frida-helper` beside `perfr`, or in the hooks data directory
-(`PERFR_FRIDA_AGENT` / `PERFR_FRIDA_HELPER` override the lookup); on Windows
-the files are `perfr_frida_agent.dll` and `perfr-frida-helper.exe`. The core
-release archive does not include them. Install with
-`curl -fsSL https://perfr.dev/install.sh | sh -s -- --with-hooks`, or later:
-
-```sh
-perfr hooks install
-```
-
-The first hook in an interactive terminal offers to download them. MCP and
-other non-interactive sessions get an error that names that command;
-`PERFR_HOOKS_AUTO_INSTALL=1` or `--hooks-auto` downloads without asking.
-Without the files, a capture that asks for Frida hooks fails the Frida
-setup; it does not switch engines on its own. On Linux the kernel engine is
-a separate choice and needs root or `CAP_SYS_ADMIN`. It is not in the macOS
-or Windows builds.
+Function hooks ship with perfr. They need `libperfr_agent` and
+`perfr-inject-helper` beside `perfr` (`PERFR_AGENT` / `PERFR_INJECT_HELPER`
+override the lookup); on Windows the files are `perfr_agent.dll` and
+`perfr-inject-helper.exe`. `perfr hooks status` prints the paths. Without
+the files, a capture that asks for function hooks fails that setup; it does
+not switch engines on its own. On Linux the kernel engine is a separate
+choice and needs root or `CAP_SYS_ADMIN`. It is not in the macOS or Windows
+builds.
 
 With no arguments, `perfr` listens on `127.0.0.1:44766`.
 
 ## Drive it from an agent
 
-`perfr mcp` is a Model Context Protocol server. It lists processes, attaches, searches functions, arms Frida hooks, starts and stops captures, and reads sampling hotspots, call stacks, and per-function timing. It does not edit source. The service has to be running first. The HTTP API has no authentication; keep it on `127.0.0.1`.
+`perfr mcp` is a Model Context Protocol server. It lists processes, attaches, searches functions, arms function hooks, starts and stops captures, and reads sampling hotspots, call stacks, and per-function timing. It does not edit source. The service has to be running first. The HTTP API has no authentication; keep it on `127.0.0.1`.
 
 Claude Code (`~/.claude.json` or `.mcp.json`):
 
@@ -136,14 +126,14 @@ limits.
 
 | | |
 |---|---|
-| Linux x86-64 | Sampling at a fixed 1 kHz with DWARF unwinding, scheduler, thread states, Frida hooks, manual scopes, disassembly. Auto-profiling uses the kernel hook engine and needs root or `CAP_SYS_ADMIN`. The release binary is static musl, about 12 MB with the viewer embedded. |
+| Linux x86-64 | Sampling at a fixed 1 kHz with DWARF unwinding, scheduler, thread states, function hooks, manual scopes, disassembly. Auto-profiling uses the kernel hook engine and needs root or `CAP_SYS_ADMIN`. The release binary is static musl, about 12 MB with the viewer embedded. |
 | Linux arm64 | The service compiles. It is not run in CI, and the published static binary is x86-64 only. |
-| macOS (Intel and Apple silicon) | Manual scopes and Frida function hooks. Native tests pass on both architectures. Attaching needs a task port; code signing, the hardened runtime, and SIP can refuse it. Shared-cache images whose symbols Frida cannot read may be missing from the function list. No call-stack sampling, scheduler, thread states, live disassembly, GPU lanes, or auto-profiling. The release binary is universal and ad-hoc signed, not notarized. |
-| Windows x86-64 | Sampling at a fixed 1 kHz with the kernel's stack walks, scheduler, thread states, Frida hooks, manual scopes, disassembly (no source lines yet), symbols from PDBs and export tables. The scheduler, thread states and sampling come from the NT Kernel Logger (ETW) and need an elevated prompt; scopes and hooks do not. No auto-profiling, kernel hook engine, or GPU lanes. The release binaries link the C runtime statically and are not code-signed. |
+| macOS (Intel and Apple silicon) | Manual scopes and function hooks. Native tests pass on both architectures. Attaching needs a task port; code signing, the hardened runtime, and SIP can refuse it. Shared-cache images whose symbols the hook engine cannot read may be missing from the function list. No call-stack sampling, scheduler, thread states, live disassembly, GPU lanes, or auto-profiling. The release binary is universal and ad-hoc signed, not notarized. |
+| Windows x86-64 | Sampling at a fixed 1 kHz with the kernel's stack walks, scheduler, thread states, function hooks, manual scopes, disassembly (no source lines yet), symbols from PDBs and export tables. The scheduler, thread states and sampling come from the NT Kernel Logger (ETW) and need an elevated prompt; scopes and hooks do not. No auto-profiling, kernel hook engine, or GPU lanes. The release binaries link the C runtime statically and are not code-signed. |
 
 ## Build from source
 
-For development on any platform, one script builds the service, the Frida
+For development on any platform, one script builds the service, the inject
 helper and agent beside it, and serves the viewer:
 
 ```sh
@@ -156,7 +146,7 @@ It needs a Rust toolchain and nothing else; `rust-toolchain.toml` pins the
 version. The viewer pack is committed, so the front end builds only when you
 change it (`crates/perfr-live-viewer/build_wasm.sh`).
 
-Linux x86-64, static binary, with the Frida files beside it:
+Linux x86-64, static binary, with the inject helper and agent beside it:
 
 ```sh
 ./tools/build/build-service-musl.sh

@@ -444,22 +444,13 @@ def measure(args: argparse.Namespace) -> None:
         lines.append(f"{name}={size}")
 
     add("core_archive_bytes", args.core_archive, "file")
-    add("hooks_archive_bytes", args.hooks_archive, "file")
     add("debug_archive_bytes", args.debug_archive, "file")
     add("symstore_archive_bytes", args.symstore_archive, "file")
     add("core_installed_bytes", args.core_dir, "dir")
-    add("hooks_installed_bytes", args.hooks_dir, "dir")
-    core = directory_bytes(args.core_dir) if args.core_dir else 0
-    hooks = directory_bytes(args.hooks_dir) if args.hooks_dir else 0
-    lines.append(f"core_plus_hooks_installed_bytes={core + hooks}")
     if args.core_dir:
         for file in sorted(args.core_dir.rglob("*")):
             if file.is_file():
                 lines.append(f"core_file:{file.relative_to(args.core_dir)}={file.stat().st_size}")
-    if args.hooks_dir:
-        for file in sorted(args.hooks_dir.rglob("*")):
-            if file.is_file():
-                lines.append(f"hooks_file:{file.relative_to(args.hooks_dir)}={file.stat().st_size}")
     text = "\n".join(lines) + "\n"
     if args.out:
         args.out.write_text(text)
@@ -481,11 +472,9 @@ def main(argv: list[str] | None = None) -> int:
     measured.add_argument("--label", required=True)
     measured.add_argument("--out", type=Path)
     measured.add_argument("--core-archive", type=Path)
-    measured.add_argument("--hooks-archive", type=Path)
     measured.add_argument("--debug-archive", type=Path)
     measured.add_argument("--symstore-archive", type=Path)
     measured.add_argument("--core-dir", type=Path)
-    measured.add_argument("--hooks-dir", type=Path)
 
     args = parser.parse_args(argv)
     if args.cmd == "split":

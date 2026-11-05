@@ -20,7 +20,7 @@ Top-down is the call tree from the root. Each node shows inclusive, self, and of
 
 ## Live table and histograms
 
-The Live tab updates while events stream in. The columns are hook, type, function, count, total, avg, min, max, std dev and module. The type hover explains **D** (dynamic, Frida or a uprobe), **MS** (a manual scope) and **MA** (a manual async span).
+The Live tab updates while events stream in. The columns are hook, type, function, count, total, avg, min, max, std dev and module. The type hover explains **D** (dynamic, the inject engine or a uprobe), **MS** (a manual scope) and **MA** (a manual async span).
 
 Click a row for its duration histogram, on a log scale, pinned under the table. The hint when nothing is selected: “Click a function above for its duration histogram”. While a capture is running the sort order is held and refreshed once a second, so rows do not trade places every frame. A click on a column header sorts immediately.
 

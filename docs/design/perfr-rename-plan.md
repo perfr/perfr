@@ -44,7 +44,7 @@ appears only where an identifier needs PascalCase.
 | Thing | Proposed name |
 | --- | --- |
 | Service binary and pip package | `perfr` (also the console script); the `orbit-profiler` wheel becomes `perfr` |
-| Other binaries | `perfr-frida-helper`, `perfr-gpu-helper`, `perfr-pod-dump`, `perfr-live-service`, `perfr-scope`, `perfr-scope-dump` |
+| Other binaries | `perfr-inject-helper`, `perfr-gpu-helper`, `perfr-pod-dump`, `perfr-live-service`, `perfr-scope`, `perfr-scope-dump` |
 | Crates | `perfr-*`, same suffixes; `use perfr_api::` and so on |
 | Public API | `perfr.h`; `perfr_scope()` and the 30 other functions; `PERFR_SCOPE` and the 17 other macros; `libperfr_api.so` / `.dylib`, `perfr_api.dll` / `.lib`; Python import `perfr_api`, pip `perfr-api` |
 | API ABI version | bumped: the shared-memory segment name changes, so old and new libraries do not interoperate |

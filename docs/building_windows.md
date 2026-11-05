@@ -16,7 +16,7 @@ how to check it.
 | Feature | Windows | How |
 |---|---|---|
 | Manual scopes (`perfr.h`, the `perfr-api` crate, `perfr_api.py`) | Yes, no privilege | A file-backed shared mapping per process under `%LOCALAPPDATA%\perfr\scopes` |
-| Function hooks (Frida) | Yes, no privilege | `perfr-frida-helper.exe` injects `perfr_frida_agent.dll`; control over a named pipe |
+| Function hooks | Yes, no privilege | `perfr-inject-helper.exe` injects `perfr_agent.dll`; control over a named pipe |
 | Call-stack sampling, 1 kHz | Yes, elevated prompt | The NT Kernel Logger's sampled profile with stack walks |
 | Scheduler (context switches, core lanes) | Yes, elevated prompt | `CSwitch` events |
 | Thread states | Yes, elevated prompt | `CSwitch` old-thread state, `ReadyThread`, thread start; initial states from a system snapshot |
@@ -28,7 +28,7 @@ how to check it.
 The kernel logger is one session per machine and is reserved to
 administrators. Start `perfr.exe` from a terminal opened with *Run
 as administrator* to record the scheduler, thread states and samples. From
-an ordinary prompt a capture still records manual scopes and Frida hooks,
+an ordinary prompt a capture still records manual scopes and function hooks,
 and the status line under the Capture strip says why the rest is missing.
 Nothing else needs elevation; the service never changes a machine setting
 apart from the profile interval, which it sets to 1 kHz for the capture and
@@ -59,15 +59,13 @@ session's PATH; every build script here dot-sources it.
 writes `dist\windows\`:
 
 - `perfr.exe`, the service with the viewer embedded.
-- `perfr_frida_agent.dll` and `perfr-frida-helper.exe`, looked up beside the
-  service, then in the hooks data directory (or `PERFR_FRIDA_AGENT` /
-  `PERFR_FRIDA_HELPER`). The GitHub release ships them in
-  `perfr-hooks-windows-x86_64.zip`, not in the core zip. `perfr hooks install`
-  downloads that zip for the running version.
+- `perfr_agent.dll` and `perfr-inject-helper.exe`, looked up beside the
+  service (`PERFR_AGENT` / `PERFR_INJECT_HELPER` override that). The GitHub
+  release ships them in the core zip. `perfr hooks status` reports the paths.
 - `perfr_api.dll` (with `perfr_api.dll.lib`), `perfr_api.lib` and
   `include\perfr.h`, the manual instrumentation SDK; `perfr_api.py`.
 - `PerfrTestRust.exe`, an instrumented test program.
-- `licenses\`, Frida's.
+- `licenses\`, for the libraries the helper and agent link.
 
 Every binary links the C runtime statically (`.cargo\config.toml`
 sets `+crt-static` for the MSVC target), so the result depends on system
@@ -117,7 +115,7 @@ Three harnesses, the same ones CI runs on `windows-2022`
 
 ```powershell
 python tools\e2e\manual_service_smoke.py --service dist\windows\perfr.exe --api-lib dist\windows\perfr_api.dll
-python tools\e2e\frida_smoke.py --service dist\windows\perfr.exe --agent dist\windows\perfr_frida_agent.dll --helper dist\windows\perfr-frida-helper.exe --target <perfr-frida-target.exe>
+python tools\e2e\frida_smoke.py --service dist\windows\perfr.exe --agent dist\windows\perfr_agent.dll --helper dist\windows\perfr-inject-helper.exe --target <perfr-frida-target.exe>
 python tools\e2e\windows_etw_smoke.py --service dist\windows\perfr.exe --target dist\windows\PerfrTestRust.exe
 ```
 
@@ -154,7 +152,7 @@ way (`PERFR_ETW_LIVE=1`).
   section (`perfr-scope-ring/src/shm_windows.rs`): the reader maps the rings
   read-only and the control page read-write, the producer lease is a
   byte-range lock, and a segment whose process has died is swept.
-- **Frida** is the same agent and helper as Linux and macOS, with a named
+- **Function hooks** use the same agent and helper as Linux and macOS, with a named
   pipe as the control channel; the helper authenticates the connecting
   process by the pid the kernel reports for the pipe client, as
   `SO_PEERCRED` does on Linux.
@@ -173,7 +171,7 @@ Timestamps everywhere are QueryPerformanceCounter ticks converted with
 - Thread names arrive only for threads named with `SetThreadDescription`
   (which Rust's `Thread::Builder::name` does).
 - The service's own track shows the Frida setup phases (inject, Gum init,
-  resolve, each trampoline) but not the `Frida: detach trampolines` span.
+  resolve, each trampoline) but not the `Inject: detach trampolines` span.
   That span is emitted at teardown over the control pipe, and a Windows
   named pipe has no half-close, so the pipe is already closing when the
   agent detaches and the span does not round-trip. The detach itself is

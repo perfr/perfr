@@ -30,18 +30,18 @@ The script refuses to run if the release version drifts between
 `perfr-api==` pin in perfr, and the two `__version__`s: bump all of
 them together.
 
-The perfr wheel includes the Frida companions
-(`libperfr_frida_agent`, `perfr-frida-helper`, `licenses/`). The service
+The perfr wheel includes the function-hook helper and agent
+(`libperfr_agent`, `perfr-inject-helper`, `licenses/`). The service
 loads them from the directory that contains `perfr`. The script
 builds them for the wheel target. `PERFR_COMPANIONS_DIR=<dir>` skips that
 build and copies a directory already produced by `tools/frida/build.sh`.
 
-The GitHub release is different: the core archive has no Frida files.
-`perfr-hooks-<platform>` is the optional archive, and `perfr hooks install`
-downloads it. The wheel keeps the companions so `pip install perfr` can hook
-without a second download. Debug symbols for the release binaries are split
-out by `tools/release/split_debug.py` and published beside the release; see
-[docs/releasing.md](../../docs/releasing.md).
+The GitHub release archive contains the same files. Debug symbols for the
+release binaries are split out by `tools/release/split_debug.py` and
+published beside the release; see
+[docs/releasing.md](../../docs/releasing.md). The detached debug files and
+the symbol-store entries use the binary names (`perfr-inject-helper`,
+`libperfr_agent.so`, and the macOS and Windows equivalents).
 
 Local check:
 

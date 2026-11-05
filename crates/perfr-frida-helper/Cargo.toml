@@ -5,9 +5,14 @@
 [package]
 name = "perfr-frida-helper"
 version = "0.1.0"
-description = "The Frida Core controller process: attaches to the target and drives the agent"
+description = "The inject helper: attaches to the target and drives the agent"
 edition = "2021"
 license = "BSD-2-Clause"
+autobins = false
+
+[[bin]]
+name = "perfr-inject-helper"
+path = "src/main.rs"
 
 [dependencies]
 libc = "0.2"

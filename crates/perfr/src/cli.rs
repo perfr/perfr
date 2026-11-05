@@ -8,8 +8,6 @@
 //! behavior they had before subcommands. `perfr serve`, `capture`, and
 //! `slice` are the same work with help text.
 
-use std::path::PathBuf;
-
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
@@ -28,12 +26,12 @@ Examples:
   perfr skill install --dry-run
   perfr doctor
   perfr setup
-  perfr hooks install
+  perfr hooks status
   perfr update --check
 
 `perfr --serve`, `perfr --pid`, and `perfr --slice` still work.
 perfr runs on Linux, macOS, and Windows. Sampling and the scheduler need
-Linux, or an elevated Windows prompt. macOS records manual scopes and Frida hooks.";
+Linux, or an elevated Windows prompt. macOS records manual scopes and function hooks.";
 
 const SUBCOMMANDS: &[&str] = &[
     "serve", "capture", "slice", "mcp", "skill", "hooks", "update", "doctor", "setup", "version",
@@ -101,7 +99,6 @@ pub fn command() -> Command {
         .subcommand(hooks_cmd())
         .subcommand(update_cmd())
         .subcommand(version_cmd())
-        .arg(hooks_auto_arg())
 }
 
 /// Top-level help. Clap 4 styles one subcommand heading, so the groups are
@@ -143,7 +140,10 @@ pub fn render_top_help(color: bool) -> String {
                     "setup",
                     "Apply permission fixes for sampling and instrumentation",
                 ),
-                ("hooks", "Install optional Frida function hooks"),
+                (
+                    "hooks",
+                    "Show whether the function-hook helper and agent are present",
+                ),
                 ("update", "Update this install from a GitHub release"),
                 ("version", "Print the version, git hash, and build date"),
             ],
@@ -159,7 +159,6 @@ pub fn render_top_help(color: bool) -> String {
         }
     }
     out.push_str(&format!("\n{header}Options:{header:#}\n"));
-    out.push_str("      --hooks-auto    Download function hooks without prompting\n");
     out.push_str("      --no-preflight  Skip the permission check on startup\n");
     out.push_str("  -h, --help          Print help\n");
     out.push_str("  -V, --version       Print version\n\n");
@@ -211,9 +210,6 @@ fn clap_front(args: &[String]) -> Front {
             return Front::Exit(code);
         }
     };
-    if matches.get_flag("hooks-auto") {
-        crate::hook_dist::set_auto_from_flag();
-    }
     match matches.subcommand() {
         Some(("serve", sub)) => Front::Serve(serve_opts(sub)),
         Some(("capture", sub)) => Front::Capture(capture_opts(sub)),
@@ -566,55 +562,29 @@ fn skill_verb(name: &'static str, about: &'static str) -> Command {
         )
 }
 
-fn hooks_auto_arg() -> Arg {
-    Arg::new("hooks-auto")
-        .long("hooks-auto")
-        .global(true)
-        .action(ArgAction::SetTrue)
-        .help("Download function hooks without prompting when they are missing")
-}
-
 fn run_hooks(matches: &ArgMatches) -> i32 {
-    let Some((name, sub)) = matches.subcommand() else {
-        eprintln!("perfr hooks: expected install, status, or uninstall");
+    let Some((name, _)) = matches.subcommand() else {
+        eprintln!("perfr hooks: expected status");
         return 2;
     };
-    let opts = crate::hook_dist::HooksOpts {
-        dir: sub.get_one::<String>("dir").map(PathBuf::from),
-    };
-    crate::hook_dist::command(name, &opts)
+    crate::hook_dist::command(name)
 }
 
 fn hooks_cmd() -> Command {
     Command::new("hooks")
-        .about("Install optional Frida function hooks")
+        .about("Show whether the function-hook helper and agent are present")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(
-            Command::new("install")
-                .about("Download the hooks archive for this perfr version")
+            Command::new("status")
+                .about("Show perfr-inject-helper and the agent library")
                 .after_help(
-                    "Verifies the published SHA-256 and refuses a hooks archive whose \
-                     version does not match this binary.\n\n\
-                     Examples:\n  \
-                     perfr hooks install\n  \
-                     perfr hooks install --dir ~/.local/share/perfr/hooks",
-                )
-                .arg(
-                    Arg::new("dir")
-                        .long("dir")
-                        .value_name("DIR")
-                        .help("Install directory (default: beside perfr, or the hooks data dir)"),
-                )
-                .arg(
-                    Arg::new("yes")
-                        .long("yes")
-                        .action(ArgAction::SetTrue)
-                        .help("Accepted for scripts; install does not prompt"),
+                    "Function hooks ship beside perfr. This prints their paths, \
+                     or the reason they were not found.\n\n\
+                     Example:\n  \
+                     perfr hooks status",
                 ),
         )
-        .subcommand(Command::new("status").about("Show whether function hooks are installed"))
-        .subcommand(Command::new("uninstall").about("Remove installed function hooks"))
 }
 
 fn doctor_cmd() -> Command {
@@ -761,11 +731,14 @@ mod tests {
         assert!(setup.contains("--check"), "{setup}");
         assert!(setup.contains("--persist"), "{setup}");
         let hooks = render(&["hooks", "--help"]);
-        assert!(hooks.contains("install"), "{hooks}");
         assert!(hooks.contains("status"), "{hooks}");
-        assert!(hooks.contains("uninstall"), "{hooks}");
-        let hooks_install = render(&["hooks", "install", "--help"]);
-        assert!(hooks_install.contains("--dir"), "{hooks_install}");
+        assert!(!hooks.contains("install"), "{hooks}");
+        assert!(!hooks.contains("uninstall"), "{hooks}");
+        let hooks_status = render(&["hooks", "status", "--help"]);
+        assert!(
+            hooks_status.contains("perfr-inject-helper"),
+            "{hooks_status}"
+        );
     }
 
     #[test]

@@ -34,16 +34,16 @@ def read_line_within(child, seconds):
 
 
 def helper_children(service_pid):
-    """The pids of perfr-frida-helper processes the service spawned."""
+    """The pids of perfr-inject-helper processes the service spawned."""
     if sys.platform == 'win32':
         script = (f"Get-CimInstance Win32_Process -Filter 'ParentProcessId={service_pid}' | "
-                  "Where-Object { $_.Name -like 'perfr-frida-helper*' } | ForEach-Object { $_.ProcessId }")
+                  "Where-Object { $_.Name -like 'perfr-inject-helper*' } | ForEach-Object { $_.ProcessId }")
         out = subprocess.check_output(['powershell', '-NoProfile', '-Command', script], text=True)
         return [int(line) for line in out.split() if line.strip().isdecimal()]
     processes = subprocess.check_output(['ps', '-axo', 'pid=,ppid=,args='], text=True)
     return [int(fields[0]) for row in processes.splitlines()
             if len(fields := row.split(None, 2)) == 3
-            and int(fields[1]) == service_pid and 'perfr-frida-helper' in fields[2]]
+            and int(fields[1]) == service_pid and 'perfr-inject-helper' in fields[2]]
 
 
 def kill_hard(pid):
@@ -82,7 +82,7 @@ def main():
             data = response.read()
             return json.loads(data) if data.startswith((b'{', b'[')) else data
     with tempfile.TemporaryFile(mode='w+') as log:
-        env = dict(os.environ, PERFR_FRIDA_AGENT=str(Path(args.agent).resolve()) + ('.missing' if args.missing_agent else ''), PERFR_FRIDA_HELPER=str(Path(args.helper).resolve()) + ('.missing' if args.missing_helper else ''))
+        env = dict(os.environ, PERFR_AGENT=str(Path(args.agent).resolve()) + ('.missing' if args.missing_agent else ''), PERFR_INJECT_HELPER=str(Path(args.helper).resolve()) + ('.missing' if args.missing_helper else ''))
         service = subprocess.Popen([args.service, '--host', '127.0.0.1', '--serve', str(port)], env=env, stdout=log, stderr=log)
         target = subprocess.Popen([args.target], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True)
         try:
@@ -120,7 +120,7 @@ def main():
                     request('/api/capture/start', {'pid':pid, 'instrumented_functions':[{'function_id': hooks[0]['function_id']}]})
                 except urllib.error.HTTPError as error:
                     message = error.read()
-                    expected = b'Frida helper' if args.missing_helper else b'Frida agent'
+                    expected = b'inject helper' if args.missing_helper else b'inject agent'
                     assert expected in message, message
                 else:
                     raise AssertionError('missing Frida runtime silently accepted')
@@ -182,30 +182,30 @@ def main():
                 time.sleep(.15)
                 request('/api/capture/stop', {})
                 status = request('/api/status')
-                if args.engine == 'frida': assert status['instrumentation'].startswith('Frida:'), status
+                if args.engine == 'frida': assert status['instrumentation'].startswith('function hooks:'), status
                 with zipfile.ZipFile(io.BytesIO(request('/api/capture/export?format=bundle'))) as capture:
                     manifest = json.loads(capture.read('manifest.json'))
                     rows = parquet.read_table(io.BytesIO(capture.read(manifest['files']['events']))).to_pylist()
                 if args.engine == 'frida':
-                    phases = [r for r in rows if r['pid'] == service.pid and r['name'].startswith('Frida: ')]
-                    expected_phases = ['Frida: inject native agent', 'Frida: initialize Gum',
-                                       'Frida: connect scope API', 'Frida: resolve executable address',
-                                       'Frida: detach trampolines']
+                    phases = [r for r in rows if r['pid'] == service.pid and r['name'].startswith('Inject: ')]
+                    expected_phases = ['Inject: inject native agent', 'Inject: initialize Gum',
+                                       'Inject: connect scope API', 'Inject: resolve executable address',
+                                       'Inject: detach trampolines']
                     # The detach span is emitted at teardown and relayed over the
                     # control channel. A Windows named pipe has no half-close, so
                     # it is already closing when the agent detaches and the span
                     # does not round-trip; the detach still happens (hooks are
                     # removed, below). See docs/building_windows.md.
                     if sys.platform == 'win32':
-                        expected_phases.remove('Frida: detach trampolines')
+                        expected_phases.remove('Inject: detach trampolines')
                     for name in expected_phases:
                         # Cached initialization can finish within a host clock tick
                         # (notably CLOCK_MONOTONIC on Darwin). Zero is valid.
                         assert any(r['name'] == name and r['duration_ns'] >= 0 for r in phases), ('missing self-profile phase', name)
-                    installs = [r for r in phases if r['name'].startswith('Frida: install trampoline: ')]
+                    installs = [r for r in phases if r['name'].startswith('Inject: install trampoline: ')]
                     assert len(installs) == len(wanted), ('missing hook installation timings', installs)
                     assert all(r['duration_ns'] > 0 and not (r['flags'] & 128) for r in installs)
-                    arm = next(r for r in phases if r['name'] == 'Frida: arm hooks')
+                    arm = next(r for r in phases if r['name'] == 'Inject: arm hooks')
                     assert all(arm['start_ns'] <= r['start_ns'] and
                                r['start_ns'] + r['duration_ns'] <= arm['start_ns'] + arm['duration_ns']
                                for r in installs), 'remote timestamps do not align with service setup'
@@ -218,7 +218,7 @@ def main():
                     tids = {e['tid'] for e in events}
                     assert len(tids) == 3
                     if not args.no_manual: assert tids == {r['tid'] for r in rows if r['pid'] == pid and r['name'] == 'manual worker'}, 'manual and dynamic thread identities differ'
-                if not args.no_manual: assert any(r['pid'] == pid and r['name'] == 'manual alongside Frida' for r in rows), 'manual segment was replaced'
+                if not args.no_manual: assert any(r['pid'] == pid and r['name'] == 'manual alongside hooks' for r in rows), 'manual segment was replaced'
                 if args.engine in ('frida', 'kernel_uprobes'):
                     dynamic = [r for r in rows if r['pid'] == pid and r['kind'] == 1 and bare(r['name']) in wanted]
                     assert all(r['flags'] & 128 for r in dynamic), 'dynamic provenance lost in export'

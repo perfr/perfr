@@ -101,14 +101,14 @@ A capture that is already running keeps the hooks it started with. `perfr_unhook
 
 | | Linux | Windows | macOS |
 |---|---|---|---|
-| Frida hooks, no rebuild | yes | yes | yes |
+| Function hooks, no rebuild | yes | yes | yes |
 | Manual scopes (`perfr_function_stats`) | yes | yes | yes |
 | Sampling and call stacks | yes | yes, from an elevated prompt | the tool returns `supported: false` |
 | Scheduler and thread states | yes | yes, from an elevated prompt | `supported: false` |
 | Kernel uprobes | yes, when you ask, needs root or `CAP_SYS_ADMIN` | refused | refused |
 | Auto-profiling | yes, off unless you set it | refused | refused |
 
-Asking to start a capture with sampling on macOS does not start the capture. The result names the unsupported fields. Start again without them. On Windows the capture starts either way; without an elevated prompt the sampling report is empty and the service's `instrumentation` status line says the kernel logger needs one. `perfr_function_stats` is the reading for a Frida hook on every platform. Times are integer nanoseconds.
+Asking to start a capture with sampling on macOS does not start the capture. The result names the unsupported fields. Start again without them. On Windows the capture starts either way; without an elevated prompt the sampling report is empty and the service's `instrumentation` status line says the kernel logger needs one. `perfr_function_stats` is the reading for a function hook on every platform. Times are integer nanoseconds.
 
 Sampling can also come back with `"samples": 0` on Linux when `perf_event_paranoid` is too high. That is an empty profile, not an unsupported feature. [Troubleshooting](troubleshooting.md) has the sysctl.
 

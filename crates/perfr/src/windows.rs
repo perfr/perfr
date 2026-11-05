@@ -485,7 +485,7 @@ struct Etw {
 /// Starts the kernel logger for a capture, or says why it could not.
 fn open_etw(sampling: bool, focus: &[u32], capture_start_ns: u64) -> Result<Etw, String> {
     if !perfr_etw::is_elevated() {
-        return Err("Windows: the scheduler and sampling need the kernel logger, which needs an elevated prompt (Run as administrator); manual scopes and Frida hooks still work".into());
+        return Err("Windows: the scheduler and sampling need the kernel logger, which needs an elevated prompt (Run as administrator); manual scopes and function hooks still work".into());
     }
     let session = KernelSession::start(SessionOptions { sampling_hz: if sampling { 1000 } else { 0 }, scheduler: true, images: false, ..SessionOptions::default() })?;
     let consumer = Consumer::open_realtime(session.name())?;
@@ -922,7 +922,7 @@ pub fn capture_loop(
         service.set_instrumentation_status(status_line(&frida, &scopes, true));
     }
     // A fresh instant, taken after the kernel and Frida stops: the agent's
-    // "Frida: detach trampolines" span and the service's own stop scopes are
+    // "Inject: detach trampolines" span and the service's own stop scopes are
     // stamped during those stops, after `end_ns`, so draining to `end_ns`
     // would leave them below the horizon.
     let drain_ns = crate::now_monotonic_ns();

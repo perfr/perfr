@@ -131,7 +131,7 @@ class Service:
         if not os.path.exists(binary):
             raise Failure(
                 f"{binary} is missing.\nBuild it:  ./run.sh (builds the service with the "
-                "Frida helper and agent beside it)"
+                "perfr-inject-helper and libperfr_agent beside it)"
             )
         self.port = port
         self.base = f"http://127.0.0.1:{port}"

@@ -1,32 +1,27 @@
-# Frida instrumentation
+# Dynamic instrumentation
 
-Frida is the default dynamic instrumentation engine. The viewer selects it by
-default; HTTP requests with no method, `frida`, or the older `user_space` value
-select Frida. Linux's existing uprobes remain available through the **Uprobes**
-selector or `dynamic_instrumentation_method: "kernel_uprobes"`. Failures are
-reported at Start, without silently switching engines.
+Inject is the default dynamic instrumentation engine. The viewer’s **HOOKS**
+control selects **Inject** by default. HTTP requests with no method, `frida`,
+or the older `user_space` value select that engine. Linux’s existing uprobes
+remain available through the **Uprobes** selector or
+`dynamic_instrumentation_method: "kernel_uprobes"`. Failures are reported at
+Start, without silently switching engines.
+
+The shipped files are `perfr-inject-helper` and `libperfr_agent`. The helper
+links Frida Core and the agent links Gum; those library names stay inside
+the build.
 
 ## Installed builds
 
-The GitHub release does not put the helper or the agent in the core archive.
-`perfr hooks install` downloads `perfr-hooks-<platform>` for this binary's
-version, checks the SHA-256, and requires `perfr-hooks-version` to match.
-`perfr hooks status` and `perfr doctor` show whether that copy is present.
-`perfr update` replaces it when hooks are already installed.
-
-The first time a capture needs hooks:
-
-- an interactive terminal is asked before downloading
-- MCP and any other non-interactive session get an error that says to run
-  `perfr hooks install`
-- `PERFR_HOOKS_AUTO_INSTALL=1` or `--hooks-auto` downloads without asking
-- `PERFR_HOOKS_NO_PROMPT=1` forces the error even on a terminal
+The GitHub release puts the helper and the agent in the core archive, next
+to `perfr`. The files are `perfr-inject-helper` and `libperfr_agent.so`
+(`.dylib` on macOS, `perfr-inject-helper.exe` and `perfr_agent.dll` on
+Windows). `perfr hooks status` and `perfr doctor` show whether that copy is
+present. `perfr update` replaces them with the rest of the archive.
 
 Lookup order, for the helper and the agent separately: the environment
-variable, the directory that contains `perfr`, then the hooks data directory
-(`PERFR_HOOKS_DIR`, `%LOCALAPPDATA%\perfr\hooks`, or
-`~/.local/share/perfr/hooks`). A development build can keep using
-`PERFR_FRIDA_HELPER` and `PERFR_FRIDA_AGENT`.
+variable, then the directory that contains `perfr`. A development build sets
+`PERFR_INJECT_HELPER` and `PERFR_AGENT`.
 
 ## Build and run
 
@@ -37,8 +32,8 @@ On Linux, install Rust 1.88.0, a C compiler, curl and tar/xz, then:
 ./dist/frida/perfr --host 127.0.0.1 --serve 3000
 ```
 
-The package contains a native `perfr-frida-helper` linked to Frida Core and
-`libperfr_frida_agent.so` linked to Gum. No Python environment or JavaScript
+The package contains a native `perfr-inject-helper` linked to Frida Core and
+`libperfr_agent.so` linked to Gum. No Python environment or JavaScript
 agent is needed. `tools/frida/devkits.sh` downloads Frida 17.17.0 native devkits,
 verifies their pinned SHA-256 checksums, and caches them under
 `target/frida-devkits`. Set `PERFR_FRIDA_DEVKIT_ROOT` to use another cache.
@@ -55,17 +50,17 @@ For a development build:
 cargo +1.88.0 build --locked -p perfr-frida-helper
 cargo +1.88.0 build --locked -p perfr-frida-agent --features native
 cargo +1.88.0 build --locked -p perfr
-PERFR_FRIDA_HELPER="$PWD/target/debug/perfr-frida-helper" \
-PERFR_FRIDA_AGENT="$PWD/target/debug/libperfr_frida_agent.so" \
+PERFR_INJECT_HELPER="$PWD/target/debug/perfr-inject-helper" \
+PERFR_AGENT="$PWD/target/debug/libperfr_agent.so" \
   target/debug/perfr
 ```
 
 Use `.dylib` on macOS. The service otherwise finds both components beside its
-executable. A Cargo-only service build does not build the optional injector.
+executable. A Cargo-only service build does not build the inject helper.
 The agent's default Cargo feature set keeps lifecycle unit tests independent
 of the devkits; a deployable agent requires `--features native`. Ordinary manual
-captures need neither native Frida component. The musl service remains static;
-its Frida helper and agent use the host's native libc.
+captures need neither the helper nor the agent. The musl service remains static;
+its helper and agent use the host's native libc.
 
 Select a running process, load its functions, select functions, and record.
 Linux uses the existing ELF/detached-debug-file index. macOS uses Frida to
@@ -159,7 +154,7 @@ repository's BSD license. Devkit archives remain build inputs, not runtime files
 
 ## Self-profiling
 
-The service records `Frida:` phases in its own timeline: arming hooks, launching
+The service records `Inject:` phases in its own timeline: arming hooks, launching
 and waiting for the helper, native-agent injection, Gum initialization, connecting
 the scope API, executable-address resolution, installing each named trampoline,
 and normal detach. Recording begins before attachment.

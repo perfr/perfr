@@ -100,12 +100,12 @@ leaves a log you can read and delete. The banner and `GET /api/status`
 ```
 [2026-09-26T14:03:22.123456] [INFO ] [serve.rs:773] 3 sampling ring(s) at 1000 Hz, unwinder ready
 [2026-09-26T14:03:24.010775] [WARN ] [viewer 7c1e perfr_live_viewer::net] WebSocket closed
-[2026-09-26T14:03:24.100031] [INFO ] [perfr-frida-helper] agent injected into pid 4242
+[2026-09-26T14:03:24.100031] [INFO ] [perfr-inject-helper] agent injected into pid 4242
 ```
 
 UTC time to the microsecond, the level, where the line came from, the
 message. The origin is `file:line` for the service's own lines, the helper's
-name for a line a child process (`perfr-frida-helper`, `perfr-gpu-helper`)
+name for a line a child process (`perfr-inject-helper`, `perfr-gpu-helper`)
 wrote to its stderr, and `viewer <page> <module>` for a line the browser
 viewer relayed through `POST /api/log` -- the viewer sends its own log
 (everything it prints to the console, and a panic) so one file has both

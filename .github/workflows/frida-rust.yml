@@ -50,39 +50,39 @@ jobs:
       - name: Drive a capture through the MCP server
         run: |
           if [ "$(uname -s)" = Darwin ]; then ext=dylib; prefix=(sudo); else ext=so; prefix=(); fi
-          "${prefix[@]}" /tmp/perfr-frida-test/bin/python tools/e2e/mcp_loop.py --helper target/debug/perfr-frida-helper --service target/debug/perfr --agent "target/debug/libperfr_frida_agent.$ext" --target /tmp/perfr-frida-target
+          "${prefix[@]}" /tmp/perfr-frida-test/bin/python tools/e2e/mcp_loop.py --helper target/debug/perfr-inject-helper --service target/debug/perfr --agent "target/debug/libperfr_agent.$ext" --target /tmp/perfr-frida-target
       - name: Verify live attachment, exact spans and restart
         run: |
           if [ "$(uname -s)" = Darwin ]; then ext=dylib; else ext=so; fi
           # Hosted Macs have no interactive authorization dialog. Run both
           # our own target and collector as root for this attachment test.
           if [ "$(uname -s)" = Darwin ]; then prefix=(sudo); else prefix=(); fi
-          "${prefix[@]}" /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-frida-helper --service target/debug/perfr --agent "target/debug/libperfr_frida_agent.$ext" --target /tmp/perfr-frida-target
+          "${prefix[@]}" /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-inject-helper --service target/debug/perfr --agent "target/debug/libperfr_agent.$ext" --target /tmp/perfr-frida-target
       - name: Verify detach and controller death with a call in flight
         run: |
           if [ "$(uname -s)" = Darwin ]; then ext=dylib; prefix=(sudo); else ext=so; prefix=(); fi
           for mode in --inflight --controller-death; do
-            "${prefix[@]}" /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-frida-helper --service target/debug/perfr --agent "target/debug/libperfr_frida_agent.$ext" --target /tmp/perfr-frida-target "$mode"
+            "${prefix[@]}" /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-inject-helper --service target/debug/perfr --agent "target/debug/libperfr_agent.$ext" --target /tmp/perfr-frida-target "$mode"
           done
       - name: Verify injected API in a target without manual instrumentation
         run: |
           cc -O1 -g -DPERFR_NO_API tools/e2e/frida_target.c -lpthread -o /tmp/perfr-frida-plain-target
           if [ "$(uname -s)" = Darwin ]; then ext=dylib; prefix=(sudo); else ext=so; prefix=(); fi
-          "${prefix[@]}" /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-frida-helper --service target/debug/perfr --agent "target/debug/libperfr_frida_agent.$ext" --target /tmp/perfr-frida-plain-target --no-manual
+          "${prefix[@]}" /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-inject-helper --service target/debug/perfr --agent "target/debug/libperfr_agent.$ext" --target /tmp/perfr-frida-plain-target --no-manual
       - name: Verify shared API discovery without API symbols
         if: runner.os == 'Linux'
         run: |
           objcopy --strip-symbol=perfr_init --strip-symbol=perfr_start_dynamic --strip-symbol=perfr_stop --strip-symbol=perfr_start /tmp/perfr-frida-target /tmp/perfr-frida-hidden-api-target
-          /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-frida-helper --service target/debug/perfr --agent target/debug/libperfr_frida_agent.so --target /tmp/perfr-frida-hidden-api-target
+          /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-inject-helper --service target/debug/perfr --agent target/debug/libperfr_agent.so --target /tmp/perfr-frida-hidden-api-target
       - name: Verify startup failure does not block manual capture
         if: runner.os == 'Linux'
-        run: /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-frida-helper --service target/debug/perfr --agent target/debug/libperfr_frida_agent.so --target /tmp/perfr-frida-target --missing-agent
+        run: /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-inject-helper --service target/debug/perfr --agent target/debug/libperfr_agent.so --target /tmp/perfr-frida-target --missing-agent
       - name: Verify missing native helper does not block manual capture
         if: runner.os == 'Linux'
-        run: /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-frida-helper --service target/debug/perfr --agent target/debug/libperfr_frida_agent.so --target /tmp/perfr-frida-target --missing-helper
+        run: /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-inject-helper --service target/debug/perfr --agent target/debug/libperfr_agent.so --target /tmp/perfr-frida-target --missing-helper
       - name: Verify retained Linux uprobe backend
         if: runner.os == 'Linux'
-        run: sudo /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-frida-helper --service target/debug/perfr --agent target/debug/libperfr_frida_agent.so --target /tmp/perfr-frida-target --engine kernel_uprobes
+        run: sudo /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-inject-helper --service target/debug/perfr --agent target/debug/libperfr_agent.so --target /tmp/perfr-frida-target --engine kernel_uprobes
       - name: Smoke test two services in one timeline
         run: /tmp/perfr-frida-test/bin/python tools/e2e/multi_machine_smoke.py --service target/debug/perfr --target target/debug/PerfrTestRust
       - name: Collect macOS crash reports

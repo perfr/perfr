@@ -104,7 +104,7 @@ else
 fi
 [[ -x "$BIN" ]] || die "built, but $BIN is missing"
 
-# Dynamic instrumentation defaults to Frida. Keep its native components beside
+# Dynamic instrumentation defaults to the inject engine. Keep its components beside
 # the development service; the musl builder already packages them there.
 if [[ "$SERVE" -eq 1 && "$STATIC" -eq 0 ]]; then
   ./tools/frida/build.sh "$(dirname "$BIN")" --agent-only

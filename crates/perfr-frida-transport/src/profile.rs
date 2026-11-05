@@ -61,12 +61,12 @@ mod tests {
     fn telemetry_preserves_result_and_monotonic_interval() {
         let mut bytes = Vec::new();
         let before = now_ns();
-        let result = measure(&mut bytes, true, "Frida: test", || Err::<(), _>(42));
+        let result = measure(&mut bytes, true, "Inject: test", || Err::<(), _>(42));
         let after = now_ns();
         assert_eq!(result, Err(42));
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let p = &value["profile"];
-        assert_eq!(p["name"], "Frida: test");
+        assert_eq!(p["name"], "Inject: test");
         let start = p["start_ns"].as_u64().unwrap();
         let end = p["end_ns"].as_u64().unwrap();
         assert!(before <= start && start <= end && end <= after);
@@ -75,7 +75,7 @@ mod tests {
     #[test]
     fn disabled_or_disconnected_telemetry_does_not_change_work() {
         let mut bytes = Vec::new();
-        assert_eq!(measure(&mut bytes, false, "Frida: test", || 42), 42);
+        assert_eq!(measure(&mut bytes, false, "Inject: test", || 42), 42);
         assert!(bytes.is_empty());
         struct Disconnected;
         impl Write for Disconnected {
@@ -86,6 +86,6 @@ mod tests {
                 Ok(())
             }
         }
-        assert_eq!(measure(&mut Disconnected, true, "Frida: test", || 42), 42);
+        assert_eq!(measure(&mut Disconnected, true, "Inject: test", || 42), 42);
     }
 }

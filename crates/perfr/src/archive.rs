@@ -237,14 +237,10 @@ fn find_eocd(bytes: &[u8]) -> Result<usize, String> {
     Err("zip end of central directory not found".into())
 }
 
-/// Drop the leading `perfr/` or `perfr-hooks/` directory the release archives use.
+/// Drop the leading `perfr/` directory the release archives use.
 pub fn install_relative(path: &str) -> Option<String> {
     let path = path.trim_start_matches("./").replace('\\', "/");
-    // `perfr-hooks/` has to be tried first: it also starts with `perfr`.
-    let rest = path
-        .strip_prefix("perfr-hooks/")
-        .or_else(|| path.strip_prefix("perfr/"))
-        .unwrap_or(path.as_str());
+    let rest = path.strip_prefix("perfr/").unwrap_or(path.as_str());
     if rest.is_empty() || rest.ends_with('/') || rest.split('/').any(|part| part == "..") {
         return None;
     }
@@ -377,7 +373,7 @@ mod tests {
     fn tar_gz_round_trip_keeps_the_perfr_layout() {
         let packed = pack_tar_gz(&[
             ("perfr/perfr", b"bin", 0o755),
-            ("perfr/libperfr_frida_agent.so", b"so", 0o644),
+            ("perfr/libperfr_agent.so", b"so", 0o644),
         ]);
         let files = unpack_named("perfr-linux-x86_64.tar.gz", &packed).unwrap();
         assert_eq!(files.len(), 2);
@@ -401,13 +397,12 @@ mod tests {
         );
         assert_eq!(install_relative("perfr/../../etc/passwd"), None);
         assert_eq!(
-            install_relative("perfr-hooks/perfr-frida-helper").as_deref(),
-            Some("perfr-frida-helper")
+            install_relative("perfr/perfr-inject-helper").as_deref(),
+            Some("perfr-inject-helper")
         );
         assert_eq!(
-            install_relative("perfr-hooks/licenses/frida").as_deref(),
-            Some("licenses/frida")
+            install_relative("perfr/licenses/NOTICE").as_deref(),
+            Some("licenses/NOTICE")
         );
-        assert_eq!(install_relative("perfr-hooks/../../etc/passwd"), None);
     }
 }

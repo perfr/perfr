@@ -75,8 +75,8 @@ jobs:
           Push-Location target\e2e
           cl.exe /nologo /O1 /Zi /std:c11 /utf-8 /DPERFR_STATIC /I..\..\crates\perfr-api\include ..\..\..\tools\e2e\frida_target.c /Fe:perfr-frida-target.exe /link /DEBUG ..\x86_64-pc-windows-msvc\release\perfr_api.lib ws2_32.lib ntdll.lib userenv.lib bcrypt.lib advapi32.lib kernel32.lib
           Pop-Location
-          python tools/e2e/frida_smoke.py --service dist/windows/perfr.exe --agent dist/windows/perfr_frida_agent.dll --helper dist/windows/perfr-frida-helper.exe --target target/e2e/perfr-frida-target.exe
-          python tools/e2e/frida_smoke.py --service dist/windows/perfr.exe --agent dist/windows/perfr_frida_agent.dll --helper dist/windows/perfr-frida-helper.exe --target target/e2e/perfr-frida-target.exe --inflight
+          python tools/e2e/frida_smoke.py --service dist/windows/perfr.exe --agent dist/windows/perfr_agent.dll --helper dist/windows/perfr-inject-helper.exe --target target/e2e/perfr-frida-target.exe
+          python tools/e2e/frida_smoke.py --service dist/windows/perfr.exe --agent dist/windows/perfr_agent.dll --helper dist/windows/perfr-inject-helper.exe --target target/e2e/perfr-frida-target.exe --inflight
       - name: Capture the scheduler and samples with the kernel logger
         run: |
           python tools/e2e/windows_etw_smoke.py --service dist/windows/perfr.exe --target dist/windows/PerfrTestRust.exe

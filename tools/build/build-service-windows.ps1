@@ -44,13 +44,13 @@ try {
     cargo +1.88.0 build --locked --release --target $target -p perfr-api -p perfr-test-rust -p perfr-frida-agent --features perfr-frida-agent/native
     if ($LASTEXITCODE -ne 0) { throw 'perfr-api / agent build failed' }
     cargo +1.88.0 build --locked --release --target $target -p perfr-frida-helper
-    if ($LASTEXITCODE -ne 0) { throw 'perfr-frida-helper build failed' }
+    if ($LASTEXITCODE -ne 0) { throw 'perfr-inject-helper build failed' }
 
     New-Item -ItemType Directory -Force "$Output\include", "$Output\licenses" | Out-Null
     $files = @{
         "target\$target\release\perfr.exe" = 'perfr.exe'
-        "target\$target\release\perfr-frida-helper.exe" = 'perfr-frida-helper.exe'
-        "target\$target\release\perfr_frida_agent.dll" = 'perfr_frida_agent.dll'
+        "target\$target\release\perfr-inject-helper.exe" = 'perfr-inject-helper.exe'
+        "target\$target\release\perfr_agent.dll" = 'perfr_agent.dll'
         "target\$target\release\perfr_api.dll" = 'perfr_api.dll'
         "target\$target\release\perfr_api.dll.lib" = 'perfr_api.dll.lib'
         "target\$target\release\perfr_api.lib" = 'perfr_api.lib'
@@ -75,7 +75,7 @@ try {
     Copy-Item 'tools\frida\licenses\*' "$Output\licenses\" -Force
 
     # Static CRT: nothing but system DLLs may be imported.
-    foreach ($binary in 'perfr.exe', 'perfr-frida-helper.exe', 'perfr_frida_agent.dll', 'perfr_api.dll') {
+    foreach ($binary in 'perfr.exe', 'perfr-inject-helper.exe', 'perfr_agent.dll', 'perfr_api.dll') {
         $imports = (dumpbin /nologo /dependents (Join-Path $Output $binary) | Select-String -Pattern '^\s+(\S+\.dll)\s*$' | ForEach-Object { $_.Matches[0].Groups[1].Value.ToLowerInvariant() })
         $runtime = $imports | Where-Object { $_ -like 'vcruntime*' -or $_ -like 'msvcp*' -or $_ -like 'msvcr*' -or $_ -like 'api-ms-win-crt-*' -or $_ -eq 'ucrtbase.dll' }
         if ($runtime) { throw "$binary links the C runtime dynamically: $($runtime -join ', ')" }

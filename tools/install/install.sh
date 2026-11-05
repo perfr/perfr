@@ -10,10 +10,9 @@
 # It downloads the Rust perfr release for this machine. Linux
 # x86-64 and macOS (one universal binary, Intel and Apple silicon) are
 # both published. The binary serves the web viewer. The script checks
-# SHA-256. Function hooks (perfr-frida-helper, libperfr_frida_agent, and
-# the Frida licenses) are a separate archive: pass --with-hooks, or set
-# PERFR_WITH_HOOKS=1, to install them too. `perfr hooks install` does the
-# same later. No compiler and no package manager.
+# SHA-256. The archive includes the function-hook helper
+# (perfr-inject-helper), the agent library (libperfr_agent), and the
+# license notices. No compiler and no package manager.
 #
 # Download host for the release archives. perfr.dev serves the assets of the
 # latest stable GitHub Release under /download/ (perfr-linux-x86_64.tar.gz,
@@ -29,9 +28,8 @@ DEFAULT_BASE="https://perfr.dev/download"
 #                        (default: latest, from perfr.dev). GitHub serves it
 #                        only once the repository is public.
 #   PERFR_INSTALL_DIR    where to install (default: ~/.local/bin)
-#   PERFR_WITH_HOOKS     set to 1 to also install the perfr-hooks archive
 #
-#   curl -fsSL https://perfr.dev/install.sh | sh -s -- --with-hooks
+#   curl -fsSL https://perfr.dev/install.sh | sh
 
 set -eu
 
@@ -49,17 +47,10 @@ if [ -z "${PERFR_INSTALL_BASE:-}" ] && [ -n "${PERFR_VERSION:-}" ]; then
 fi
 VERSION="${PERFR_VERSION:-latest}"
 INSTALL_DIR="${PERFR_INSTALL_DIR:-$HOME/.local/bin}"
-WITH_HOOKS=0
-case "${PERFR_WITH_HOOKS:-}" in
-    1|true|yes|TRUE|YES) WITH_HOOKS=1 ;;
-esac
 for arg in "$@"; do
     case "$arg" in
-        --with-hooks) WITH_HOOKS=1 ;;
         --help|-h)
-            printf '%s\n' "usage: install.sh [--with-hooks]" \
-                "  --with-hooks    also install perfr-frida-helper and libperfr_frida_agent" \
-                "  PERFR_WITH_HOOKS=1 is the same switch"
+            printf '%s\n' "usage: install.sh"
             exit 0
             ;;
         *) die "unknown argument: $arg" ;;
@@ -163,15 +154,15 @@ verify_sha256 "$archive" "$url"
 tar -xzf "$archive" -C "$tmp" || die "could not unpack ${asset}"
 root="$tmp/perfr"
 [ -f "$root/perfr" ] || die "archive has no perfr/perfr"
-# Older releases carried the Frida files in the core archive. Install them
-# when they are there. New releases put them in perfr-hooks.
+[ -f "$root/perfr-inject-helper" ] || die "archive is missing perfr-inject-helper. Function hooks need it beside perfr."
 agent=""
-for candidate in libperfr_frida_agent.so libperfr_frida_agent.dylib; do
+for candidate in libperfr_agent.so libperfr_agent.dylib; do
     if [ -f "$root/$candidate" ]; then
         agent=$candidate
         break
     fi
 done
+[ -n "$agent" ] || die "archive is missing libperfr_agent. Function hooks need it beside perfr."
 
 mkdir -p "$INSTALL_DIR" || die "cannot create $INSTALL_DIR"
 install_bin() {
@@ -186,12 +177,8 @@ install_file() {
 }
 
 install_bin "$root/perfr" "$INSTALL_DIR/perfr"
-if [ -f "$root/perfr-frida-helper" ]; then
-    install_bin "$root/perfr-frida-helper" "$INSTALL_DIR/perfr-frida-helper"
-fi
-if [ -n "$agent" ]; then
-    install_file "$root/$agent" "$INSTALL_DIR/$agent"
-fi
+install_bin "$root/perfr-inject-helper" "$INSTALL_DIR/perfr-inject-helper"
+install_file "$root/$agent" "$INSTALL_DIR/$agent"
 
 case "$os" in
     linux) lib="libperfr_api.so" ;;
@@ -211,45 +198,7 @@ fi
 if [ -d "$root/licenses" ]; then
     mkdir -p "$INSTALL_DIR/licenses"
     cp -R "$root/licenses/." "$INSTALL_DIR/licenses/"
-    say "installed Frida license notices in $INSTALL_DIR/licenses"
-fi
-
-if [ "$WITH_HOOKS" -eq 1 ]; then
-    case "${os}-${arch}" in
-        linux-x86_64) hooks_asset="perfr-hooks-linux-x86_64.tar.gz" ;;
-        macos-x86_64|macos-aarch64) hooks_asset="perfr-hooks-macos-universal.tar.gz" ;;
-        *) die "no hooks archive for ${os}/${arch}" ;;
-    esac
-    hooks_url="${BASE}/${hooks_asset}"
-    say "installing function hooks from ${hooks_url}"
-    hooks_archive="$tmp/$hooks_asset"
-    if ! fetch "$hooks_url" "$hooks_archive"; then
-        die "download failed: ${hooks_url}
-Function hooks are perfr-hooks-* on the same release as perfr. The core
-install is already in place. Retry with --with-hooks, or run \`perfr hooks install\`."
-    fi
-    verify_sha256 "$hooks_archive" "$hooks_url"
-    tar -xzf "$hooks_archive" -C "$tmp" || die "could not unpack ${hooks_asset}"
-    hooks_root="$tmp/perfr-hooks"
-    [ -f "$hooks_root/perfr-frida-helper" ] || die "hooks archive has no perfr-frida-helper"
-    hooks_agent=""
-    for candidate in libperfr_frida_agent.so libperfr_frida_agent.dylib; do
-        if [ -f "$hooks_root/$candidate" ]; then
-            hooks_agent=$candidate
-            break
-        fi
-    done
-    [ -n "$hooks_agent" ] || die "hooks archive has no libperfr_frida_agent"
-    install_bin "$hooks_root/perfr-frida-helper" "$INSTALL_DIR/perfr-frida-helper"
-    install_file "$hooks_root/$hooks_agent" "$INSTALL_DIR/$hooks_agent"
-    if [ -f "$hooks_root/perfr-hooks-version" ]; then
-        install_file "$hooks_root/perfr-hooks-version" "$INSTALL_DIR/perfr-hooks-version"
-    fi
-    if [ -d "$hooks_root/licenses" ]; then
-        mkdir -p "$INSTALL_DIR/licenses"
-        cp -R "$hooks_root/licenses/." "$INSTALL_DIR/licenses/"
-        say "installed Frida license notices in $INSTALL_DIR/licenses"
-    fi
+    say "installed license notices in $INSTALL_DIR/licenses"
 fi
 
 # --- PATH hint ---------------------------------------------------------------
@@ -269,14 +218,10 @@ and open the viewer in a browser:
   perfr
   # then open http://127.0.0.1:44766/
 
-Function hooks are optional. This install included them only with
---with-hooks (or PERFR_WITH_HOOKS=1). Otherwise run:
-
-  perfr hooks install
-
-perfr looks for libperfr_frida_agent and perfr-frida-helper beside itself,
-or in the hooks data directory. They do not need root. On macOS, attaching
-needs a task port; code signing, the hardened runtime, or SIP can refuse it.
+Function hooks use libperfr_agent and perfr-inject-helper in the same
+directory as perfr. They do not need root. On macOS, attaching needs a
+task port; code signing, the hardened runtime, or SIP can refuse it.
+`perfr hooks status` prints the paths.
 
 On Linux, sampling needs perf_event_paranoid at 2 or below, and the
 scheduler needs 0 or below. Root, CAP_PERFMON, or CAP_SYS_ADMIN bypass

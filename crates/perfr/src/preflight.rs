@@ -232,14 +232,14 @@ pub fn plan_for(snap: &Snapshot) -> Plan {
             }
             if !snap.uprobe_pmu {
                 plan.notes.push(
-                    "this kernel has no uprobe PMU (CONFIG_UPROBE_EVENTS). Use Frida for hooks; setup cannot add the PMU.".into(),
+                    "this kernel has no uprobe PMU (CONFIG_UPROBE_EVENTS). Use the default hook engine; setup cannot add the PMU.".into(),
                 );
             }
         }
         OsKind::Macos => {
             if !snap.is_root && !snap.debugger_entitlement {
                 plan.notes.push(format!(
-                    "Frida attach needs a task port. Run `sudo {}`. SIP and the hardened runtime can still refuse system processes. This build does not sample through dtrace.",
+                    "Attaching needs a task port. Run `sudo {}`. SIP and the hardened runtime can still refuse system processes. This build does not sample through dtrace.",
                     snap.binary
                 ));
             }
@@ -247,7 +247,7 @@ pub fn plan_for(snap: &Snapshot) -> Plan {
         OsKind::Windows => {
             if !snap.windows_elevated {
                 plan.notes.push(
-                    "Sampling and the scheduler need the kernel logger. Open a terminal with Run as administrator and start perfr there. A normal prompt of an administrator account is not elevated. Manual scopes and Frida hooks need no privilege.".into(),
+                    "Sampling and the scheduler need the kernel logger. Open a terminal with Run as administrator and start perfr there. A normal prompt of an administrator account is not elevated. Manual scopes and function hooks need no privilege.".into(),
                 );
             }
         }
@@ -361,9 +361,9 @@ fn linux_checks(snap: &Snapshot, checks: &mut Vec<Check>) {
     let (uprobe_status, uprobe_detail, uprobe_fix, uprobe_warn) = if !snap.uprobe_pmu {
         (
             Status::Unavailable,
-            "this kernel has no uprobe PMU (CONFIG_UPROBE_EVENTS). Frida does not need it"
+            "this kernel has no uprobe PMU (CONFIG_UPROBE_EVENTS). The default hook engine does not need it"
                 .to_string(),
-            Some("Switch hooks to Frida. No sysctl adds the uprobe PMU.".to_string()),
+            Some("Leave hooks on the default engine. No sysctl adds the uprobe PMU.".to_string()),
             true,
         )
     } else if snap.is_root || snap.cap_sys_admin {
@@ -371,7 +371,8 @@ fn linux_checks(snap: &Snapshot, checks: &mut Vec<Check>) {
     } else {
         (
             Status::Degraded,
-            "uprobe PMU present; arming it needs CAP_SYS_ADMIN. Frida does not".to_string(),
+            "uprobe PMU present; arming it needs CAP_SYS_ADMIN. The default hook engine does not"
+                .to_string(),
             Some(format!(
                 "sudo setcap cap_sys_admin,cap_perfmon,cap_dac_read_search+ep {}",
                 snap.binary
@@ -466,7 +467,7 @@ fn macos_checks(snap: &Snapshot, checks: &mut Vec<Check>) {
             "task_for_pid is available to root or a debugger entitlement".into()
         } else {
             format!(
-                "not root and {snap_binary_entitlement}; Frida attach needs a task port. {sip}",
+                "not root and {snap_binary_entitlement}; attaching needs a task port. {sip}",
                 snap_binary_entitlement = "no debugger entitlement"
             )
         },
@@ -493,7 +494,7 @@ fn windows_checks(snap: &Snapshot, checks: &mut Vec<Check>) {
     checks.push(row(
         "dynamic instrumentation",
         Status::Ok,
-        "Frida hooks need no privilege for a same-user target",
+        "Function hooks need no privilege for a same-user target",
         None,
         false,
     ));

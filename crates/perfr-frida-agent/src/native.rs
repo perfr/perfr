@@ -139,7 +139,7 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
     reader.read_line(&mut line)?;
     let config: Value = serde_json::from_str(&line)?;
     let profiling = config["self_profile"].as_bool().unwrap_or(false);
-    profile::measure(stream, profiling, "Frida: initialize Gum", || unsafe {
+    profile::measure(stream, profiling, "Inject: initialize Gum", || unsafe {
         perfr_gum_init()
     });
     unsafe {
@@ -148,7 +148,7 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
     let _ignore = Ignore;
     if config["command"] == "symbols" {
         let mut symbols = Vec::<Value>::new();
-        profile::measure(stream, profiling, "Frida: enumerate symbols", || unsafe {
+        profile::measure(stream, profiling, "Inject: enumerate symbols", || unsafe {
             perfr_gum_symbols(emit, &mut symbols as *mut _ as *mut _);
         });
         writeln!(stream, "{}", json!({"symbols":symbols}))?;
@@ -160,7 +160,7 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
         .try_lock()
         .map_err(|_| "another native controller is active")?;
     let path = CString::new(config["transport"].as_str().ok_or("missing transport")?)?;
-    let generation = profile::measure(stream, profiling, "Frida: connect scope API", || unsafe {
+    let generation = profile::measure(stream, profiling, "Inject: connect scope API", || unsafe {
         super::perfr_frida_open(path.as_ptr(), None, None, None)
     });
     if generation == 0 {
@@ -189,7 +189,7 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
         let address = profile::measure(
             stream,
             profiling,
-            "Frida: resolve executable address",
+            "Inject: resolve executable address",
             || unsafe { perfr_gum_resolve(path.as_ptr(), offset) },
         );
         if address == 0 {
@@ -203,7 +203,7 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
         let listener = profile::measure(
             stream,
             profiling,
-            &format!("Frida: install trampoline: {}", display.to_string_lossy()),
+            &format!("Inject: install trampoline: {}", display.to_string_lossy()),
             || unsafe { perfr_gum_attach(address, generation, name.as_ptr(), unhook_token.as_ptr(), &mut status) },
         );
         if listener.is_null() {
@@ -231,7 +231,7 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
     // named pipe has no half-close: by the time a stop is seen the pipe is
     // already closing, so these writes may fail -- the detach itself is what
     // matters, and the controller waits for process exit, not the ack.
-    profile::measure(stream, profiling, "Frida: detach trampolines", || {
+    profile::measure(stream, profiling, "Inject: detach trampolines", || {
         drop(capture)
     });
     let _ = writeln!(stream, "{}", json!({"stopped":true}));

@@ -20,12 +20,10 @@ target/
 /dist/frida/
 
 # Prebuilt binaries staged into the pip packages by tools/release/build_wheels.sh
-/crates/perfr-api/python/perfr_api/libperfr_api.*
-/crates/perfr-api/python/perfr_api/perfr_api.dll
+/crates/perfr-api/python/perfr_api/libperfr.*
 /crates/perfr/python/perfr/perfr
 /crates/perfr/python/perfr/perfr.exe
-/crates/perfr/python/perfr/libperfr_api.*
-/crates/perfr/python/perfr/perfr_api.dll
+/crates/perfr/python/perfr/libperfr.*
 /crates/perfr/python/perfr/perfr.h
 /dist/wheels/
 /crates/perfr-api/python/build/

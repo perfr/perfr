@@ -223,11 +223,11 @@ mod tests {
     fn globs_match_runs_single_characters_and_ignore_case() {
         assert!(glob_match("TP_ThirdPerson*", "tp_thirdperson-linux-shipping"));
         assert!(glob_match("*shipping", "TP_ThirdPerson-Linux-Shipping"));
-        assert!(glob_match("perfr-frida-help?r", "perfr-frida-helper"));
+        assert!(glob_match("perfr-ho?k", "perfr-hook"));
         assert!(glob_match("*", "anything"));
         assert!(glob_match("a*b*c", "aXXbYYc"));
         assert!(!glob_match("a*b*c", "aXXbYY"));
-        assert!(!glob_match("perfr", "perfr-frida-helper"));
+        assert!(!glob_match("perfr", "perfr-hook"));
         assert!(glob_match("", ""));
         assert!(!glob_match("", "x"));
     }

@@ -20,7 +20,7 @@
  * HOW IT WORKS
  *
  * The producer -- the shared-memory ring that a running perfr drains
- * -- lives in one library, libperfr_api, which ships beside perfr.
+ * -- lives in one library, libperfr, which ships beside perfr.
  * This header never links it. perfr_init() loads it at run time, checks that
  * it speaks this header's ABI, and fills a table of function pointers; every
  * call below is then a load, a null check and an indirect call, about fifteen
@@ -36,7 +36,7 @@
  *
  * WHERE THE LIBRARY IS LOOKED FOR, IN ORDER
  *
- *   1. $PERFR_API_LIB          the full path of the library file. When set it
+ *   1. $PERFR_LIB          the full path of the library file. When set it
  *                              is the only place tried, so a wrong path fails
  *                              visibly instead of loading some other copy.
  *   2. beside perfr    every $PATH directory that holds a perfr,
@@ -45,11 +45,11 @@
  *                              the ring protocol version -- it refuses a segment
  *                              written at any other -- so its own library wins
  *                              over a copy shipped beside an application.
- *   3. beside the executable   <directory of the running program>/libperfr_api.so,
+ *   3. beside the executable   <directory of the running program>/libperfr.so,
  *                              for a machine with no service installed.
- *   4. the system loader       dlopen("libperfr_api.so")
+ *   4. the system loader       dlopen("libperfr.so")
  *
- * .dylib on macOS; perfr_api.dll, %PATH% and LoadLibrary on Windows.
+ * .dylib on macOS; libperfr.dll, %PATH% and LoadLibrary on Windows.
  *
  * STATIC BUILDS
  *
@@ -87,8 +87,8 @@ extern "C" {
 
 /* perfr_init() results beyond 0 (ok) and -errno (the segment could not be
  * created). Instrumentation calls stay valid no-ops in every case. */
-#define PERFR_E_NOLIB (-1000) /* no libperfr_api found: see the search order above */
-#define PERFR_E_ABI (-1001)   /* a libperfr_api was found but speaks another ABI */
+#define PERFR_E_NOLIB (-1000) /* no libperfr found: see the search order above */
+#define PERFR_E_ABI (-1001)   /* a libperfr was found but speaks another ABI */
 
 /* A handle to an event this process recorded: a scope from perfr_start, or an
  * instant. It is an identity, not a resource -- nothing needs to be freed --
@@ -157,7 +157,7 @@ static inline int perfr_available(void) { return 1; }
 #elif defined(__GNUC__) || defined(__clang__)
 #define PERFR_SHARED_ __attribute__((weak))
 #else
-#error "perfr.h dynamic mode needs GCC, Clang or MSVC; define PERFR_STATIC and link libperfr_api instead"
+#error "perfr.h dynamic mode needs GCC, Clang or MSVC; define PERFR_STATIC and link libperfr instead"
 #endif
 
 PERFR_SHARED_ const struct perfr_api_table_v1* perfr_api_table_v1_ = 0;
@@ -179,7 +179,7 @@ PERFR_SHARED_ const struct perfr_api_table_v1* perfr_api_table_v1_ = 0;
 #pragma warning(push)
 #pragma warning(disable : 4996)
 #endif
-#define PERFR_LIB_FILE_ "perfr_api.dll"
+#define PERFR_LIB_FILE_ "libperfr.dll"
 #define PERFR_SERVICE_FILE_ "perfr.exe"
 #define PERFR_PATH_SEP_ ';'
 #define PERFR_DIR_SEP_ '\\'
@@ -188,9 +188,9 @@ PERFR_SHARED_ const struct perfr_api_table_v1* perfr_api_table_v1_ = 0;
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
-#define PERFR_LIB_FILE_ "libperfr_api.dylib"
+#define PERFR_LIB_FILE_ "libperfr.dylib"
 #else
-#define PERFR_LIB_FILE_ "libperfr_api.so"
+#define PERFR_LIB_FILE_ "libperfr.so"
 #if !defined(__cplusplus)
 /* Under a strict -std=c99/c11 glibc hides readlink behind the XOPEN feature
  * gate, and this header cannot set that before system headers a program
@@ -344,7 +344,7 @@ static inline void* perfr_api_find_(void) {
   char dir[4096];
   size_t len;
   void* handle;
-  const char* env = getenv("PERFR_API_LIB");
+  const char* env = getenv("PERFR_LIB");
   /* Rule 1 is exclusive: an explicit path that fails must not be papered over
    * by a stray copy found some other way. */
   if (env && *env) return perfr_api_dlopen_(env);
@@ -396,7 +396,7 @@ static inline const struct perfr_api_table_v1* perfr_api_load_(int* status) {
 
 /* --- the API ------------------------------------------------------------- */
 
-/* Finds and loads libperfr_api (see the search order at the top), then
+/* Finds and loads libperfr (see the search order at the top), then
  * creates this process's segment so a running perfr can find it.
  * Idempotent. Returns 0 on success, PERFR_E_NOLIB or PERFR_E_ABI when no
  * usable library was found, or a negative errno if the segment could not be

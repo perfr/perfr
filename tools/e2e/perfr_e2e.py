@@ -519,14 +519,18 @@ def report_tabs(run):
 def _build_app(lang):
     """Returns the argv to launch the test app for `lang`, building it first."""
     # PerfrTestC, PerfrTestCpp and the Python package do not link the API:
-    # perfr.h and perfr_api load libperfr_api at run time, by default from
+    # perfr.h and perfr_api load libperfr at run time, by default from
     # beside the perfr on PATH. The suite's service is not on PATH, so
     # name the tree's library explicitly; Target inherits the environment.
-    lib = os.path.join(REPO, "target/release/libperfr_api.so")
+    lib = os.path.join(REPO, "target/release/libperfr.so")
     if not os.path.exists(lib):
-        subprocess.run(["cargo", "build", "--release", "-p", "perfr-api"],
+        # The same libperfr the service injects for hooks (`--features
+        # native`); an API-only build here would leave the hook scenarios
+        # without an agent.
+        subprocess.run([os.path.join(REPO, "tools/frida/build.sh"),
+                        os.path.join(REPO, "target/release"), "--agent-only"],
                        cwd=REPO, check=True)
-    os.environ.setdefault("PERFR_API_LIB", lib)
+    os.environ.setdefault("PERFR_LIB", lib)
     if lang == "rust":
         binary = os.path.join(REPO, "target/release/PerfrTestRust")
         if not os.path.exists(binary):

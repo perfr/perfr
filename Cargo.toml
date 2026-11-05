@@ -19,10 +19,11 @@ members = [
     "crates/perfr-capture",
     "crates/perfr-collector",
     "crates/perfr-etw",
-    "crates/perfr-frida-agent",
-    "crates/perfr-frida-helper",
+    "crates/perfr-lib",
+    "crates/perfr-lib-windows",
+    "crates/perfr-hook",
     "crates/perfr-frida-transport",
-    "crates/perfr-gpu-helper",
+    "crates/perfr-gpu",
     "crates/perfr-live-chrome",
     "crates/perfr-live-event",
     "crates/perfr-live-protocol",
@@ -86,7 +87,7 @@ strip = "none"
 # 35 MB on the service, for code the disassembly example does not show. That
 # is a compile-time choice: nothing that was generated is discarded later.
 # `package."*"` does not apply to the package currently being built, so
-# `perfr`, the Frida companions, libperfr_api, and perfr-gpu-helper still get
+# `perfr`, `perfr-hook`, `libperfr`, and `perfr-gpu` still get
 # the full debug info above.
 [profile.release.package."*"]
 debug = false

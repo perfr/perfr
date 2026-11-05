@@ -5,7 +5,7 @@ perfr manual instrumentation for Python. Pure Python, no dependencies.
 ```python
 import perfr_api as perfr
 
-perfr.init()                      # finds libperfr_api, or stays quiet
+perfr.init()                      # finds libperfr, or stays quiet
 
 with perfr.scope("update"):
     ...
@@ -22,8 +22,8 @@ Run `perfr`, open its viewer, pick the Python process, press Record.
 
 ## How it finds the library
 
-The producer is the same `libperfr_api` that C and C++ load through
-`perfr.h`. The package looks, in order, at `$PERFR_API_LIB`, beside the
+The producer is the same `libperfr` that C and C++ load through
+`perfr.h`. The package looks, in order, at `$PERFR_LIB`, beside the
 `perfr` on `PATH` (then `~/.local/bin`, `~/.perfr/bin`), the copy
 bundled in this wheel, then the system loader. The service comes first
 because it is the authority on the ring protocol version: the library that

@@ -1,0 +1,26 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# `libperfr.dll`. The same library as crates/perfr-lib, under the name Windows
+# needs: a `perfr.dll` next to `perfr.exe` would give both a `perfr.pdb`, and
+# cargo writes one over the other. Elsewhere the cdylib comes straight from
+# perfr-lib (the `lib` prefix is the platform's); the Windows build script is
+# the only thing that builds this crate.
+[package]
+name = "perfr-lib-windows"
+version = "0.1.0"
+description = "libperfr.dll: crates/perfr-lib under the file name Windows needs"
+edition = "2021"
+license = "BSD-2-Clause"
+publish = false
+
+[lib]
+name = "libperfr"
+crate-type = ["cdylib"]
+
+[dependencies]
+perfr-lib = { path = "../perfr-lib" }
+
+[features]
+native = ["perfr-lib/native"]

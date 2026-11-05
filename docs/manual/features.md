@@ -443,14 +443,14 @@ in the URL opens a tab on load.
 - **The API** is the `perfr-api` crate at `crates/perfr-api`: Rust
   functions `init`, `shutdown`, `start`, `stop`, `start_async`, `instant`,
   `link`, `value`, `now_ns`, and the RAII helpers `span`, `span_async`,
-  `scope`, `scope_async`. The same crate builds `libperfr_api` (static and
-  shared) with a C ABI (`perfr_init`, `perfr_start`, `perfr_stop`,
+  `scope`, `scope_async`. The same crate builds the static `libperfr_api.a`,
+  and `crates/perfr-lib` builds the shared `libperfr` from it, with a C ABI (`perfr_init`, `perfr_start`, `perfr_stop`,
   `perfr_instant`, `perfr_link`, `perfr_value`, `perfr_now_ns`, ...) and a
   versioned function table (`perfr_api_table_v1`).
 - **Shipping shape: one header, one library, no linking.**
   `crates/perfr-api/include/perfr.h` is a single file a C or C++
-  project includes; it links nothing. `perfr_init()` loads `libperfr_api`
-  at run time -- from `$PERFR_API_LIB`, beside the executable, beside the
+  project includes; it links nothing. `perfr_init()` loads `libperfr`
+  at run time -- from `$PERFR_LIB`, beside the executable, beside the
   `perfr` on `PATH` (then `~/.local/bin`, `~/.perfr/bin`), or the
   system loader -- checks the ABI version, and fills a process-wide table;
   without a library every call is one predictable branch and `perfr_init()`
@@ -466,7 +466,7 @@ in the URL opens a tab on load.
 - **Distribution.** Prebuilt wheels, never source-to-compile, so no toolchain
   is needed to install. `tools/release/build_wheels.sh <platform>` cuts two
   platform wheels from one build (so their ring protocol matches): `perfr-api`
-  bundles a `libperfr_api` cross-built against glibc 2.17 (manylinux2014); and
+  bundles a `libperfr` cross-built against glibc 2.17 (manylinux2014); and
   `perfr` (`crates/perfr/python`) carries the static
   `perfr` binary, the library and `perfr.h`, installs an
   `perfr` command, and depends on `perfr-api`. The
@@ -481,7 +481,7 @@ in the URL opens a tab on load.
   (`PerfrTestRust`) and, under `tools/test-programs/`, `PerfrTestC`,
   `PerfrTestCpp` (RAII, built header-only by their `build.sh`;
   `PERFR_STATIC=1` links) and `PerfrTestPython` (the package). Each runs
-  every call; the `api-*` scenarios capture them with `PERFR_API_LIB` naming
+  every call; the `api-*` scenarios capture them with `PERFR_LIB` naming
   the tree's library.
   Screenshots: `07-api-rust.png`, `08-api-c.png`, `09-api-cpp.png`,
   `10-api-python.png`.

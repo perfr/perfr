@@ -8,7 +8,7 @@
     perfr                      # then open http://127.0.0.1:44766/
 
 The wheel carries the prebuilt ``perfr`` binary -- the capture service
-that also serves the web viewer -- plus ``libperfr_api`` and ``perfr.h`` for
+that also serves the web viewer -- plus ``libperfr`` and ``perfr.h`` for
 instrumenting C and C++, the Frida agent and helper the service loads from
 the same directory, and a dependency on ``perfr-api`` so ``import perfr_api``
 works for Python. The ``perfr`` console command runs the bundled
@@ -22,11 +22,11 @@ __all__ = ["binary_path", "header_path", "library_path", "main"]
 __version__ = "0.1.0"
 
 if sys.platform == "win32":
-    _BINARY, _LIBRARY = "perfr.exe", "perfr_api.dll"
+    _BINARY, _LIBRARY = "perfr.exe", "libperfr.dll"
 elif sys.platform == "darwin":
-    _BINARY, _LIBRARY = "perfr", "libperfr_api.dylib"
+    _BINARY, _LIBRARY = "perfr", "libperfr.dylib"
 else:
-    _BINARY, _LIBRARY = "perfr", "libperfr_api.so"
+    _BINARY, _LIBRARY = "perfr", "libperfr.so"
 
 
 def _here(name):
@@ -39,7 +39,7 @@ def binary_path():
 
 
 def library_path():
-    """The bundled ``libperfr_api`` shared library, or ``None`` if absent."""
+    """The bundled ``libperfr`` shared library, or ``None`` if absent."""
     p = _here(_LIBRARY)
     return p if os.path.exists(p) else None
 
@@ -67,10 +67,10 @@ def main():
     binary = binary_path()
     if not os.path.exists(binary):
         sys.exit("perfr: the perfr binary is missing from this wheel")
-    # The service spawns perfr-frida-helper from the same directory. Both
+    # The service spawns perfr-hook from the same directory. Both
     # need the executable bit, which a wheel does not record.
     _ensure_executable(binary)
-    _ensure_executable(_here("perfr-frida-helper"))
+    _ensure_executable(_here("perfr-hook"))
     argv = [binary] + sys.argv[1:]
     if sys.platform == "win32":
         import subprocess

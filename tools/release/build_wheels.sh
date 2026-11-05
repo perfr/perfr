@@ -6,8 +6,8 @@
 # Builds the pip artifacts for one or more platforms:
 #
 #   perfr-api        the pure-Python instrumentation package with a prebuilt
-#                    libperfr_api bundled in (a platform wheel).
-#   perfr            the perfr binary, libperfr_api and perfr.h in a
+#                    the API-only libperfr bundled in (a platform wheel).
+#   perfr            the perfr binary, the full libperfr, perfr-hook and perfr.h in a
 #                    platform wheel, with a `perfr` console command.
 #
 # Both wheels for a platform are cut from ONE build so the ring protocol
@@ -24,7 +24,7 @@
 # on any modern Linux; the service binary is a fully static musl build.
 #
 # The perfr wheel always includes the Frida companions. The service
-# loads libperfr_frida_agent and spawns perfr-frida-helper from the directory
+# loads libperfr and spawns perfr-hook from the directory
 # that contains the perfr executable. This script builds those for the
 # wheel's target (glibc or macOS, not the musl service triple). Set
 # PERFR_COMPANIONS_DIR to skip that build and copy a directory already laid
@@ -62,11 +62,11 @@ echo "release version $VERSION"
 # key -> "lib_target service_target platform_tag lib_file"
 target_spec() {
   case "$1" in
-    linux-x86_64)  echo "x86_64-unknown-linux-gnu  x86_64-unknown-linux-musl  manylinux_2_17_x86_64   libperfr_api.so" ;;
-    linux-aarch64) echo "aarch64-unknown-linux-gnu aarch64-unknown-linux-musl manylinux_2_17_aarch64  libperfr_api.so" ;;
-    macos-x86_64)  echo "x86_64-apple-darwin       x86_64-apple-darwin        macosx_11_0_x86_64      libperfr_api.dylib" ;;
-    macos-arm64)   echo "aarch64-apple-darwin      aarch64-apple-darwin       macosx_11_0_arm64       libperfr_api.dylib" ;;
-    windows-x86_64) echo "x86_64-pc-windows-msvc   x86_64-pc-windows-msvc     win_amd64               perfr_api.dll" ;;
+    linux-x86_64)  echo "x86_64-unknown-linux-gnu  x86_64-unknown-linux-musl  manylinux_2_17_x86_64   libperfr.so" ;;
+    linux-aarch64) echo "aarch64-unknown-linux-gnu aarch64-unknown-linux-musl manylinux_2_17_aarch64  libperfr.so" ;;
+    macos-x86_64)  echo "x86_64-apple-darwin       x86_64-apple-darwin        macosx_11_0_x86_64      libperfr.dylib" ;;
+    macos-arm64)   echo "aarch64-apple-darwin      aarch64-apple-darwin       macosx_11_0_arm64       libperfr.dylib" ;;
+    windows-x86_64) echo "x86_64-pc-windows-msvc   x86_64-pc-windows-msvc     win_amd64               libperfr.dll" ;;
     *) echo "unknown platform key '$1' (use linux-x86_64 linux-aarch64 macos-x86_64 macos-arm64 windows-x86_64)" >&2; return 1 ;;
   esac
 }
@@ -78,6 +78,9 @@ native_mac() { [[ $(uname -s) == Darwin && "$1" == macos-* ]]; }
 native_windows() { [[ "$1" == windows-* ]]; }
 # The service binary's file name on the platform being built.
 service_file() { if [[ "$1" == windows-* ]]; then echo perfr.exe; else echo perfr; fi; }
+# The crate that produces libperfr: on Windows a wrapper, so the DLL is
+# libperfr.dll and its PDB does not collide with perfr.exe's.
+lib_crate() { if [[ "$1" == windows-* ]]; then echo perfr-lib-windows; else echo perfr-lib; fi; }
 
 # Frida's devkits and the helper are per-target glibc/macOS binaries, not musl.
 companion_triple() {
@@ -92,7 +95,7 @@ companion_triple() {
 }
 
 # build_frida_companions <key> <dest>
-# Writes libperfr_frida_agent.*, perfr-frida-helper, and licenses/ into dest.
+# Writes the full libperfr.* (API + hook agent), perfr-hook, and licenses/ into dest.
 build_frida_companions() {
   local key=$1 dest=$2 triple lib host
   triple=$(companion_triple "$key")
@@ -106,13 +109,12 @@ build_frida_companions() {
   else
     cargo=(cargo build --release --target "$triple")
   fi
-  "${cargo[@]}" --manifest-path "$ROOT/Cargo.toml" -p perfr-frida-helper >/dev/null
-  "${cargo[@]}" --manifest-path "$ROOT/Cargo.toml" -p perfr-frida-agent --features native >/dev/null
-  local helper=perfr-frida-helper
+  "${cargo[@]}" --manifest-path "$ROOT/Cargo.toml" -p perfr-hook >/dev/null
+  local helper=perfr-hook
   case "$key" in
-    macos-*) lib=libperfr_frida_agent.dylib ;;
-    windows-*) lib=perfr_frida_agent.dll; helper=perfr-frida-helper.exe ;;
-    *) lib=libperfr_frida_agent.so ;;
+    macos-*) lib=libperfr.dylib; "${cargo[@]}" --manifest-path "$ROOT/Cargo.toml" -p perfr-lib --features native >/dev/null ;;
+    windows-*) lib=libperfr.dll; helper=perfr-hook.exe; "${cargo[@]}" --manifest-path "$ROOT/Cargo.toml" -p perfr-lib-windows --features native >/dev/null ;;
+    *) lib=libperfr.so; "${cargo[@]}" --manifest-path "$ROOT/Cargo.toml" -p perfr-lib --features native >/dev/null ;;
   esac
   mkdir -p "$dest/licenses"
   cp "$ROOT/target/$triple/release/$lib" "$dest/"
@@ -154,12 +156,14 @@ for key in "$@"; do
 
   rustup target add "$lib_target" "$svc_target" >/dev/null 2>&1 || true
 
-  # 1. libperfr_api, against the glibc floor on Linux (zig picks the version).
-  echo "-- libperfr_api ($lib_target)"
+  # 1. The API-only libperfr for the perfr-api wheel, against the glibc floor on
+  #    Linux (zig picks the version). Copied out before step 3 rebuilds the
+  #    same file name with the hook agent in it.
+  echo "-- libperfr, API only ($lib_target)"
   if [[ "$key" == linux-* ]]; then
-    cargo_for "$key" "$ROOT/Cargo.toml" "$lib_target.$GLIBC" -p perfr-api
+    cargo_for "$key" "$ROOT/Cargo.toml" "$lib_target.$GLIBC" -p "$(lib_crate "$key")"
   else
-    cargo_for "$key" "$ROOT/Cargo.toml" "$lib_target" -p perfr-api
+    cargo_for "$key" "$ROOT/Cargo.toml" "$lib_target" -p "$(lib_crate "$key")"
   fi
   lib="$ROOT/target/$lib_target/release/$lib_file"
 
@@ -173,7 +177,6 @@ for key in "$@"; do
   build_and_tag "$API_PKG" "$plat"
 
   cp "$svc" "$SVC_PKG/perfr/$(service_file "$key")"
-  cp "$lib" "$SVC_PKG/perfr/$lib_file"
   cp "$HEADER" "$SVC_PKG/perfr/perfr.h"
   staged_companions=()
   companions_src=${PERFR_COMPANIONS_DIR:-}
@@ -184,7 +187,9 @@ for key in "$@"; do
     companions_src=$companions_tmp
   fi
   shopt -s nullglob
-  for f in "$companions_src"/libperfr_frida_agent.* "$companions_src"/perfr_frida_agent.dll "$companions_src"/perfr-frida-helper "$companions_src"/perfr-frida-helper.exe; do
+  # The full libperfr (API + hook agent) replaces nothing: the API-only one
+  # went into the perfr-api wheel above and was never staged here.
+  for f in "$companions_src"/libperfr.* "$companions_src"/perfr-hook "$companions_src"/perfr-hook.exe; do
     cp "$f" "$SVC_PKG/perfr/"
     staged_companions+=("$SVC_PKG/perfr/$(basename "$f")")
   done
@@ -193,8 +198,8 @@ for key in "$@"; do
     cp -r "$companions_src/licenses" "$SVC_PKG/perfr/licenses"; staged_companions+=("$SVC_PKG/perfr/licenses")
   fi
   [[ -z "${companions_tmp}" ]] || rm -rf "$companions_tmp"
-  if [[ ! -f "$SVC_PKG/perfr/perfr-frida-helper" && ! -f "$SVC_PKG/perfr/perfr-frida-helper.exe" ]] || \
-     [[ ! -f "$SVC_PKG/perfr/libperfr_frida_agent.so" && ! -f "$SVC_PKG/perfr/libperfr_frida_agent.dylib" && ! -f "$SVC_PKG/perfr/perfr_frida_agent.dll" ]]; then
+  if [[ ! -f "$SVC_PKG/perfr/perfr-hook" && ! -f "$SVC_PKG/perfr/perfr-hook.exe" ]] || \
+     [[ ! -f "$SVC_PKG/perfr/libperfr.so" && ! -f "$SVC_PKG/perfr/libperfr.dylib" && ! -f "$SVC_PKG/perfr/libperfr.dll" ]]; then
     echo "Frida companions were not staged for $key" >&2
     exit 1
   fi

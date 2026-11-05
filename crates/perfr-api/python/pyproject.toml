@@ -34,4 +34,4 @@ packages = ["perfr_api"]
 # `pip install .` from a checkout has no library and installs a pure no-op
 # package, which is the right behaviour for a source install.
 [tool.setuptools.package-data]
-perfr_api = ["libperfr_api.so", "libperfr_api.dylib", "perfr_api.dll"]
+perfr_api = ["libperfr.so", "libperfr.dylib", "libperfr.dll"]

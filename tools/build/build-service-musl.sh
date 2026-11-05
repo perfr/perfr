@@ -29,9 +29,8 @@ echo "size: $(du -h "$BIN" | cut -f1)"
 tools/frida/build.sh "$PWD/$(dirname "$BIN")" --agent-only
 
 # The manual-instrumentation library and its header ship beside the service:
-# perfr.h and the Python package load libperfr_api from the directory that
+# perfr.h and the Python package load libperfr from the directory that
 # holds perfr. Built for glibc, not musl, because it is loaded into
 # ordinary applications, not into the static service.
-cargo build --release -p perfr-api
-cp target/release/libperfr_api.so crates/perfr-api/include/perfr.h "$(dirname "$BIN")/"
-echo "api:  $(dirname "$BIN")/libperfr_api.so + perfr.h"
+cp crates/perfr-api/include/perfr.h "$(dirname "$BIN")/"
+echo "api:  $(dirname "$BIN")/libperfr.so + perfr.h"

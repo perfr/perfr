@@ -15,8 +15,8 @@ On Linux, install Rust 1.88.0, a C compiler, curl and tar/xz, then:
 ./dist/frida/perfr --host 127.0.0.1 --serve 3000
 ```
 
-The package contains a native `perfr-frida-helper` linked to Frida Core and
-`libperfr_frida_agent.so` linked to Gum. No Python environment or JavaScript
+The package contains a native `perfr-hook` linked to Frida Core and
+`libperfr.so` linked to Gum. No Python environment or JavaScript
 agent is needed. `tools/frida/devkits.sh` downloads Frida 17.17.0 native devkits,
 verifies their pinned SHA-256 checksums, and caches them under
 `target/frida-devkits`. Set `PERFR_FRIDA_DEVKIT_ROOT` to use another cache.
@@ -30,11 +30,11 @@ For a development build:
 
 ```sh
 ./tools/frida/devkits.sh
-cargo +1.88.0 build --locked -p perfr-frida-helper
-cargo +1.88.0 build --locked -p perfr-frida-agent --features native
+cargo +1.88.0 build --locked -p perfr-hook
+cargo +1.88.0 build --locked -p perfr-lib --features native
 cargo +1.88.0 build --locked -p perfr
-PERFR_FRIDA_HELPER="$PWD/target/debug/perfr-frida-helper" \
-PERFR_FRIDA_AGENT="$PWD/target/debug/libperfr_frida_agent.so" \
+PERFR_HOOK="$PWD/target/debug/perfr-hook" \
+PERFR_LIB="$PWD/target/debug/libperfr.so" \
   target/debug/perfr
 ```
 

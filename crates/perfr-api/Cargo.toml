@@ -14,11 +14,12 @@ keywords = ["profiling", "tracing", "instrumentation", "perfr"]
 categories = ["development-tools::profiling"]
 include = ["src/**", "include/perfr.h", "README.md"]
 
-# Three shapes of the same library: rlib for Rust callers, staticlib for C and
-# C++ to link, cdylib for Python to load with ctypes.
+# Two shapes: rlib for Rust callers, staticlib (libperfr_api.a / perfr_api.lib)
+# for C and C++ that link statically. The shared library every other caller
+# loads at run time, libperfr, is built by crates/perfr-lib from this crate.
 [lib]
 name = "perfr_api"
-crate-type = ["rlib", "staticlib", "cdylib"]
+crate-type = ["rlib", "staticlib"]
 
 [[bin]]
 name = "perfr-scope-dump"

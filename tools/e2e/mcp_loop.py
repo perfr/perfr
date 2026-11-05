@@ -84,8 +84,8 @@ def main():
     base = f"http://127.0.0.1:{port}"
     env = dict(
         os.environ,
-        PERFR_FRIDA_AGENT=str(Path(args.agent).resolve()),
-        PERFR_FRIDA_HELPER=str(Path(args.helper).resolve()),
+        PERFR_LIB=str(Path(args.agent).resolve()),
+        PERFR_HOOK=str(Path(args.helper).resolve()),
     )
     with tempfile.TemporaryFile(mode="w+") as log:
         service = subprocess.Popen(

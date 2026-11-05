@@ -19,6 +19,7 @@ fn main() {
     let mut ring_slots: usize = 4096;
     let mut coalesce_lag: u64 = 4;
     let mut control_per_sec = DEFAULT_CONTROL_PER_SEC;
+    let mut ingest = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -54,6 +55,17 @@ fn main() {
                     std::process::exit(2);
                 });
             }
+            "--ingest" => {
+                let addr: std::net::SocketAddr = value().parse().unwrap_or_else(|err| {
+                    eprintln!("--ingest: {err}");
+                    std::process::exit(2);
+                });
+                if !addr.ip().is_loopback() {
+                    eprintln!("--ingest must be a loopback address");
+                    std::process::exit(2);
+                }
+                ingest = Some(addr);
+            }
             "--control-per-sec" => {
                 control_per_sec = value().parse().unwrap_or_else(|_| {
                     eprintln!("--control-per-sec wants an integer");
@@ -62,7 +74,7 @@ fn main() {
             }
             "--help" | "-h" => {
                 eprintln!(
-                    "perfr-relay [--bind ADDR] [--idle-secs N] [--ring-slots N] [--coalesce-lag N] [--control-per-sec N]"
+                    "perfr-relay [--bind ADDR] [--ingest ADDR] [--idle-secs N] [--ring-slots N] [--coalesce-lag N] [--control-per-sec N]"
                 );
                 std::process::exit(0);
             }
@@ -79,6 +91,7 @@ fn main() {
         idle,
         hard_cap: perfr_relay::HARD_CAP,
         control_per_sec,
+        ingest,
     });
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

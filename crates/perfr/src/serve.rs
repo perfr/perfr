@@ -2296,6 +2296,7 @@ pub fn run_on(
         wire,
     };
     let service = LiveService::new(config)?;
+    service.attach_relay_from_env();
     intern_gpu_lane_names(&service);
     // The capture clock for the clock probes between machines, and this
     // machine's name for the other machines' rails.

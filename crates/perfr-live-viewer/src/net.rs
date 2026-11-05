@@ -74,6 +74,12 @@ pub struct StatusJson {
     pub auto_profile: bool,
     #[serde(default)]
     pub auto_profile_status: serde_json::Value,
+    /// Concurrent browsers on the public relay. Absent on a normal service.
+    #[serde(default)]
+    pub relay_clients: Option<u64>,
+    /// Hard-cap deadline from the relay, unix epoch milliseconds.
+    #[serde(default)]
+    pub session_expires_unix_ms: Option<u64>,
 }
 
 fn default_machine() -> String {
@@ -570,6 +576,9 @@ mod wasm_impl {
         /// Held so the JS WebSocket is not GC'd.
         #[allow(dead_code)]
         ws: Arc<Mutex<Option<WebSocket>>>,
+        /// Last interaction ping, unix milliseconds. Throttled so a drag
+        /// does not write a frame per pointer move.
+        last_ping_ms: Arc<Mutex<u64>>,
         /// A capture file was opened instead of a service: no socket, and
         /// every request that would go to the service is dropped.
         offline: bool,
@@ -588,6 +597,7 @@ mod wasm_impl {
                 view_busy: Arc::new(AtomicBool::new(false)),
                 self_busy: Arc::new(AtomicBool::new(false)),
                 ws,
+                last_ping_ms: Arc::new(Mutex::new(0)),
                 offline: false,
             }
         }
@@ -618,7 +628,30 @@ mod wasm_impl {
                 view_busy: Arc::new(AtomicBool::new(false)),
                 self_busy: Arc::new(AtomicBool::new(false)),
                 ws: Arc::new(Mutex::new(None)),
+                last_ping_ms: Arc::new(Mutex::new(0)),
                 offline: true,
+            }
+        }
+
+        /// Tells the relay this tab is still in use. The server treats a
+        /// session as idle when this stops *and* no events are delivered.
+        pub fn note_activity(&self) {
+            if self.offline {
+                return;
+            }
+            let now = js_sys::Date::now() as u64;
+            let mut last = self.last_ping_ms.lock().unwrap_or_else(|err| err.into_inner());
+            if now.saturating_sub(*last) < 5_000 {
+                return;
+            }
+            let Ok(slot) = self.ws.lock() else {
+                return;
+            };
+            let Some(ws) = slot.as_ref() else {
+                return;
+            };
+            if ws.send_with_str(r#"{"op":"ping"}"#).is_ok() {
+                *last = now;
             }
         }
 
@@ -1304,7 +1337,8 @@ mod wasm_impl {
         } else {
             "ws"
         };
-        let url = format!("{proto}://{host}/ws");
+        let url = crate::dev::query_ws_override_from_location()
+            .unwrap_or_else(|| format!("{proto}://{host}/ws"));
         let ws = match WebSocket::new(&url) {
             Ok(ws) => ws,
             Err(e) => {
@@ -1440,6 +1474,7 @@ mod native_impl {
         pub fn put_settings(&self, _settings: &serde_json::Value) {}
         pub fn set_auto_profile(&self, _on: bool) {}
         pub fn reconnect_ws_if_closed(&self) {}
+        pub fn note_activity(&self) {}
         pub fn get_sampling_report(&self, _ranges: &[(u64, u64, Option<u32>)]) {}
         pub fn get_sampling_report_scope(&self, _name_id: u32) {}
         pub fn get_sampling_tree_scope(&self, _name_id: u32, _mode: &str) {}

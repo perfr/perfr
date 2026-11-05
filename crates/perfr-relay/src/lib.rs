@@ -21,6 +21,7 @@
 //!   `herd`). They never touch frames that were published from a capture.
 
 mod control;
+mod ingest;
 mod ring;
 mod seqlock;
 mod server;

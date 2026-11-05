@@ -26,7 +26,7 @@ use perfr_live_event::dev::{
     NAME_POOL_TAIL_US, NAME_LISTING_INLINE, MachineId, TID_NET, TID_RENDER, TID_STATS, TID_UI, VIEWER_PID,
 };
 use perfr_live_event::{kind, InternTable, LaneKey, LiveEvent};
-use perfr_live_protocol::{decode_frame, LiveFrame};
+use perfr_live_protocol::{decode_frame, read_hello_expiry, read_relay_status, LiveFrame};
 use perfr_live_render::{ThreadFocus, 
     apply_highlight_flags, choose_lod_hint, collect_instances_cached, collect_instances_layout_opts,
     instance_for_event,
@@ -2536,7 +2536,14 @@ impl PerfrLiveApp {
         }
     }
 
-    fn apply_status(&mut self, s: StatusJson) {
+    fn apply_status(&mut self, mut s: StatusJson) {
+        // HTTP status has no relay fields. Keep what the WebSocket tail said.
+        if s.relay_clients.is_none() {
+            s.relay_clients = self.status.relay_clients;
+        }
+        if s.session_expires_unix_ms.is_none() {
+            s.session_expires_unix_ms = self.status.session_expires_unix_ms;
+        }
         if !self.got_status {
             // First word from the service: read the settings it keeps.
             self.net.get_settings();
@@ -2850,7 +2857,17 @@ impl PerfrLiveApp {
         loop {
             match decode_frame(&self.leftover[off..]) {
                 Ok((frame, n)) => {
+                    let bytes = &self.leftover[off..off + n];
+                    let relay = read_relay_status(bytes);
+                    let hello_expiry = read_hello_expiry(bytes);
                     self.apply_frame(frame);
+                    if let Some(ext) = relay {
+                        self.status.relay_clients = Some(ext.clients);
+                        self.status.session_expires_unix_ms = Some(ext.session_expires_unix_ms);
+                    }
+                    if let Some(exp) = hello_expiry {
+                        self.status.session_expires_unix_ms = Some(exp);
+                    }
                     off += n;
                 }
                 Err(_) => break,
@@ -2946,6 +2963,8 @@ impl PerfrLiveApp {
                     auto_profile: self.auto_profile,
                     auto_profile_status: self.status.auto_profile_status.clone(),
                     wire: self.status.wire.clone(),
+                    relay_clients: self.status.relay_clients,
+                    session_expires_unix_ms: self.status.session_expires_unix_ms,
                 });
                 // An opened capture is all here once the service reports it
                 // finished: show the whole of it.
@@ -4286,6 +4305,12 @@ impl PerfrLiveApp {
             ),
         );
         status_row(ui, "Dropped", &fmt_int(self.status.dropped));
+        if let Some(viewers) = self.status.relay_clients {
+            status_row(ui, "Viewers", &fmt_int(viewers));
+        }
+        if let Some(expires) = self.status.session_expires_unix_ms {
+            status_row(ui, "Session", &session_countdown(expires));
+        }
         status_row(ui, "Spilled", &fmt_int(self.status.spilled));
         status_row(ui, "Produced", &fmt_int(self.status.produced));
         status_row(
@@ -9318,6 +9343,11 @@ impl eframe::App for PerfrLiveApp {
                     }),
                 )
             });
+            if interaction {
+                // Keeps a relay session out of the idle timeout while the
+                // pointer or keyboard is in use. No-op on the native stub.
+                self.net.note_activity();
+            }
             let search_sel_changed = self.last_dirty.map_or(true, |d| {
                 d.selected != pick_key(self.selected)
                     || d.hover != pick_key(self.hover)
@@ -10684,6 +10714,16 @@ fn icon_pill(ui: &mut Ui, label: &str, tip: &str) -> egui::Response {
         .corner_radius(4),
     )
     .on_hover_text(tip)
+}
+
+/// Hard-cap countdown from the relay's unix timestamp. `m:ss left`.
+fn session_countdown(expires_unix_ms: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let left = expires_unix_ms.saturating_sub(now) / 1000;
+    format!("{}:{:02} left", left / 60, left % 60)
 }
 
 fn status_row(ui: &mut Ui, label: &str, value: &str) {

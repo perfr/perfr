@@ -6,6 +6,7 @@
 
 pub mod bench;
 pub mod demo;
+mod relay_forward;
 mod sharing;
 pub mod http;
 pub mod ingest;
@@ -137,6 +138,10 @@ pub struct LiveService {
     pub pairer: Mutex<ScopePairer>,
     pub intern: Mutex<InternTable>,
     live_tx: broadcast::Sender<Vec<u8>>,
+    /// Already-encoded frames for the public relay. `try_send` only: a slow
+    /// or absent relay never blocks the capture that called `push_events`.
+    relay_tx: Mutex<Option<std::sync::mpsc::SyncSender<relay_forward::RelayOut>>>,
+    relay_dropped: AtomicU64,
     pub capturing: AtomicBool,
     pub demo: AtomicBool,
     /// The benchmark producer's knobs and counters (`bench.rs`).
@@ -355,6 +360,8 @@ impl LiveService {
             pairer: Mutex::new(ScopePairer::default()),
             intern: Mutex::new(InternTable::default()),
             live_tx,
+            relay_tx: Mutex::new(None),
+            relay_dropped: AtomicU64::new(0),
             capturing: AtomicBool::new(false),
             demo: AtomicBool::new(false),
             bench: bench::BenchState::default(),
@@ -681,13 +688,16 @@ impl LiveService {
     /// either -- a capture with no viewer attached should cost the ring push
     /// and no more.
     fn broadcast_events(&self, events: &[LiveEvent]) {
-        if self.live_tx.receiver_count() == 0 {
+        let forwarding = self.relay_tx.lock().is_some();
+        if self.live_tx.receiver_count() == 0 && !forwarding {
             return;
         }
         // Encoding is its own scope: the packed and deflate formats cost
-        // CPU here, the sends cost it in every viewer's ws task.
+        // CPU here, the sends cost it in every viewer's ws task. The relay
+        // gets this same buffer; it is not encoded again per browser.
         let _encode = crate::scope("encode events");
-        let _ = self.live_tx.send(encode_event_batch_with(events, self.wire()));
+        let encoded = encode_event_batch_with(events, self.wire());
+        self.fan_out(encoded, events.len() as u32);
     }
 
     /// The batch format this server sends.
@@ -958,8 +968,58 @@ impl LiveService {
     }
 
     fn broadcast_frame(&self, frame: &LiveFrame) {
-        let bytes = encode_frame(frame);
-        let _ = self.live_tx.send(bytes);
+        self.fan_out(encode_frame(frame), 0);
+    }
+
+    /// Local viewers get a clone when the relay is also attached. The relay
+    /// gets `Bytes` of that one encoding. A full forward queue drops the
+    /// relay copy and leaves the capture moving.
+    fn fan_out(&self, encoded: Vec<u8>, events: u32) {
+        let tx = self.relay_tx.lock().clone();
+        let viewers = self.live_tx.receiver_count() > 0;
+        match (viewers, tx) {
+            (true, Some(tx)) => {
+                let _ = self.live_tx.send(encoded.clone());
+                self.try_forward(tx, encoded, events);
+            }
+            (true, None) => {
+                let _ = self.live_tx.send(encoded);
+            }
+            (false, Some(tx)) => self.try_forward(tx, encoded, events),
+            (false, None) => {}
+        }
+    }
+
+    fn try_forward(
+        &self,
+        tx: std::sync::mpsc::SyncSender<relay_forward::RelayOut>,
+        encoded: Vec<u8>,
+        events: u32,
+    ) {
+        let item = relay_forward::RelayOut {
+            bytes: bytes::Bytes::from(encoded),
+            events,
+        };
+        if tx.try_send(item).is_err() {
+            self.relay_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Frames pushed to `addr` (loopback only) in the relay ingest layout.
+    /// Safe to call from a capture thread: the socket write runs elsewhere.
+    pub fn attach_relay_ingest(&self, addr: std::net::SocketAddr) -> Result<(), String> {
+        relay_forward::attach(self, addr)
+    }
+
+    /// `PERFR_RELAY_INGEST=127.0.0.1:44781`. Unset is a no-op. A bad value is
+    /// reported and ignored so a capture still starts.
+    pub fn attach_relay_from_env(&self) {
+        relay_forward::attach_from_env(self);
+    }
+
+    /// Frames the forwarder could not queue because the relay was behind.
+    pub fn relay_dropped(&self) -> u64 {
+        self.relay_dropped.load(Ordering::Relaxed)
     }
 }
 

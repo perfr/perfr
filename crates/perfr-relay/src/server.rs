@@ -45,6 +45,9 @@ pub struct RelayConfig {
     pub idle: Duration,
     pub hard_cap: Duration,
     pub control_per_sec: u32,
+    /// Loopback socket perfr pushes already-encoded frames to. `None` until
+    /// `--ingest` is set.
+    pub ingest: Option<SocketAddr>,
 }
 
 impl Default for RelayConfig {
@@ -55,6 +58,7 @@ impl Default for RelayConfig {
             idle: DEFAULT_IDLE,
             hard_cap: HARD_CAP,
             control_per_sec: DEFAULT_CONTROL_PER_SEC,
+            ingest: None,
         }
     }
 }
@@ -72,6 +76,7 @@ pub struct Relay {
     knobs: Knobs,
     limiter: Limiter,
     preamble: Mutex<std::collections::VecDeque<Bytes>>,
+    ingest: Option<SocketAddr>,
 }
 
 impl Relay {
@@ -89,7 +94,13 @@ impl Relay {
             knobs: Knobs::new(),
             limiter: Limiter::new(config.control_per_sec),
             preamble: Mutex::new(std::collections::VecDeque::new()),
+            ingest: config.ingest,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ring_for_test(&self) -> &BroadcastRing {
+        &self.ring
     }
 
     pub fn set_demo(&self, demo: bool) {
@@ -198,6 +209,14 @@ pub fn router(relay: Arc<Relay>) -> Router {
 
 pub async fn serve(addr: SocketAddr, relay: Arc<Relay>) -> std::io::Result<()> {
     relay.ensure_rate_task();
+    if let Some(ingest) = relay.ingest {
+        let forwarded = Arc::clone(&relay);
+        tokio::spawn(async move {
+            if let Err(err) = crate::ingest::serve_ingest(ingest, forwarded).await {
+                eprintln!("perfr-relay ingest: {err}");
+            }
+        });
+    }
     let listener = TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     println!("perfr-relay listening on {bound}");

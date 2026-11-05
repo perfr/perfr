@@ -11,6 +11,7 @@ perfr-live-protocol = { path = "../perfr-live-protocol" }
 perfr-live-render = { path = "../perfr-live-render" }
 perfr-live-ring = { path = "../perfr-live-ring" }
 axum = { version = "0.7", features = ["ws"] }
+bytes = "1"
 futures-util = "0.3"
 libc = "0.2"
 rand = "0.8"

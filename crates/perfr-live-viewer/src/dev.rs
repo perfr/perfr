@@ -373,6 +373,36 @@ pub fn query_track_filter(search: &str) -> Option<String> {
     None
 }
 
+/// `?ws=ws://host:port/ws` — open the live socket against the public relay
+/// instead of this page's host. The value must be a `ws:` or `wss:` URL.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn query_ws_override_from_location() -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.location().search().ok())
+            .and_then(|s| query_ws_override(&s))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        None
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn query_ws_override(search: &str) -> Option<String> {
+    let value = search
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("ws="))?;
+    let value = percent_decode(value);
+    if value.starts_with("ws://") || value.starts_with("wss://") {
+        Some(value)
+    } else {
+        None
+    }
+}
+
 /// `?theme=<key>` -- pick a colour scheme at load (perfr, dracula, nord,
 /// gruvbox, solarized). Lets a screenshot or a shared link pin the look.
 pub fn query_theme_from_location() -> Option<String> {
@@ -425,6 +455,20 @@ fn now_ns() -> u64 {
 mod tests {
     use super::*;
     use perfr_live_event::dev::{NAME_FRAME, NAME_NET, TID_NET, TID_UI};
+
+    #[test]
+    fn ws_query_is_a_websocket_url() {
+        assert_eq!(
+            query_ws_override("?ws=ws://127.0.0.1:44780/ws").as_deref(),
+            Some("ws://127.0.0.1:44780/ws")
+        );
+        assert_eq!(
+            query_ws_override("theme=perfr&ws=wss%3A%2F%2Fdemo.example%2Fws").as_deref(),
+            Some("wss://demo.example/ws")
+        );
+        assert_eq!(query_ws_override("?ws=http://127.0.0.1/ws"), None);
+        assert_eq!(query_ws_override("?report=flat"), None);
+    }
 
     #[test]
     fn theme_query_reads_the_key() {

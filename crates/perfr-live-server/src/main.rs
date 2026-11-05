@@ -96,6 +96,7 @@ async fn main() {
         cfg.bind, cfg.ring_buffer_bytes, cfg.spill_path
     );
     let service = LiveService::new(cfg).expect("create live service");
+    service.attach_relay_from_env();
     let svc = Arc::clone(&service);
     tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;

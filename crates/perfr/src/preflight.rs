@@ -10,6 +10,11 @@
 //! whole table. `perfr setup` applies the sysctls and the setcap after
 //! confirmation.
 //!
+//! Startup and `perfr doctor` also warn when a retired environment variable
+//! is set. `PERFR_API_LIB` and `PERFR_FRIDA_AGENT` are ignored in favor of
+//! `PERFR_LIB`; `PERFR_FRIDA_HELPER` is ignored in favor of `PERFR_HOOK`.
+//! The old names are not read.
+//!
 //! Linux thresholds match `privileges` and docs/manual/troubleshooting.md.
 //! Uprobes need `CAP_SYS_ADMIN` even when `perf_event_paranoid` is already
 //! low. Tracefs is the id file the scheduler tracepoints read. On Windows
@@ -122,7 +127,47 @@ pub fn env_suppressed() -> bool {
     }
 }
 
+/// Retired overrides from the split-library layout. The first element is the
+/// old name, the second is what to set instead. Nothing in the process reads
+/// the old name.
+const STALE_ENV: &[(&str, &str)] = &[
+    ("PERFR_API_LIB", "PERFR_LIB"),
+    ("PERFR_FRIDA_AGENT", "PERFR_LIB"),
+    ("PERFR_FRIDA_HELPER", "PERFR_HOOK"),
+];
+
+/// One line per retired variable that `is_set` reports as present.
+pub fn stale_env_lines(is_set: impl Fn(&str) -> bool) -> Vec<String> {
+    STALE_ENV
+        .iter()
+        .filter(|(name, _)| is_set(name))
+        .map(|(name, replacement)| {
+            format!("perfr: {name} is set and ignored; use {replacement} instead")
+        })
+        .collect()
+}
+
+fn current_stale_env_lines() -> Vec<String> {
+    stale_env_lines(|name| std::env::var_os(name).is_some())
+}
+
+fn append_stale_env(mut text: String, lines: &[String]) -> String {
+    if lines.is_empty() {
+        return text;
+    }
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push('\n');
+    text.push_str(&lines.join("\n"));
+    text.push('\n');
+    text
+}
+
 pub fn emit_warning() {
+    for line in current_stale_env_lines() {
+        eprintln!("{line}");
+    }
     let report = inspect_host();
     if let Some(text) = render_warning(&report, color_stderr()) {
         eprint!("{text}");
@@ -134,10 +179,8 @@ pub fn emit_warning() {
 }
 
 pub fn doctor() -> i32 {
-    print!(
-        "{}",
-        render_doctor(&inspect_host(), color_stdout(), "perfr doctor")
-    );
+    let text = render_doctor(&inspect_host(), color_stdout(), "perfr doctor");
+    print!("{}", append_stale_env(text, &current_stale_env_lines()));
     0
 }
 
@@ -1286,6 +1329,36 @@ mod tests {
     fn preflight_can_be_suppressed() {
         assert!(suppressed(&["--no-preflight".into()]));
         assert!(!suppressed(&["--serve".into()]));
+    }
+
+    #[test]
+    fn stale_env_vars_are_ignored_and_name_their_replacement() {
+        let lines = stale_env_lines(|name| {
+            matches!(
+                name,
+                "PERFR_API_LIB" | "PERFR_FRIDA_AGENT" | "PERFR_FRIDA_HELPER"
+            )
+        });
+        assert_eq!(
+            lines,
+            vec![
+                "perfr: PERFR_API_LIB is set and ignored; use PERFR_LIB instead".to_string(),
+                "perfr: PERFR_FRIDA_AGENT is set and ignored; use PERFR_LIB instead".to_string(),
+                "perfr: PERFR_FRIDA_HELPER is set and ignored; use PERFR_HOOK instead".to_string(),
+            ]
+        );
+        assert!(stale_env_lines(|_| false).is_empty());
+        let helper = stale_env_lines(|name| name == "PERFR_FRIDA_HELPER");
+        assert_eq!(helper.len(), 1);
+        assert!(helper[0].contains("ignored"));
+        assert!(helper[0].contains("PERFR_HOOK"));
+        let doctor = append_stale_env("perfr doctor\n".into(), &helper);
+        assert!(doctor.starts_with("perfr doctor\n"));
+        assert!(doctor.contains("\n\nperfr: PERFR_FRIDA_HELPER"));
+        assert_eq!(
+            append_stale_env("perfr doctor\n".into(), &[]),
+            "perfr doctor\n"
+        );
     }
 
     #[test]

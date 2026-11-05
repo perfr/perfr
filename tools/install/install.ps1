@@ -65,12 +65,46 @@ try {
     }
     New-Item -ItemType Directory -Force $installDir | Out-Null
     # A running service holds its files; stop it before replacing them.
-    Get-Process -Name 'perfr' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$installDir*" } | ForEach-Object {
-        Say "stopping perfr (pid $($_.Id)) in $installDir"
-        $_ | Stop-Process -Force
+    foreach ($procName in 'perfr', 'perfr-frida-helper', 'perfr-gpu-helper') {
+        Get-Process -Name $procName -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$installDir*" } | ForEach-Object {
+            Say "stopping $procName (pid $($_.Id)) in $installDir"
+            $_ | Stop-Process -Force
+        }
     }
     Copy-Item -Path (Join-Path $root '*') -Destination $installDir -Recurse -Force
     Say "installed to $installDir"
+    # Prior installs left the split libraries and helpers here. The same names
+    # are deleted by `perfr update` (RETIRED_INSTALL_FILES in
+    # crates/perfr/src/update.rs) and by install.sh. perfr_api.lib is the
+    # static library and is not in this list.
+    $retired = @(
+        'perfr-frida-helper',
+        'libperfr_frida_agent.so',
+        'libperfr_frida_agent.dylib',
+        'libperfr_api.so',
+        'libperfr_api.dylib',
+        'perfr-gpu-helper',
+        'perfr_frida_agent.dll',
+        'perfr_api.dll',
+        'perfr-frida-helper.exe',
+        'perfr-gpu-helper.exe',
+        'perfr-frida-helper.pdb',
+        'perfr-frida-helper.lib',
+        'perfr-gpu-helper.pdb',
+        'perfr-gpu-helper.lib',
+        'perfr_frida_agent.pdb',
+        'perfr_frida_agent.lib',
+        'perfr_frida_agent.dll.lib',
+        'perfr_api.pdb',
+        'perfr_api.dll.lib'
+    )
+    foreach ($name in $retired) {
+        $stale = Join-Path $installDir $name
+        if (Test-Path -LiteralPath $stale -PathType Leaf) {
+            Remove-Item -LiteralPath $stale -Force
+            Say "removed $stale"
+        }
+    }
 } finally {
     Remove-Item -Recurse -Force $temp -ErrorAction SilentlyContinue
 }

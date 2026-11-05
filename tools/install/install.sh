@@ -178,6 +178,38 @@ if [ -d "$root/licenses" ]; then
     say "installed Frida license notices in $INSTALL_DIR/licenses"
 fi
 
+# Prior installs left the split libraries and helpers in the install dir.
+# The same names are deleted by `perfr update` (RETIRED_INSTALL_FILES in
+# crates/perfr/src/update.rs) and by install.ps1. perfr_api.lib and
+# libperfr_api.a are the static libraries and are not in this list.
+for retired in \
+    perfr-frida-helper \
+    libperfr_frida_agent.so \
+    libperfr_frida_agent.dylib \
+    libperfr_api.so \
+    libperfr_api.dylib \
+    perfr-gpu-helper \
+    perfr_frida_agent.dll \
+    perfr_api.dll \
+    perfr-frida-helper.exe \
+    perfr-gpu-helper.exe \
+    perfr-frida-helper.pdb \
+    perfr-frida-helper.lib \
+    perfr-gpu-helper.pdb \
+    perfr-gpu-helper.lib \
+    perfr_frida_agent.pdb \
+    perfr_frida_agent.lib \
+    perfr_frida_agent.dll.lib \
+    perfr_api.pdb \
+    perfr_api.dll.lib
+do
+    stale="$INSTALL_DIR/$retired"
+    if [ -f "$stale" ] || [ -L "$stale" ]; then
+        rm -f "$stale" || die "cannot remove $stale"
+        say "removed $stale"
+    fi
+done
+
 # --- PATH hint ---------------------------------------------------------------
 case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;

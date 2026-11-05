@@ -13,7 +13,7 @@
 //! It degrades quietly at every level: no library, no driver, no devices, or
 //! an unsupported metric all reduce what is reported rather than failing.
 //!
-//! Usage: perfr-gpu-helper [--interval-ms <n>] [--pid <pid>] [--devices <n>]
+//! Usage: perfr-gpu [--interval-ms <n>] [--pid <pid>] [--devices <n>]
 
 mod nvml_sys;
 
@@ -54,10 +54,10 @@ fn main() {
                 max_devices = iter.next().and_then(|v| v.parse().ok()).unwrap_or(u32::MAX);
             }
             "--help" | "-h" => {
-                eprintln!("perfr-gpu-helper [--interval-ms <n>] [--pid <pid>] [--devices <n>]");
+                eprintln!("perfr-gpu [--interval-ms <n>] [--pid <pid>] [--devices <n>]");
                 return;
             }
-            other => eprintln!("perfr-gpu-helper: ignoring unknown argument {other}"),
+            other => eprintln!("perfr-gpu: ignoring unknown argument {other}"),
         }
     }
 
@@ -68,10 +68,10 @@ fn main() {
     };
     let device_count = nvml.device_count().min(max_devices);
     if device_count == 0 {
-        eprintln!("perfr-gpu-helper: NVML reports no devices");
+        eprintln!("perfr-gpu: NVML reports no devices");
         return;
     }
-    eprintln!("perfr-gpu-helper: {device_count} device(s), polling every {interval:?}");
+    eprintln!("perfr-gpu: {device_count} device(s), polling every {interval:?}");
 
     // Lead with GpuInfo metadata: the model name, VRAM and driver version a
     // sysfs scan cannot supply. The service writes these into the capture

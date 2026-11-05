@@ -86,20 +86,21 @@ Linux x86-64, on `ubuntu-22.04`, `perfr-linux-x86_64.tar.gz`:
   `perfr-live-server` at compile time. The job checks that the binary is
   statically linked, that `.gnu_debuglink` is present, and that the build-id
   survived.
-- `perfr-frida-helper` and `libperfr_frida_agent.so`, the function-hook
-  engine, stripped the same way, and `licenses/` for the Frida devkits.
-  They are glibc binaries: the helper hosts Frida Core and the agent is
-  loaded into ordinary glibc programs.
-- `libperfr_api.so` and `perfr.h`, for manual instrumentation.
-- `perfr-gpu-helper`, the optional NVIDIA helper. It is a glibc binary on
+- `libperfr.so` and `perfr.h`: the one library profiled programs load, for
+  manual instrumentation, and the agent `perfr-hook` injects for function
+  hooks. Stripped the same way.
+- `perfr-hook`, the Frida Core controller, and `licenses/` for the Frida
+  devkits. `libperfr` and `perfr-hook` are glibc binaries: the hook engine
+  lives in ordinary glibc programs.
+- `perfr-gpu`, the optional NVIDIA helper. It is a glibc binary on
   purpose (the static service cannot `dlopen`).
 
 macOS, on `macos-15`, via `tools/build/build-service-macos.sh --universal`,
 `perfr-macos-universal.tar.gz`:
 
-- One universal `perfr` (Apple silicon and Intel), `perfr-frida-helper`,
-  `libperfr_frida_agent.dylib`, `libperfr_api.dylib`, `libperfr_api.a`,
-  `perfr.h`, `licenses/`, and the SDK extras the build script writes.
+- One universal `perfr` (Apple silicon and Intel), `libperfr.dylib`,
+  `perfr-hook`, `libperfr_api.a`, `perfr.h`, `licenses/`, and the SDK
+  extras the build script writes.
 - Ad-hoc signed (`codesign --sign -`) after the strip, not notarized.
 - Records manual scopes and Frida function hooks. No call-stack sampling,
   scheduler, live disassembly, or auto-profiling.
@@ -110,9 +111,9 @@ Windows x86-64, on `windows-2022`, via `.\tools\build\build-service-windows.ps1`
 
 - `perfr.exe` with the viewer embedded, linked against the static C runtime
   (`.cargo/config.toml`); the build script checks that with `dumpbin /dependents`.
-- `perfr-frida-helper.exe` and `perfr_frida_agent.dll` (function hooks),
-  `licenses/`; `perfr_api.dll`, `perfr_api.dll.lib`, `perfr_api.lib` and
-  `include\perfr.h`; `perfr_api.py`; `PerfrTestRust.exe`. No PDBs in this zip.
+- `libperfr.dll` (with `libperfr.dll.lib`), `perfr-hook.exe` and
+  `licenses/`; `perfr_api.lib` and `include\perfr.h`; `perfr_api.py`;
+  `PerfrTestRust.exe`. No PDBs in this zip.
 - Records manual scopes and Frida hooks without privilege. Call-stack
   sampling, the scheduler and thread states come from the NT Kernel Logger
   (ETW) and need an elevated prompt. No auto-profiling, no kernel hook

@@ -34,7 +34,7 @@ in the environment or `[Core.ProfilingDebugging] ExternalProfiler=perfr` in
 | thread names | come from the OS; Unreal names its threads |
 
 The plugin is one Core-only module: at startup it calls `perfr_init()`, which
-finds `libperfr_api` (`$PERFR_API_LIB`, then beside a `perfr` on
+finds `libperfr` (`$PERFR_LIB`, then beside a `perfr` on
 `PATH`, `~/.local/bin`, `~/.perfr/bin`, beside the executable, then the system
 loader) and logs one line either way. Without a library every macro is one
 predictable branch. It then registers `FPerfrExternalProfiler`, which maps
@@ -111,7 +111,7 @@ arrive twice if `-perfr` is also passed; pick one route.
 ![Unreal's named events as perfr scopes: the ThirdPerson demo, Development Editor, `-game -nullrhi -perfr -statnamedevents`](https://perfr.dev/screenshots/unreal-named-events.png)
 
 
-The game log says `perfr: libperfr_api loaded` at module startup. The
+The game log says `perfr: libperfr loaded` at module startup. The
 service log says `opened segment of pid <n>` when Record starts, and
 `manual instrumentation: <n> events` when it stops. In the viewer the game's
 threads carry scope bands named as the macros named them, and the game

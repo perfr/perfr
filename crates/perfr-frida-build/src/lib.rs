@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 //! Shared native devkit linking for the small Core and Gum ABI adapters.
-//! Called from the build scripts of `perfr-frida-agent` and
-//! `perfr-frida-helper`; the devkits come from `tools/frida/devkits.sh`.
+//! Called from the build scripts of `perfr-lib` and
+//! `perfr-hook`; the devkits come from `tools/frida/devkits.sh`.
 
 /// Compiles `source` against the Frida `component` devkit ("core" or "gum")
 /// for the build's target and emits the link lines for it. The devkit root

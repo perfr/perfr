@@ -16,7 +16,7 @@ how to check it.
 | Feature | Windows | How |
 |---|---|---|
 | Manual scopes (`perfr.h`, the `perfr-api` crate, `perfr_api.py`) | Yes, no privilege | A file-backed shared mapping per process under `%LOCALAPPDATA%\perfr\scopes` |
-| Function hooks (Frida) | Yes, no privilege | `perfr-frida-helper.exe` injects `perfr_frida_agent.dll`; control over a named pipe |
+| Function hooks (Frida) | Yes, no privilege | `perfr-hook.exe` injects `libperfr.dll`; control over a named pipe |
 | Call-stack sampling, 1 kHz | Yes, elevated prompt | The NT Kernel Logger's sampled profile with stack walks |
 | Scheduler (context switches, core lanes) | Yes, elevated prompt | `CSwitch` events |
 | Thread states | Yes, elevated prompt | `CSwitch` old-thread state, `ReadyThread`, thread start; initial states from a system snapshot |
@@ -59,10 +59,11 @@ session's PATH; every build script here dot-sources it.
 writes `dist\windows\`:
 
 - `perfr.exe`, the service with the viewer embedded.
-- `perfr_frida_agent.dll` and `perfr-frida-helper.exe`, looked up beside the
-  service (or `PERFR_FRIDA_AGENT` / `PERFR_FRIDA_HELPER`).
-- `perfr_api.dll` (with `perfr_api.dll.lib`), `perfr_api.lib` and
-  `include\perfr.h`, the manual instrumentation SDK; `perfr_api.py`.
+- `libperfr.dll` (with `libperfr.dll.lib`), the library profiled programs
+  load: the manual instrumentation SDK and the agent `perfr-hook.exe`
+  injects. Both are looked up beside the service (or `PERFR_LIB` /
+  `PERFR_HOOK`).
+- `perfr_api.lib` and `include\perfr.h`, for static linking; `perfr_api.py`.
 - `PerfrTestRust.exe`, an instrumented test program.
 - `licenses\`, Frida's.
 
@@ -90,7 +91,7 @@ cargo +1.88.0 build --release -p perfr-api -p perfr-test-rust
 The C and C++ test apps:
 
 ```powershell
-.\tools\test-programs\PerfrTestC\build.ps1      # header-only; loads perfr_api.dll at run time
+.\tools\test-programs\PerfrTestC\build.ps1      # header-only; loads libperfr.dll at run time
 .\tools\test-programs\PerfrTestCpp\build.ps1
 .\tools\test-programs\PerfrTestC\build.ps1 -Static   # links perfr_api.lib instead
 ```
@@ -113,8 +114,8 @@ Three harnesses, the same ones CI runs on `windows-2022`
 (`.github/workflows/windows-rust.yml`):
 
 ```powershell
-python tools\e2e\manual_service_smoke.py --service dist\windows\perfr.exe --api-lib dist\windows\perfr_api.dll
-python tools\e2e\frida_smoke.py --service dist\windows\perfr.exe --agent dist\windows\perfr_frida_agent.dll --helper dist\windows\perfr-frida-helper.exe --target <perfr-frida-target.exe>
+python tools\e2e\manual_service_smoke.py --service dist\windows\perfr.exe --api-lib dist\windows\libperfr.dll
+python tools\e2e\frida_smoke.py --service dist\windows\perfr.exe --agent dist\windows\libperfr.dll --helper dist\windows\perfr-hook.exe --target <perfr-frida-target.exe>
 python tools\e2e\windows_etw_smoke.py --service dist\windows\perfr.exe --target dist\windows\PerfrTestRust.exe
 ```
 

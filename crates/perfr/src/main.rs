@@ -801,7 +801,7 @@ fn merge_gpu_info(existing: &mut BTreeMap<u32, Event>, incoming: Event) {
 /// operator having to know the flag.
 fn default_gpu_helper() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
-    let candidate = exe.parent()?.join("perfr-gpu-helper");
+    let candidate = exe.parent()?.join("perfr-gpu");
     candidate.is_file().then(|| candidate.to_string_lossy().into_owned())
 }
 

@@ -63,10 +63,10 @@ def main():
             data = response.read()
             return json.loads(data) if data.startswith((b'{', b'[')) else data
 
-    api_lib = str(Path(service_path).with_name('perfr_api.dll'))
+    api_lib = str(Path(service_path).with_name('libperfr.dll'))
     env = dict(os.environ)
     if Path(api_lib).is_file():
-        env['PERFR_API_LIB'] = api_lib
+        env['PERFR_LIB'] = api_lib
     with tempfile.TemporaryFile(mode='w+') as log:
         service = subprocess.Popen([service_path, '--host', '127.0.0.1', '--serve', str(port)], stdout=log, stderr=log)
         target = subprocess.Popen([target_path, '--seconds', str(int(args.seconds) + 15)], stdout=subprocess.PIPE, stderr=log, text=True, env=env)

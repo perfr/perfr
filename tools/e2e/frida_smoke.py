@@ -34,16 +34,16 @@ def read_line_within(child, seconds):
 
 
 def helper_children(service_pid):
-    """The pids of perfr-frida-helper processes the service spawned."""
+    """The pids of perfr-hook processes the service spawned."""
     if sys.platform == 'win32':
         script = (f"Get-CimInstance Win32_Process -Filter 'ParentProcessId={service_pid}' | "
-                  "Where-Object { $_.Name -like 'perfr-frida-helper*' } | ForEach-Object { $_.ProcessId }")
+                  "Where-Object { $_.Name -like 'perfr-hook*' } | ForEach-Object { $_.ProcessId }")
         out = subprocess.check_output(['powershell', '-NoProfile', '-Command', script], text=True)
         return [int(line) for line in out.split() if line.strip().isdecimal()]
     processes = subprocess.check_output(['ps', '-axo', 'pid=,ppid=,args='], text=True)
     return [int(fields[0]) for row in processes.splitlines()
             if len(fields := row.split(None, 2)) == 3
-            and int(fields[1]) == service_pid and 'perfr-frida-helper' in fields[2]]
+            and int(fields[1]) == service_pid and 'perfr-hook' in fields[2]]
 
 
 def kill_hard(pid):
@@ -82,7 +82,7 @@ def main():
             data = response.read()
             return json.loads(data) if data.startswith((b'{', b'[')) else data
     with tempfile.TemporaryFile(mode='w+') as log:
-        env = dict(os.environ, PERFR_FRIDA_AGENT=str(Path(args.agent).resolve()) + ('.missing' if args.missing_agent else ''), PERFR_FRIDA_HELPER=str(Path(args.helper).resolve()) + ('.missing' if args.missing_helper else ''))
+        env = dict(os.environ, PERFR_LIB=str(Path(args.agent).resolve()) + ('.missing' if args.missing_agent else ''), PERFR_HOOK=str(Path(args.helper).resolve()) + ('.missing' if args.missing_helper else ''))
         service = subprocess.Popen([args.service, '--host', '127.0.0.1', '--serve', str(port)], env=env, stdout=log, stderr=log)
         target = subprocess.Popen([args.target], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True)
         try:

@@ -373,7 +373,7 @@ mod tests {
     fn tar_gz_round_trip_keeps_the_perfr_layout() {
         let packed = pack_tar_gz(&[
             ("perfr/perfr", b"bin", 0o755),
-            ("perfr/libperfr_frida_agent.so", b"so", 0o644),
+            ("perfr/libperfr.so", b"so", 0o644),
         ]);
         let files = unpack_named("perfr-linux-x86_64.tar.gz", &packed).unwrap();
         assert_eq!(files.len(), 2);

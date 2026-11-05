@@ -41,18 +41,17 @@ try {
 
     cargo +1.88.0 build --locked --release --target $target -p perfr
     if ($LASTEXITCODE -ne 0) { throw 'perfr build failed' }
-    cargo +1.88.0 build --locked --release --target $target -p perfr-api -p perfr-test-rust -p perfr-frida-agent --features perfr-frida-agent/native
-    if ($LASTEXITCODE -ne 0) { throw 'perfr-api / agent build failed' }
-    cargo +1.88.0 build --locked --release --target $target -p perfr-frida-helper
-    if ($LASTEXITCODE -ne 0) { throw 'perfr-frida-helper build failed' }
+    cargo +1.88.0 build --locked --release --target $target -p perfr-api -p perfr-test-rust -p perfr-lib-windows --features perfr-lib-windows/native
+    if ($LASTEXITCODE -ne 0) { throw 'perfr-api / libperfr build failed' }
+    cargo +1.88.0 build --locked --release --target $target -p perfr-hook
+    if ($LASTEXITCODE -ne 0) { throw 'perfr-hook build failed' }
 
     New-Item -ItemType Directory -Force "$Output\include", "$Output\licenses" | Out-Null
     $files = @{
         "target\$target\release\perfr.exe" = 'perfr.exe'
-        "target\$target\release\perfr-frida-helper.exe" = 'perfr-frida-helper.exe'
-        "target\$target\release\perfr_frida_agent.dll" = 'perfr_frida_agent.dll'
-        "target\$target\release\perfr_api.dll" = 'perfr_api.dll'
-        "target\$target\release\perfr_api.dll.lib" = 'perfr_api.dll.lib'
+        "target\$target\release\perfr-hook.exe" = 'perfr-hook.exe'
+        "target\$target\release\libperfr.dll" = 'libperfr.dll'
+        "target\$target\release\libperfr.dll.lib" = 'libperfr.dll.lib'
         "target\$target\release\perfr_api.lib" = 'perfr_api.lib'
         "target\$target\release\PerfrTestRust.exe" = 'PerfrTestRust.exe'
         'crates\perfr-api\include\perfr.h' = 'include\perfr.h'
@@ -75,7 +74,7 @@ try {
     Copy-Item 'tools\frida\licenses\*' "$Output\licenses\" -Force
 
     # Static CRT: nothing but system DLLs may be imported.
-    foreach ($binary in 'perfr.exe', 'perfr-frida-helper.exe', 'perfr_frida_agent.dll', 'perfr_api.dll') {
+    foreach ($binary in 'perfr.exe', 'perfr-hook.exe', 'libperfr.dll') {
         $imports = (dumpbin /nologo /dependents (Join-Path $Output $binary) | Select-String -Pattern '^\s+(\S+\.dll)\s*$' | ForEach-Object { $_.Matches[0].Groups[1].Value.ToLowerInvariant() })
         $runtime = $imports | Where-Object { $_ -like 'vcruntime*' -or $_ -like 'msvcp*' -or $_ -like 'msvcr*' -or $_ -like 'api-ms-win-crt-*' -or $_ -eq 'ucrtbase.dll' }
         if ($runtime) { throw "$binary links the C runtime dynamically: $($runtime -join ', ')" }

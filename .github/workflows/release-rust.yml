@@ -71,11 +71,11 @@ jobs:
           # static musl and looks for these next to its own executable.
           ./tools/frida/devkits.sh x86_64-unknown-linux-gnu
           cargo +1.88.0 build --locked --release \
-            -p perfr-frida-helper
+            -p perfr-hook
           cargo +1.88.0 build --locked --release \
-            -p perfr-frida-agent --features native
+            -p perfr-lib --features native
           cargo +1.88.0 build --locked --release \
-            -p perfr-api -p perfr-gpu-helper
+            -p perfr-gpu
 
       - name: Pack the archive and the debug symbols
         run: |
@@ -92,10 +92,9 @@ jobs:
             --symstore-dir dist/symstore \
             --stripped-dir dist/stripped \
             target/x86_64-unknown-linux-musl/release/perfr \
-            target/release/libperfr_api.so \
-            target/release/perfr-gpu-helper \
-            target/release/perfr-frida-helper \
-            target/release/libperfr_frida_agent.so
+            target/release/libperfr.so \
+            target/release/perfr-gpu \
+            target/release/perfr-hook
           file dist/stripped/perfr | grep -qE 'static(ally|-pie) linked'
           # The symbol table stays (a profiler symbolizes its own binary).
           # DWARF does not: it is in dist/debug, linked by .gnu_debuglink.
@@ -105,13 +104,12 @@ jobs:
           stage=dist/perfr
           mkdir -p "$stage/licenses"
           cp dist/stripped/perfr "$stage/"
-          cp dist/stripped/libperfr_frida_agent.so "$stage/"
-          cp dist/stripped/perfr-frida-helper "$stage/"
-          cp dist/stripped/libperfr_api.so "$stage/"
+          cp dist/stripped/libperfr.so "$stage/"
+          cp dist/stripped/perfr-hook "$stage/"
           cp crates/perfr-api/include/perfr.h "$stage/"
-          cp dist/stripped/perfr-gpu-helper "$stage/"
+          cp dist/stripped/perfr-gpu "$stage/"
           cp tools/frida/licenses/* "$stage/licenses/"
-          chmod 755 "$stage/perfr" "$stage/perfr-frida-helper" "$stage/perfr-gpu-helper"
+          chmod 755 "$stage/perfr" "$stage/perfr-hook" "$stage/perfr-gpu"
           tar -C dist -czf perfr-linux-x86_64.tar.gz perfr
           sha256sum perfr-linux-x86_64.tar.gz | tee perfr-linux-x86_64.tar.gz.sha256
 
@@ -174,12 +172,10 @@ jobs:
             --symstore-dir dist/symstore \
             --stripped-dir dist/stripped \
             dist/macos-universal/perfr \
-            dist/macos-universal/libperfr_api.dylib \
-            dist/macos-universal/perfr-frida-helper \
-            dist/macos-universal/libperfr_frida_agent.dylib
+            dist/macos-universal/libperfr.dylib \
+            dist/macos-universal/perfr-hook
           # strip -S invalidates the ad-hoc signature the build script wrote.
-          for bin in dist/stripped/perfr dist/stripped/libperfr_api.dylib \
-                     dist/stripped/perfr-frida-helper dist/stripped/libperfr_frida_agent.dylib; do
+          for bin in dist/stripped/perfr dist/stripped/libperfr.dylib dist/stripped/perfr-hook; do
             codesign --force --sign - "$bin"
           done
           file dist/stripped/perfr | grep -q 'universal'
@@ -187,9 +183,8 @@ jobs:
           stage=dist/perfr
           mkdir -p "$stage/include" "$stage/licenses"
           cp dist/stripped/perfr "$stage/"
-          cp dist/stripped/perfr-frida-helper "$stage/"
-          cp dist/stripped/libperfr_frida_agent.dylib "$stage/"
-          cp dist/stripped/libperfr_api.dylib "$stage/"
+          cp dist/stripped/perfr-hook "$stage/"
+          cp dist/stripped/libperfr.dylib "$stage/"
           cp tools/frida/licenses/* "$stage/licenses/"
           cp dist/macos-universal/libperfr_api.a "$stage/"
           cp dist/macos-universal/perfr.h "$stage/"
@@ -200,7 +195,7 @@ jobs:
           if [ -f dist/macos-universal/README.md ]; then
             cp dist/macos-universal/README.md "$stage/"
           fi
-          chmod 755 "$stage/perfr" "$stage/perfr-frida-helper"
+          chmod 755 "$stage/perfr" "$stage/perfr-hook"
           tar -C dist -czf perfr-macos-universal.tar.gz perfr
           shasum -a 256 perfr-macos-universal.tar.gz | tee perfr-macos-universal.tar.gz.sha256
 
@@ -260,25 +255,23 @@ jobs:
           }
           python tools/release/split_debug.py split --os windows `
             --debug-dir dist/debug --symstore-dir dist/symstore --stripped-dir dist/stripped `
-            dist\windows\perfr.exe dist\windows\perfr_api.dll `
-            dist\windows\perfr-frida-helper.exe dist\windows\perfr_frida_agent.dll `
+            dist\windows\perfr.exe dist\windows\libperfr.dll dist\windows\perfr-hook.exe `
             dist\windows\PerfrTestRust.exe
 
           $stage = 'dist\perfr'
           New-Item -ItemType Directory -Force $stage, "$stage\include" | Out-Null
           Copy-Item dist\stripped\perfr.exe $stage
-          Copy-Item dist\stripped\perfr-frida-helper.exe $stage
-          Copy-Item dist\stripped\perfr_frida_agent.dll $stage
-          Copy-Item dist\stripped\perfr_api.dll $stage
+          Copy-Item dist\stripped\perfr-hook.exe $stage
+          Copy-Item dist\stripped\libperfr.dll $stage
           Copy-Item dist\stripped\PerfrTestRust.exe $stage
           New-Item -ItemType Directory -Force "$stage\licenses" | Out-Null
           Copy-Item tools\frida\licenses\* "$stage\licenses\"
-          foreach ($extra in 'perfr_api.dll.lib', 'perfr_api.lib', 'perfr_api.py', 'README.md') {
+          foreach ($extra in 'libperfr.dll.lib', 'perfr_api.lib', 'perfr_api.py', 'README.md') {
             $src = Join-Path 'dist\windows' $extra
             if (Test-Path $src) { Copy-Item $src $stage }
           }
           Copy-Item dist\windows\include\perfr.h "$stage\include\perfr.h"
-          foreach ($required in 'perfr.exe', 'perfr_frida_agent.dll', 'perfr-frida-helper.exe', 'perfr_api.dll', 'include\perfr.h') {
+          foreach ($required in 'perfr.exe', 'libperfr.dll', 'perfr-hook.exe', 'include\perfr.h') {
             if (-not (Test-Path (Join-Path $stage $required))) { throw "missing $required" }
           }
           if (Test-Path "$stage\perfr.pdb") { throw 'the archive must not contain PDBs' }
@@ -397,16 +390,17 @@ jobs:
               "SymSrv `<name>/<GUIDAGE>/<name>`).\n\n"
               "**Linux x86-64** (`perfr-linux-x86_64.tar.gz`): static musl binary with the WASM viewer embedded, "
               "DWARF removed and a GNU build-id plus `.gnu_debuglink` left in place. Beside it:\n\n"
-              "- `libperfr_frida_agent.so` and `perfr-frida-helper` (function hooks)\n"
-              "- `libperfr_api.so` and `perfr.h` (manual instrumentation)\n"
-              "- `perfr-gpu-helper` (optional NVIDIA lanes; dynamically linked)\n"
+              "- `libperfr.so` and `perfr.h`: the library profiled programs load, for manual "
+              "instrumentation and as the agent for function hooks\n"
+              "- `perfr-hook`: attaches to a process and loads `libperfr` into it\n"
+              "- `perfr-gpu` (optional NVIDIA lanes; dynamically linked)\n"
               "- `licenses/` (Frida)\n\n"
               "**macOS** (`perfr-macos-universal.tar.gz`): universal binary (Apple silicon and Intel). Ad-hoc signed, "
               "not notarized. Manual scopes and Frida function hooks. Attaching needs a task port. No call-stack "
               "sampling, scheduler, live disassembly, or auto-profiling. No GPU helper.\n\n"
               "**Windows x86-64** (`perfr-windows-x86_64.zip`): static-CRT binaries. Beside `perfr.exe`: "
-              "`perfr_frida_agent.dll` and `perfr-frida-helper.exe` (function hooks), `perfr_api.dll`, `perfr_api.lib` "
-              "and `include\\perfr.h` (manual instrumentation), `PerfrTestRust.exe`, `licenses/`. PDBs are in the "
+              "`libperfr.dll` (manual instrumentation and the hook agent), `perfr-hook.exe`, `perfr_api.lib` "
+              "and `include\\perfr.h`, `PerfrTestRust.exe`, `licenses/`. PDBs are in the "
               "debug archive, not this zip. Call-stack sampling, the scheduler and thread states come from the kernel "
               "logger (ETW) and need an elevated prompt; manual scopes and Frida hooks do not. No auto-profiling, no "
               "kernel hook engine, no GPU helper.\n\n"

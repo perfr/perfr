@@ -23,7 +23,7 @@
 #endif
 
 /**
- * Loads libperfr_api once at startup and registers "perfr" as an external
+ * Loads libperfr once at startup and registers "perfr" as an external
  * profiler, so that every SCOPED_NAMED_EVENT*, SCOPE_CYCLE_COUNTER (with
  * -statnamedevents), QUICK_SCOPE_CYCLE_COUNTER and engine named event reaches
  * perfr as a scope on its thread, with a "frame" tick per game-thread frame.
@@ -38,6 +38,6 @@ public:
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
 
-	/** Whether perfr_init() found a libperfr_api. False means every call is a no-op. */
+	/** Whether perfr_init() found a libperfr. False means every call is a no-op. */
 	static bool IsLibraryLoaded() { return perfr_available() != 0; }
 };

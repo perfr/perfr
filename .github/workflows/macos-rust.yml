@@ -40,7 +40,7 @@ jobs:
         run: tools/build/build-service-macos.sh
       - name: Build and run C and C++ consumers
         env:
-          PERFR_API_LIB: ${{ github.workspace }}/dist/macos/libperfr_api.dylib
+          PERFR_LIB: ${{ github.workspace }}/dist/macos/libperfr.dylib
         run: |
           ./tools/test-programs/PerfrTestC/build.sh
           ./tools/test-programs/PerfrTestCpp/build.sh
@@ -50,7 +50,7 @@ jobs:
         run: |
           python3 -m venv /tmp/perfr-smoke
           /tmp/perfr-smoke/bin/pip install pyarrow
-          /tmp/perfr-smoke/bin/python tools/e2e/manual_service_smoke.py --service dist/macos/perfr --api-lib dist/macos/libperfr_api.dylib
+          /tmp/perfr-smoke/bin/python tools/e2e/manual_service_smoke.py --service dist/macos/perfr --api-lib dist/macos/libperfr.dylib
       - name: Smoke test two services in one timeline
         run: |
           cargo +1.88.0 build --locked -p perfr-test-rust

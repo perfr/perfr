@@ -16,7 +16,7 @@ public class PerfrProfiler : ModuleRules
 		// end of FEngineLoop::Init.
 		PublicDependencyModuleNames.AddRange(new string[] { "Core" });
 
-		// perfr.h links nothing and loads libperfr_api at run time. Its
+		// perfr.h links nothing and loads libperfr at run time. Its
 		// loader uses dlopen, which glibc older than 2.34 keeps in libdl.
 		if (Target.Platform == UnrealTargetPlatform.Linux || Target.Platform == UnrealTargetPlatform.LinuxArm64)
 		{

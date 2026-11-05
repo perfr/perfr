@@ -138,17 +138,17 @@ say "checksum ok"
 tar -xzf "$archive" -C "$tmp" || die "could not unpack ${asset}"
 root="$tmp/perfr"
 [ -f "$root/perfr" ] || die "archive has no perfr/perfr"
-for need in perfr-frida-helper; do
+for need in perfr-hook; do
     [ -f "$root/$need" ] || die "archive is missing $need. Function hooks need it beside perfr."
 done
 agent=""
-for candidate in libperfr_frida_agent.so libperfr_frida_agent.dylib; do
+for candidate in libperfr.so libperfr.dylib; do
     if [ -f "$root/$candidate" ]; then
         agent=$candidate
         break
     fi
 done
-[ -n "$agent" ] || die "archive is missing libperfr_frida_agent. Function hooks need it beside perfr."
+[ -n "$agent" ] || die "archive is missing libperfr. perfr.h, the Python package and function hooks need it beside perfr."
 
 mkdir -p "$INSTALL_DIR" || die "cannot create $INSTALL_DIR"
 install_bin() {
@@ -163,23 +163,14 @@ install_file() {
 }
 
 install_bin "$root/perfr" "$INSTALL_DIR/perfr"
-install_bin "$root/perfr-frida-helper" "$INSTALL_DIR/perfr-frida-helper"
+install_bin "$root/perfr-hook" "$INSTALL_DIR/perfr-hook"
 install_file "$root/$agent" "$INSTALL_DIR/$agent"
 
-case "$os" in
-    linux) lib="libperfr_api.so" ;;
-    macos) lib="libperfr_api.dylib" ;;
-esac
-if [ -f "$root/$lib" ]; then
-    install_file "$root/$lib" "$INSTALL_DIR/$lib"
-else
-    say "no $lib in this archive; perfr.h and Python perfr-api calls run as no-ops"
-fi
 if [ -f "$root/perfr.h" ]; then
     install_file "$root/perfr.h" "$INSTALL_DIR/perfr.h"
 fi
-if [ -f "$root/perfr-gpu-helper" ]; then
-    install_bin "$root/perfr-gpu-helper" "$INSTALL_DIR/perfr-gpu-helper"
+if [ -f "$root/perfr-gpu" ]; then
+    install_bin "$root/perfr-gpu" "$INSTALL_DIR/perfr-gpu"
 fi
 if [ -d "$root/licenses" ]; then
     mkdir -p "$INSTALL_DIR/licenses"
@@ -204,7 +195,7 @@ and open the viewer in a browser:
   perfr
   # then open http://127.0.0.1:44766/
 
-Function hooks use libperfr_frida_agent and perfr-frida-helper in the same
+Function hooks use libperfr and perfr-hook in the same
 directory as perfr, on either OS. They do not need root. On macOS,
 attaching needs a task port; code signing, the hardened runtime, or SIP
 can refuse it.
@@ -216,5 +207,5 @@ or CAP_SYS_ADMIN. Sampling, the scheduler, and auto-profiling are not
 in the macOS build.
 
 To instrument your own code: perfr.h is beside perfr (nothing to
-link; it finds libperfr_api there), or use the perfr-api crate or package.
+link; it finds libperfr there), or use the perfr-api crate or package.
 EOF

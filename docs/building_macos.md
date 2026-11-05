@@ -42,7 +42,7 @@ cc -DPERFR_STATIC -I dist/macos/include your_app.c dist/macos/libperfr_api.a -lS
 Python uses the same C ABI through the dylib:
 
 ```sh
-export PERFR_API_LIB="$PWD/dist/macos/libperfr_api.dylib"
+export PERFR_LIB="$PWD/dist/macos/libperfr.dylib"
 export PYTHONPATH="$PWD/dist/macos"
 python3 -c 'import perfr_api as perfr,time; assert perfr.init() == 0; exec("while True:\n with perfr.scope(\"Python work\"):\n  time.sleep(0.01)")'
 ```
@@ -97,7 +97,7 @@ Runner labels follow the [GitHub runner reference](https://docs.github.com/en/ac
 Run the smoke test locally with Python and `pyarrow` installed:
 
 ```sh
-python3 tools/e2e/manual_service_smoke.py --service dist/macos/perfr --api-lib dist/macos/libperfr_api.dylib
+python3 tools/e2e/manual_service_smoke.py --service dist/macos/perfr --api-lib dist/macos/libperfr.dylib
 ```
 
 Initial development was on Linux, with compile checks for both Apple targets and

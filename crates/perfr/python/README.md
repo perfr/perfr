@@ -11,7 +11,7 @@ $ perfr
 ```
 
 The wheel carries a prebuilt, self-contained `perfr` binary (the
-capture service, which also serves the viewer), the `libperfr_api`
+capture service, which also serves the viewer), the `libperfr`
 instrumentation library and `perfr.h`, and depends on
 [`perfr-api`](https://pypi.org/project/perfr-api/) so `import perfr_api` works
 for instrumenting Python.
@@ -26,11 +26,11 @@ The Linux binary samples, records the scheduler, and hooks functions. The
 macOS binary records manual scopes and Frida function hooks; sampling, the
 scheduler, live disassembly, and auto-profiling are not in that build.
 Manual instrumentation through the API (C, C++, Rust, Python) is in both.
-Function hooks need `libperfr_frida_agent` and `perfr-frida-helper` in the
-same directory as `perfr`. The wheel includes them (see
+Function hooks need `perfr-hook` beside `perfr`, and the `libperfr` in that
+directory is also the agent it injects. The wheel includes both (see
 `tools/release/build_wheels.sh`).
-The console script marks `perfr-frida-helper` executable, because a wheel
-does not keep that bit. NVIDIA GPU lanes need `perfr-gpu-helper` beside the
+The console script marks `perfr-hook` executable, because a wheel
+does not keep that bit. NVIDIA GPU lanes need `perfr-gpu` beside the
 service; the release archive has it, this wheel does not.
 
 Frida hooks do not need root on either OS. On macOS, attaching needs a

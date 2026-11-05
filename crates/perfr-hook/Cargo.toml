@@ -3,9 +3,9 @@
 # found in the LICENSE file.
 
 [package]
-name = "perfr-frida-helper"
+name = "perfr-hook"
 version = "0.1.0"
-description = "The Frida Core controller process: attaches to the target and drives the agent"
+description = "perfr-hook: the Frida Core controller perfr spawns to attach to a target and load libperfr into it"
 edition = "2021"
 license = "BSD-2-Clause"
 

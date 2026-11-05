@@ -22,12 +22,14 @@ panel are viewer-side work still to do -- see
 
 ## Distributing
 
-Two binaries, and only one of them is ever required.
+Three binaries and one library, and only the first is ever required.
 
-| Binary | Build | Size | Needs on the target | Required? |
+| File | Build | Size | Needs on the target | Required? |
 |---|---|---|---|---|
 | `perfr` | `tools/build/build-service-musl.sh` | ~12 MB | nothing (static, 0 `DT_NEEDED`) | always |
-| `perfr-gpu-helper` | `cargo build --release -p perfr-gpu-helper` | 361 KB | glibc >= 2.34, libgcc_s; NVIDIA driver at runtime | only for NVIDIA GPU telemetry |
+| `libperfr.so` | `cargo build --release -p perfr-lib --features native` | ~3.4 MB stripped | glibc; loaded into the profiled program | manual instrumentation and function hooks |
+| `perfr-hook` | `cargo build --release -p perfr-hook` | ~15 MB stripped | glibc >= 2.34 | only for function hooks |
+| `perfr-gpu` | `cargo build --release -p perfr-gpu` | 361 KB | glibc >= 2.34, libgcc_s; NVIDIA driver at runtime | only for NVIDIA GPU telemetry |
 
 `perfr` is statically linked and runs on any x86-64 Linux with no
 runtime dependencies at all. It was ~865 KB before it grew the ability to
@@ -36,7 +38,7 @@ stack is what takes it to ~12 MB. Still one self-contained file, but the
 "under a megabyte" figure in earlier posts predates serve mode. It never links or loads a GPU library, so it
 behaves identically on NVIDIA, AMD, and machines with no GPU.
 
-`perfr-gpu-helper` is dynamically linked *on purpose*: static musl cannot
+`perfr-gpu` is dynamically linked *on purpose*: static musl cannot
 `dlopen`, and NVML must be loaded at runtime. It does **not** link
 `libnvidia-ml` at build time (it `dlopen`s it), so the same helper binary runs
 on machines without an NVIDIA driver -- it just exits quietly and the capture
@@ -62,7 +64,7 @@ perfr --pid <tid> --duration-ms 5000 --out capture.pod
 
 # ...plus NVIDIA GPU telemetry
 perfr --pid <tid> --duration-ms 5000 \
-              --gpu-helper ./perfr-gpu-helper --out capture.pod
+              --gpu-helper ./perfr-gpu --out capture.pod
 
 # read the capture back
 perfr-pod-dump capture.pod            # machine, counts, hottest callstacks
@@ -100,12 +102,12 @@ leaves a log you can read and delete. The banner and `GET /api/status`
 ```
 [2026-09-26T14:03:22.123456] [INFO ] [serve.rs:773] 3 sampling ring(s) at 1000 Hz, unwinder ready
 [2026-09-26T14:03:24.010775] [WARN ] [viewer 7c1e perfr_live_viewer::net] WebSocket closed
-[2026-09-26T14:03:24.100031] [INFO ] [perfr-frida-helper] agent injected into pid 4242
+[2026-09-26T14:03:24.100031] [INFO ] [perfr-hook] agent injected into pid 4242
 ```
 
 UTC time to the microsecond, the level, where the line came from, the
 message. The origin is `file:line` for the service's own lines, the helper's
-name for a line a child process (`perfr-frida-helper`, `perfr-gpu-helper`)
+name for a line a child process (`perfr-hook`, `perfr-gpu`)
 wrote to its stderr, and `viewer <page> <module>` for a line the browser
 viewer relayed through `POST /api/log` -- the viewer sends its own log
 (everything it prints to the console, and a panic) so one file has both

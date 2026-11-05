@@ -95,9 +95,9 @@ def main():
     scratch = tempfile.mkdtemp(prefix='perfr-remote-')
     if sys.platform == 'win32':
         remote_env['LOCALAPPDATA'] = scratch
-    api_lib = next((p for p in (Path(service_path).with_name(n) for n in ('perfr_api.dll', 'libperfr_api.so', 'libperfr_api.dylib')) if p.is_file()), None)
+    api_lib = next((p for p in (Path(service_path).with_name(n) for n in ('libperfr.dll', 'libperfr.so', 'libperfr.dylib')) if p.is_file()), None)
     if api_lib:
-        remote_env['PERFR_API_LIB'] = str(api_lib)
+        remote_env['PERFR_LIB'] = str(api_lib)
 
     with tempfile.TemporaryFile(mode='w+') as hub_log, tempfile.TemporaryFile(mode='w+') as remote_log:
         hub_proc = subprocess.Popen([service_path, '--host', '127.0.0.1', '--serve', str(hub_port)], stdout=hub_log, stderr=hub_log)

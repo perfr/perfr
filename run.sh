@@ -111,9 +111,9 @@ if [[ "$SERVE" -eq 1 && "$STATIC" -eq 0 ]]; then
 fi
 
 if [[ "$WITH_GPU" -eq 1 ]]; then
-  echo "run.sh: building perfr-gpu-helper"
-  cargo build --release -p perfr-gpu-helper
-  HELPER="$ROOT/target/release/perfr-gpu-helper"
+  echo "run.sh: building perfr-gpu"
+  cargo build --release -p perfr-gpu
+  HELPER="$ROOT/target/release/perfr-gpu"
   [[ -x "$HELPER" ]] || die "built, but $HELPER is missing"
   PASSTHROUGH+=(--gpu-helper "$HELPER")
 fi

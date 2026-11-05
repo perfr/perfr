@@ -3,7 +3,7 @@
 # found in the LICENSE file.
 #
 # Builds the pip wheels for perfr:
-#   perfr-api       manual instrumentation for Python (bundles libperfr_api)
+#   perfr-api       manual instrumentation for Python (bundles libperfr)
 #   perfr  the perfr binary + library + header, one command
 #
 # Both wheels for a platform come from one build (tools/release/build_wheels.sh)
@@ -74,12 +74,12 @@ jobs:
       run: |
         python -m venv /tmp/v
         /tmp/v/bin/pip install --no-index --find-links dist/wheels perfr
-        env -u PERFR_API_LIB PATH=/usr/bin:/bin /tmp/v/bin/python -c \
+        env -u PERFR_LIB PATH=/usr/bin:/bin /tmp/v/bin/python -c \
           "import perfr_api as o; assert o.init() == 0 and o.available(); print('ok', o.library_path())"
         /tmp/v/bin/python -c '
           import os, perfr as p
           root = os.path.dirname(p.binary_path())
-          for name in ("perfr", "perfr-frida-helper", "libperfr_frida_agent.so"):
+          for name in ("perfr", "perfr-hook", "libperfr.so"):
               path = os.path.join(root, name)
               assert os.path.isfile(path), path
           print("frida companions ok", root)

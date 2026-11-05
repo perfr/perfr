@@ -49,7 +49,6 @@ try {
     New-Item -ItemType Directory -Force "$Output\include", "$Output\licenses" | Out-Null
     $files = @{
         "target\$target\release\perfr.exe" = 'perfr.exe'
-        "target\$target\release\perfr.pdb" = 'perfr.pdb'
         "target\$target\release\perfr-frida-helper.exe" = 'perfr-frida-helper.exe'
         "target\$target\release\perfr_frida_agent.dll" = 'perfr_frida_agent.dll'
         "target\$target\release\perfr_api.dll" = 'perfr_api.dll'
@@ -61,13 +60,17 @@ try {
         'docs\building_windows.md' = 'README.md'
     }
     foreach ($entry in $files.GetEnumerator()) {
-        if (-not (Test-Path $entry.Key)) {
-            # The service's PDB is the one optional file: its name follows the
-            # crate, and a build without line tables has none.
-            if ($entry.Value -eq 'perfr.pdb') { continue }
-            throw "missing $($entry.Key)"
-        }
+        if (-not (Test-Path $entry.Key)) { throw "missing $($entry.Key)" }
         Copy-Item $entry.Key (Join-Path $Output $entry.Value) -Force
+    }
+    # Release builds compile full debug info. The PDBs stay out of the core
+    # zip; the release workflow publishes them. Copy every PDB next to the
+    # binary so that step can find the one the PE names.
+    Get-ChildItem "target\$target\release\*.pdb" | ForEach-Object {
+        Copy-Item $_.FullName (Join-Path $Output $_.Name) -Force
+    }
+    if (-not (Test-Path (Join-Path $Output 'perfr.pdb'))) {
+        throw 'perfr.pdb is missing; a release build keeps full debug info in the PDB'
     }
     Copy-Item 'tools\frida\licenses\*' "$Output\licenses\" -Force
 

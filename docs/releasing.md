@@ -26,44 +26,93 @@ They were not deleted or retagged.
 
 ## What the workflow builds
 
-Each stable tag publishes three archives: a static Linux x86-64 build, a
-universal macOS build (Apple silicon and Intel), and a Windows x86-64 build.
+Each stable tag publishes, per platform, the archive the installer
+downloads, a debug-symbol archive, and a symbol-store archive. Platforms: static Linux
+x86-64, universal macOS (Apple silicon and Intel), and Windows x86-64.
 Linux arm64 is not in the release.
 
-Linux x86-64, on `ubuntu-22.04`:
+Release builds compile **full** debug info (`debug = true` in the release
+profile, `strip = "none"` so cargo does not delete it). Dependencies stay
+without debug info: that is a compile-time choice, and their line tables
+alone were 35 MB. `tools/release/split_debug.py` then splits the shipped
+binaries:
 
-- `perfr`, static musl (`x86_64-unknown-linux-musl`). The WASM viewer
-  in `crates/perfr-live-viewer/viewer-dist` is embedded by `perfr-live-server` at
-  compile time. The job checks that the binary is statically linked.
-- The files the service looks up next to its own executable
-  (`std::env::current_exe()`, overridable with `PERFR_FRIDA_AGENT` and
-  `PERFR_FRIDA_HELPER`):
-  - `libperfr_frida_agent.so`
-  - `perfr-frida-helper`
+| Platform | Split | What stays in the binary |
+|---|---|---|
+| Linux | `objcopy --only-keep-debug`, `--strip-debug`, `--add-gnu-debuglink` | symbol table and the GNU build-id note. Link with `-Wl,--build-id=sha1` (the workflow sets `RUSTFLAGS`). |
+| macOS | `dsymutil`, then `strip -S`, then ad-hoc `codesign` | the Mach-O UUID that matches the `.dSYM` |
+| Windows | PDB already beside the image | the RSDS pointer. The PDB is not in the zip. |
+
+The symbol table is kept on purpose. perfr symbolizes its own binary, and
+the disassembly example finds functions from that table. Source lines come
+from `.debug_line` in the detached file, not from the release binary. The
+example reads `.gnu_debuglink` (next to the binary, `.debug/`, or
+`/usr/lib/debug`), then `/usr/lib/debug/.build-id`, then
+`PERFR_SYMBOL_PATH/buildid/<id>/debuginfo` or the debuginfod client cache.
+A local `cargo build --release` still has the line table inside the binary,
+because only the release packager splits it. macOS has no live disassembly.
+Windows disassembly does not read source lines from a PDB yet.
+
+Debug archive names look like `perfr-v0.1.0-linux-x86_64-debug.tar.gz`.
+The symbol-store archive is `perfr-v0.1.0-linux-x86_64-symstore.tar.gz`
+with this layout:
+
+- Linux: `buildid/<hex-build-id>/debuginfo` (the debuginfod URL path, so the
+  tree can be the document root of a static debuginfod server)
+- Windows: `<filename>/<GUIDAGE>/<filename>` (SymSrv). `GUIDAGE` is the
+  CodeView GUID in mixed endian plus the age in unpadded lowercase hex.
+- macOS: `dsym/<uuid>/<name>.dSYM/`
+
+If `PERFR_SYMBOL_STORE_BUCKET` and an access key are set
+(`PERFR_SYMBOL_STORE_ACCESS_KEY_ID` or `AWS_ACCESS_KEY_ID`, and the matching
+secret), the publish job syncs that tree to the bucket with the AWS CLI.
+`PERFR_SYMBOL_STORE_ENDPOINT` is the R2 S3 endpoint
+(`https://<account>.r2.cloudflarestorage.com`). `PERFR_SYMBOL_STORE_PREFIX`
+is an optional key prefix. `PERFR_SYMBOL_STORE_REGION` defaults to `auto`.
+With no bucket or no credentials the step prints why and exits 0. The
+symstore archives are on the GitHub release either way. Unpack them and
+`aws s3 sync` later; `tools/release/upload-symbols.sh` is that step.
+
+`python3 tools/release/test_split_debug.py` checks the path layout and, when
+gcc is installed, that objcopy keeps the build-id and moves `.debug_line`
+into the detached file.
+
+### The archive
+
+Linux x86-64, on `ubuntu-22.04`, `perfr-linux-x86_64.tar.gz`:
+
+- `perfr`, static musl (`x86_64-unknown-linux-musl`), DWARF removed. The
+  WASM viewer in `crates/perfr-live-viewer/viewer-dist` is embedded by
+  `perfr-live-server` at compile time. The job checks that the binary is
+  statically linked, that `.gnu_debuglink` is present, and that the build-id
+  survived.
+- `perfr-frida-helper` and `libperfr_frida_agent.so`, the function-hook
+  engine, stripped the same way, and `licenses/` for the Frida devkits.
+  They are glibc binaries: the helper hosts Frida Core and the agent is
+  loaded into ordinary glibc programs.
 - `libperfr_api.so` and `perfr.h`, for manual instrumentation.
 - `perfr-gpu-helper`, the optional NVIDIA helper. It is a glibc binary on
   purpose (the static service cannot `dlopen`).
-- `licenses/` for the Frida devkits.
 
-macOS, on `macos-15`, via `tools/build/build-service-macos.sh --universal`:
+macOS, on `macos-15`, via `tools/build/build-service-macos.sh --universal`,
+`perfr-macos-universal.tar.gz`:
 
-- One universal `perfr` (Apple silicon and Intel), plus
-  `libperfr_frida_agent.dylib`, `perfr-frida-helper`, `libperfr_api.dylib`,
-  `perfr.h`, and the Frida licenses.
-- Ad-hoc signed (`codesign --sign -`), not notarized.
+- One universal `perfr` (Apple silicon and Intel), `perfr-frida-helper`,
+  `libperfr_frida_agent.dylib`, `libperfr_api.dylib`, `libperfr_api.a`,
+  `perfr.h`, `licenses/`, and the SDK extras the build script writes.
+- Ad-hoc signed (`codesign --sign -`) after the strip, not notarized.
 - Records manual scopes and Frida function hooks. No call-stack sampling,
   scheduler, live disassembly, or auto-profiling.
 - No GPU helper. That binary is Linux-only.
 
-Windows x86-64, on `windows-2022`, via `.\tools\build\build-service-windows.ps1`:
+Windows x86-64, on `windows-2022`, via `.\tools\build\build-service-windows.ps1`,
+`perfr-windows-x86_64.zip`:
 
-- `perfr.exe` with the viewer embedded, linked against the static C
-  runtime (`.cargo/config.toml`), so it depends on system DLLs only;
-  the script checks that with `dumpbin /dependents`.
-- `perfr_frida_agent.dll` and `perfr-frida-helper.exe` beside it, for
-  function hooks; `perfr_api.dll`, `perfr_api.dll.lib`, `perfr_api.lib` and
-  `include\perfr.h` for manual instrumentation; `perfr_api.py`;
-  `PerfrTestRust.exe`; the Frida licenses.
+- `perfr.exe` with the viewer embedded, linked against the static C runtime
+  (`.cargo/config.toml`); the build script checks that with `dumpbin /dependents`.
+- `perfr-frida-helper.exe` and `perfr_frida_agent.dll` (function hooks),
+  `licenses/`; `perfr_api.dll`, `perfr_api.dll.lib`, `perfr_api.lib` and
+  `include\perfr.h`; `perfr_api.py`; `PerfrTestRust.exe`. No PDBs in this zip.
 - Records manual scopes and Frida hooks without privilege. Call-stack
   sampling, the scheduler and thread states come from the NT Kernel Logger
   (ETW) and need an elevated prompt. No auto-profiling, no kernel hook
@@ -73,11 +122,14 @@ Windows x86-64, on `windows-2022`, via `.\tools\build\build-service-windows.ps1`
 Linux arm64 is not in the release. The service compiles for arm64; it is not
 run in CI, and the static musl build in this workflow is x86-64 only.
 
-The Linux and macOS archives are gzipped tars, the Windows one a zip; each
-has the top-level directory `perfr/`. Beside the archives the release has
-`SHA256SUMS` and a `.sha256` file per archive (`sha256sum` format: hash, two
-spaces, file name). `tools/install/install.ps1` is the Windows installer and
-reads the zip's `.sha256` the way `install.sh` reads the tars'.
+The Linux and macOS archives are gzipped tars, the Windows one is a zip;
+debug and symstore archives are gzipped tars on every platform. The
+installer archives use the top-level directory `perfr/`. Beside the archives the
+release has `SHA256SUMS` and a `.sha256` file per archive (`sha256sum`
+format: hash, two spaces, file name). `tools/install/install.ps1` is the
+Windows installer and reads the zip's `.sha256` the way `install.sh` reads
+the tars'. The pip wheels are a separate channel and bundle the same
+companion files inside the `perfr` wheel; see `tools/release/README.md`.
 
 ## How to cut one
 
@@ -89,7 +141,7 @@ git push origin perfr-v0.1.0
 ```
 
 Pushing the tag starts the workflow. The workflow does not create the tag.
-Wait until both build jobs and the publish job are green, then check
+Wait until the Linux, macOS, and Windows jobs and the publish job are green, then check
 `https://github.com/perfr/perfr/releases/tag/perfr-v0.1.0`.
 
 `workflow_dispatch` (Actions → release-rust → Run workflow) builds the same

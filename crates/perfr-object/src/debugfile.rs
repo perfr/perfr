@@ -27,11 +27,76 @@ pub const DEFAULT_DEBUG_ROOT: &str = "/usr/lib/debug";
 
 /// The detached debug file for `path`, whose metadata was already parsed.
 pub fn detached_debug_file(path: &Path, metadata: &ElfMetadata) -> Option<PathBuf> {
-    detached_debug_file_under(path, metadata, Path::new(DEFAULT_DEBUG_ROOT))
+    detached_debug_file_under(path, metadata, Path::new(DEFAULT_DEBUG_ROOT)).or_else(|| {
+        debuginfod_debuginfo(
+            &metadata.build_id,
+            &symbol_store_roots(),
+            &debuginfod_cache_roots(),
+        )
+    })
+}
+
+/// `buildid/<id>/debuginfo` inside a symbol store, or `<id>/debuginfo` inside
+/// a debuginfod client cache. The id is the lowercase hex GNU build-id.
+///
+/// The release symbol store uses the debuginfod URL layout (`buildid/<id>/debuginfo`)
+/// so a static file server can answer debuginfod. The elfutils client cache
+/// stores the same file one directory higher (`<id>/debuginfo`).
+pub fn debuginfod_debuginfo(
+    build_id: &str,
+    store_roots: &[PathBuf],
+    cache_roots: &[PathBuf],
+) -> Option<PathBuf> {
+    let id = build_id.trim().to_ascii_lowercase();
+    if id.len() < 2 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    for root in store_roots {
+        let candidate = root.join("buildid").join(&id).join("debuginfo");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    for root in cache_roots {
+        let candidate = root.join(&id).join("debuginfo");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// `PERFR_SYMBOL_PATH`, a `PATH`-style list of symbol-store roots.
+pub fn symbol_store_roots() -> Vec<PathBuf> {
+    std::env::var_os("PERFR_SYMBOL_PATH")
+        .map(|value| {
+            std::env::split_paths(&value)
+                .filter(|path| !path.as_os_str().is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The debuginfod client cache: `DEBUGINFOD_CACHE_PATH`, else
+/// `$XDG_CACHE_HOME/debuginfod_client`, else `~/.cache/debuginfod_client`.
+pub fn debuginfod_cache_roots() -> Vec<PathBuf> {
+    if let Some(path) = std::env::var_os("DEBUGINFOD_CACHE_PATH") {
+        return vec![PathBuf::from(path)];
+    }
+    let cache_home = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")));
+    cache_home
+        .map(|dir| vec![dir.join("debuginfod_client")])
+        .unwrap_or_default()
 }
 
 /// [`detached_debug_file`] with the debug root made explicit, for tests.
-pub fn detached_debug_file_under(path: &Path, metadata: &ElfMetadata, root: &Path) -> Option<PathBuf> {
+pub fn detached_debug_file_under(
+    path: &Path,
+    metadata: &ElfMetadata,
+    root: &Path,
+) -> Option<PathBuf> {
     if metadata.build_id.len() > 2 {
         let candidate = root
             .join(".build-id")
@@ -52,7 +117,9 @@ pub fn detached_debug_file_under(path: &Path, metadata: &ElfMetadata, root: &Pat
         // The fast proof first; the CRC stays the authority when the ids
         // differ or the candidate has none (a debug file produced from
         // another link of the same sources still checks out by CRC).
-        if !metadata.build_id.is_empty() && build_id_of(&candidate).as_deref() == Some(metadata.build_id.as_str()) {
+        if !metadata.build_id.is_empty()
+            && build_id_of(&candidate).as_deref() == Some(metadata.build_id.as_str())
+        {
             return Some(candidate);
         }
         if crc32_file(&candidate) == Some(link.crc32_checksum) {
@@ -78,9 +145,10 @@ mod tests {
     use crate::parse_elf_metadata;
 
     fn testdata_dir() -> PathBuf {
-        PathBuf::from(std::env::var("PERFR_TESTDATA").unwrap_or_else(|_| {
-            format!("{}/testdata", env!("CARGO_MANIFEST_DIR"))
-        }))
+        PathBuf::from(
+            std::env::var("PERFR_TESTDATA")
+                .unwrap_or_else(|_| format!("{}/testdata", env!("CARGO_MANIFEST_DIR"))),
+        )
     }
 
     #[test]
@@ -103,7 +171,8 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         let metadata = parse_elf_metadata(&bytes, path.to_str().unwrap()).unwrap();
         let empty_root = std::env::temp_dir().join("perfr-no-debug-root");
-        let found = detached_debug_file_under(&path, &metadata, &empty_root).expect("debug file next to it");
+        let found = detached_debug_file_under(&path, &metadata, &empty_root)
+            .expect("debug file next to it");
         assert_eq!(found.file_name().unwrap(), "hello_world_elf.debug");
     }
 
@@ -112,14 +181,71 @@ mod tests {
         let path = testdata_dir().join("hello_world_elf");
         let bytes = std::fs::read(&path).unwrap();
         let metadata = parse_elf_metadata(&bytes, path.to_str().unwrap()).unwrap();
-        assert!(metadata.gnu_debuglink.is_none(), "this file has no debuglink; only the build id can find it");
+        assert!(
+            metadata.gnu_debuglink.is_none(),
+            "this file has no debuglink; only the build id can find it"
+        );
         let root = std::env::temp_dir().join(format!("perfr-debug-root-{}", std::process::id()));
         let dir = root.join(".build-id").join(&metadata.build_id[..2]);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join(format!("{}.debug", &metadata.build_id[2..]));
         std::fs::write(&file, b"any bytes: the path is the proof").unwrap();
-        assert_eq!(detached_debug_file_under(&path, &metadata, &root), Some(file));
+        assert_eq!(
+            detached_debug_file_under(&path, &metadata, &root),
+            Some(file)
+        );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_symbol_store_buildid_path_is_the_debuginfod_url_layout() {
+        let root = std::env::temp_dir().join(format!("perfr-symstore-{}", std::process::id()));
+        let id = "d12d54bc5b72ccce54a408bdeda65e2530740ac8";
+        let debuginfo = root.join("buildid").join(id).join("debuginfo");
+        std::fs::create_dir_all(debuginfo.parent().unwrap()).unwrap();
+        std::fs::write(&debuginfo, b"split debug").unwrap();
+        let cache = root.join("cache");
+        let cached = cache.join(id).join("debuginfo");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"cached").unwrap();
+        assert_eq!(
+            debuginfod_debuginfo(id, &[root.clone()], &[]).as_deref(),
+            Some(debuginfo.as_path())
+        );
+        // The store wins over the client cache. An empty store falls through.
+        assert_eq!(
+            debuginfod_debuginfo(&id.to_ascii_uppercase(), &[], &[cache.clone()]).as_deref(),
+            Some(cached.as_path())
+        );
+        assert_eq!(debuginfod_debuginfo("zz", &[root.clone()], &[]), None);
+        assert_eq!(debuginfod_debuginfo("", &[root.clone()], &[]), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn line_tables_come_from_the_detached_debug_file() {
+        // The release binary keeps a .gnu_debuglink and no .debug_line. The
+        // example disassembly reads the detached file, which is where the
+        // line table went.
+        let path = testdata_dir().join("hello_world_elf_with_gnu_debuglink");
+        let bytes = std::fs::read(&path).unwrap();
+        let metadata = parse_elf_metadata(&bytes, path.to_str().unwrap()).unwrap();
+        assert!(metadata.gnu_debuglink.is_some());
+        let debug_path =
+            detached_debug_file_under(&path, &metadata, Path::new("/nonexistent")).unwrap();
+        let debug = std::fs::read(&debug_path).unwrap();
+        // 0x1140 is the first line-table address in this fixture. Asking from
+        // address 0 skips the unit: its ranges do not cover 0.
+        let from_binary = crate::line_rows(&bytes, 0x1140, 0x1200);
+        let from_debug = crate::line_rows(&debug, 0x1140, 0x1200);
+        assert!(
+            from_binary.is_empty(),
+            "the stripped fixture has no line table"
+        );
+        assert!(
+            from_debug.iter().any(|row| row.line > 0),
+            "the detached debug file has the line table: {from_debug:?}"
+        );
     }
 
     #[test]
@@ -128,6 +254,9 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         let metadata = parse_elf_metadata(&bytes, path.to_str().unwrap()).unwrap();
         let empty_root = std::env::temp_dir().join("perfr-no-debug-root");
-        assert_eq!(detached_debug_file_under(&path, &metadata, &empty_root), None);
+        assert_eq!(
+            detached_debug_file_under(&path, &metadata, &empty_root),
+            None
+        );
     }
 }

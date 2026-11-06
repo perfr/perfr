@@ -11,8 +11,9 @@ on:
   # https://github.com/ossf/scorecard/blob/main/docs/checks.md#maintained
   schedule:
     - cron: '15 12 * * 1'
-  push:
-    branches: [ "main" ]
+  # Intentionally no push-to-main: every merge was billing a failing private-repo
+  # run (~1 Linux min each). Weekly cron is enough; dispatch for on-demand.
+  workflow_dispatch:
 
 # Declare default permissions as read only.
 permissions: read-all

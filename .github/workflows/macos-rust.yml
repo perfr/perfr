@@ -7,8 +7,19 @@ name: macos-rust
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, labeled]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
   workflow_dispatch:
 
 permissions:
@@ -20,11 +31,20 @@ concurrency:
 
 jobs:
   manual-capture:
+    # Ignore "labeled" for any label other than full-ci. Adding full-ci
+    # re-runs with the Intel matrix included.
+    if: >
+      github.event_name != 'pull_request'
+      || github.event.action != 'labeled'
+      || github.event.label.name == 'full-ci'
     strategy:
       fail-fast: false
       matrix:
-        # Explicit architectures: macos-15 is Apple Silicon.
-        runner: [macos-15, macos-15-intel]
+        # Explicit architectures: macos-15 is Apple Silicon. PRs without the
+        # full-ci label run arm only (cuts the 10x macOS bill roughly in half
+        # for PR CI). Intel joins on main pushes, workflow_dispatch, and PRs
+        # labeled full-ci. Release tags use release-rust.yml instead.
+        runner: ${{ fromJSON(github.event_name == 'pull_request' && !contains(join(github.event.pull_request.labels.*.name, ','), 'full-ci') && '["macos-15"]' || '["macos-15", "macos-15-intel"]') }}
     runs-on: ${{ matrix.runner }}
     env:
       MACOSX_DEPLOYMENT_TARGET: '11.0'
@@ -32,6 +52,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         run: rustup toolchain install 1.88.0 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-rust-${{ matrix.runner }}
       - name: Test manual API and shared mappings
         run: cargo +1.88.0 test --locked -p perfr-api -p perfr-scope-ring
       - name: Test service

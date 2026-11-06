@@ -51,6 +51,10 @@ jobs:
         rustup toolchain install 1.88.0 --profile minimal
         rustup default 1.88.0
 
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: python-wheels-${{ matrix.key }}
+
     - uses: actions/setup-python@v5
       with:
         python-version: '3.12'

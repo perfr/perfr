@@ -51,6 +51,9 @@ jobs:
           # symbol store has nothing to key the debug file on.
           echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-Wl,--build-id=sha1" >> "$GITHUB_ENV"
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-rust-linux
       - name: Build static perfr
         run: |
           set -euo pipefail
@@ -154,6 +157,9 @@ jobs:
       - name: Rust toolchain
         run: rustup toolchain install 1.88.0 --profile minimal
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-rust-macos
       - name: Build universal service
         run: tools/build/build-service-macos.sh --universal
 
@@ -230,7 +236,7 @@ jobs:
   windows:
     name: Windows x86-64
     runs-on: windows-2022
-    timeout-minutes: 120
+    timeout-minutes: 45
     defaults:
       run:
         shell: pwsh
@@ -240,6 +246,9 @@ jobs:
       - name: Rust toolchain
         run: rustup toolchain install 1.88.0 --profile minimal
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-rust-windows
       - name: Build service and SDK
         run: .\tools\build\build-service-windows.ps1
 

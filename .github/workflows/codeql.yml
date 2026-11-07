@@ -2,6 +2,12 @@ name: "CodeQL"
 
 on:
   workflow_dispatch:
+  # Path-filtered so an edit to this workflow is proven on the PR.
+  # The Monday/Friday schedule still covers the tree between edits.
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/codeql.yml'
   schedule:
     - cron: '20 19 * * 1,5'
 

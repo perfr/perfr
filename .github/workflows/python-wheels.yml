@@ -10,12 +10,25 @@
 # so the ring protocol matches between the library that writes and the service
 # that reads. Wheels are uploaded as artifacts. On a perfr-v* tag (the Rust
 # release scheme, not the legacy C++ v1.* tags) they publish to PyPI via
-# Trusted Publishing once those publishers exist. workflow_dispatch builds
-# wheels and does not publish.
+# Trusted Publishing once those publishers exist. workflow_dispatch and a
+# path-filtered pull request build wheels and do not publish. Ordinary code
+# PRs do not run this workflow, so the arm-only macOS cut on macos-rust and
+# frida-rust is unchanged. A pull request that touches the wheel build runs
+# the full release matrix, including both Mac architectures.
 
 name: python-wheels
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/python-wheels.yml'
+      - 'tools/release/build_wheels.sh'
+      - 'tools/frida/**'
+      - 'tools/windows/**'
+      - 'crates/perfr/python/**'
+      - 'crates/perfr-api/python/**'
+      - 'crates/perfr-api/include/**'
   push:
     tags:
     - 'perfr-v*'

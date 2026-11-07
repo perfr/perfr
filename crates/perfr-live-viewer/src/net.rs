@@ -300,7 +300,10 @@ pub struct ServiceFrame {
 
 #[derive(Default)]
 pub struct Inbox {
-    pub share: Option<Result<ShareReply, String>>,
+    pub share_notes: Vec<crate::share::ShareNote>,
+    /// A `.perfr.stream` just loaded from a file or `?capture=` URL. The
+    /// app ingests it and keeps the bytes for Share.
+    pub loaded_stream: Option<Vec<u8>>,
     pub status: Option<StatusJson>,
     /// The service's persisted user settings (`/api/settings`), as the raw
     /// object so keys this viewer does not know survive a round trip.
@@ -328,12 +331,6 @@ pub struct Inbox {
     /// The code views: a disassembly and a source file, or why not.
     pub disassembly: Option<Result<crate::code::Disassembly, String>>,
     pub source: Option<Result<crate::code::SourceFile, String>>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ShareReply {
-    pub viewer_url: String,
-    pub expires_in: Option<u32>,
 }
 
 #[allow(dead_code)] // used from the wasm Net impl
@@ -605,7 +602,7 @@ mod wasm_impl {
                 match result {
                     Ok(bytes) => {
                         g.bytes_in += bytes.len() as u64;
-                        g.frames.push(bytes);
+                        g.loaded_stream = Some(bytes);
                         g.ws_ok = true;
                         g.http_ok = true;
                     }
@@ -622,21 +619,77 @@ mod wasm_impl {
             }
         }
 
-        pub fn share_capture(&self, window: Option<(u64, u64)>) {
-            if self.offline { return; }
+        /// Posts `.perfr.stream` bytes to `endpoint`. `bytes` is the file or
+        /// URL the page already loaded; `None` means a live session, so the
+        /// bytes come from `GET /api/capture/export?format=stream` first.
+        pub fn share_capture(&self, gen: u64, endpoint: String, bytes: Option<Vec<u8>>) {
             let inbox = self.inbox.clone();
-            let query = window.map(|(a, b)| format!("?t0={a}&t1={b}")).unwrap_or_default();
             wasm_bindgen_futures::spawn_local(async move {
-                let result = send_text("POST", &format!("/api/capture/share{query}"), "{}")
-                    .await.and_then(|text| serde_json::from_str::<ShareReply>(&text).map_err(|e| e.to_string()));
-                inbox.lock().unwrap_or_else(|e| e.into_inner()).share = Some(result);
+                let bytes = match bytes {
+                    Some(bytes) => bytes,
+                    None => {
+                        push_share(&inbox, gen, crate::share::ShareNoteKind::Reading);
+                        match get_bytes(crate::share::STREAM_EXPORT_PATH).await {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                push_share(
+                                    &inbox,
+                                    gen,
+                                    crate::share::ShareNoteKind::Failed(format!("Could not read the capture. {e}")),
+                                );
+                                return;
+                            }
+                        }
+                    }
+                };
+                if bytes.is_empty() {
+                    push_share(&inbox, gen, crate::share::ShareNoteKind::Failed("Nothing to share.".into()));
+                    return;
+                }
+                push_share(
+                    &inbox,
+                    gen,
+                    crate::share::ShareNoteKind::Progress { loaded: 0, total: bytes.len() as u64 },
+                );
+                let result = post_share_xhr(&endpoint, &bytes, &inbox, gen).await;
+                let kind = match result {
+                    Ok(text) => match crate::share::parse_share_reply(&text) {
+                        Ok(link) => crate::share::ShareNoteKind::Done(link),
+                        Err(e) => crate::share::ShareNoteKind::Failed(e),
+                    },
+                    Err((status, body)) => {
+                        crate::share::ShareNoteKind::Failed(crate::share::share_failure_message(status, &body))
+                    }
+                };
+                push_share(&inbox, gen, kind);
+            });
+        }
+
+        /// Reads a `.perfr.stream` the user opened and hands the bytes to the app.
+        pub fn import_stream_file(&self, file: web_sys::File) {
+            let inbox = self.inbox.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = async {
+                    let buf = JsFuture::from(file.array_buffer()).await.map_err(js_err)?;
+                    let arr = js_sys::Uint8Array::new(&buf);
+                    let mut bytes = vec![0u8; arr.length() as usize];
+                    arr.copy_to(&mut bytes);
+                    Ok::<_, String>(bytes)
+                }
+                .await;
+                let mut g = inbox.lock().unwrap_or_else(|p| p.into_inner());
+                match result {
+                    Ok(bytes) => g.loaded_stream = Some(bytes),
+                    Err(e) => g.error = Some(format!("open capture: {e}")),
+                }
             });
         }
 
         pub fn take(&self) -> Inbox {
             let mut inbox = self.inbox.lock().unwrap_or_else(|e| e.into_inner());
             Inbox {
-                share: inbox.share.take(),
+                share_notes: std::mem::take(&mut inbox.share_notes),
+                loaded_stream: inbox.loaded_stream.take(),
                 status: inbox.status.take(),
                 settings: inbox.settings.take(),
                 bench: inbox.bench.take(),
@@ -1257,6 +1310,65 @@ mod wasm_impl {
         Ok(text)
     }
 
+    fn push_share(inbox: &Arc<Mutex<Inbox>>, gen: u64, kind: crate::share::ShareNoteKind) {
+        inbox.lock().unwrap_or_else(|e| e.into_inner()).share_notes.push(crate::share::ShareNote { gen, kind });
+    }
+
+    /// POST the stream with an XMLHttpRequest so the upload reports progress.
+    /// `fetch` does not. The status is 0 when the browser could not reach the host.
+    async fn post_share_xhr(
+        url: &str,
+        bytes: &[u8],
+        inbox: &Arc<Mutex<Inbox>>,
+        gen: u64,
+    ) -> Result<String, (u16, String)> {
+        let xhr = web_sys::XmlHttpRequest::new().map_err(|e| (0, js_err(e)))?;
+        xhr.open_with_async("POST", url, true).map_err(|e| (0, js_err(e)))?;
+        xhr.set_request_header("content-type", crate::share::SHARE_CONTENT_TYPE).map_err(|e| (0, js_err(e)))?;
+        let progress_inbox = inbox.clone();
+        let onprogress = Closure::wrap(Box::new(move |ev: web_sys::ProgressEvent| {
+            let total = if ev.length_computable() { ev.total() as u64 } else { 0 };
+            push_share(
+                &progress_inbox,
+                gen,
+                crate::share::ShareNoteKind::Progress { loaded: ev.loaded() as u64, total },
+            );
+        }) as Box<dyn FnMut(_)>);
+        if let Ok(upload) = xhr.upload() {
+            upload.set_onprogress(Some(onprogress.as_ref().unchecked_ref()));
+        }
+        onprogress.forget();
+
+        let xhr_done = xhr.clone();
+        let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+            let resolve_ok = resolve.clone();
+            let onload = Closure::wrap(Box::new(move || {
+                let _ = resolve_ok.call1(&JsValue::NULL, &JsValue::UNDEFINED);
+            }) as Box<dyn FnMut()>);
+            xhr_done.set_onload(Some(onload.as_ref().unchecked_ref()));
+            onload.forget();
+            let resolve_err = resolve;
+            let onerror = Closure::wrap(Box::new(move || {
+                let _ = resolve_err.call1(&JsValue::NULL, &JsValue::UNDEFINED);
+            }) as Box<dyn FnMut()>);
+            xhr_done.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+            onerror.forget();
+        });
+        // A copy in its own ArrayBuffer. The threaded build's wasm memory is a
+        // SharedArrayBuffer, and XMLHttpRequest refuses to send a view of one.
+        let copied = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
+        copied.copy_from(bytes);
+        xhr.send_with_opt_js_u8_array(Some(&copied)).map_err(|e| (0, js_err(e)))?;
+        let _ = JsFuture::from(promise).await;
+        let status = xhr.status().unwrap_or(0);
+        let text = xhr.response_text().ok().flatten().unwrap_or_default();
+        if (200..300).contains(&status) {
+            Ok(text)
+        } else {
+            Err((status, text))
+        }
+    }
+
     async fn send_text(method: &str, url: &str, body: &str) -> Result<String, String> {
         let opts = RequestInit::new();
         opts.set_method(method);
@@ -1428,7 +1540,7 @@ mod native_impl {
         pub fn connect() -> Self {
             Self
         }
-        pub fn share_capture(&self, _window: Option<(u64, u64)>) {}
+        pub fn share_capture(&self, _gen: u64, _endpoint: String, _bytes: Option<Vec<u8>>) {}
         pub fn from_capture_url(_url: &str) -> Self {
             Self
         }

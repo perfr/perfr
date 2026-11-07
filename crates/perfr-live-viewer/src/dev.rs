@@ -271,6 +271,20 @@ pub fn query_capture_url_from_location() -> Option<String> {
     }
 }
 
+/// The page's query string, including the leading `?` when the browser has one.
+pub fn location_search() -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.location().search().ok())
+            .unwrap_or_default()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        String::new()
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub fn query_capture_url(search: &str) -> Option<String> {
     let value = search
@@ -285,7 +299,7 @@ pub fn query_capture_url(search: &str) -> Option<String> {
 
 /// Enough of percent-decoding for a path: `%2F`, `%3A` and friends.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -604,5 +618,12 @@ mod capture_url_tests {
         assert_eq!(query_capture_url("?capture="), None);
         assert_eq!(query_capture_url("?report=live"), None);
         assert_eq!(query_capture_url("?capture=x%2"), Some("x%2".into()));
+        // A shared link opens the viewer with this path. It is same-origin
+        // and has no file suffix; fetch must be handed it unchanged.
+        assert_eq!(query_capture_url("?capture=/api/share/abc"), Some("/api/share/abc".into()));
+        assert_eq!(
+            query_capture_url("?share_base=http%3A%2F%2F127.0.0.1%3A9&capture=%2Fapi%2Fshare%2Fabc"),
+            Some("/api/share/abc".into())
+        );
     }
 }

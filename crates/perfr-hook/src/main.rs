@@ -31,7 +31,7 @@ fn wait_for_stop() {
 }
 #[cfg(windows)]
 fn wait_for_stop() {
-    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     type Handle = *mut std::ffi::c_void;
     const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6; // (DWORD)-10
     const DUPLICATE_SAME_ACCESS: u32 = 0x2;
@@ -48,9 +48,20 @@ fn wait_for_stop() {
             inherit: i32,
             opts: u32,
         ) -> i32;
+        fn PeekNamedPipe(
+            pipe: Handle,
+            buf: *mut u8,
+            buf_size: u32,
+            read: *mut u32,
+            avail: *mut u32,
+            left: *mut u32,
+        ) -> i32;
     }
-    // SAFETY: duplicating the process's own stdin handle into an owned File.
-    let file = unsafe {
+    // SAFETY: duplicating the process's own stdin handle. A blocking ReadFile
+    // on that duplicate never wakes when the service closes the write end
+    // while the process-wide stdin handle is still open. PeekNamedPipe reports
+    // the broken pipe, which is the stop signal.
+    let handle = unsafe {
         let stdin = GetStdHandle(STD_INPUT_HANDLE);
         let mut dup: Handle = std::ptr::null_mut();
         if DuplicateHandle(
@@ -63,17 +74,37 @@ fn wait_for_stop() {
             DUPLICATE_SAME_ACCESS,
         ) == 0
         {
-            // The dedicated handle is what makes a piped EOF visible. If it
-            // cannot be duplicated, fall back to the shared stdin rather than
-            // treating the failure as an immediate stop.
             let mut line = String::new();
             let _ = std::io::stdin().lock().read_line(&mut line);
             return;
         }
-        std::fs::File::from(OwnedHandle::from_raw_handle(dup))
+        OwnedHandle::from_raw_handle(dup)
     };
-    let mut line = String::new();
-    let _ = BufReader::new(file).read_line(&mut line);
+    let raw = handle.as_raw_handle() as Handle;
+    loop {
+        let mut avail = 0u32;
+        // SAFETY: the duplicated pipe handle stays open for this loop.
+        let ok = unsafe {
+            PeekNamedPipe(
+                raw,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut avail,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return;
+        }
+        if avail > 0 {
+            let mut line = String::new();
+            let mut file = std::fs::File::from(handle);
+            let _ = BufReader::new(&mut file).read_line(&mut line);
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 extern "C" {

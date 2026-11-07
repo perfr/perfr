@@ -293,8 +293,11 @@ impl Drop for FridaSession {
     fn drop(&mut self) {
         self.mapping.disable();
         // EOF asks the helper to detach even if capture startup failed after
-        // hooks were installed. Give cleanup time before Helper's kill backstop.
-        let _ = self.helper.stop();
+        // hooks were installed. stop() already did that and waited; doing it
+        // again burns a second timeout before Helper's kill backstop.
+        if !self.stopped {
+            let _ = self.helper.stop();
+        }
     }
 }
 

@@ -135,7 +135,11 @@ process switching with a late response.
 
 After rebuilding the viewer pack and the debug service, run
 `python3 tools/e2e/share_capture.py`. It uses a local AWS CLI stand-in and an
-HTTPS object server, makes no AWS writes, and checks one-click Share, exact
-slice archive preservation, signed URL encoding, cross-origin browser loading
-under COOP/COEP, and the complete archive download. It requires `openssl` in
-addition to `google-chrome`.
+HTTPS object server, makes no AWS writes, and checks `POST /api/capture/share`,
+exact slice archive preservation, signed URL encoding, cross-origin browser
+loading under COOP/COEP, and the complete archive download. It requires
+`openssl` in addition to `google-chrome`.
+
+`python3 tools/e2e/share_link.py` checks the viewer's Share button against a
+local mock of `POST /api/share`. Pass a viewer pack directory if `viewer-dist`
+is not the one just built.

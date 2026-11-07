@@ -197,31 +197,41 @@ pub fn new_pending_file() -> PendingFile {
 }
 
 /// Open a file picker. WASM streams the File; native reads the path in a thread.
-pub fn start_open_dialog(
-    #[cfg(target_arch = "wasm32")] pending: &PendingFile,
-) -> Option<TraceLoad> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        wasm_open_dialog(pending);
-        None
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        native_open_dialog()
-    }
+#[cfg(target_arch = "wasm32")]
+pub fn start_open_dialog(pending: &PendingFile) -> Option<TraceLoad> {
+    wasm_open_dialog(pending);
+    None
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn native_open_dialog() -> Option<TraceLoad> {
+pub fn start_open_dialog() -> Option<OpenPick> {
+    native_open_dialog()
+}
+
+/// What the native file dialog picked: a trace to parse, or a capture stream
+/// whose bytes Share can post unchanged.
+#[cfg(not(target_arch = "wasm32"))]
+pub enum OpenPick {
+    Trace(TraceLoad),
+    Stream(Vec<u8>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_open_dialog() -> Option<OpenPick> {
     let path = rfd::FileDialog::new()
+        .add_filter("perfr stream", &["perfr.stream", "orbit.stream"])
         .add_filter("Chrome / Perfetto trace", TRACE_EXTENSIONS)
         .pick_file()?;
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "trace.json".into());
+    if crate::share::is_stream_file(&name) {
+        let bytes = std::fs::read(&path).ok()?;
+        return Some(OpenPick::Stream(bytes));
+    }
     let size = std::fs::metadata(&path).ok().map(|m| m.len());
-    Some(spawn_path_read(name, path, size))
+    Some(OpenPick::Trace(spawn_path_read(name, path, size)))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -274,7 +284,7 @@ fn wasm_open_dialog(pending: &PendingFile) {
     };
     input.set_type("file");
     let accept: Vec<String> = TRACE_EXTENSIONS.iter().map(|e| format!(".{e}")).collect();
-    input.set_accept(&format!("{},application/json", accept.join(",")));
+    input.set_accept(&format!("{},.perfr.stream,.orbit.stream,application/json", accept.join(",")));
     let pending = pending.clone();
     let input_clone = input.clone();
     let onchange = wasm_bindgen::closure::Closure::wrap(Box::new(move || {

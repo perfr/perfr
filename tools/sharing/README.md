@@ -9,14 +9,13 @@ Plan and implementation:
 
 ## Use
 
-Stop recording. Select a time range by dragging on the timeline, then click
-**Share slice** (or **Share** with no selection). The service uploads two files;
-when they are up, the bar shows **Copy link** and **Open shared capture**. The
-controls are also in **More** on narrow screens. The service accepts the request
-only from its own viewer opened by IP address or as `localhost`, so a page on
-some other site cannot upload a capture through a user's browser. Failed AWS
-CLI calls are logged by the service with the CLI's own message. Save → Selected slice
-continues to download a local `.perfr.zip` without S3.
+`POST /api/capture/share` uploads a stopped capture. Add `?t0=<ns>&t1=<ns>` for
+a slice; both bounds are required together and reversed bounds are normalized.
+The service accepts a browser request only from its own viewer opened by IP
+address or as `localhost`, so a page on some other site cannot upload a capture
+through a user's browser. Failed AWS CLI calls are logged by the service with
+the CLI's own message. Save → Selected slice downloads a local `.perfr.zip`
+without S3.
 
 The website opens `viewer/index.html?capture=<encoded-stream-url>&download=<encoded-archive-url>`.
 No perfr service is needed by the recipient. The timeline and local sampling
@@ -153,8 +152,8 @@ origin. Nothing new needs to run on the website server.
 
 ## Verify deployment
 
-1. Record a capture with nested scopes and samples; stop, select a window
-   crossing an outer scope, and click Share slice.
+1. Record a capture with nested scopes and samples; stop, and
+   `POST /api/capture/share?t0=<ns>&t1=<ns>` for a window crossing an outer scope.
 2. Open the copied link in another browser without a running service.
    Check timeline names, crossing scopes and Flat/Top-down/Bottom-up reports.
 3. Download the archive; reopen it in perfr and compare the same samples and

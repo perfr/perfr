@@ -632,6 +632,16 @@ impl ClipLabelCache {
     }
 }
 
+/// Where a Share click is, drawn in the dialog.
+#[derive(Clone, Debug)]
+enum ShareUi {
+    Idle,
+    Reading,
+    Uploading { loaded: u64, total: u64 },
+    Ready { url: String, copied_until: f64 },
+    Failed(String),
+}
+
 pub struct PerfrLiveApp {
     index: TrackIndex,
     intern: InternTable,
@@ -752,8 +762,19 @@ pub struct PerfrLiveApp {
     /// service: nothing is polled, and the pills that need one are not
     /// shown. The static web site's mode.
     static_capture: Option<String>,
-    share_pending: bool,
-    share_reply: Option<crate::net::ShareReply>,
+    /// Bytes of a `.perfr.stream` loaded from a file or URL. Share posts
+    /// these. A live session leaves this empty and exports from the service.
+    stream_bytes: Option<Vec<u8>>,
+    /// Set while those bytes are being ingested, so a frame inside the file
+    /// does not throw them away.
+    loading_stream: bool,
+    /// The open capture is that file. Later socket frames are not mixed in.
+    local_stream: bool,
+    share_open: bool,
+    /// Bumped when a share starts and when the capture is replaced, so a
+    /// reply for an older click is dropped.
+    share_gen: u64,
+    share_ui: ShareUi,
     /// Last frame's per-lane listing rows (TODO item 21); swapped with the
     /// self pane's like the rest of the timeline state.
     listing_cache: perfr_live_render::ListingCache,
@@ -1762,8 +1783,12 @@ impl PerfrLiveApp {
             user_set_view: false,
             in_self_pane: false,
             static_capture: static_capture.clone(),
-            share_pending: false,
-            share_reply: None,
+            stream_bytes: None,
+            loading_stream: false,
+            local_stream: false,
+            share_open: false,
+            share_gen: 0,
+            share_ui: ShareUi::Idle,
             capture_start_ns: 0,
             capture_timer: CaptureTimer::default(),
             settle_frames: 0,
@@ -2198,6 +2223,10 @@ impl PerfrLiveApp {
         self.trace_flows.clear();
         self.thread_names.clear();
         self.trace_processes.clear();
+        if !self.loading_stream {
+            self.stream_bytes = None;
+            self.local_stream = false;
+        }
         self.forget_share();
     }
 
@@ -2205,8 +2234,66 @@ impl PerfrLiveApp {
     /// (Clear, Record, opening a file, a capture started elsewhere) drops it,
     /// and a reply still in flight for the old capture is ignored.
     fn forget_share(&mut self) {
-        self.share_pending = false;
-        self.share_reply = None;
+        self.share_gen = self.share_gen.wrapping_add(1);
+        self.share_ui = ShareUi::Idle;
+        self.share_open = false;
+    }
+
+    /// Ingest a `.perfr.stream` and keep the bytes so Share can post them.
+    fn accept_stream(&mut self, bytes: Vec<u8>) {
+        self.loading_stream = true;
+        self.clear_file_trace();
+        self.index.clear();
+        self.live_all.clear();
+        self.intern = InternTable::default();
+        self.thread_names.clear();
+        self.trace_processes.clear();
+        self.selected = None;
+        self.hover = None;
+        self.measure = None;
+        self.sample_sels.clear();
+        self.stop_record();
+        self.ingest(&bytes);
+        self.loading_stream = false;
+        self.stream_bytes = Some(bytes);
+        self.local_stream = true;
+        self.follow = false;
+        self.user_set_view = false;
+        if self.index.event_count() > 0 {
+            self.fit_to_content();
+        }
+        self.needs_repaint = true;
+        self.settle_frames = 6;
+    }
+
+    fn can_share(&self) -> bool {
+        if self.stream_bytes.as_ref().is_some_and(|b| !b.is_empty()) {
+            return true;
+        }
+        self.static_capture.is_none() && !self.local_stream && self.index.event_count() > 0
+    }
+
+    fn begin_share(&mut self) {
+        if !self.can_share() {
+            return;
+        }
+        if matches!(self.share_ui, ShareUi::Reading | ShareUi::Uploading { .. }) {
+            self.share_open = true;
+            return;
+        }
+        self.share_gen = self.share_gen.wrapping_add(1);
+        let endpoint = crate::share::share_post_url(&crate::share::resolve_share_base(
+            &crate::dev::location_search(),
+        ));
+        let bytes = self.stream_bytes.clone();
+        let total = bytes.as_ref().map(|b| b.len() as u64).unwrap_or(0);
+        self.share_ui = if bytes.is_some() {
+            ShareUi::Uploading { loaded: 0, total }
+        } else {
+            ShareUi::Reading
+        };
+        self.share_open = true;
+        self.net.share_capture(self.share_gen, endpoint, bytes);
     }
 
     fn begin_trace_load(&mut self, load: TraceLoad) {
@@ -2266,7 +2353,9 @@ impl PerfrLiveApp {
         {
             let file = self.pending_file.lock().ok().and_then(|mut g| g.take());
             if let Some(file) = file {
-                if is_bundle_name(&file.name()) {
+                if crate::share::is_stream_file(&file.name()) {
+                    self.net.import_stream_file(file);
+                } else if is_bundle_name(&file.name()) {
                     // A perfr capture: the service opens it and streams it
                     // back like a capture, names and samples included.
                     self.import_pending = true;
@@ -2352,6 +2441,22 @@ impl PerfrLiveApp {
         } else {
             f.name.clone()
         };
+        if crate::share::is_stream_file(&name) {
+            if let Some(bytes) = &f.bytes {
+                self.accept_stream(bytes.to_vec());
+                return;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(path) = &f.path {
+                match std::fs::read(path) {
+                    Ok(bytes) => self.accept_stream(bytes),
+                    Err(e) => self.error = format!("{name}: {e}"),
+                }
+                return;
+            }
+            self.error = format!("{name}: could not read the capture");
+            return;
+        }
         if is_bundle_name(&name) {
             match &f.bytes {
                 Some(bytes) => {
@@ -2646,16 +2751,40 @@ impl PerfrLiveApp {
     fn drain_net(&mut self) {
         crate::logging::flush();
         let inbox = self.net.take();
-        // Only a reply someone still waits for counts: Clear or Record after
-        // clicking Share dropped the request (`forget_share`). The link is not
-        // copied here: a clipboard write outside a click is refused by
-        // Firefox and Safari, so the bar offers Copy link instead.
-        if let (Some(result), true) = (inbox.share, self.share_pending) {
-            self.share_pending = false;
-            match result {
-                Ok(reply) => self.share_reply = Some(reply),
-                Err(e) => self.error = e,
+        // A loaded stream replaces the capture, which drops any share still
+        // in flight, before notes from that old attempt are applied.
+        if let Some(bytes) = inbox.loaded_stream {
+            self.accept_stream(bytes);
+        }
+        let mut share_settled = matches!(self.share_ui, ShareUi::Ready { .. } | ShareUi::Failed(_));
+        for note in inbox.share_notes {
+            if note.gen != self.share_gen {
+                continue;
             }
+            if share_settled {
+                match note.kind {
+                    crate::share::ShareNoteKind::Reading | crate::share::ShareNoteKind::Progress { .. } => {
+                        continue
+                    }
+                    _ => {}
+                }
+            }
+            self.share_ui = match note.kind {
+                crate::share::ShareNoteKind::Reading => ShareUi::Reading,
+                crate::share::ShareNoteKind::Progress { loaded, total } => {
+                    share_settled = false;
+                    ShareUi::Uploading { loaded, total }
+                }
+                crate::share::ShareNoteKind::Done(link) => {
+                    share_settled = true;
+                    ShareUi::Ready { url: link.url, copied_until: 0.0 }
+                }
+                crate::share::ShareNoteKind::Failed(message) => {
+                    share_settled = true;
+                    ShareUi::Failed(message)
+                }
+            };
+            self.needs_repaint = true;
         }
         self.http_ok = inbox.http_ok;
         self.ws_ok = inbox.ws_ok;
@@ -2827,17 +2956,23 @@ impl PerfrLiveApp {
             }
             self.error = e;
         }
-        self.ws_queue.extend(inbox.frames);
-        let mut ingested = 0usize;
-        while let Some(next_len) = self.ws_queue.front().map(Vec::len) {
-            if ingested > 0 && ingested + next_len > 1024 * 1024 {
-                break;
+        if self.local_stream {
+            // The file is the capture. Frames still arriving from a service
+            // would draw on top of it.
+            self.ws_queue.clear();
+        } else {
+            self.ws_queue.extend(inbox.frames);
+            let mut ingested = 0usize;
+            while let Some(next_len) = self.ws_queue.front().map(Vec::len) {
+                if ingested > 0 && ingested + next_len > 1024 * 1024 {
+                    break;
+                }
+                let Some(bytes) = self.ws_queue.pop_front() else {
+                    break;
+                };
+                ingested = ingested.saturating_add(bytes.len());
+                self.ingest(&bytes);
             }
-            let Some(bytes) = self.ws_queue.pop_front() else {
-                break;
-            };
-            ingested = ingested.saturating_add(bytes.len());
-            self.ingest(&bytes);
         }
     }
 
@@ -3113,14 +3248,17 @@ impl PerfrLiveApp {
 
     fn transport_open(&mut self, ui: &mut Ui) {
         if pill(ui, "Open", false)
-            .on_hover_text("Open a saved perfr capture (.perfr.zip), a Chrome trace (.json / .json.gz) or a Perfetto trace (.pftrace / .pb) — or drop the file on the page")
+            .on_hover_text("Open a saved capture (.perfr.zip, .perfr.stream), a Chrome trace (.json / .json.gz) or a Perfetto trace (.pftrace / .pb) — or drop the file on the page")
             .clicked()
         {
             #[cfg(target_arch = "wasm32")]
             chrome_load::start_open_dialog(&self.pending_file);
             #[cfg(not(target_arch = "wasm32"))]
-            if let Some(load) = chrome_load::start_open_dialog() {
-                self.begin_trace_load(load);
+            if let Some(pick) = chrome_load::start_open_dialog() {
+                match pick {
+                    chrome_load::OpenPick::Trace(load) => self.begin_trace_load(load),
+                    chrome_load::OpenPick::Stream(bytes) => self.accept_stream(bytes),
+                }
             }
         }
     }
@@ -3128,8 +3266,10 @@ impl PerfrLiveApp {
     fn transport_overflow_items(&mut self, ui: &mut Ui) {
         // The wide bar has Save and Share of its own; the narrow bar keeps
         // them here.
-        if self.static_capture.is_none() && (self.chrome_collapsed() || self.was_narrow) {
-            self.transport_save(ui);
+        if self.chrome_collapsed() || self.was_narrow {
+            if self.static_capture.is_none() {
+                self.transport_save(ui);
+            }
             self.transport_share(ui);
         }
         let presets = ui.button("Instrumentation presets…");
@@ -3152,14 +3292,17 @@ impl PerfrLiveApp {
         }
         if ui
             .button("Open…")
-            .on_hover_text("Open a saved perfr capture (.perfr.zip), a Chrome trace (.json / .json.gz) or a Perfetto trace (.pftrace / .pb) — or drop the file on the page")
+            .on_hover_text("Open a saved capture (.perfr.zip, .perfr.stream), a Chrome trace (.json / .json.gz) or a Perfetto trace (.pftrace / .pb) — or drop the file on the page")
             .clicked()
         {
             #[cfg(target_arch = "wasm32")]
             chrome_load::start_open_dialog(&self.pending_file);
             #[cfg(not(target_arch = "wasm32"))]
-            if let Some(load) = chrome_load::start_open_dialog() {
-                self.begin_trace_load(load);
+            if let Some(pick) = chrome_load::start_open_dialog() {
+                match pick {
+                    chrome_load::OpenPick::Trace(load) => self.begin_trace_load(load),
+                    chrome_load::OpenPick::Stream(bytes) => self.accept_stream(bytes),
+                }
             }
             ui.close();
         }
@@ -3457,6 +3600,8 @@ impl PerfrLiveApp {
                     self.capture_user = true;
                 }
                 self.paint_process_picker(ui, "perfr_processes_strip");
+            } else {
+                self.transport_share(ui);
             }
             self.paint_search(ui);
             self.paint_track_filter(ui);
@@ -3525,34 +3670,116 @@ impl PerfrLiveApp {
     }
 
     fn transport_share(&mut self, ui: &mut Ui) {
-        // Sharing goes through the service's HTTP API, which only the browser
-        // build talks to: the native `Net` has no request to make.
+        // The upload uses the browser. The native build has nothing to post to.
         if !cfg!(target_arch = "wasm32") {
             return;
         }
-        let stopped = !self.recording && !self.status.capturing && !self.status.demo && self.trace_name.is_none();
-        let selected = self.selection_span();
-        let label = if self.share_pending { "Sharing…" } else if selected.is_some() { "Share slice" } else { "Share" };
-        let button = ui.add_enabled(stopped && !self.share_pending && self.index.event_count() > 0, egui::Button::new(label))
-            .on_hover_text("Upload to S3 and get a website link. Shares the selected time range, or the whole capture. Stop recording first.");
-        note_ui_rect(label, button.rect);
+        let enabled = self.can_share();
+        let tip = if enabled {
+            "Upload this capture and get a link. Anyone with the link can view it."
+        } else if self.static_capture.is_some() && self.stream_bytes.is_none() {
+            "The capture is still loading."
+        } else {
+            "Nothing to share yet."
+        };
+        let button = ui.add_enabled(
+            enabled,
+            egui::Button::new(RichText::new("Share").size(12.0).color(if enabled { theme::TEXT() } else { theme::MUTED() }))
+                .fill(theme::TRACK())
+                .stroke(Stroke::new(1.0, theme::HAIR()))
+                .min_size(Vec2::new(0.0, 22.0))
+                .corner_radius(4),
+        ).on_hover_text(tip);
+        note_ui_rect("Share", button.rect);
         if button.clicked() {
-            self.share_pending = true;
-            self.share_reply = None;
-            self.net.share_capture(selected);
+            self.share_open = true;
+            self.begin_share();
+            ui.close();
         }
-        if let Some(reply) = &self.share_reply {
-            let copy = ui.button(RichText::new("Copy link").color(theme::ACCENT()))
-                .on_hover_text("Copy the website link to the clipboard");
-            note_ui_rect("Copy link", copy.rect);
-            if copy.clicked() { ui.ctx().copy_text(reply.viewer_url.clone()); }
-            ui.hyperlink_to("Open shared capture", &reply.viewer_url).on_hover_text(
-                reply.expires_in.map(|s| format!("Link expires after {} hours; temporary AWS credentials can expire sooner", s / 3600))
-                    .unwrap_or_else(|| "Shared capture on the perfr website".into()));
+    }
+
+    fn share_window(&mut self, ctx: &Context) {
+        if !self.share_open {
+            return;
         }
-        // The label waits on a reply the network drain delivers; an upload
-        // can take a minute, so this is a slow tick, not a frame-rate spin.
-        if self.share_pending { ui.ctx().request_repaint_after(std::time::Duration::from_millis(250)); }
+        let mut open = true;
+        let mut retry = false;
+        let mut copied = false;
+        egui::Window::new("Share")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(460.0)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .frame(Frame::window(&ctx.style()).fill(theme::RAIL()))
+            .show(ctx, |ui| {
+                ui.set_min_width(420.0);
+                ui.label("Anyone with this link can view the capture.");
+                ui.add_space(6.0);
+                match &self.share_ui {
+                    ShareUi::Idle | ShareUi::Reading => {
+                        let label = ui.label("Reading the capture…");
+                        note_ui_rect("share-progress", label.rect);
+                    }
+                    ShareUi::Uploading { loaded, total } => {
+                        ui.label("Uploading…");
+                        let frac = if *total > 0 {
+                            (*loaded as f32 / *total as f32).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                        let bar = ui.add(egui::ProgressBar::new(frac).show_percentage());
+                        note_ui_rect("share-progress", bar.rect);
+                    }
+                    ShareUi::Ready { url, copied_until } => {
+                        let now = ui.input(|i| i.time);
+                        let show_check = *copied_until > now;
+                        ui.horizontal(|ui| {
+                            let width = (ui.available_width() - 36.0).max(80.0);
+                            let text = ui.add_sized(
+                                Vec2::new(width, 22.0),
+                                egui::Label::new(RichText::new(url).font(FontId::monospace(12.0)).color(theme::TEXT()))
+                                    .truncate(),
+                            );
+                            note_ui_rect(&format!("share-url:{url}"), text.rect);
+                            text.on_hover_text(url);
+                            let (label, tip, paint): (&str, &str, fn(&egui::Painter, Rect, Color32)) = if show_check {
+                                ("Copied", "Copied", paint_check_icon)
+                            } else {
+                                ("Copy", "Copy the link", paint_copy_icon)
+                            };
+                            if icon_button(ui, label, tip, paint).clicked() {
+                                ui.ctx().copy_text(url.clone());
+                                copied = true;
+                            }
+                        });
+                        if show_check {
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+                        }
+                    }
+                    ShareUi::Failed(message) => {
+                        let label = ui.label(RichText::new(message).color(RECORD_RED));
+                        note_ui_rect(&format!("share-error:{message}"), label.rect);
+                        if ui.button("Try again").clicked() {
+                            retry = true;
+                        }
+                    }
+                }
+            });
+        if copied {
+            let now = ctx.input(|i| i.time);
+            if let ShareUi::Ready { copied_until, .. } = &mut self.share_ui {
+                *copied_until = now + 2.0;
+            }
+        }
+        if retry {
+            self.share_ui = ShareUi::Idle;
+            self.begin_share();
+        }
+        self.share_open = open;
+        if matches!(self.share_ui, ShareUi::Reading | ShareUi::Uploading { .. }) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
     }
 
     fn paint_symbols_status(&mut self, ui: &mut Ui) {
@@ -6183,8 +6410,11 @@ impl PerfrLiveApp {
             #[cfg(target_arch = "wasm32")]
             chrome_load::start_open_dialog(&self.pending_file);
             #[cfg(not(target_arch = "wasm32"))]
-            if let Some(load) = chrome_load::start_open_dialog() {
-                self.begin_trace_load(load);
+            if let Some(pick) = chrome_load::start_open_dialog() {
+                match pick {
+                    chrome_load::OpenPick::Trace(load) => self.begin_trace_load(load),
+                    chrome_load::OpenPick::Stream(bytes) => self.accept_stream(bytes),
+                }
             }
         }
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
@@ -9481,6 +9711,7 @@ impl eframe::App for PerfrLiveApp {
                 self.sampling_panel(ctx);
             }
             self.tweaks_window(ctx);
+            self.share_window(ctx);
             self.presets_window(ctx);
             self.bench_window(ctx);
             self.paint_scope_menu(ctx);
@@ -9814,6 +10045,33 @@ fn record_button(ui: &mut Ui, recording: bool) -> egui::Response {
     }
     note_ui_rect(if recording { "Stop" } else { "Record" }, resp.rect);
     resp
+}
+
+/// Two overlapping sheets.
+fn paint_copy_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let s = Stroke::new(1.4, color);
+    painter.rect_stroke(
+        Rect::from_min_max(Pos2::new(c.x - 5.5, c.y - 6.5), Pos2::new(c.x + 2.0, c.y + 2.5)),
+        1.0,
+        s,
+        StrokeKind::Inside,
+    );
+    painter.rect_stroke(
+        Rect::from_min_max(Pos2::new(c.x - 2.0, c.y - 2.5), Pos2::new(c.x + 5.5, c.y + 6.5)),
+        1.0,
+        s,
+        StrokeKind::Inside,
+    );
+}
+
+/// A tick, shown in place of the copy icon once the link is on the clipboard.
+fn paint_check_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let s = Stroke::new(1.8, theme::ACCENT());
+    let _ = color;
+    painter.line_segment([Pos2::new(c.x - 5.0, c.y + 0.5), Pos2::new(c.x - 1.5, c.y + 4.0)], s);
+    painter.line_segment([Pos2::new(c.x - 1.5, c.y + 4.0), Pos2::new(c.x + 6.0, c.y - 4.0)], s);
 }
 
 /// A tray with an arrow pointing down into it.

@@ -147,19 +147,7 @@ else:
                 chrome.eval('window.__perfr_sel ? JSON.parse(window.__perfr_sel) : null')))
             assert chrome.eval("document.querySelector('a[download]').href") == shared['download_url']
             assert chrome.screenshot(str(work / 'shared.png')) > 20000, 'Viewer painted a blank screenshot'
-            chrome.goto(base, settle=1)
-            def rect(label):
-                rows = chrome.eval("JSON.parse(window.__perfr_ui || '[]')") or []
-                return next((row[1:] for row in rows if row[0] == label), None)
-            x, y, width, height = wait_until(lambda: rect('Share'))
-            chrome.click(x + width / 2, y + height / 2)
-            wait_until(lambda: rect('Copy link'))
-            archives = list((objects / 'captures').glob('*.perfr.zip'))
-            assert len(archives) == 2, 'The Share button did not upload a new capture'
-            full = next(a for a in archives if a != archive)
-            with zipfile.ZipFile(full) as bundle:
-                assert json.loads(bundle.read('manifest.json'))['rows']['events'] == 3
-            print('PASS: one-click Share, S3 CLI upload, exact cropped archive, encoded signed URL, cross-origin WASM load, 2 retained scopes and archive download')
+            print('PASS: S3 CLI upload, exact cropped archive, encoded signed URL, cross-origin WASM load, 2 retained scopes and archive download')
         finally:
             if chrome:
                 chrome.close()

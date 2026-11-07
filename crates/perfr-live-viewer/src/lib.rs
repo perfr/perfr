@@ -35,6 +35,8 @@ mod presets;
 mod track_order;
 mod rect_select;
 mod report_copy;
+#[cfg(feature = "egui")]
+mod share;
 mod self_pane;
 #[cfg(feature = "egui")]
 mod theme;

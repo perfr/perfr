@@ -1,18 +1,18 @@
 /* tslint:disable */
 /* eslint-disable */
 /**
- * Called after JS `initThreadPool` resolves. `n == 1` keeps collect/raster
- * sequential (SAB missing / init failed).
- */
-export function markWasmPoolReady(n: number): void;
-/**
  * Browser entry: eframe WebRunner on the given canvas. Native window is not used.
  * JS must call `initThreadPool` (when present) *before* this, then
  * `markWasmPoolReady`.
  */
 export function start_eframe(canvas: HTMLCanvasElement): Promise<void>;
-export function wbg_rayon_start_worker(receiver: number): void;
+/**
+ * Called after JS `initThreadPool` resolves. `n == 1` keeps collect/raster
+ * sequential (SAB missing / init failed).
+ */
+export function markWasmPoolReady(n: number): void;
 export function initThreadPool(num_threads: number): Promise<any>;
+export function wbg_rayon_start_worker(receiver: number): void;
 export class LiveViewer {
   free(): void;
   /**
@@ -79,12 +79,13 @@ export interface InitOutput {
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
   readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __wbindgen_export_7: WebAssembly.Table;
-  readonly _dyn_core__ops__function__FnMut_____Output___R_as_wasm_bindgen__closure__WasmClosure___describe__invoke__hb1c320cc36cf70ce: (a: number, b: number) => void;
-  readonly closure476_externref_shim: (a: number, b: number, c: any) => void;
-  readonly _dyn_core__ops__function__FnMut_____Output___R_as_wasm_bindgen__closure__WasmClosure___describe__invoke__hedfb34caa3a4e8cb_multivalue_shim: (a: number, b: number) => [number, number];
+  readonly _dyn_core__ops__function__FnMut_____Output___R_as_wasm_bindgen__closure__WasmClosure___describe__invoke__h2bda3c7c504daa23: (a: number, b: number) => void;
+  readonly closure233_externref_shim: (a: number, b: number, c: any) => void;
+  readonly _dyn_core__ops__function__FnMut_____Output___R_as_wasm_bindgen__closure__WasmClosure___describe__invoke__h5b383bcc186b42e6_multivalue_shim: (a: number, b: number) => [number, number];
   readonly __externref_table_dealloc: (a: number) => void;
-  readonly closure1195_externref_shim: (a: number, b: number, c: any) => void;
-  readonly closure2911_externref_shim: (a: number, b: number, c: any, d: any) => void;
+  readonly closure500_externref_shim: (a: number, b: number, c: any) => void;
+  readonly closure1214_externref_shim: (a: number, b: number, c: any) => void;
+  readonly closure2930_externref_shim: (a: number, b: number, c: any, d: any) => void;
   readonly __wbindgen_thread_destroy: (a?: number, b?: number, c?: number) => void;
   readonly __wbindgen_start: (a: number) => void;
 }

@@ -125,8 +125,15 @@ impl Helper {
         Ok(value)
     }
     fn stop(&mut self) -> Result<(), String> {
-        // Closing stdin requests safe detach, also used on early-return errors.
-        self.input.take();
+        // A "stop" line, then close. Closing the write end is enough on Unix.
+        // On Windows the helper never observes that close: a blocking read and
+        // PeekNamedPipe both stay idle while the process-wide stdin handle is
+        // open, so detach waited out the timeout below with a call still inside
+        // the target. The line is the signal the stop thread reads.
+        if let Some(mut input) = self.input.take() {
+            let _ = writeln!(input, "stop");
+            let _ = input.flush();
+        }
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             if let Some(status) = self.child.try_wait().map_err(|e| e.to_string())? {

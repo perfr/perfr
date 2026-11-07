@@ -32,11 +32,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        - { runner: ubuntu-22.04, key: linux-x86_64 }
-        - { runner: ubuntu-22.04, key: linux-aarch64 }
-        - { runner: macos-14,     key: macos-arm64 }
-        - { runner: macos-14,     key: macos-x86_64 }
-        - { runner: windows-2022, key: windows-x86_64 }
+        # Standard GitHub-hosted runners only. macos-14 is rejected as the
+        # unsupported larger image macos-14-arm64-us-xl. macos-15 is arm64;
+        # macos-15-intel is x86_64 (Apple's toolchain still cross-links the
+        # other Mac arch, but each wheel is built on its own arch).
+        - { runner: ubuntu-22.04,    key: linux-x86_64 }
+        - { runner: ubuntu-22.04,    key: linux-aarch64 }
+        - { runner: macos-15,        key: macos-arm64 }
+        - { runner: macos-15-intel,  key: macos-x86_64 }
+        - { runner: windows-2022,    key: windows-x86_64 }
     runs-on: ${{ matrix.runner }}
     defaults:
       run:

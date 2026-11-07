@@ -45,7 +45,26 @@ GLIBC="2.17" # manylinux2014 floor
 export CARGO_PROFILE_RELEASE_STRIP=symbols
 
 command -v cargo-zigbuild >/dev/null || { echo "need cargo-zigbuild (pip install cargo-zigbuild ziglang)" >&2; exit 1; }
-python3 -c "import build, wheel" 2>/dev/null || { echo "need python 'build' and 'wheel' (pip install build wheel)" >&2; exit 1; }
+python3 - <<'PY' || exit 1
+import sys
+try:
+    import build, wheel, setuptools
+except ImportError as exc:
+    sys.stderr.write(f"need python build, wheel, and setuptools>=77 ({exc})\n")
+    sys.stderr.write("pip install 'setuptools>=77' build wheel\n")
+    sys.exit(1)
+parts = []
+for piece in setuptools.__version__.split("."):
+    digits = "".join(ch for ch in piece if ch.isdigit())
+    if not digits:
+        break
+    parts.append(int(digits))
+if tuple(parts[:2]) < (77, 0):
+    sys.stderr.write(
+        f"need setuptools>=77 (SPDX license field), found {setuptools.__version__}\n"
+    )
+    sys.exit(1)
+PY
 
 # One release version, stamped in five places. Refuse to build if they drift:
 # perfr pins perfr-api to the exact version because the two must
@@ -139,7 +158,9 @@ cargo_for() {
 build_and_tag() {
   local pkg=$1 plat=$2
   rm -rf "$pkg/build" "$pkg"/*.egg-info "$pkg/dist"
-  ( cd "$pkg" && python3 -m build --wheel --no-isolation --outdir dist >/dev/null 2>&1 )
+  # Keep stderr: a setuptools or metadata failure used to vanish into /dev/null
+  # and the step exited 1 with no message after the Rust build.
+  ( cd "$pkg" && python3 -m build --wheel --no-isolation --outdir dist >/dev/null )
   local anywheel tagged
   anywheel=$(echo "$pkg"/dist/*-py3-none-any.whl)
   python3 -m wheel tags --python-tag py3 --abi-tag none --platform-tag "$plat" --remove "$anywheel" >/dev/null
@@ -189,7 +210,13 @@ for key in "$@"; do
   shopt -s nullglob
   # The full libperfr (API + hook agent) replaces nothing: the API-only one
   # went into the perfr-api wheel above and was never staged here.
+  # perfr-hook.exe is only produced on Windows; the other name is only
+  # produced elsewhere. A missing literal name is not a glob, so nullglob
+  # does not drop it.
   for f in "$companions_src"/libperfr.* "$companions_src"/perfr-hook "$companions_src"/perfr-hook.exe; do
+    if [[ ! -e "$f" ]]; then
+      continue
+    fi
     cp "$f" "$SVC_PKG/perfr/"
     staged_companions+=("$SVC_PKG/perfr/$(basename "$f")")
   done

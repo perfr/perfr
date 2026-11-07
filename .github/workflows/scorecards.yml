@@ -13,6 +13,12 @@ on:
     - cron: '15 12 * * 1'
   # Intentionally no push-to-main: every merge was billing a failing private-repo
   # run (~1 Linux min each). Weekly cron is enough; dispatch for on-demand.
+  # A path-filtered pull_request proves an edit to this file before merge
+  # and does not run on ordinary code PRs.
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/scorecards.yml'
   workflow_dispatch:
 
 # Declare default permissions as read only.

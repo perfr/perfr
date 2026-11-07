@@ -60,6 +60,10 @@ struct Helper {
     input: Option<ChildStdin>,
     replies: Receiver<serde_json::Value>,
     reader: Option<std::thread::JoinHandle<()>>,
+    // Windows stdin does not deliver a later write to the helper. This event
+    // is the stop signal it waits on.
+    #[cfg(windows)]
+    stop_event: Option<std::os::windows::io::OwnedHandle>,
 }
 impl Helper {
     fn launch(mut config: serde_json::Value) -> Result<Self, String> {
@@ -101,11 +105,25 @@ impl Helper {
                 }
             }
         });
+        #[cfg(windows)]
+        let stop_event = {
+            let name = format!(r"Local\perfr-hook-stop-{}", child.id());
+            let event = create_stop_event(&name);
+            if event.is_some() {
+                log::info!("frida stop event created: {name}");
+                config["stop_event"] = serde_json::Value::String(name);
+            } else {
+                log::warn!("frida stop event was not created");
+            }
+            event
+        };
         let mut helper = Self {
             child,
             input,
             replies,
             reader: Some(reader),
+            #[cfg(windows)]
+            stop_event,
         };
         writeln!(helper.input.as_mut().unwrap(), "{config}").map_err(|e| e.to_string())?;
         Ok(helper)
@@ -125,8 +143,20 @@ impl Helper {
         Ok(value)
     }
     fn stop(&mut self) -> Result<(), String> {
-        // Closing stdin requests safe detach, also used on early-return errors.
-        self.input.take();
+        // A "stop" line, then close. Closing the write end is enough on Unix.
+        // On Windows the helper never observes that close: a blocking read and
+        // PeekNamedPipe both stay idle while the process-wide stdin handle is
+        // open, so detach waited out the timeout below with a call still inside
+        // the target. The line is the signal the stop thread reads.
+        #[cfg(windows)]
+        if let Some(event) = self.stop_event.take() {
+            log::info!("frida stop event set");
+            signal_stop_event(&event);
+        }
+        if let Some(mut input) = self.input.take() {
+            let _ = writeln!(input, "stop");
+            let _ = input.flush();
+        }
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             if let Some(status) = self.child.try_wait().map_err(|e| e.to_string())? {
@@ -146,6 +176,38 @@ impl Helper {
         }
     }
 }
+#[cfg(windows)]
+fn create_stop_event(name: &str) -> Option<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateEventW(
+            security: *mut std::ffi::c_void,
+            manual: i32,
+            initial: i32,
+            name: *const u16,
+        ) -> *mut std::ffi::c_void;
+    }
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let handle = unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, wide.as_ptr()) };
+    if handle.is_null() || handle == -1isize as *mut std::ffi::c_void {
+        return None;
+    }
+    Some(unsafe { OwnedHandle::from_raw_handle(handle) })
+}
+
+#[cfg(windows)]
+fn signal_stop_event(handle: &std::os::windows::io::OwnedHandle) {
+    use std::os::windows::io::AsRawHandle;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetEvent(handle: *mut std::ffi::c_void) -> i32;
+    }
+    unsafe {
+        SetEvent(handle.as_raw_handle() as *mut std::ffi::c_void);
+    }
+}
+
 impl Drop for Helper {
     fn drop(&mut self) {
         self.input.take();
@@ -293,8 +355,11 @@ impl Drop for FridaSession {
     fn drop(&mut self) {
         self.mapping.disable();
         // EOF asks the helper to detach even if capture startup failed after
-        // hooks were installed. Give cleanup time before Helper's kill backstop.
-        let _ = self.helper.stop();
+        // hooks were installed. stop() already did that and waited; doing it
+        // again burns a second timeout before Helper's kill backstop.
+        if !self.stopped {
+            let _ = self.helper.stop();
+        }
     }
 }
 

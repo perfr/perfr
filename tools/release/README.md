@@ -15,7 +15,7 @@ reads them.
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install cargo-zigbuild ziglang build wheel
+pip install 'setuptools>=77' cargo-zigbuild ziglang build wheel
 tools/release/build_wheels.sh linux-x86_64 linux-aarch64 macos-arm64 macos-x86_64
 # wheels land in dist/wheels/
 ```

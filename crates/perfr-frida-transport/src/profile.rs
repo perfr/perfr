@@ -6,7 +6,7 @@
 //! initializing a second SDK inside the target or tracing hot callbacks.
 use std::io::Write;
 #[cfg(unix)]
-fn now_ns() -> u64 {
+pub fn now_ns() -> u64 {
     let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
     unsafe {
         libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
@@ -16,7 +16,7 @@ fn now_ns() -> u64 {
 // QueryPerformanceCounter, converted exactly as perfr-scope-ring does, so
 // these spans sit on the service's track next to its own scopes.
 #[cfg(windows)]
-fn now_ns() -> u64 {
+pub fn now_ns() -> u64 {
     #[link(name = "kernel32")]
     extern "system" {
         fn QueryPerformanceCounter(count: *mut i64) -> i32;
@@ -51,6 +51,22 @@ pub fn measure<T>(
     );
     let _ = output.flush();
     result
+}
+
+/// A span whose interval was measured elsewhere. `end` is clamped to `start`
+/// so a clock step cannot produce a negative duration.
+pub fn record(output: &mut impl Write, enabled: bool, name: &str, start: u64, end: u64) {
+    if !enabled {
+        return;
+    }
+    let _ = writeln!(
+        output,
+        "{}",
+        serde_json::json!({"profile": {
+            "name": name, "start_ns": start, "end_ns": end.max(start)
+        }})
+    );
+    let _ = output.flush();
 }
 
 #[cfg(test)]

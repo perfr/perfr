@@ -772,7 +772,11 @@ mod tests {
     #[test]
     fn embedded_skills_name_themselves_and_skip_unshipped_claims() {
         for body in [SKILL, SETUP_SKILL] {
-            assert!(body.starts_with("---\n"), "{body}");
+            // Windows checkouts can be CRLF. The front matter is still the header.
+            assert!(
+                body.starts_with("---\n") || body.starts_with("---\r\n"),
+                "{body}"
+            );
             assert!(body.contains("name: perfr"));
             assert!(!body.to_lowercase().starts_with("linux"));
             assert!(!body.contains("multi-machine"));
@@ -854,8 +858,15 @@ mod tests {
         fs::create_dir_all(&home).unwrap();
         let env = env_with(&home, &project);
         let text = install(&env, &action("all", true, true, false)).unwrap();
-        assert!(text.contains(".grok/skills/perfr/SKILL.md"), "{text}");
-        assert!(text.contains(".grok/config.toml"), "{text}");
+        // Path::display uses '\' on Windows. Match the path the message prints.
+        let skill = project
+            .join(".grok")
+            .join("skills")
+            .join("perfr")
+            .join("SKILL.md");
+        let config = project.join(".grok").join("config.toml");
+        assert!(text.contains(&skill.display().to_string()), "{text}");
+        assert!(text.contains(&config.display().to_string()), "{text}");
         assert!(text.contains("claude: not installed; skipped"), "{text}");
         assert!(!project.join(".grok/skills/perfr/SKILL.md").exists());
     }

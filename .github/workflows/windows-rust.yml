@@ -93,7 +93,9 @@ jobs:
           . .\tools\windows\msvc-env.ps1
           New-Item -ItemType Directory -Force target\e2e | Out-Null
           Push-Location target\e2e
-          cl.exe /nologo /O1 /Zi /std:c11 /utf-8 /DPERFR_STATIC /I..\..\crates\perfr-api\include ..\..\..\tools\e2e\frida_target.c /Fe:perfr-frida-target.exe /link /DEBUG ..\x86_64-pc-windows-msvc\release\perfr_api.lib ws2_32.lib ntdll.lib userenv.lib bcrypt.lib advapi32.lib kernel32.lib
+          # target\e2e is two levels below the repo root, not three.
+          cl.exe /nologo /O1 /Zi /std:c11 /utf-8 /DPERFR_STATIC /I..\..\crates\perfr-api\include ..\..\tools\e2e\frida_target.c /Fe:perfr-frida-target.exe /link /DEBUG ..\x86_64-pc-windows-msvc\release\perfr_api.lib ws2_32.lib ntdll.lib userenv.lib bcrypt.lib advapi32.lib kernel32.lib
+          if ($LASTEXITCODE -ne 0) { throw "cl failed: $LASTEXITCODE" }
           Pop-Location
           python tools/e2e/frida_smoke.py --service dist/windows/perfr.exe --agent dist/windows/libperfr.dll --helper dist/windows/perfr-hook.exe --target target/e2e/perfr-frida-target.exe
           python tools/e2e/frida_smoke.py --service dist/windows/perfr.exe --agent dist/windows/libperfr.dll --helper dist/windows/perfr-hook.exe --target target/e2e/perfr-frida-target.exe --inflight

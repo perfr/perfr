@@ -100,14 +100,16 @@ jobs:
         /tmp/v/bin/pip install --no-index --find-links dist/wheels perfr
         env -u PERFR_LIB PATH=/usr/bin:/bin /tmp/v/bin/python -c \
           "import perfr_api as o; assert o.init() == 0 and o.available(); print('ok', o.library_path())"
-        /tmp/v/bin/python -c '
-          import os, perfr as p
-          root = os.path.dirname(p.binary_path())
-          for name in ("perfr", "perfr-hook", "libperfr.so"):
-              path = os.path.join(root, name)
-              assert os.path.isfile(path), path
-          print("frida companions ok", root)
-        '
+        # The heredoc body stays at this indent so YAML does not leave a
+        # leading indent for Python. An indented -c string is an IndentationError.
+        /tmp/v/bin/python - <<'PY'
+        import os, perfr as p
+        root = os.path.dirname(p.binary_path())
+        for name in ("perfr", "perfr-hook", "libperfr.so"):
+            path = os.path.join(root, name)
+            assert os.path.isfile(path), path
+        print("frida companions ok", root)
+        PY
         /tmp/v/bin/perfr --help >/dev/null
 
     - uses: actions/upload-artifact@v4

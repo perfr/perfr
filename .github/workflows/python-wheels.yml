@@ -77,7 +77,10 @@ jobs:
         python-version: '3.12'
 
     - name: Build tooling
-      run: pip install cargo-zigbuild ziglang build wheel
+      # setuptools>=77 reads the SPDX license string in the pyproject files.
+      # --no-isolation does not install it. Older setuptools reject the field
+      # and the wheel build exits 1.
+      run: pip install 'setuptools>=77' cargo-zigbuild ziglang build wheel
 
     - name: MSVC on PATH (Windows)
       if: runner.os == 'Windows'

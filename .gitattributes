@@ -1,0 +1,10 @@
+# Keep sources that are embedded with include_str! as LF. A Windows
+# checkout with core.autocrlf otherwise turns the skill front matter
+# into CRLF and the embedded-skill test fails.
+*.md text eol=lf
+*.rs text eol=lf
+*.c text eol=lf
+*.cpp text eol=lf
+*.h text eol=lf
+*.py text eol=lf
+*.wgsl text eol=lf

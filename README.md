@@ -52,6 +52,20 @@ manual scopes and function hooks need no privilege.
 `<install dir>\include\perfr.h`. Compile C and C++ with `-I~/.local/include`.
 The header still loads `libperfr` from beside `perfr` on `PATH`.
 
+`perfr update` replaces that install. It downloads the latest `perfr-v*`
+release, checks the SHA-256, and writes the new files over this one, including
+`perfr.h`. A current install prints `perfr 0.1.2 is up to date`. A replacement
+prints `updated perfr 0.1.1 -> 0.1.2 in ~/.local/bin` and
+`restart any running perfr to use the new version`. Linux, macOS, and Windows
+use the same command. On Windows the directory in that line is the install
+folder, and `perfr.h` goes to `<install>\include`.
+
+`perfr update --check` only prints `current`, `latest`, and `status`. It exits
+0 when this install is current or newer than the release, and 1 when an update
+is available, so a script can tell them apart. Any other failure exits 2.
+`--yes` is still accepted and does nothing. cargo, Homebrew, and pip installs
+are left in place; the command to upgrade them is printed instead.
+
 `pip install perfr` is the same service in a wheel, including the
 Frida files. Wheels are built on the same tags and are not on PyPI yet.
 

@@ -28,6 +28,8 @@ On Windows the installer is a PowerShell script that downloads the zip, checks i
 irm https://perfr.dev/install.ps1 | iex
 ```
 
+`perfr update` downloads the latest release, checks its SHA-256, and replaces this install on Linux, macOS, and Windows. It prints `updated perfr 0.1.1 -> 0.1.2 in <dir>` and `restart any running perfr to use the new version`, or `perfr 0.1.2 is up to date` when nothing newer is published. `perfr update --check` only reports `current`, `latest`, and `status`. It exits 0 when the install is current or newer than the release, and 1 when an update is available. Exit 2 is a failure. `--yes` is accepted and ignored. A cargo, Homebrew, or pip install is not replaced; the command prints what to run instead.
+
 ## Run the service and open the viewer
 
 ```

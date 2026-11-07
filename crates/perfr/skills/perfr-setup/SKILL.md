@@ -21,7 +21,7 @@ On Windows, in PowerShell:
 irm https://perfr.dev/install.ps1 | iex
 ```
 
-If `perfr update --check` says a package manager owns the binary, use the command it prints. Do not replace that binary by hand.
+`perfr update` downloads the latest release and replaces a release install. `perfr update --check` only reports `current`, `latest`, and `status`. It exits 0 when the install is current or newer than the release, and 1 when a newer release is available. If that report says a package manager owns the binary, use the command it prints. Do not replace that binary by hand.
 
 `perfr skill install` writes this skill and the perfr skill. It also registers the MCP server where the agent keeps that config.
 

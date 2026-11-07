@@ -39,13 +39,35 @@ fn wait_for_stop() {
     extern "system" {
         fn GetStdHandle(which: u32) -> Handle;
         fn GetCurrentProcess() -> Handle;
-        fn DuplicateHandle(sp: Handle, s: Handle, tp: Handle, t: *mut Handle, a: u32, inherit: i32, opts: u32) -> i32;
+        fn DuplicateHandle(
+            sp: Handle,
+            s: Handle,
+            tp: Handle,
+            t: *mut Handle,
+            a: u32,
+            inherit: i32,
+            opts: u32,
+        ) -> i32;
     }
     // SAFETY: duplicating the process's own stdin handle into an owned File.
     let file = unsafe {
         let stdin = GetStdHandle(STD_INPUT_HANDLE);
         let mut dup: Handle = std::ptr::null_mut();
-        if DuplicateHandle(GetCurrentProcess(), stdin, GetCurrentProcess(), &mut dup, 0, 0, DUPLICATE_SAME_ACCESS) == 0 {
+        if DuplicateHandle(
+            GetCurrentProcess(),
+            stdin,
+            GetCurrentProcess(),
+            &mut dup,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        ) == 0
+        {
+            // The dedicated handle is what makes a piped EOF visible. If it
+            // cannot be duplicated, fall back to the shared stdin rather than
+            // treating the failure as an immediate stop.
+            let mut line = String::new();
+            let _ = std::io::stdin().lock().read_line(&mut line);
             return;
         }
         std::fs::File::from(OwnedHandle::from_raw_handle(dup))
@@ -197,8 +219,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if value["command"] != "symbols" {
         let mut stop = stream.try_clone()?;
         std::thread::spawn(move || {
-            let mut line = String::new();
-            let _ = std::io::stdin().lock().read_line(&mut line);
+            // Unix can read the shared stdin from this thread. Windows cannot:
+            // a second read of the process-wide buffered stdin never observes
+            // the service closing the pipe, so detach waits out the helper's
+            // 5s timeout while a hooked call is still inside the target.
+            wait_for_stop();
             // Both an explicit stop and service EOF close the agent's control path.
             let _ = stop.write_all(b"stop\n");
             #[cfg(unix)]

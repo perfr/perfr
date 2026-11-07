@@ -9,6 +9,11 @@ returns {"id", "url"}, and GET /api/share/<id> returns those bytes. The page
 is opened as /?capture=/api/share/<id>&share_base=<this server>, which is how
 https://perfr.dev/c/<id> loads the viewer.
 
+Share opens a confirm step first. Nothing is posted until Upload, and the
+dialog shows the byte size of the loaded capture. With no time range
+selected, the hint explains how to share one and does not offer a range
+size.
+
 Usage:
   python3 tools/e2e/share_link.py [/path/to/viewer-dist]
 """
@@ -146,6 +151,19 @@ def main():
 
         label, x, y, w, h = wait_until(lambda: rect("Share"), timeout=30)
         chrome.click(x + w / 2, y + h / 2)
+        size_row = wait_until(lambda: rect(f"share-bytes:{len(stream)}"), timeout=15)
+        assert size_row[0] == f"share-bytes:{len(stream)}"
+        human = wait_until(lambda: rect("share-size:"), timeout=5)
+        assert human[0].startswith("share-size:")
+        assert human[0] != "share-size:"
+        hint = wait_until(lambda: rect("share-hint:"), timeout=5)
+        assert "right-drag" in hint[0] and "sample bar" in hint[0], hint[0]
+        assert rect("share-range-bytes:") is None, "a range was offered with nothing selected"
+        assert "body" not in posted, "Share posted before Upload"
+        confirm_shot = Path(os.environ.get("PERFR_SHARE_CONFIRM_SHOT", "/tmp/perfr-share-confirm.png"))
+        assert chrome.screenshot(str(confirm_shot)) > 20000, "confirm dialog screenshot looks blank"
+        upload = wait_until(lambda: rect("share-upload"), timeout=5)
+        chrome.click(upload[1] + upload[3] / 2, upload[2] + upload[4] / 2)
         try:
             url_row = wait_until(lambda: rect("share-url:"), timeout=15)
         except AssertionError:
@@ -164,8 +182,9 @@ def main():
         chrome.click(copy[1] + copy[3] / 2, copy[2] + copy[4] / 2)
         wait_until(lambda: rect("Copied"), timeout=10)
         assert chrome.screenshot(str(shot)) > 20000, "share dialog screenshot looks blank"
-        print(f"PASS: share dialog, posted {len(stream)} stream bytes, link {url_row[0][len('share-url:'):]}")
+        print(f"PASS: share confirm showed {human[0][len('share-size:'):]} ({len(stream)} bytes) before upload, posted the loaded capture, link {url_row[0][len('share-url:'):]}")
         print(f"screenshot {shot}")
+        print(f"confirm {confirm_shot}")
     finally:
         if chrome:
             chrome.close()

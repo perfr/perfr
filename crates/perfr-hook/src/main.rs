@@ -292,29 +292,85 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             #[cfg(windows)]
             {
                 if let Some(name) = stop_event {
-                    eprintln!("perfr-hook: waiting on stop event {name}");
                     wait_named_event(&name);
-                    eprintln!("perfr-hook: stop event signaled");
                 } else if let Some(mut file) = stop_stdin {
-                    eprintln!("perfr-hook: no stop event; reading stdin");
                     let _ = read_handle_line(&mut file);
-                    eprintln!("perfr-hook: stdin stop");
                 }
             }
             #[cfg(not(windows))]
             wait_for_stop();
+            // The Windows relay polls, so this write is not stuck behind a
+            // synchronous read on the same pipe. That read was the deadlock.
             let _ = stop.write_all(b"stop\n");
+            let _ = stop.flush();
             #[cfg(unix)]
             let _ = stop.shutdown(std::net::Shutdown::Write);
         });
     }
     let mut output = std::io::stdout().lock();
-    for line in BufReader::new(stream).lines() {
-        writeln!(output, "{}", line?)?;
-        output.flush()?;
+    #[cfg(windows)]
+    relay_windows(&mut stream, &mut output)?;
+    #[cfg(not(windows))]
+    {
+        for line in BufReader::new(stream).lines() {
+            let Ok(line) = line else { break };
+            writeln!(output, "{}", line)?;
+            output.flush()?;
+        }
     }
     Ok(())
 }
+/// No synchronous ReadFile stays outstanding, so the stop thread can write
+/// `stop` on another handle of this pipe. A blocking read deadlocks that write.
+#[cfg(windows)]
+fn relay_windows(stream: &mut std::fs::File, output: &mut impl std::io::Write) -> std::io::Result<()> {
+    use std::io::Read;
+    use std::os::windows::io::AsRawHandle;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn PeekNamedPipe(
+            pipe: *mut std::ffi::c_void,
+            buf: *mut u8,
+            buf_size: u32,
+            read: *mut u32,
+            avail: *mut u32,
+            left: *mut u32,
+        ) -> i32;
+    }
+    let mut incoming = String::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let mut avail = 0u32;
+        let ok = unsafe {
+            PeekNamedPipe(
+                stream.as_raw_handle() as *mut std::ffi::c_void,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut avail,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            break;
+        }
+        if avail == 0 {
+            std::thread::sleep(Duration::from_millis(5));
+            continue;
+        }
+        if stream.read(&mut byte)? == 0 {
+            break;
+        }
+        incoming.push(byte[0] as char);
+        if byte[0] == b'\n' {
+            writeln!(output, "{}", incoming.trim_end())?;
+            output.flush()?;
+            incoming.clear();
+        }
+    }
+    Ok(())
+}
+
 fn main() {
     if let Err(error) = run() {
         println!("{}", serde_json::json!({"error":error.to_string()}));

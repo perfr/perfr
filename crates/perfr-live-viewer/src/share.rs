@@ -4,13 +4,23 @@
 
 //! Share a capture with the website.
 //!
-//! The viewer posts the current capture's `.perfr.stream` bytes to
-//! `{base}/api/share` as `application/octet-stream`. The server answers
-//! JSON `{id, url}`. `base` is `https://perfr.dev`, unless `PERFR_SHARE_BASE`
-//! was set when the viewer was built, or the page was opened with
+//! The viewer posts `.perfr.stream` bytes to `{base}/api/share` as
+//! `application/octet-stream`. The server answers JSON `{id, url}`.
+//! `base` is `https://perfr.dev`, unless `PERFR_SHARE_BASE` was set when
+//! the viewer was built, or the page was opened with
 //! `?share_base=http://127.0.0.1:port` (loopback only, so a link cannot
 //! point the upload at some other host).
+//!
+//! Share asks before posting. The dialog shows the size of the bytes
+//! that will be uploaded. A selected time range can be posted instead:
+//! the stream is cut to the events that overlap that window, the same
+//! rule the service uses for `capture_stream`. The cut is the whole
+//! window, on every thread.
 
+use perfr_live_protocol::{
+    decode_frame, encode_event_batch_with, LiveFrame, WireFormat, FRAME_EVENT_BATCH,
+    FRAME_EVENT_BATCH_DEFLATE, FRAME_EVENT_BATCH_PACKED,
+};
 use serde::Deserialize;
 
 /// `POST` target for a live capture: the service's stream export.
@@ -39,7 +49,12 @@ pub struct ShareNote {
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub enum ShareNoteKind {
     Reading,
-    Progress { loaded: u64, total: u64 },
+    /// The bytes are in hand. Nothing has been posted yet.
+    Prepared(Vec<u8>),
+    Progress {
+        loaded: u64,
+        total: u64,
+    },
     Done(ShareLink),
     Failed(String),
 }
@@ -115,6 +130,89 @@ fn plain_error_body(body: &str) -> bool {
         && body
             .chars()
             .all(|c| c == '\n' || (c.is_ascii() && !c.is_control()))
+}
+
+/// Decimal size of the bytes that will be posted: `12.4 MB` is 12.4 million
+/// bytes. Under 1000 bytes the unit is `B` with no decimal.
+pub fn format_share_bytes(bytes: u64) -> String {
+    const KB: f64 = 1_000.0;
+    const MB: f64 = 1_000_000.0;
+    const GB: f64 = 1_000_000_000.0;
+    let n = bytes as f64;
+    if n >= GB {
+        format!("{:.1} GB", n / GB)
+    } else if n >= MB {
+        format!("{:.1} MB", n / MB)
+    } else if n >= KB {
+        format!("{:.1} KB", n / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// What the confirm dialog says about sharing a time range.
+///
+/// `can_slice` is false when the bytes could not be cut, so the sentence
+/// must not tell the reader to pick a range. `has_range` is a committed
+/// selection whose cut is ready to post.
+pub fn share_section_hint(can_slice: bool, has_range: bool) -> &'static str {
+    if !can_slice {
+        "This capture cannot be cut to a time range, so only the whole capture can be shared."
+    } else if has_range {
+        "Share selected range uploads the events in that time range, on every thread, instead of the whole capture."
+    } else {
+        "To share a section instead, right-drag a range on the timeline, or drag across a thread's sample bar, then use Share selected range."
+    }
+}
+
+/// The events that overlap `[start_ns, end_ns]`, as a `.perfr.stream`.
+///
+/// Reversed bounds are swapped. An event overlaps when
+/// `start_ns <= end && end_ns() >= start`, which is the service's rule:
+/// scopes that cross an edge stay whole, and a sample is the instant
+/// `end_ns()` reports (its `duration_ns` is the sampling period, not a
+/// span). Name, hello, and status frames are copied unchanged. Event
+/// batches are rewritten in the format they arrived in, and a batch that
+/// loses every event is dropped. The returned length is the number of
+/// bytes a share of this range would post.
+pub fn slice_stream(bytes: &[u8], start_ns: u64, end_ns: u64) -> Result<Vec<u8>, String> {
+    let (t0, t1) = (start_ns.min(end_ns), start_ns.max(end_ns));
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        if rest.len() < 5 {
+            return Err("Could not read this capture.".into());
+        }
+        let payload_len = u32::from_le_bytes(rest[0..4].try_into().unwrap()) as usize;
+        let total = 5usize.saturating_add(payload_len);
+        if total < 5 || rest.len() < total {
+            return Err("Could not read this capture.".into());
+        }
+        let wire = match rest[4] {
+            FRAME_EVENT_BATCH => Some(WireFormat::Raw),
+            FRAME_EVENT_BATCH_PACKED => Some(WireFormat::Packed),
+            FRAME_EVENT_BATCH_DEFLATE => Some(WireFormat::Deflate),
+            _ => None,
+        };
+        if let Some(wire) = wire {
+            let (frame, n) =
+                decode_frame(rest).map_err(|e| format!("Could not read this capture. {e}"))?;
+            if n != total {
+                return Err("Could not read this capture.".into());
+            }
+            let LiveFrame::EventBatch { mut events } = frame else {
+                return Err("Could not read this capture.".into());
+            };
+            events.retain(|event| event.start_ns <= t1 && event.end_ns() >= t0);
+            if !events.is_empty() {
+                out.extend_from_slice(&encode_event_batch_with(&events, wire));
+            }
+        } else {
+            out.extend_from_slice(&rest[..total]);
+        }
+        rest = &rest[total..];
+    }
+    Ok(out)
 }
 
 /// `{id, url}` from a 2xx body.
@@ -395,5 +493,106 @@ mod tests {
             assert_eq!(got, status);
             assert_eq!(share_failure_message(got, &text), words);
         }
+    }
+
+    #[test]
+    fn share_sizes_are_decimal_units() {
+        assert_eq!(format_share_bytes(0), "0 B");
+        assert_eq!(format_share_bytes(999), "999 B");
+        assert_eq!(format_share_bytes(1_000), "1.0 KB");
+        assert_eq!(format_share_bytes(12_400_000), "12.4 MB");
+        assert_eq!(format_share_bytes(1_500_000_000), "1.5 GB");
+    }
+
+    #[test]
+    fn the_section_hint_only_offers_a_cut_the_viewer_can_make() {
+        let none = share_section_hint(true, false);
+        assert!(none.contains("right-drag"));
+        assert!(none.contains("sample bar"));
+        assert!(none.contains("Share selected range"));
+        let ready = share_section_hint(true, true);
+        assert!(ready.contains("every thread"));
+        assert!(ready.contains("time range"));
+        assert!(!ready.contains("right-drag"));
+        let blocked = share_section_hint(false, true);
+        assert!(blocked.contains("only the whole capture"));
+        assert!(!blocked.contains("right-drag"));
+        assert!(!blocked.contains("Share selected range"));
+    }
+
+    fn event(start: u64, duration: u64, kind_id: u8) -> perfr_live_event::LiveEvent {
+        perfr_live_event::LiveEvent {
+            start_ns: start,
+            duration_ns: duration,
+            tid: 7,
+            pid: 8,
+            kind: kind_id,
+            depth: 0,
+            extra: 0,
+            _pad: 0,
+            name_id: 1,
+        }
+    }
+
+    fn framed(events: &[perfr_live_event::LiveEvent], wire: WireFormat) -> Vec<u8> {
+        use perfr_live_event::LIVE_EVENT_SIZE;
+        use perfr_live_protocol::{encode_frame, VERSION};
+        let mut out = encode_frame(&LiveFrame::Hello {
+            version: VERSION,
+            event_size: LIVE_EVENT_SIZE as u16,
+        });
+        out.extend_from_slice(&encode_frame(&LiveFrame::ProcessName {
+            pid: 8,
+            name: "demo".into(),
+        }));
+        out.extend_from_slice(&encode_event_batch_with(events, wire));
+        out.extend_from_slice(&encode_frame(&LiveFrame::CaptureFinished));
+        out
+    }
+
+    fn events_of(bytes: &[u8]) -> Vec<perfr_live_event::LiveEvent> {
+        perfr_live_protocol::decode_all(bytes)
+            .unwrap()
+            .into_iter()
+            .filter_map(|frame| match frame {
+                LiveFrame::EventBatch { events } => Some(events),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn a_time_range_keeps_overlapping_events_and_the_bytes_are_the_upload() {
+        use perfr_live_event::kind;
+        let crossing = event(0, 200, kind::API_SCOPE);
+        let inside = event(160, 10, kind::API_SCOPE);
+        let outside = event(10, 5, kind::API_SCOPE);
+        let sample = event(160, 1_000_000, kind::SAMPLE);
+        let late_sample = event(190, 1_000_000, kind::SAMPLE);
+        let kept = [crossing, inside, sample];
+        for wire in [WireFormat::Raw, WireFormat::Packed, WireFormat::Deflate] {
+            let full = framed(&[crossing, inside, outside, sample, late_sample], wire);
+            let same = slice_stream(&full, 0, u64::MAX).unwrap();
+            assert_eq!(
+                same, full,
+                "{wire:?} covering every event must not change the bytes"
+            );
+            let sliced = slice_stream(&full, 180, 150).unwrap();
+            assert_eq!(events_of(&sliced), kept, "{wire:?}");
+            assert!(
+                sliced.len() < full.len(),
+                "{wire:?} slice is {} bytes, whole capture is {}",
+                sliced.len(),
+                full.len()
+            );
+            let process = perfr_live_protocol::encode_frame(&LiveFrame::ProcessName {
+                pid: 8,
+                name: "demo".into(),
+            });
+            assert!(sliced.windows(process.len()).any(|w| w == process));
+        }
+        let broken = slice_stream(&[1, 2, 3, 4], 0, 1);
+        assert!(broken.is_err());
     }
 }

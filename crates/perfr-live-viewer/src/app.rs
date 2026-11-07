@@ -632,14 +632,65 @@ impl ClipLabelCache {
     }
 }
 
-/// Where a Share click is, drawn in the dialog.
+/// Where a Share click is, drawn in the dialog. Upload starts only from
+/// Confirm, after the size of those bytes has been shown.
 #[derive(Clone, Debug)]
 enum ShareUi {
     Idle,
+    /// Fetching the capture so its size can be shown. Nothing is posted.
     Reading,
+    Confirm,
     Uploading { loaded: u64, total: u64 },
     Ready { url: String, copied_until: f64 },
     Failed(String),
+}
+
+/// Where the bytes in a confirm dialog came from.
+#[derive(Clone, Debug)]
+enum ShareSource {
+    /// `stream_bytes` already held by the viewer (a file or `?capture=`).
+    Loaded,
+    /// Read from the service for this confirm. Not posted yet.
+    Fetched(Vec<u8>),
+}
+
+/// A cut of the capture for the current selection. `bytes` is what
+/// Share selected range would post.
+#[derive(Clone, Debug)]
+struct ShareRange {
+    span: (u64, u64),
+    bytes: Vec<u8>,
+}
+
+/// The payload the confirm dialog is offering. Kept across a failed upload
+/// so the same bytes can be posted again without a second read.
+#[derive(Clone, Debug)]
+struct ShareDraft {
+    source: ShareSource,
+    range: Option<ShareRange>,
+    /// `slice_stream` failed. The dialog must not offer a time range.
+    range_unslicable: bool,
+    error: Option<String>,
+}
+
+impl ShareDraft {
+    fn loaded() -> Self {
+        Self {
+            source: ShareSource::Loaded,
+            range: None,
+            range_unslicable: false,
+            error: None,
+        }
+    }
+
+    fn fetched(bytes: Vec<u8>) -> Self {
+        Self {
+            source: ShareSource::Fetched(bytes),
+            range: None,
+            range_unslicable: false,
+            error: None,
+        }
+    }
 }
 
 pub struct PerfrLiveApp {
@@ -775,6 +826,9 @@ pub struct PerfrLiveApp {
     /// reply for an older click is dropped.
     share_gen: u64,
     share_ui: ShareUi,
+    /// Bytes the confirm dialog is showing. Present from Confirm through a
+    /// failed upload; cleared when the link arrives or the capture changes.
+    share_draft: Option<ShareDraft>,
     /// Last frame's per-lane listing rows (TODO item 21); swapped with the
     /// self pane's like the rest of the timeline state.
     listing_cache: perfr_live_render::ListingCache,
@@ -1789,6 +1843,7 @@ impl PerfrLiveApp {
             share_open: false,
             share_gen: 0,
             share_ui: ShareUi::Idle,
+            share_draft: None,
             capture_start_ns: 0,
             capture_timer: CaptureTimer::default(),
             settle_frames: 0,
@@ -2236,6 +2291,7 @@ impl PerfrLiveApp {
     fn forget_share(&mut self) {
         self.share_gen = self.share_gen.wrapping_add(1);
         self.share_ui = ShareUi::Idle;
+        self.share_draft = None;
         self.share_open = false;
     }
 
@@ -2273,27 +2329,175 @@ impl PerfrLiveApp {
         self.static_capture.is_none() && !self.local_stream && self.index.event_count() > 0
     }
 
-    fn begin_share(&mut self) {
+    /// Open the confirm dialog. A file the page already holds can show its
+    /// size immediately. A live session reads the stream first and still
+    /// does not post until Upload.
+    fn open_share(&mut self) {
         if !self.can_share() {
             return;
         }
-        if matches!(self.share_ui, ShareUi::Reading | ShareUi::Uploading { .. }) {
-            self.share_open = true;
-            return;
+        self.share_open = true;
+        match self.share_ui {
+            ShareUi::Reading | ShareUi::Uploading { .. } | ShareUi::Confirm => return,
+            ShareUi::Idle | ShareUi::Ready { .. } | ShareUi::Failed(_) => {}
         }
         self.share_gen = self.share_gen.wrapping_add(1);
+        if self.stream_bytes.as_ref().is_some_and(|b| !b.is_empty()) {
+            self.share_draft = Some(ShareDraft::loaded());
+            self.share_ui = ShareUi::Confirm;
+        } else {
+            self.share_draft = None;
+            self.share_ui = ShareUi::Reading;
+            self.net.prepare_share(
+                self.share_gen,
+                crate::share::STREAM_EXPORT_PATH.to_string(),
+            );
+        }
+    }
+
+    /// A copy of the bytes the Upload button would post: the whole capture.
+    fn share_whole_owned(&self) -> Option<Vec<u8>> {
+        let loaded = matches!(
+            self.share_draft.as_ref().map(|d| matches!(&d.source, ShareSource::Loaded)),
+            Some(true)
+        );
+        if loaded {
+            return self.stream_bytes.clone();
+        }
+        match &self.share_draft {
+            Some(ShareDraft { source: ShareSource::Fetched(bytes), .. }) => Some(bytes.clone()),
+            _ => None,
+        }
+    }
+
+    /// Cut the current selection once per span. A drag in progress is left
+    /// alone so the dialog does not re-encode the capture every frame.
+    fn refresh_share_range(&mut self) {
+        if self.measure_dragging || !matches!(self.share_ui, ShareUi::Confirm) {
+            return;
+        }
+        let span = self.selection_span();
+        let cached = self.share_draft.as_ref().and_then(|d| d.range.as_ref().map(|r| r.span));
+        if cached == span {
+            return;
+        }
+        if span.is_none() {
+            if let Some(draft) = &mut self.share_draft {
+                draft.range = None;
+            }
+            return;
+        }
+        let span = span.unwrap();
+        let loaded = matches!(
+            self.share_draft.as_ref().map(|d| matches!(&d.source, ShareSource::Loaded)),
+            Some(true)
+        );
+        let whole = if loaded {
+            self.stream_bytes.clone()
+        } else {
+            match &self.share_draft {
+                Some(ShareDraft { source: ShareSource::Fetched(bytes), .. }) => Some(bytes.clone()),
+                _ => None,
+            }
+        };
+        let Some(whole) = whole else {
+            if let Some(draft) = &mut self.share_draft {
+                draft.range = None;
+                draft.range_unslicable = true;
+            }
+            return;
+        };
+        match crate::share::slice_stream(&whole, span.0, span.1) {
+            Ok(bytes) => {
+                if let Some(draft) = &mut self.share_draft {
+                    draft.range_unslicable = false;
+                    draft.range = Some(ShareRange { span, bytes });
+                }
+            }
+            Err(_) => {
+                if let Some(draft) = &mut self.share_draft {
+                    draft.range = None;
+                    draft.range_unslicable = true;
+                }
+            }
+        }
+    }
+
+    /// Post the bytes the dialog already measured. `range` posts the cut.
+    fn start_share_upload(&mut self, range: bool) {
+        if !matches!(self.share_ui, ShareUi::Confirm) {
+            return;
+        }
+        let bytes = if range {
+            let span = self.selection_span();
+            self.share_draft.as_ref().and_then(|draft| {
+                draft.range.as_ref().filter(|r| Some(r.span) == span).map(|r| r.bytes.clone())
+            })
+        } else {
+            self.share_whole_owned()
+        };
+        let Some(bytes) = bytes.filter(|b| !b.is_empty()) else {
+            if let Some(draft) = &mut self.share_draft {
+                draft.error = Some("Nothing to share.".into());
+            }
+            return;
+        };
+        let total = bytes.len() as u64;
+        if let Some(draft) = &mut self.share_draft {
+            draft.error = None;
+        }
+        self.share_ui = ShareUi::Uploading { loaded: 0, total };
         let endpoint = crate::share::share_post_url(&crate::share::resolve_share_base(
             &crate::dev::location_search(),
         ));
-        let bytes = self.stream_bytes.clone();
-        let total = bytes.as_ref().map(|b| b.len() as u64).unwrap_or(0);
-        self.share_ui = if bytes.is_some() {
-            ShareUi::Uploading { loaded: 0, total }
-        } else {
-            ShareUi::Reading
-        };
-        self.share_open = true;
         self.net.share_capture(self.share_gen, endpoint, bytes);
+    }
+
+    fn apply_share_note(&mut self, kind: crate::share::ShareNoteKind) {
+        if matches!(self.share_ui, ShareUi::Ready { .. }) {
+            return;
+        }
+        match kind {
+            crate::share::ShareNoteKind::Reading => {
+                if !matches!(self.share_ui, ShareUi::Confirm | ShareUi::Uploading { .. }) {
+                    self.share_ui = ShareUi::Reading;
+                }
+            }
+            crate::share::ShareNoteKind::Prepared(bytes) => {
+                if !matches!(self.share_ui, ShareUi::Uploading { .. }) {
+                    self.share_draft = Some(ShareDraft::fetched(bytes));
+                    self.share_ui = ShareUi::Confirm;
+                }
+            }
+            crate::share::ShareNoteKind::Progress { loaded, total } => {
+                let total = if total > 0 {
+                    total
+                } else if let ShareUi::Uploading { total, .. } = self.share_ui {
+                    total
+                } else {
+                    0
+                };
+                self.share_ui = ShareUi::Uploading { loaded, total };
+            }
+            crate::share::ShareNoteKind::Done(link) => {
+                self.share_draft = None;
+                self.share_ui = ShareUi::Ready { url: link.url, copied_until: 0.0 };
+            }
+            crate::share::ShareNoteKind::Failed(message) => {
+                let keep = self.share_draft.is_some()
+                    && matches!(self.share_ui, ShareUi::Uploading { .. } | ShareUi::Confirm);
+                if keep {
+                    if let Some(draft) = &mut self.share_draft {
+                        draft.error = Some(message);
+                    }
+                    self.share_ui = ShareUi::Confirm;
+                } else {
+                    self.share_draft = None;
+                    self.share_ui = ShareUi::Failed(message);
+                }
+            }
+        }
+        self.needs_repaint = true;
     }
 
     fn begin_trace_load(&mut self, load: TraceLoad) {
@@ -2756,35 +2960,11 @@ impl PerfrLiveApp {
         if let Some(bytes) = inbox.loaded_stream {
             self.accept_stream(bytes);
         }
-        let mut share_settled = matches!(self.share_ui, ShareUi::Ready { .. } | ShareUi::Failed(_));
         for note in inbox.share_notes {
             if note.gen != self.share_gen {
                 continue;
             }
-            if share_settled {
-                match note.kind {
-                    crate::share::ShareNoteKind::Reading | crate::share::ShareNoteKind::Progress { .. } => {
-                        continue
-                    }
-                    _ => {}
-                }
-            }
-            self.share_ui = match note.kind {
-                crate::share::ShareNoteKind::Reading => ShareUi::Reading,
-                crate::share::ShareNoteKind::Progress { loaded, total } => {
-                    share_settled = false;
-                    ShareUi::Uploading { loaded, total }
-                }
-                crate::share::ShareNoteKind::Done(link) => {
-                    share_settled = true;
-                    ShareUi::Ready { url: link.url, copied_until: 0.0 }
-                }
-                crate::share::ShareNoteKind::Failed(message) => {
-                    share_settled = true;
-                    ShareUi::Failed(message)
-                }
-            };
-            self.needs_repaint = true;
+            self.apply_share_note(note.kind);
         }
         self.http_ok = inbox.http_ok;
         self.ws_ok = inbox.ws_ok;
@@ -3676,7 +3856,7 @@ impl PerfrLiveApp {
         }
         let enabled = self.can_share();
         let tip = if enabled {
-            "Upload this capture and get a link. Anyone with the link can view it."
+            "Upload this capture and get a link. The size is shown before anything is sent."
         } else if self.static_capture.is_some() && self.stream_bytes.is_none() {
             "The capture is still loading."
         } else {
@@ -3692,8 +3872,7 @@ impl PerfrLiveApp {
         ).on_hover_text(tip);
         note_ui_rect("Share", button.rect);
         if button.clicked() {
-            self.share_open = true;
-            self.begin_share();
+            self.open_share();
             ui.close();
         }
     }
@@ -3702,9 +3881,13 @@ impl PerfrLiveApp {
         if !self.share_open {
             return;
         }
+        self.refresh_share_range();
         let mut open = true;
         let mut retry = false;
         let mut copied = false;
+        let mut upload_entire = false;
+        let mut upload_range = false;
+        let mut cancel = false;
         egui::Window::new("Share")
             .open(&mut open)
             .collapsible(false)
@@ -3716,8 +3899,10 @@ impl PerfrLiveApp {
                 ui.set_min_width(420.0);
                 ui.label("Anyone with this link can view the capture.");
                 ui.add_space(6.0);
-                match &self.share_ui {
-                    ShareUi::Idle | ShareUi::Reading => {
+                if matches!(self.share_ui, ShareUi::Confirm) {
+                    self.share_confirm_body(ui, &mut upload_entire, &mut upload_range, &mut cancel);
+                } else { match &self.share_ui {
+                    ShareUi::Confirm | ShareUi::Idle | ShareUi::Reading => {
                         let label = ui.label("Reading the capture…");
                         note_ui_rect("share-progress", label.rect);
                     }
@@ -3764,7 +3949,7 @@ impl PerfrLiveApp {
                             retry = true;
                         }
                     }
-                }
+                }}
             });
         if copied {
             let now = ctx.input(|i| i.time);
@@ -3772,13 +3957,83 @@ impl PerfrLiveApp {
                 *copied_until = now + 2.0;
             }
         }
+        if upload_entire {
+            self.start_share_upload(false);
+        } else if upload_range {
+            self.start_share_upload(true);
+        }
         if retry {
             self.share_ui = ShareUi::Idle;
-            self.begin_share();
+            self.share_draft = None;
+            self.open_share();
+        }
+        if cancel {
+            open = false;
         }
         self.share_open = open;
         if matches!(self.share_ui, ShareUi::Reading | ShareUi::Uploading { .. }) {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// The confirm step: the size of the bytes Upload will post, and how to
+    /// share the selected time range instead.
+    fn share_confirm_body(&mut self, ui: &mut Ui, upload_entire: &mut bool, upload_range: &mut bool, cancel: &mut bool) {
+        let (error, fetched_len, unslicable, range_info) = {
+            let Some(draft) = self.share_draft.as_ref() else {
+                let label = ui.label("Reading the capture…");
+                note_ui_rect("share-progress", label.rect);
+                return;
+            };
+            let fetched_len = match &draft.source {
+                ShareSource::Fetched(bytes) => Some(bytes.len()),
+                ShareSource::Loaded => None,
+            };
+            let range_info = draft.range.as_ref().map(|r| (r.span, r.bytes.len()));
+            (draft.error.clone(), fetched_len, draft.range_unslicable, range_info)
+        };
+        let whole_len = fetched_len.unwrap_or_else(|| self.stream_bytes.as_ref().map(|b| b.len()).unwrap_or(0));
+        if let Some(error) = error {
+            let label = ui.label(RichText::new(&error).color(RECORD_RED));
+            note_ui_rect(&format!("share-error:{error}"), label.rect);
+            ui.add_space(6.0);
+        }
+        let size = crate::share::format_share_bytes(whole_len as u64);
+        let line = ui.label(
+            RichText::new(format!("The entire capture is {size}."))
+                .size(16.0)
+                .color(theme::TEXT()),
+        );
+        note_ui_rect(&format!("share-size:{size}"), line.rect);
+        note_ui_rect(&format!("share-bytes:{whole_len}"), line.rect);
+        ui.add_space(8.0);
+        let upload = ui.button("Upload");
+        note_ui_rect("share-upload", upload.rect);
+        if upload.clicked() {
+            *upload_entire = true;
+        }
+        ui.add_space(10.0);
+        let span = if self.measure_dragging { None } else { self.selection_span() };
+        let has_range = range_info.as_ref().is_some_and(|(s, _)| Some(*s) == span);
+        let hint = crate::share::share_section_hint(!unslicable, has_range);
+        let hint_label = ui.label(RichText::new(hint).size(12.0).color(theme::MUTED()));
+        note_ui_rect(&format!("share-hint:{hint}"), hint_label.rect);
+        if has_range {
+            let n = range_info.map(|(_, n)| n).unwrap_or(0);
+            let label = format!("Share selected range ({})", crate::share::format_share_bytes(n as u64));
+            ui.add_space(4.0);
+            let button = ui.button(label).on_hover_text(
+                "Events that overlap the selected time range, on every thread.",
+            );
+            note_ui_rect("share-range", button.rect);
+            note_ui_rect(&format!("share-range-bytes:{n}"), button.rect);
+            if button.clicked() {
+                *upload_range = true;
+            }
+        }
+        ui.add_space(8.0);
+        if ui.button("Cancel").clicked() {
+            *cancel = true;
         }
     }
 

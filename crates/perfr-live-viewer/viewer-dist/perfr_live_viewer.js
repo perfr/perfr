@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import { perfrPickTrackOrder, perfrSaveTrackOrder } from './snippets/perfr-live-viewer-d0d80d9502538a84/inline0.js';
-import { perfrPickPresets, perfrSavePreset } from './snippets/perfr-live-viewer-d0d80d9502538a84/inline1.js';
+import { perfrPickPresets, perfrSavePreset } from './snippets/perfr-live-viewer-d0d80d9502538a84/inline0.js';
+import { perfrPickTrackOrder, perfrSaveTrackOrder } from './snippets/perfr-live-viewer-d0d80d9502538a84/inline1.js';
 import { startWorkers } from './snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src/workerHelpers.no-bundler.js';
 
 let wasm;
@@ -311,7 +311,7 @@ function __wbg_adapter_38(arg0, arg1) {
 }
 
 function __wbg_adapter_41(arg0, arg1, arg2) {
-    wasm.closure233_externref_shim(arg0, arg1, arg2);
+    wasm.closure322_externref_shim(arg0, arg1, arg2);
 }
 
 function takeFromExternrefTable0(idx) {
@@ -327,15 +327,15 @@ function __wbg_adapter_44(arg0, arg1) {
 }
 
 function __wbg_adapter_47(arg0, arg1, arg2) {
-    wasm.closure500_externref_shim(arg0, arg1, arg2);
+    wasm.closure502_externref_shim(arg0, arg1, arg2);
 }
 
 function __wbg_adapter_52(arg0, arg1, arg2) {
-    wasm.closure1214_externref_shim(arg0, arg1, arg2);
+    wasm.closure1216_externref_shim(arg0, arg1, arg2);
 }
 
 function __wbg_adapter_1510(arg0, arg1, arg2, arg3) {
-    wasm.closure2930_externref_shim(arg0, arg1, arg2, arg3);
+    wasm.closure2932_externref_shim(arg0, arg1, arg2, arg3);
 }
 
 const __wbindgen_enum_BinaryType = ["blob", "arraybuffer"];
@@ -3376,32 +3376,32 @@ function __wbg_get_imports() {
         const ret = false;
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper1708 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 230, __wbg_adapter_38);
+    imports.wbg.__wbindgen_closure_wrapper2201 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 319, __wbg_adapter_38);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper1710 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 230, __wbg_adapter_41);
+    imports.wbg.__wbindgen_closure_wrapper2203 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 319, __wbg_adapter_41);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper2960 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 497, __wbg_adapter_44);
+    imports.wbg.__wbindgen_closure_wrapper2977 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 499, __wbg_adapter_44);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper2962 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 497, __wbg_adapter_47);
+    imports.wbg.__wbindgen_closure_wrapper2979 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 499, __wbg_adapter_47);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper2964 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 497, __wbg_adapter_47);
+    imports.wbg.__wbindgen_closure_wrapper2981 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 499, __wbg_adapter_47);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper4641 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 1215, __wbg_adapter_52);
+    imports.wbg.__wbindgen_closure_wrapper4658 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 1217, __wbg_adapter_52);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper4643 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 1215, __wbg_adapter_52);
+    imports.wbg.__wbindgen_closure_wrapper4660 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 1217, __wbg_adapter_52);
         return ret;
     };
     imports.wbg.__wbindgen_debug_string = function(arg0, arg1) {

@@ -619,29 +619,35 @@ mod wasm_impl {
             }
         }
 
-        /// Posts `.perfr.stream` bytes to `endpoint`. `bytes` is the file or
-        /// URL the page already loaded; `None` means a live session, so the
-        /// bytes come from `GET /api/capture/export?format=stream` first.
-        pub fn share_capture(&self, gen: u64, endpoint: String, bytes: Option<Vec<u8>>) {
+        /// Reads a `.perfr.stream` from the service so the dialog can show
+        /// its size. Does not post it.
+        pub fn prepare_share(&self, gen: u64, path: String) {
             let inbox = self.inbox.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let bytes = match bytes {
-                    Some(bytes) => bytes,
-                    None => {
-                        push_share(&inbox, gen, crate::share::ShareNoteKind::Reading);
-                        match get_bytes(crate::share::STREAM_EXPORT_PATH).await {
-                            Ok(bytes) => bytes,
-                            Err(e) => {
-                                push_share(
-                                    &inbox,
-                                    gen,
-                                    crate::share::ShareNoteKind::Failed(format!("Could not read the capture. {e}")),
-                                );
-                                return;
-                            }
-                        }
+                push_share(&inbox, gen, crate::share::ShareNoteKind::Reading);
+                match get_bytes(&path).await {
+                    Ok(bytes) if !bytes.is_empty() => {
+                        push_share(&inbox, gen, crate::share::ShareNoteKind::Prepared(bytes));
                     }
-                };
+                    Ok(_) => push_share(
+                        &inbox,
+                        gen,
+                        crate::share::ShareNoteKind::Failed("Nothing to share.".into()),
+                    ),
+                    Err(e) => push_share(
+                        &inbox,
+                        gen,
+                        crate::share::ShareNoteKind::Failed(format!("Could not read the capture. {e}")),
+                    ),
+                }
+            });
+        }
+
+        /// Posts `.perfr.stream` bytes to `endpoint`. The dialog has already
+        /// shown `bytes.len()` and the user confirmed.
+        pub fn share_capture(&self, gen: u64, endpoint: String, bytes: Vec<u8>) {
+            let inbox = self.inbox.clone();
+            wasm_bindgen_futures::spawn_local(async move {
                 if bytes.is_empty() {
                     push_share(&inbox, gen, crate::share::ShareNoteKind::Failed("Nothing to share.".into()));
                     return;
@@ -1540,7 +1546,8 @@ mod native_impl {
         pub fn connect() -> Self {
             Self
         }
-        pub fn share_capture(&self, _gen: u64, _endpoint: String, _bytes: Option<Vec<u8>>) {}
+        pub fn prepare_share(&self, _gen: u64, _path: String) {}
+        pub fn share_capture(&self, _gen: u64, _endpoint: String, _bytes: Vec<u8>) {}
         pub fn from_capture_url(_url: &str) -> Self {
             Self
         }

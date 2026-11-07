@@ -4,6 +4,12 @@
 
 //! `perfr update`: replace this install with a GitHub release of perfr/perfr.
 //!
+//! With no flags the command downloads the release, verifies the checksum,
+//! and replaces the install. `--check` only prints `current`, `latest`, and
+//! `status`. It exits [`EXIT_OK`] when this install is current and
+//! [`EXIT_UPDATE_AVAILABLE`] when a newer release exists. `--yes` is accepted
+//! and ignored.
+//!
 //! The asset names and the on-disk layout match `tools/install/install.sh`
 //! and `tools/install/install.ps1`: a `perfr/` directory of the binary plus
 //! the Frida files beside it, checksummed by the `.sha256` asset (sha256sum
@@ -12,6 +18,12 @@
 //! `<install>\include` on Windows. Retired files from the split-library
 //! layout are deleted from the install directory. A cargo, Homebrew, or pip
 //! install is not overwritten; the command that owns it is printed instead.
+//!
+//! Exit codes: [`EXIT_OK`] (0) the install is current, this build is newer
+//! than the release, or an update was applied; [`EXIT_UPDATE_AVAILABLE`] (1)
+//! `--check` found a newer release; [`EXIT_ERROR`] (2) the download, the
+//! checksum, or the install failed, including a package-manager install that
+//! this command will not overwrite.
 
 use std::fs;
 use std::io::Write;
@@ -26,11 +38,27 @@ use crate::build_info;
 const LATEST_URL: &str = "https://api.github.com/repos/perfr/perfr/releases/latest";
 const TAG_URL: &str = "https://api.github.com/repos/perfr/perfr/releases/tags/";
 
+/// The install is current, this build is newer than the release, or `perfr update`
+/// replaced the install.
+pub const EXIT_OK: i32 = 0;
+/// `perfr update --check` found a newer release. The archive was not downloaded.
+pub const EXIT_UPDATE_AVAILABLE: i32 = 1;
+/// Download, checksum, or install failure. A package-manager install that this
+/// command will not overwrite also exits with this code.
+pub const EXIT_ERROR: i32 = 2;
+
 #[derive(Clone, Debug)]
 pub struct UpdateOpts {
     pub check: bool,
     pub tag: Option<String>,
+    /// Accepted for compatibility. Ignored: `perfr update` already replaces the install.
     pub yes: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdateReport {
+    pub text: String,
+    pub code: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,16 +155,16 @@ pub fn run(opts: UpdateOpts) -> i32 {
         ReplaceStyle::host(),
         &real_manager_hints(&exe),
     ) {
-        Ok(text) => {
-            print!("{text}");
-            if !text.ends_with('\n') {
+        Ok(report) => {
+            print!("{}", report.text);
+            if !report.text.ends_with('\n') {
                 println!();
             }
-            0
+            report.code
         }
         Err(error) => {
             eprintln!("perfr update: {error}");
-            2
+            EXIT_ERROR
         }
     }
 }
@@ -148,7 +176,9 @@ pub fn run_with(
     platform: Platform,
     style: ReplaceStyle,
     manager: &Option<Manager>,
-) -> Result<String, String> {
+) -> Result<UpdateReport, String> {
+    // Older scripts passed `--yes` to apply. Applying is the default now.
+    let _ = opts.yes;
     let tag = match &opts.tag {
         Some(tag) => Some(normalize_tag(tag)?),
         None => None,
@@ -161,6 +191,8 @@ pub fn run_with(
         format!("{error}\n({url})\nNo stable perfr-v* release was downloaded. The v1.* and nightly-* tags are the legacy build.")
     })?;
     let release = parse_release(&String::from_utf8_lossy(&body))?;
+    let current = display_version(build_info::package_version());
+    let latest = display_version(&release.tag);
     let relation = compare_versions(build_info::package_version(), &release.tag);
     let asset_name = asset_for(platform)?;
     let asset = release
@@ -170,72 +202,91 @@ pub fn run_with(
         .cloned()
         .ok_or_else(|| format!("release {} has no {asset_name}", release.tag))?;
     let checksum_asset = checksum_asset(&release, &asset_name);
-    let mut text = String::new();
-    text.push_str(&build_info::version_line());
-    text.push('\n');
-    text.push_str(&format!("latest release: {}\n", release.tag));
-    text.push_str(&format!("asset: {}\n", asset.name));
-    text.push_str(&format!(
-        "checksum: {}\n",
-        if checksum_asset.is_some() {
-            "published"
-        } else {
-            "not published"
-        }
-    ));
+    if opts.check {
+        return Ok(check_report(&current, &latest, relation, manager.as_ref()));
+    }
     if let Some(manager) = manager {
-        text.push_str(&format!("status: installed by {}\n", manager.name));
-        text.push_str(&format!("update with: {}\n", manager.command));
-        if opts.yes && !opts.check {
-            return Err(format!(
-                "this install is managed by {}; not replacing the binary\nupdate with: {}",
-                manager.name, manager.command
-            ));
-        }
-        return Ok(text);
+        return Err(format!(
+            "this install is managed by {}; not replacing the binary\nupdate with: {}",
+            manager.name, manager.command
+        ));
     }
     let explicit = opts.tag.is_some();
-    let should_install = match relation {
-        Relation::UpdateAvailable => true,
-        Relation::UpToDate => explicit,
-        Relation::Ahead => explicit,
-    };
-    if !should_install {
-        text.push_str(match relation {
-            Relation::UpToDate => "status: up to date\n",
-            Relation::Ahead => "status: this build is newer than the latest release\n",
-            Relation::UpdateAvailable => "status: update available\n",
-        });
-        return Ok(text);
+    if !explicit {
+        match relation {
+            Relation::UpToDate => {
+                return Ok(UpdateReport {
+                    text: format!("perfr {current} is up to date\n"),
+                    code: EXIT_OK,
+                });
+            }
+            Relation::Ahead => {
+                return Ok(UpdateReport {
+                    text: format!("perfr {current} is newer than the latest release {latest}\n"),
+                    code: EXIT_OK,
+                });
+            }
+            Relation::UpdateAvailable => {}
+        }
     }
-    text.push_str(match relation {
-        Relation::Ahead => "status: downgrade requested\n",
-        Relation::UpToDate => "status: reinstall requested\n",
-        Relation::UpdateAvailable => "status: update available\n",
-    });
-    if opts.check || !opts.yes {
-        text.push_str("re-run with --yes to replace this install\n");
-        return Ok(text);
-    }
-    if checksum_asset.is_none() {
+    let Some(checksum_asset) = checksum_asset else {
         return Err(format!(
             "no checksum published for {}; refusing to replace the binary",
             asset.name
         ));
-    }
+    };
     let archive = fetch.get(&asset.url)?;
-    let sums = fetch.get(&checksum_asset.unwrap().url)?;
+    let sums = fetch.get(&checksum_asset.url)?;
     verify_checksum(&archive, &String::from_utf8_lossy(&sums), &asset.name)?;
     let files = archive::unpack_named(&asset.name, &archive)?;
     let dest = exe.parent().ok_or("the running binary has no directory")?;
     install_tree(dest, &files, style, platform)?;
     let removed = remove_retired(dest)?;
-    text.push_str(&format!("replaced install in {}\n", dest.display()));
+    let mut text = format!(
+        "updated perfr {current} -> {latest} in {}\n",
+        dest.display()
+    );
+    text.push_str("restart any running perfr to use the new version\n");
     for path in &removed {
         text.push_str(&format!("removed {}\n", path.display()));
     }
-    text.push_str("restart perfr to run the new binary\n");
-    Ok(text)
+    Ok(UpdateReport {
+        text,
+        code: EXIT_OK,
+    })
+}
+
+fn check_report(
+    current: &str,
+    latest: &str,
+    relation: Relation,
+    manager: Option<&Manager>,
+) -> UpdateReport {
+    let status = match relation {
+        Relation::UpdateAvailable => "update available",
+        Relation::UpToDate => "up to date",
+        Relation::Ahead => "newer than latest",
+    };
+    let mut text = format!("current: {current}\nlatest: {latest}\nstatus: {status}\n");
+    if let Some(manager) = manager {
+        text.push_str(&format!("installed by: {}\n", manager.name));
+        text.push_str(&format!("update with: {}\n", manager.command));
+    }
+    UpdateReport {
+        text,
+        code: if relation == Relation::UpdateAvailable {
+            EXIT_UPDATE_AVAILABLE
+        } else {
+            EXIT_OK
+        },
+    }
+}
+
+/// `0.1.2` from `0.1.2`, `v0.1.2`, or `perfr-v0.1.2`.
+fn display_version(text: &str) -> String {
+    let text = text.trim();
+    let text = text.strip_prefix("perfr-v").unwrap_or(text);
+    text.strip_prefix('v').unwrap_or(text).to_string()
 }
 
 pub fn parse_release(text: &str) -> Result<Release, String> {
@@ -969,7 +1020,7 @@ mod tests {
         let fetch = MapFetch {
             files: HashMap::from([(LATEST_URL.to_string(), json)]),
         };
-        let text = run_with(
+        let report = run_with(
             &UpdateOpts {
                 check: true,
                 tag: None,
@@ -985,11 +1036,76 @@ mod tests {
             &None,
         )
         .unwrap();
-        assert!(text.contains("latest release: perfr-v9.9.9"), "{text}");
-        assert!(text.contains("asset: perfr-linux-x86_64.tar.gz"), "{text}");
-        assert!(text.contains("checksum: published"), "{text}");
-        assert!(text.contains("status: update available"), "{text}");
-        assert!(text.contains("--yes"), "{text}");
+        let text = report.text;
+        assert_eq!(report.code, EXIT_UPDATE_AVAILABLE);
+        assert!(
+            text.contains(&format!("current: {}", build_info::package_version())),
+            "{text}"
+        );
+        assert!(text.contains("latest: 9.9.9\n"), "{text}");
+        assert!(text.contains("status: update available\n"), "{text}");
+        assert!(!text.contains("--yes"), "{text}");
+        assert!(!text.contains("updated perfr"), "{text}");
+    }
+
+    #[test]
+    fn check_exits_zero_when_current_or_newer() {
+        let current = format!("perfr-v{}", build_info::package_version());
+        let json = release_json(&current, &["perfr-linux-x86_64.tar.gz"]);
+        let fetch = MapFetch {
+            files: HashMap::from([(LATEST_URL.to_string(), json)]),
+        };
+        let report = run_with(
+            &UpdateOpts {
+                check: true,
+                tag: None,
+                yes: true,
+            },
+            &fetch,
+            Path::new("/usr/local/bin/perfr"),
+            Platform {
+                os: "linux",
+                arch: "x86_64",
+            },
+            ReplaceStyle::Atomic,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(report.code, EXIT_OK);
+        assert_eq!(
+            report.text,
+            format!(
+                "current: {v}\nlatest: {v}\nstatus: up to date\n",
+                v = build_info::package_version()
+            )
+        );
+
+        let older = release_json("perfr-v0.0.1", &["perfr-macos-universal.tar.gz"]);
+        let fetch = MapFetch {
+            files: HashMap::from([(LATEST_URL.to_string(), older)]),
+        };
+        let report = run_with(
+            &UpdateOpts {
+                check: true,
+                tag: None,
+                yes: false,
+            },
+            &fetch,
+            Path::new("/usr/local/bin/perfr"),
+            Platform {
+                os: "macos",
+                arch: "aarch64",
+            },
+            ReplaceStyle::Atomic,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(report.code, EXIT_OK);
+        assert!(
+            report.text.contains("status: newer than latest\n"),
+            "{report:?}"
+        );
+        assert!(report.text.contains("latest: 0.0.1\n"), "{report:?}");
     }
 
     #[test]
@@ -1021,27 +1137,215 @@ mod tests {
         let fetch = MapFetch {
             files: HashMap::from([(LATEST_URL.to_string(), json)]),
         };
-        let err = run_with(
+        for yes in [false, true] {
+            let err = run_with(
+                &UpdateOpts {
+                    check: false,
+                    tag: None,
+                    yes,
+                },
+                &fetch,
+                Path::new("/opt/homebrew/Cellar/perfr/0.1.0/bin/perfr"),
+                Platform {
+                    os: "linux",
+                    arch: "x86_64",
+                },
+                ReplaceStyle::Atomic,
+                &Some(brew.clone()),
+            )
+            .unwrap_err();
+            assert!(err.contains("not replacing the binary"), "{err}");
+            assert!(err.contains("brew upgrade perfr"), "{err}");
+        }
+
+        let json = release_json("perfr-v9.9.9", &["perfr-windows-x86_64.zip"]);
+        let fetch = MapFetch {
+            files: HashMap::from([(LATEST_URL.to_string(), json)]),
+        };
+        let report = run_with(
             &UpdateOpts {
-                check: false,
+                check: true,
                 tag: None,
                 yes: true,
             },
             &fetch,
             Path::new("/opt/homebrew/Cellar/perfr/0.1.0/bin/perfr"),
             Platform {
+                os: "windows",
+                arch: "aarch64",
+            },
+            ReplaceStyle::WindowsAside,
+            &Some(brew),
+        )
+        .unwrap();
+        assert_eq!(report.code, EXIT_UPDATE_AVAILABLE);
+        assert!(
+            report.text.contains("status: update available\n"),
+            "{report:?}"
+        );
+        assert!(
+            report.text.contains("installed by: homebrew\n"),
+            "{report:?}"
+        );
+        assert!(
+            report.text.contains("update with: brew upgrade perfr\n"),
+            "{report:?}"
+        );
+        assert!(!report.text.contains("updated perfr"), "{report:?}");
+    }
+
+    #[test]
+    fn a_current_or_newer_install_is_not_replaced() {
+        let version = build_info::package_version();
+        let json = release_json(&format!("perfr-v{version}"), &["perfr-linux-x86_64.tar.gz"]);
+        let fetch = MapFetch {
+            files: HashMap::from([(LATEST_URL.to_string(), json)]),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("perfr");
+        fs::write(&exe, b"old").unwrap();
+        let report = run_with(
+            &UpdateOpts {
+                check: false,
+                tag: None,
+                yes: true,
+            },
+            &fetch,
+            &exe,
+            Platform {
                 os: "linux",
                 arch: "x86_64",
             },
             ReplaceStyle::Atomic,
-            &Some(brew),
+            &None,
         )
-        .unwrap_err();
-        assert!(err.contains("brew upgrade perfr"), "{err}");
+        .unwrap();
+        assert_eq!(report.code, EXIT_OK);
+        assert_eq!(report.text, format!("perfr {version} is up to date\n"));
+        assert_eq!(fs::read(&exe).unwrap(), b"old");
+
+        let json = release_json("perfr-v0.0.1", &["perfr-windows-x86_64.zip"]);
+        let fetch = MapFetch {
+            files: HashMap::from([(LATEST_URL.to_string(), json)]),
+        };
+        let exe = dir.path().join("perfr.exe");
+        fs::write(&exe, b"old-exe").unwrap();
+        let report = run_with(
+            &UpdateOpts {
+                check: false,
+                tag: None,
+                yes: false,
+            },
+            &fetch,
+            &exe,
+            Platform {
+                os: "windows",
+                arch: "x86_64",
+            },
+            ReplaceStyle::WindowsAside,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(report.code, EXIT_OK);
+        assert_eq!(
+            report.text,
+            format!("perfr {version} is newer than the latest release 0.0.1\n")
+        );
+        assert_eq!(fs::read(&exe).unwrap(), b"old-exe");
+        assert!(!dir.path().join("perfr.exe.old").exists());
     }
 
     #[test]
-    fn yes_verifies_the_checksum_and_replaces_the_tree() {
+    fn an_explicit_version_replaces_the_install_on_windows() {
+        let archive = archive::pack_zip_stored(&[
+            ("perfr/perfr.exe", b"older-exe"),
+            ("perfr/include/perfr.h", b"hdr"),
+        ]);
+        let hash = hex_encode(&sha256(&archive));
+        let asset = "perfr-windows-x86_64.zip";
+        let sums = format!("{hash}  {asset}\n");
+        let tag = "perfr-v0.0.1";
+        let json = release_json(tag, &[asset, &format!("{asset}.sha256")]);
+        let fetch = MapFetch {
+            files: HashMap::from([
+                (format!("{TAG_URL}{tag}"), json),
+                (format!("https://example.test/{asset}"), archive),
+                (
+                    format!("https://example.test/{asset}.sha256"),
+                    sums.into_bytes(),
+                ),
+            ]),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path().join("perfr");
+        fs::create_dir_all(&install).unwrap();
+        let exe = install.join("perfr.exe");
+        fs::write(&exe, b"current").unwrap();
+        fs::write(install.join("perfr.h"), b"stale").unwrap();
+
+        let checked = run_with(
+            &UpdateOpts {
+                check: true,
+                tag: Some("v0.0.1".into()),
+                yes: false,
+            },
+            &fetch,
+            &exe,
+            Platform {
+                os: "windows",
+                arch: "aarch64",
+            },
+            ReplaceStyle::WindowsAside,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(checked.code, EXIT_OK);
+        assert_eq!(
+            checked.text,
+            format!(
+                "current: {}\nlatest: 0.0.1\nstatus: newer than latest\n",
+                build_info::package_version()
+            )
+        );
+        assert_eq!(fs::read(&exe).unwrap(), b"current");
+
+        let report = run_with(
+            &UpdateOpts {
+                check: false,
+                tag: Some("0.0.1".into()),
+                yes: true,
+            },
+            &fetch,
+            &exe,
+            Platform {
+                os: "windows",
+                arch: "x86_64",
+            },
+            ReplaceStyle::WindowsAside,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(report.code, EXIT_OK);
+        assert_eq!(
+            report.text,
+            format!(
+                "updated perfr {} -> 0.0.1 in {}\nrestart any running perfr to use the new version\nremoved {}\n",
+                build_info::package_version(),
+                install.display(),
+                install.join("perfr.h").display()
+            )
+        );
+        assert_eq!(fs::read(&exe).unwrap(), b"older-exe");
+        assert_eq!(
+            fs::read(install.join("include").join("perfr.h")).unwrap(),
+            b"hdr"
+        );
+        assert!(!install.join("perfr.h").exists());
+        assert!(!install.join("perfr.exe.old").exists());
+    }
+
+    #[test]
+    fn update_verifies_the_checksum_and_replaces_the_tree() {
         let archive = archive::pack_tar_gz(&[
             ("perfr/perfr", b"new-binary", 0o755),
             ("perfr/perfr-hook", b"helper", 0o755),
@@ -1072,28 +1376,36 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("perfr");
         fs::write(&exe, b"old").unwrap();
-        let text = run_with(
-            &UpdateOpts {
-                check: false,
-                tag: None,
-                yes: true,
-            },
-            &fetch,
-            &exe,
-            Platform {
-                os: "linux",
-                arch: "x86_64",
-            },
-            ReplaceStyle::WindowsAside,
-            &None,
-        )
-        .unwrap();
-        assert!(text.contains("replaced install"), "{text}");
-        assert_eq!(fs::read(dir.path().join("perfr")).unwrap(), b"new-binary");
-        assert_eq!(fs::read(dir.path().join("perfr-hook")).unwrap(), b"helper");
-        assert!(!dir.path().join("perfr.exe.old").exists());
-        assert!(!dir.path().join("perfr.old").exists());
-        assert!(!text.contains("removed "), "{text}");
+        let expected = format!(
+            "updated perfr {} -> 9.9.9 in {}\nrestart any running perfr to use the new version\n",
+            build_info::package_version(),
+            dir.path().display()
+        );
+        for yes in [false, true] {
+            fs::write(&exe, b"old").unwrap();
+            let report = run_with(
+                &UpdateOpts {
+                    check: false,
+                    tag: None,
+                    yes,
+                },
+                &fetch,
+                &exe,
+                Platform {
+                    os: "linux",
+                    arch: "x86_64",
+                },
+                ReplaceStyle::WindowsAside,
+                &None,
+            )
+            .unwrap();
+            assert_eq!(report.code, EXIT_OK);
+            assert_eq!(report.text, expected);
+            assert_eq!(fs::read(dir.path().join("perfr")).unwrap(), b"new-binary");
+            assert_eq!(fs::read(dir.path().join("perfr-hook")).unwrap(), b"helper");
+            assert!(!dir.path().join("perfr.exe.old").exists());
+            assert!(!dir.path().join("perfr.old").exists());
+        }
     }
 
     #[test]
@@ -1137,11 +1449,11 @@ mod tests {
         fs::create_dir(dir.path().join("include")).unwrap();
         fs::write(dir.path().join("include").join("perfr.h"), b"header").unwrap();
 
-        let text = run_with(
+        let report = run_with(
             &UpdateOpts {
                 check: false,
                 tag: None,
-                yes: true,
+                yes: false,
             },
             &fetch,
             &exe,
@@ -1153,7 +1465,16 @@ mod tests {
             &None,
         )
         .unwrap();
-        assert!(text.contains("replaced install"), "{text}");
+        let text = report.text;
+        assert_eq!(report.code, EXIT_OK);
+        assert!(
+            text.starts_with(&format!(
+                "updated perfr {} -> 9.9.9 in {}\nrestart any running perfr to use the new version\n",
+                build_info::package_version(),
+                dir.path().display()
+            )),
+            "{text}"
+        );
         for name in RETIRED_INSTALL_FILES {
             assert!(
                 text.contains(&format!("removed {}", dir.path().join(name).display())),
@@ -1210,7 +1531,7 @@ mod tests {
             &UpdateOpts {
                 check: false,
                 tag: None,
-                yes: true,
+                yes: false,
             },
             &fetch,
             &exe,
@@ -1242,7 +1563,7 @@ mod tests {
             &UpdateOpts {
                 check: false,
                 tag: None,
-                yes: true,
+                yes: false,
             },
             &fetch,
             exe,
@@ -1251,6 +1572,7 @@ mod tests {
             &None,
         )
         .unwrap()
+        .text
     }
 
     #[test]
@@ -1279,6 +1601,18 @@ mod tests {
         let header = root.path().join(".local").join("include").join("perfr.h");
         assert_eq!(fs::read(&header).unwrap(), b"from-include");
         assert!(!bin.join("perfr.h").exists());
+        assert!(
+            text.contains(&format!(
+                "updated perfr {} -> 9.9.9 in {}\n",
+                build_info::package_version(),
+                bin.display()
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains("restart any running perfr to use the new version\n"),
+            "{text}"
+        );
         assert!(text.contains("removed "), "{text}");
         assert!(text.contains("perfr.h"), "{text}");
         assert_eq!(fs::read(bin.join("libperfr.so")).unwrap(), b"agent");
@@ -1329,6 +1663,14 @@ mod tests {
             b"win-header"
         );
         assert!(!install.join("perfr.h").exists());
+        assert!(
+            text.contains(&format!(
+                "updated perfr {} -> 9.9.9 in {}\nrestart any running perfr to use the new version\n",
+                build_info::package_version(),
+                install.display()
+            )),
+            "{text}"
+        );
         assert!(
             text.contains(&format!("removed {}", install.join("perfr.h").display())),
             "{text}"

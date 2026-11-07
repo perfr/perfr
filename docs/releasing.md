@@ -102,6 +102,48 @@ The disassembly view finds detached Linux debug info through
    `gh release create --verify-tag` with every file, as `--latest` for a
    stable tag or `--prerelease` for a suffixed one.
 
+## `perfr update`
+
+`perfr update` downloads the latest stable `perfr-v*` release, or the tag
+given with `--version`, verifies the `.sha256` sidecar or `SHA256SUMS`, and
+replaces this install. It uses the layout in the next section, deletes the
+retired files below, and prints each path it removes. Linux, macOS, and
+Windows are the same command. A running `perfr` keeps the previous image
+until it is started again.
+
+```
+updated perfr 0.1.1 -> 0.1.2 in ~/.local/bin
+restart any running perfr to use the new version
+```
+
+On Windows the directory is the install folder (`perfr.exe`'s directory),
+not `bin`. A current install prints `perfr 0.1.2 is up to date` and does not
+download the archive. A build newer than the release is left in place:
+`perfr 0.1.2 is newer than the latest release 0.1.1`.
+
+`perfr update --check` does not download the archive. It prints three lines
+and exits:
+
+```
+current: 0.1.1
+latest: 0.1.2
+status: update available
+```
+
+`status` is `up to date`, `update available`, or `newer than latest`. When a
+package manager owns the binary, two more lines name it and the command to
+run (`installed by: homebrew`, `update with: brew upgrade perfr`). `--version`
+compares against that tag and still prints it as `latest`.
+
+| Exit | Meaning |
+|---|---|
+| 0 | Up to date, newer than the release, or (without `--check`) the install was replaced |
+| 1 | `--check` only: a newer release is available |
+| 2 | Download, checksum, or install failure. A cargo, Homebrew, or pip install is not overwritten, and that refusal is also 2 |
+
+`--yes` is accepted and ignored, so older scripts that passed it still update.
+`--check` never replaces the install, with or without `--yes`.
+
 ## Install layout
 
 The installers and `perfr update` do not leave `perfr.h` beside the binary.

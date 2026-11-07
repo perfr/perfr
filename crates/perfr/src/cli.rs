@@ -26,6 +26,7 @@ Examples:
   perfr skill install --dry-run
   perfr doctor
   perfr setup
+  perfr update
   perfr update --check
 
 `perfr --serve`, `perfr --pid`, and `perfr --slice` still work.
@@ -138,7 +139,10 @@ pub fn render_top_help(color: bool) -> String {
                     "setup",
                     "Apply permission fixes for sampling and instrumentation",
                 ),
-                ("update", "Update this install from a GitHub release"),
+                (
+                    "update",
+                    "Replace this install with the latest GitHub release",
+                ),
                 ("version", "Print the version, git hash, and build date"),
             ],
         ),
@@ -596,21 +600,27 @@ fn setup_cmd() -> Command {
 
 fn update_cmd() -> Command {
     Command::new("update")
-        .about("Update this install from a GitHub release")
+        .about("Replace this install with the latest GitHub release")
         .after_help(
-            "Compares this binary with the latest perfr-v* release of perfr/perfr.\n\
-             A cargo, Homebrew, or pip install is not replaced; the package command is printed.\n\
-             The archive layout matches the curl and PowerShell installers.\n\n\
+            "Downloads a perfr-v* release of perfr/perfr, checks its SHA-256, and\n\
+             replaces this install. Linux and macOS write perfr.h to the sibling\n\
+             include directory (~/.local/include). Windows writes it to\n\
+             <install>\\include. Retired files from older installs are deleted.\n\
+             A cargo, Homebrew, or pip install is not replaced; the package command\n\
+             is printed instead. --yes is accepted and ignored.\n\n\
+             --check prints current, latest, and status, and does not download the\n\
+             archive. It exits 0 when this install is current or newer than the\n\
+             release, and 1 when an update is available. Other failures exit 2.\n\n\
              Examples:\n  \
+             perfr update\n  \
              perfr update --check\n  \
-             perfr update --yes\n  \
-             perfr update --version perfr-v0.2.0 --yes",
+             perfr update --version perfr-v0.2.0",
         )
         .arg(
             Arg::new("check")
                 .long("check")
                 .action(ArgAction::SetTrue)
-                .help("Report whether an update exists"),
+                .help("Print current, latest, and status; do not replace the install"),
         )
         .arg(
             Arg::new("tag")
@@ -622,7 +632,8 @@ fn update_cmd() -> Command {
             Arg::new("yes")
                 .long("yes")
                 .action(ArgAction::SetTrue)
-                .help("Replace the install without prompting"),
+                .hide(true)
+                .help("Deprecated no-op; perfr update already replaces the install"),
         )
 }
 
@@ -687,8 +698,22 @@ mod tests {
         assert!(skill.contains("--force"), "{skill}");
         let update = render(&["update", "--help"]);
         assert!(update.contains("--check"), "{update}");
-        assert!(update.contains("--yes"), "{update}");
         assert!(update.contains("--version"), "{update}");
+        assert!(update.contains("perfr update\n"), "{update}");
+        assert!(update.contains("exits 0"), "{update}");
+        assert!(update.contains("1 when an update is available"), "{update}");
+        assert!(update.contains("--yes is accepted and ignored"), "{update}");
+        assert!(
+            !update.contains("Replace the install without prompting"),
+            "{update}"
+        );
+        let parsed = command()
+            .try_get_matches_from(["perfr", "update", "--yes", "--check"])
+            .unwrap();
+        let (_, sub) = parsed.subcommand().unwrap();
+        let opts = update_opts(sub);
+        assert!(opts.yes);
+        assert!(opts.check);
         let mcp = render(&["mcp", "--help"]);
         assert!(mcp.contains("--url"), "{mcp}");
         assert!(mcp.contains("--http"), "{mcp}");

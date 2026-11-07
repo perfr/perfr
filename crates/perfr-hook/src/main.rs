@@ -292,9 +292,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             #[cfg(windows)]
             {
                 if let Some(name) = stop_event {
+                    eprintln!("perfr-hook: waiting on stop event {name}");
                     wait_named_event(&name);
+                    eprintln!("perfr-hook: stop event signaled");
                 } else if let Some(mut file) = stop_stdin {
+                    eprintln!("perfr-hook: no stop event; reading stdin");
                     let _ = read_handle_line(&mut file);
+                    eprintln!("perfr-hook: stdin stop");
                 }
             }
             #[cfg(not(windows))]

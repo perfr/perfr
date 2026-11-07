@@ -110,7 +110,10 @@ impl Helper {
             let name = format!(r"Local\perfr-hook-stop-{}", child.id());
             let event = create_stop_event(&name);
             if event.is_some() {
+                log::info!("frida stop event created: {name}");
                 config["stop_event"] = serde_json::Value::String(name);
+            } else {
+                log::warn!("frida stop event was not created");
             }
             event
         };
@@ -147,6 +150,7 @@ impl Helper {
         // the target. The line is the signal the stop thread reads.
         #[cfg(windows)]
         if let Some(event) = self.stop_event.take() {
+            log::info!("frida stop event set");
             signal_stop_event(&event);
         }
         if let Some(mut input) = self.input.take() {

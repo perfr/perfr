@@ -229,9 +229,18 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
     // Detach off this thread. gum_interceptor_detach can wait until an
     // in-flight call returns; the helper process is waiting for this pipe
     // to close, and the service is waiting for the helper. The agent stays
-    // resident, so the detach thread outlives this function.
+    // resident, so the detach thread outlives this function. The profile
+    // span is recorded here: on a quiet stop detach finishes within the
+    // wait, and on an in-flight call the span still marks the stop.
+    let start = profile::now_ns();
     let detach = Detach(capture);
-    std::thread::spawn(move || drop(detach));
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(detach);
+        let _ = done_tx.send(());
+    });
+    let _ = done_rx.recv_timeout(std::time::Duration::from_millis(200));
+    profile::record(stream, profiling, "Frida: detach trampolines", start, profile::now_ns());
     let _ = writeln!(stream, "{}", json!({"stopped":true}));
     Ok(())
 }

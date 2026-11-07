@@ -210,7 +210,13 @@ for key in "$@"; do
   shopt -s nullglob
   # The full libperfr (API + hook agent) replaces nothing: the API-only one
   # went into the perfr-api wheel above and was never staged here.
+  # perfr-hook.exe is only produced on Windows; the other name is only
+  # produced elsewhere. A missing literal name is not a glob, so nullglob
+  # does not drop it.
   for f in "$companions_src"/libperfr.* "$companions_src"/perfr-hook "$companions_src"/perfr-hook.exe; do
+    if [[ ! -e "$f" ]]; then
+      continue
+    fi
     cp "$f" "$SVC_PKG/perfr/"
     staged_companions+=("$SVC_PKG/perfr/$(basename "$f")")
   done

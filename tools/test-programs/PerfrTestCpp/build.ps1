@@ -14,10 +14,17 @@ try {
 $root = (git rev-parse --show-toplevel)
 . "$root/tools/windows/msvc-env.ps1"
 $include = "$root/crates/perfr-api/include"
-$api = "$root/target/release/libperfr.dll"
-if (-not (Test-Path $api)) {
-    Push-Location "$root/rust"
-    try { cargo +1.88.0 build --release -p perfr-api; if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' } }
+# The Windows service build uses an explicit triple, so the DLL is not in
+# target\release. The workspace itself is the repository root.
+$apiCandidates = @(
+    "$root/target/release/libperfr.dll",
+    "$root/target/x86_64-pc-windows-msvc/release/libperfr.dll",
+    "$root/dist/windows/libperfr.dll"
+)
+$api = $apiCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $api) {
+    Push-Location $root
+    try { cargo +1.88.0 build --release --target x86_64-pc-windows-msvc -p perfr-lib-windows; if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' } }
     finally { Pop-Location }
 }
 $flags = @('/nologo', '/O2', '/Zi', '/W3', '/EHsc', '/std:c++17', '/utf-8', "/I$include", 'PerfrTestCpp.cpp', '/Fe:PerfrTestCpp.exe', '/Fd:PerfrTestCpp.pdb')

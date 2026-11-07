@@ -1,5 +1,16 @@
 # Release tooling
 
+## Cutting a release
+
+[`release.sh`](release.sh) bumps the release versions, commits
+`Release perfr X.Y.Z`, and pushes an annotated `perfr-v*` tag. Pushing the
+tag is what publishes. `--dry-run` stops before the commit, the tag, and
+the push. [docs/releasing.md](../../docs/releasing.md) is the full
+description, including what happens when `main` rejects the push.
+
+`test_release.sh` runs shellcheck and the script against a temporary
+origin (a dry-run, a real tag, and the refusals).
+
 ## Python wheels
 
 `build_wheels.sh` builds the two pip packages for one or more platforms:

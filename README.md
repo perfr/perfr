@@ -187,9 +187,9 @@ Windows (PowerShell, Visual Studio 2022 with the C++ workload):
 
 See [docs/building_windows.md](docs/building_windows.md).
 
-A release is a tag `perfr-vX.Y.Z` (not `v1.*`, which is the C++ line). Pushing
-that tag runs the Rust release workflow. Details:
-[docs/releasing.md](docs/releasing.md).
+A release is a tag `perfr-vX.Y.Z` (not `v1.*`, which is the C++ line).
+Cut one with `tools/release/release.sh`. Pushing that tag runs the Rust
+release workflow. Details: [docs/releasing.md](docs/releasing.md).
 
 ## More
 

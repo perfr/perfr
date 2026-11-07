@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr"
-version = "0.1.0"
+version = "0.1.1"
 description = "The perfr capture service: samples, traces and hooks a process and serves the live viewer"
 edition = "2021"
 license = "BSD-2-Clause"

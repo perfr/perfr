@@ -2908,7 +2908,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perfr"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "cpp_demangle",
@@ -2943,7 +2943,7 @@ dependencies = [
 
 [[package]]
 name = "perfr-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "perfr-scope-ring",
@@ -2951,7 +2951,7 @@ dependencies = [
 
 [[package]]
 name = "perfr-capture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
@@ -2966,7 +2966,7 @@ dependencies = [
 
 [[package]]
 name = "perfr-collector"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "perfr-perf-merge",
@@ -2978,7 +2978,7 @@ dependencies = [
 
 [[package]]
 name = "perfr-etw"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "perfr-thread-states",
  "perfr-tracing-state",
@@ -2986,14 +2986,14 @@ dependencies = [
 
 [[package]]
 name = "perfr-frida-build"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "perfr-frida-transport"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "perfr-scope-ring",
@@ -3003,7 +3003,7 @@ dependencies = [
 
 [[package]]
 name = "perfr-gpu"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "perfr-tracing-state",
@@ -3012,7 +3012,7 @@ dependencies = [
 
 [[package]]
 name = "perfr-hook"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cc",
  "libc",
@@ -3024,7 +3024,7 @@ dependencies = [
 
 [[package]]
 name = "perfr-lib"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "perfr-api",
@@ -3037,14 +3037,14 @@ dependencies = [
 
 [[package]]
 name = "perfr-lib-windows"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "perfr-lib",
 ]
 
 [[package]]
 name = "perfr-live-chrome"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "flate2",
  "perfr-live-event",
@@ -3054,14 +3054,14 @@ dependencies = [
 
 [[package]]
 name = "perfr-live-event"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "perfr-live-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "miniz_oxide 0.8.9",
  "perfr-live-event",
@@ -3070,7 +3070,7 @@ dependencies = [
 
 [[package]]
 name = "perfr-live-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "criterion",
@@ -3080,7 +3080,7 @@ dependencies = [
 
 [[package]]
 name = "perfr-live-ring"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "criterion",
@@ -3090,7 +3090,7 @@ dependencies = [
 
 [[package]]
 name = "perfr-live-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "futures-util",
@@ -3111,7 +3111,7 @@ dependencies = [
 
 [[package]]
 name = "perfr-live-viewer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "console_error_panic_hook",
  "eframe",
@@ -3135,11 +3135,11 @@ dependencies = [
 
 [[package]]
 name = "perfr-maps"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "perfr-object"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gimli",
  "msvc-demangler",
@@ -3149,15 +3149,15 @@ dependencies = [
 
 [[package]]
 name = "perfr-perf-merge"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "perfr-perf-records"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "perfr-perf-ring"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "perfr-perf-records",
@@ -3165,14 +3165,14 @@ dependencies = [
 
 [[package]]
 name = "perfr-pod-dump"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "perfr-wire",
 ]
 
 [[package]]
 name = "perfr-ptrace"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "perfr-maps",
@@ -3180,14 +3180,14 @@ dependencies = [
 
 [[package]]
 name = "perfr-scope-ring"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "perfr-test-rust"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "perfr-api",
@@ -3195,15 +3195,15 @@ dependencies = [
 
 [[package]]
 name = "perfr-thread-states"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "perfr-tracing-state"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "perfr-trampoline"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "iced-x86",
  "perfr-maps",
@@ -3212,7 +3212,7 @@ dependencies = [
 
 [[package]]
 name = "perfr-unwind"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "framehop",
  "libc",
@@ -3224,7 +3224,7 @@ dependencies = [
 
 [[package]]
 name = "perfr-wire"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "pin-project"

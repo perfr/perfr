@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr-test-rust"
-version = "0.1.0"
+version = "0.1.1"
 description = "PerfrTestRust: a program that makes every manual-instrumentation call, from Rust"
 edition.workspace = true
 license.workspace = true

@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr-frida-transport"
-version = "0.1.0"
+version = "0.1.1"
 description = "Capture lease and counters shared between the service, the helper and the agent"
 edition = "2021"
 license = "BSD-2-Clause"

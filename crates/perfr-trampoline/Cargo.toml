@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr-trampoline"
-version = "0.1.0"
+version = "0.1.1"
 description = "Trampoline placement, instruction relocation and code generation for native hooks"
 edition.workspace = true
 license.workspace = true

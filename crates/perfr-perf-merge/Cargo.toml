@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr-perf-merge"
-version = "0.1.0"
+version = "0.1.1"
 description = "Timestamp-ordered merge of perf events across rings"
 edition.workspace = true
 license.workspace = true

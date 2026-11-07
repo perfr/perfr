@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr-perf-ring"
-version = "0.1.0"
+version = "0.1.1"
 description = "perf_event_open and the mmap ring-buffer protocol"
 edition.workspace = true
 license.workspace = true

@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr-scope-ring"
-version = "0.1.0"
+version = "0.1.1"
 description = "Per-core lock-free rings behind the manual instrumentation API"
 edition.workspace = true
 license.workspace = true

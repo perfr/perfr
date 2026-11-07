@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr-collector"
-version = "0.1.0"
+version = "0.1.1"
 description = "The perf event loop: round-robin over the rings, timestamp-ordered output"
 edition.workspace = true
 license.workspace = true

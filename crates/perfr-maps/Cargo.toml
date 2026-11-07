@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr-maps"
-version = "0.1.0"
+version = "0.1.1"
 description = "Parsing of /proc/<pid>/maps into memory mappings"
 edition.workspace = true
 license.workspace = true

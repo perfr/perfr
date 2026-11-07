@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr-thread-states"
-version = "0.1.0"
+version = "0.1.1"
 description = "Per-thread state machine over the scheduler tracepoints"
 edition.workspace = true
 license.workspace = true

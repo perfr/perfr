@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr-ptrace"
-version = "0.1.0"
+version = "0.1.1"
 description = "The ptrace substrate of user-space instrumentation: attach, read and write a tracee, inject syscalls"
 edition.workspace = true
 license.workspace = true

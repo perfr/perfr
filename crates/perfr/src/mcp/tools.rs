@@ -156,7 +156,7 @@ impl Mcp {
         json!({
             "protocolVersion": version,
             "capabilities": { "tools": { "listChanged": false } },
-            "serverInfo": { "name": "perfr", "version": "0.1.0" },
+            "serverInfo": { "name": "perfr", "version": "0.1.1" },
             "instructions": INSTRUCTIONS,
         })
     }

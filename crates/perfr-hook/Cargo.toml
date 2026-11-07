@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr-hook"
-version = "0.1.0"
+version = "0.1.1"
 description = "perfr-hook: the Frida Core controller perfr spawns to attach to a target and load libperfr into it"
 edition = "2021"
 license = "BSD-2-Clause"

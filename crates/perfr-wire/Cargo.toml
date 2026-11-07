@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr-wire"
-version = "0.1.0"
+version = "0.1.1"
 description = "The pod capture wire format: one-byte tags, fixed little-endian fields"
 edition.workspace = true
 license.workspace = true

@@ -9,7 +9,7 @@
 # the only thing that builds this crate.
 [package]
 name = "perfr-lib-windows"
-version = "0.1.0"
+version = "0.1.1"
 description = "libperfr.dll: crates/perfr-lib under the file name Windows needs"
 edition = "2021"
 license = "BSD-2-Clause"

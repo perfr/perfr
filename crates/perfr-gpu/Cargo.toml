@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr-gpu"
-version = "0.1.0"
+version = "0.1.1"
 description = "perfr-gpu: polls NVML and writes GPU telemetry pod events to stdout for perfr"
 edition.workspace = true
 license.workspace = true

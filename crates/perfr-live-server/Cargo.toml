@@ -1,6 +1,6 @@
 [package]
 name = "perfr-live-server"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 description = "HTTP + WebSocket server that serves the live WASM viewer and streams packed events"

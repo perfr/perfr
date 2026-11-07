@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr-pod-dump"
-version = "0.1.0"
+version = "0.1.1"
 description = "Reads a pod capture and prints what is in it"
 edition.workspace = true
 license.workspace = true

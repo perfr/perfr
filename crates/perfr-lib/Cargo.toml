@@ -4,7 +4,7 @@
 
 [package]
 name = "perfr-lib"
-version = "0.1.0"
+version = "0.1.1"
 description = "libperfr: the manual-instrumentation API and, with `native`, the Frida Gum hook agent, in the one library loaded into profiled processes"
 edition = "2021"
 license = "BSD-2-Clause"

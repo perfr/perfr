@@ -29,9 +29,12 @@ fn wait_for_stop() {
     let mut line = String::new();
     let _ = std::io::stdin().lock().read_line(&mut line);
 }
+/// The process stdin, owned here. Rust's `std::io::stdin` buffer and a second
+/// handle on the same pipe do not observe a later write or the service's
+/// close. One reader, used for the config line and then the stop line.
 #[cfg(windows)]
-fn wait_for_stop() {
-    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+fn owned_stdin() -> Option<std::fs::File> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
     type Handle = *mut std::ffi::c_void;
     const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6; // (DWORD)-10
     const DUPLICATE_SAME_ACCESS: u32 = 0x2;
@@ -48,20 +51,8 @@ fn wait_for_stop() {
             inherit: i32,
             opts: u32,
         ) -> i32;
-        fn PeekNamedPipe(
-            pipe: Handle,
-            buf: *mut u8,
-            buf_size: u32,
-            read: *mut u32,
-            avail: *mut u32,
-            left: *mut u32,
-        ) -> i32;
     }
-    // SAFETY: duplicating the process's own stdin handle. A blocking ReadFile
-    // on that duplicate never wakes when the service closes the write end
-    // while the process-wide stdin handle is still open. PeekNamedPipe reports
-    // the broken pipe, which is the stop signal.
-    let handle = unsafe {
+    unsafe {
         let stdin = GetStdHandle(STD_INPUT_HANDLE);
         let mut dup: Handle = std::ptr::null_mut();
         if DuplicateHandle(
@@ -74,37 +65,27 @@ fn wait_for_stop() {
             DUPLICATE_SAME_ACCESS,
         ) == 0
         {
-            let mut line = String::new();
-            let _ = std::io::stdin().lock().read_line(&mut line);
-            return;
+            return None;
         }
-        OwnedHandle::from_raw_handle(dup)
-    };
-    let raw = handle.as_raw_handle() as Handle;
-    loop {
-        let mut avail = 0u32;
-        // SAFETY: the duplicated pipe handle stays open for this loop.
-        let ok = unsafe {
-            PeekNamedPipe(
-                raw,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-                &mut avail,
-                std::ptr::null_mut(),
-            )
-        };
-        if ok == 0 {
-            return;
-        }
-        if avail > 0 {
-            let mut line = String::new();
-            let mut file = std::fs::File::from(handle);
-            let _ = BufReader::new(&mut file).read_line(&mut line);
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
+        Some(std::fs::File::from(OwnedHandle::from_raw_handle(dup)))
     }
+}
+
+#[cfg(windows)]
+fn read_handle_line(file: &mut std::fs::File) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        if file.read(&mut byte)? == 0 {
+            break;
+        }
+        out.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
 extern "C" {
@@ -165,8 +146,21 @@ fn peer_pid(stream: &UnixStream) -> std::io::Result<u32> {
     }
 }
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    let mut stdin_owner = owned_stdin();
     let mut config = String::new();
-    std::io::stdin().lock().read_line(&mut config)?;
+    #[cfg(windows)]
+    {
+        if let Some(file) = stdin_owner.as_mut() {
+            config = read_handle_line(file)?;
+        } else {
+            std::io::stdin().lock().read_line(&mut config)?;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::io::stdin().lock().read_line(&mut config)?;
+    }
     let value: serde_json::Value = serde_json::from_str(&config)?;
     let pid = value["pid"]
         .as_u64()
@@ -249,13 +243,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // leave unread bytes when the agent closes, resetting a valid reply.
     if value["command"] != "symbols" {
         let mut stop = stream.try_clone()?;
+        #[cfg(windows)]
+        let stop_stdin = stdin_owner.take();
         std::thread::spawn(move || {
-            // Unix can read the shared stdin from this thread. Windows cannot:
-            // a second read of the process-wide buffered stdin never observes
-            // the service closing the pipe, so detach waits out the helper's
-            // 5s timeout while a hooked call is still inside the target.
+            // The config line was already consumed. This read is the only one
+            // still attached to the pipe, so the service's "stop" line or its
+            // close both wake it. A second reader on Windows never does.
+            #[cfg(windows)]
+            {
+                if let Some(mut file) = stop_stdin {
+                    let _ = read_handle_line(&mut file);
+                }
+            }
+            #[cfg(not(windows))]
             wait_for_stop();
-            // Both an explicit stop and service EOF close the agent's control path.
             let _ = stop.write_all(b"stop\n");
             #[cfg(unix)]
             let _ = stop.shutdown(std::net::Shutdown::Write);

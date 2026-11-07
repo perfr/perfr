@@ -108,8 +108,21 @@ def main():
             services = (hub_proc, remote_proc)
             wait_for('hub up', lambda: hub('/api/status', timeout=1), 30, services)
             wait_for('remote up', lambda: remote('/api/status', timeout=1), 30, services)
-            # The link, and a fit from at least a few probes.
-            peers = wait_for('link with a clock fit', lambda: (lambda p: p if p['peers'] and p['peers'][0]['probes'] >= 8 else None)(hub('/api/peers', timeout=1)), 30, services)
+            # The link, and a fit. Two kept probes are an offset; eight is
+            # common on a quiet box and rare when one fast sample makes the
+            # rest look queued. The offset check below is the accuracy bar.
+            last_peers = {}
+            def linked():
+                nonlocal last_peers
+                last_peers = hub('/api/peers', timeout=1)
+                peers = last_peers.get('peers') or []
+                if peers and peers[0].get('link') == 'joined' and int(peers[0].get('probes') or 0) >= 2:
+                    return last_peers
+                return None
+            try:
+                peers = wait_for('link with a clock fit', linked, 30, services)
+            except AssertionError as error:
+                raise AssertionError(f'{error}; last={last_peers}') from None
             peer = peers['peers'][0]
             machine = peer['machine']
             host = peer['host']

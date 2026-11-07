@@ -72,6 +72,44 @@ fn owned_stdin() -> Option<std::fs::File> {
 }
 
 #[cfg(windows)]
+fn wait_named_event(name: &str) {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> *mut std::ffi::c_void;
+        fn WaitForSingleObject(handle: *mut std::ffi::c_void, millis: u32) -> u32;
+    }
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    // The service creates the event before it sends the config, so this
+    // opens on the first try. Retry rather than treating a miss as "stop",
+    // which would detach the capture immediately.
+    let handle = loop {
+        let handle = unsafe { OpenEventW(SYNCHRONIZE, 0, wide.as_ptr()) };
+        if !handle.is_null() && handle != -1isize as *mut std::ffi::c_void {
+            break handle;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let owned = unsafe { OwnedHandle::from_raw_handle(handle) };
+    unsafe {
+        WaitForSingleObject(owned.as_raw_handle_wait(), 0xFFFF_FFFF);
+    }
+}
+
+#[cfg(windows)]
+trait RawWait {
+    fn as_raw_handle_wait(&self) -> *mut std::ffi::c_void;
+}
+#[cfg(windows)]
+impl RawWait for std::os::windows::io::OwnedHandle {
+    fn as_raw_handle_wait(&self) -> *mut std::ffi::c_void {
+        use std::os::windows::io::AsRawHandle;
+        self.as_raw_handle() as *mut std::ffi::c_void
+    }
+}
+
+#[cfg(windows)]
 fn read_handle_line(file: &mut std::fs::File) -> std::io::Result<String> {
     use std::io::Read;
     let mut out = Vec::new();
@@ -244,14 +282,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if value["command"] != "symbols" {
         let mut stop = stream.try_clone()?;
         #[cfg(windows)]
+        let stop_event = value
+            .get("stop_event")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        #[cfg(windows)]
         let stop_stdin = stdin_owner.take();
         std::thread::spawn(move || {
-            // The config line was already consumed. This read is the only one
-            // still attached to the pipe, so the service's "stop" line or its
-            // close both wake it. A second reader on Windows never does.
             #[cfg(windows)]
             {
-                if let Some(mut file) = stop_stdin {
+                if let Some(name) = stop_event {
+                    wait_named_event(&name);
+                } else if let Some(mut file) = stop_stdin {
                     let _ = read_handle_line(&mut file);
                 }
             }

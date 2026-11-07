@@ -226,17 +226,22 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
     // EOF (the controller dropped the pipe) is a stop, like an explicit
     // "stop" line; detach either way.
     reader.read_line(&mut line)?;
-    // On Unix the controller half-closes its write side and keeps reading,
-    // so this detach-profile span and the ack below reach it. A Windows
-    // named pipe has no half-close: by the time a stop is seen the pipe is
-    // already closing, so these writes may fail -- the detach itself is what
-    // matters, and the controller waits for process exit, not the ack.
-    profile::measure(stream, profiling, "Frida: detach trampolines", || {
-        drop(capture)
-    });
+    // Detach off this thread. gum_interceptor_detach can wait until an
+    // in-flight call returns; the helper process is waiting for this pipe
+    // to close, and the service is waiting for the helper. The agent stays
+    // resident, so the detach thread outlives this function.
+    let detach = Detach(capture);
+    std::thread::spawn(move || drop(detach));
     let _ = writeln!(stream, "{}", json!({"stopped":true}));
     Ok(())
 }
+
+/// `Capture` holds Gum listener pointers. Detach runs on a side thread so an
+/// in-flight target call cannot pin the control pipe open.
+struct Detach(Capture);
+// SAFETY: the listener pointers are only used from this detach thread, and
+// Gum's detach is safe to call off the thread that installed the hooks.
+unsafe impl Send for Detach {}
 
 /// Frida Injector entrypoint. RESIDENT (1) preserves callbacks and the fallback
 /// SDK after this control thread returns, including outstanding target returns.

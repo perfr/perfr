@@ -10,17 +10,21 @@
 //! default is perfr's original palette, reproduced value for value, so nothing
 //! changes unless the reader picks another scheme.
 //!
-//! The active theme is a thread-local `&'static Theme` (the viewer is
-//! single-threaded on wasm; the service never switches, so it keeps the
-//! default and draws exactly as before). `color.rs` reads the scope and
-//! thread-state colours from here; the viewer's `theme.rs` reads the chrome.
+//! The active theme is one process-wide atomic index into [`THEMES`], not a
+//! thread-local: the viewer lists and rasterises lanes on worker threads
+//! (the wasm-bindgen-rayon pool, `std::thread::scope` natively), and a
+//! thread-local there kept perfr's default while the main thread drew the
+//! reader's scheme, so colours flipped with zoom depending on which thread
+//! produced a lane. The service never switches, so it keeps the default and
+//! draws exactly as before. `color.rs` reads the scope and thread-state
+//! colours from here; the viewer's `theme.rs` reads the chrome.
 //!
 //! The non-default schemes are built from well-known terminal palettes
 //! (Dracula, Nord, Gruvbox, Solarized). A terminal palette is already a
 //! curated, harmonious set of accent colours, which is exactly what the
 //! scope boxes need to stay legible against the canvas.
 
-use core::cell::Cell;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Colours are `0xAARRGGBB`. The viewer turns them into `egui::Color32`; the
 /// rasteriser works in this word directly.
@@ -420,19 +424,21 @@ static GRUVBOX_LIGHT: Theme = Theme {
 pub static THEMES: &[&Theme] =
     &[&PERFR, &DRACULA, &NORD, &GRUVBOX, &SOLARIZED, &SOLARIZED_LIGHT, &GRUVBOX_LIGHT];
 
-thread_local! {
-    static ACTIVE: Cell<&'static Theme> = const { Cell::new(&PERFR) };
-}
+/// Index into [`THEMES`]; 0 is perfr's default. Shared by every thread so
+/// worker-produced lanes match what the main thread draws.
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 /// The active scheme. Every colour accessor reads through this.
 pub fn active() -> &'static Theme {
-    ACTIVE.with(|a| a.get())
+    THEMES[ACTIVE.load(Ordering::Relaxed)]
 }
 
 /// Switch the active scheme. Idempotent; the viewer re-applies egui's visuals
-/// after calling this.
+/// after calling this. A theme outside [`THEMES`] is ignored.
 pub fn set_active(theme: &'static Theme) {
-    ACTIVE.with(|a| a.set(theme));
+    if let Some(i) = THEMES.iter().position(|t| core::ptr::eq(*t, theme)) {
+        ACTIVE.store(i, Ordering::Relaxed);
+    }
 }
 
 /// Look a scheme up by its [`Theme::key`].
@@ -449,6 +455,16 @@ pub fn set_active_by_key(key: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// The scheme is process-wide, so a test that switches it, and a test that
+/// asserts a colour the default scheme produces, hold this: a switch must
+/// never land mid-assertion on another test thread. Switchers restore the
+/// default before releasing it.
+#[cfg(test)]
+pub(crate) fn switch_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[cfg(test)]
@@ -505,6 +521,7 @@ mod tests {
 
     #[test]
     fn switching_is_visible_then_restored() {
+        let _guard = switch_lock();
         assert!(set_active_by_key("dracula"));
         assert_eq!(active().key, "dracula");
         assert_ne!(active().scope, &PERFR_SCOPE[..]);

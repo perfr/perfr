@@ -729,8 +729,9 @@ look good with each.
 **Status: done (2026-09-09).** Every colour -- chrome, timeline canvas and
 track washes, the scope-box palette, the thread-state bar, the selection
 highlights -- lives in one `Theme` table in `perfr_live_event::theme`, read
-through a thread-local active theme (the service never switches, so it draws
-exactly as before). Five schemes: **perfr** (the original, byte-for-byte the
+through one process-wide active theme (the service never switches, so it draws
+exactly as before; it was a thread-local until 2026-11-07, which left the
+viewer's worker-thread lanes on the default palette). Five schemes: **perfr** (the original, byte-for-byte the
 default) plus **Dracula**, **Nord**, **Gruvbox** and **Solarized**, whose
 scope palettes are each scheme's own harmonious accent set. Pick it in the
 More menu; `?theme=<key>` pins it for a link or screenshot; the choice is

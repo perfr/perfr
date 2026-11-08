@@ -244,9 +244,19 @@ mod tests {
     use super::*;
     use perfr_live_event::theme;
     use perfr_live_event::THREAD_PALETTE;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// The active scheme is process-wide. Tests that switch it, and tests
+    /// that assert the default scheme's derived colours, take this so a
+    /// switch never lands mid-assertion on another thread.
+    fn scheme_lock() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn display_keeps_raw_scope_palette() {
+        let _guard = scheme_lock();
         let src = THREAD_PALETTE[0];
         assert_eq!(src, 0xFFE7_4435);
         assert_eq!(display_argb(src), src);
@@ -256,6 +266,7 @@ mod tests {
 
     #[test]
     fn reserved_pids_get_distinct_dark_washes() {
+        let _guard = scheme_lock();
         let a = process_track_wash(1);
         let b = process_track_wash(2);
         let c = process_track_wash(3);
@@ -275,6 +286,7 @@ mod tests {
 
     #[test]
     fn paper_canvas_is_light_and_opt_in() {
+        let _guard = scheme_lock();
         assert_eq!(timeline_canvas(false), CANVAS());
         assert_eq!(timeline_canvas(true), PAPER());
         assert!(PAPER().r() > 0xC0 && PAPER().g() > 0xC0 && PAPER().b() > 0xC0);
@@ -285,6 +297,7 @@ mod tests {
 
     #[test]
     fn derived_washes_stay_in_the_scheme_family() {
+        let _guard = scheme_lock();
         // A non-default scheme's process band is a tint of its own canvas, not
         // the old near-black table -- that was the "clashes with the chrome"
         // report. Each channel should sit close to the canvas.
@@ -303,6 +316,7 @@ mod tests {
 
     #[test]
     fn a_scheme_switch_changes_the_chrome_then_restores() {
+        let _guard = scheme_lock();
         let perfr_panel = PANEL();
         assert!(theme::set_active_by_key("dracula"));
         assert_ne!(PANEL(), perfr_panel, "the panel colour follows the scheme");

@@ -537,6 +537,7 @@ mod tests {
 
     #[test]
     fn cpu_scope_uses_tid_mod_6_and_even_depth_darkens() {
+        let _guard = crate::theme::switch_lock();
         let odd = thread_scope_color(0, 1);
         let even = thread_scope_color(0, 0);
         assert_eq!(odd, 0xFFE7_4435);
@@ -560,6 +561,7 @@ mod tests {
 
     #[test]
     fn api_scope_color_is_name_hash_not_tid() {
+        let _guard = crate::theme::switch_lock();
         let mut intern = InternTable::default();
         let tick = intern.intern("Tick");
         let a = LiveEvent {
@@ -606,6 +608,7 @@ mod tests {
 
     #[test]
     fn async_name_hash_indexes_the_same_six_colors() {
+        let _guard = crate::theme::switch_lock();
         let h = name_hash(b"GpuSubmit");
         assert_eq!(async_scope_color(h), THREAD_PALETTE[(h as usize) % 6]);
         let mut intern = InternTable::default();
@@ -633,6 +636,7 @@ mod tests {
 
     #[test]
     fn manual_api_material_red_is_perfr_h_word() {
+        let _guard = crate::theme::switch_lock();
         assert_eq!(
             encode_manual_color(0xF443_36FF),
             (color_mode::MANUAL_API, 1)
@@ -672,6 +676,7 @@ mod tests {
 
     #[test]
     fn thread_state_colors_match_thread_state_bar() {
+        let _guard = crate::theme::switch_lock();
         assert_eq!(thread_state_color(thread_state::RUNNING), 0xFF4C_AF50);
         assert_eq!(thread_state_color(thread_state::RUNNABLE), 0xFF21_96F3);
         assert_eq!(
@@ -692,6 +697,7 @@ mod tests {
 
     #[test]
     fn pairer_keeps_manual_api_color() {
+        let _guard = crate::theme::switch_lock();
         let mut p = ScopePairer::default();
         let a = p.intern("red");
         p.on_scope_start(1, 10, 100, 0xF443_36FF, a);
@@ -737,6 +743,7 @@ mod tests {
 
     #[test]
     fn scheduling_lane_key_is_core_only() {
+        let _guard = crate::theme::switch_lock();
         let a = LiveEvent {
             tid: 100,
             pid: 1,
@@ -778,6 +785,7 @@ mod tests {
 
     #[test]
     fn bytes_roundtrip_preserves_fields() {
+        let _guard = crate::theme::switch_lock();
         let ev = LiveEvent {
             start_ns: 1_000_000,
             duration_ns: 250,

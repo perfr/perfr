@@ -625,19 +625,15 @@ mod wasm_impl {
             }
         }
 
-        /// Reads a `.perfr.stream` from the service so the dialog can show
-        /// its size. Does not post it.
+        /// What a login return left for this page before wasm booted: the
+        /// bearer `index.html` moved out of `#share_token=` into storage, and
+        /// whether this load is the `next` of a same-tab sign-in. Both are
+        /// taken, not peeked: the token lives in memory from here on.
         pub fn stored_share_auth() -> (Option<String>, bool) {
             let Some(window) = web_sys::window() else {
                 return (None, false);
             };
-            let token = window
-                .location()
-                .hash()
-                .ok()
-                .as_deref()
-                .and_then(crate::share::fragment_share_token)
-                .or_else(|| take_stored_share_token(&window));
+            let token = take_stored_share_token(&window);
             let resume = window
                 .session_storage()
                 .ok()
@@ -665,14 +661,16 @@ mod wasm_impl {
             });
         }
 
-        /// Open the login URL in a popup. Returns false when the browser
-        /// blocked it and this tab is navigating there instead.
-        pub fn open_share_login(&self, url: &str) -> bool {
+        /// Open `popup_url` in a popup. Returns false when the browser
+        /// blocked it and this tab is navigating to `tab_url` instead. The two
+        /// URLs differ only in `share_login=`, which tells the page that comes
+        /// back which case it is in.
+        pub fn open_share_login(&self, popup_url: &str, tab_url: &str) -> bool {
             let Some(window) = web_sys::window() else {
                 return false;
             };
             match window.open_with_url_and_target_and_features(
-                url,
+                popup_url,
                 crate::share::LOGIN_WINDOW_NAME,
                 "popup=yes,width=520,height=720",
             ) {
@@ -681,7 +679,7 @@ mod wasm_impl {
                     if let Ok(Some(storage)) = window.session_storage() {
                         let _ = storage.set_item(crate::share::LOGIN_RESUME_KEY, "1");
                     }
-                    let _ = window.location().set_href(url);
+                    let _ = window.location().set_href(tab_url);
                     false
                 }
             }
@@ -716,7 +714,8 @@ mod wasm_impl {
         }
 
         /// Posts `.perfr.stream` bytes to `endpoint` after one more `GET /api/me`.
-        /// The dialog has already shown the size and the account.
+        /// The dialog has already shown the size and the account. `what` names
+        /// the bytes in a refusal: "This capture" or "The selected range".
         pub fn share_capture(
             &self,
             gen: u64,
@@ -724,6 +723,7 @@ mod wasm_impl {
             me_url: String,
             token: Option<String>,
             bytes: Vec<u8>,
+            what: &'static str,
         ) {
             let inbox = self.inbox.clone();
             wasm_bindgen_futures::spawn_local(async move {
@@ -737,19 +737,23 @@ mod wasm_impl {
                     );
                     return;
                 }
+                // A fresh account check. A signed-in answer refreshes the quota
+                // the dialog shows; a 401 moves it back to sign-in and keeps the
+                // server's login_url; anything else is one inline error, so the
+                // account and its Upload button stay on screen for a retry.
                 let session = fetch_session(&me_url, token.as_deref()).await;
-                push_share(
-                    &inbox,
-                    gen,
-                    crate::share::ShareNoteKind::Session(session.clone()),
-                );
                 match session {
                     crate::share::SessionCheck::SignedIn(account) => {
-                        if let Some(message) = crate::share::fit_block(
-                            bytes.len() as u64,
-                            &account.quota,
-                            "This capture",
-                        ) {
+                        let block =
+                            crate::share::fit_block(bytes.len() as u64, &account.quota, what);
+                        push_share(
+                            &inbox,
+                            gen,
+                            crate::share::ShareNoteKind::Session(
+                                crate::share::SessionCheck::SignedIn(account),
+                            ),
+                        );
+                        if let Some(message) = block {
                             push_share(
                                 &inbox,
                                 gen,
@@ -760,7 +764,8 @@ mod wasm_impl {
                             return;
                         }
                     }
-                    crate::share::SessionCheck::LoginRequired { .. } => {
+                    check @ crate::share::SessionCheck::LoginRequired { .. } => {
+                        push_share(&inbox, gen, crate::share::ShareNoteKind::Session(check));
                         push_share(
                             &inbox,
                             gen,
@@ -1171,7 +1176,7 @@ mod wasm_impl {
             if self.offline {
                 return;
             }
-            let q = urlencoding_lite(q);
+            let q = crate::share::percent_encode(q);
             let inbox = self.inbox.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let result = get_text(&format!(
@@ -1456,20 +1461,13 @@ mod wasm_impl {
         inbox.lock().unwrap_or_else(|e| e.into_inner()).share_notes.push(crate::share::ShareNote { gen, kind });
     }
 
-    /// POST the stream with an XMLHttpRequest so the upload reports progress.
-    /// `fetch` does not. The status is 0 when the browser could not reach the host.
-    fn share_request_credentials() -> web_sys::RequestCredentials {
-        if crate::share::SHARE_CREDENTIALS == "include" {
-            web_sys::RequestCredentials::Include
-        } else {
-            web_sys::RequestCredentials::SameOrigin
-        }
-    }
-
+    /// `GET /api/me` with the session cookie (`credentials: include`, the
+    /// share host is cross-origin for the local viewer) and the bearer when
+    /// a login return handed one back.
     async fn fetch_session(url: &str, token: Option<&str>) -> crate::share::SessionCheck {
         let opts = RequestInit::new();
         opts.set_method("GET");
-        opts.set_credentials(share_request_credentials());
+        opts.set_credentials(web_sys::RequestCredentials::Include);
         if let Some(token) = token.and_then(crate::share::usable_share_token) {
             let headers = js_sys::Object::new();
             if js_sys::Reflect::set(
@@ -1529,25 +1527,27 @@ mod wasm_impl {
         let Some(window) = web_sys::window() else {
             return;
         };
+        // The login popup writes the signal key, and the token when it has
+        // one. A `removeItem` (another viewer tab consuming the token) also
+        // fires here with no new value; that is not a login and is ignored.
         let inbox_storage = inbox.clone();
         let onstorage = Closure::wrap(Box::new(move |ev: web_sys::StorageEvent| {
             let key = ev.key().unwrap_or_default();
             if key != crate::share::LOGIN_SIGNAL_KEY && key != crate::share::SHARE_TOKEN_KEY {
                 return;
             }
+            let Some(new_value) = ev.new_value() else {
+                return;
+            };
             let mut g = inbox_storage.lock().unwrap_or_else(|e| e.into_inner());
             if key == crate::share::SHARE_TOKEN_KEY {
-                if let Some(token) = ev
-                    .new_value()
-                    .as_deref()
-                    .and_then(crate::share::usable_share_token)
-                {
+                if let Some(token) = crate::share::usable_share_token(&new_value) {
                     g.share_token = Some(token);
                 }
-            }
-            if g.share_token.is_none() {
+            } else if g.share_token.is_none() {
+                // The signal may land before or after the token's own event.
                 if let Some(window) = web_sys::window() {
-                    g.share_token = take_stored_share_token(&window).or(g.share_token.take());
+                    g.share_token = take_stored_share_token(&window);
                 }
             }
             g.share_login_signalled = true;
@@ -1593,7 +1593,7 @@ mod wasm_impl {
         xhr.open_with_async("POST", url, true)
             .map_err(|e| (0, js_err(e)))?;
         // Credentialed cross-origin upload. Same-origin cookies are sent either way.
-        xhr.set_with_credentials(crate::share::SHARE_CREDENTIALS == "include");
+        xhr.set_with_credentials(true);
         xhr.set_request_header("content-type", crate::share::SHARE_CONTENT_TYPE)
             .map_err(|e| (0, js_err(e)))?;
         if let Some(token) = token.and_then(crate::share::usable_share_token) {
@@ -1785,19 +1785,6 @@ mod wasm_impl {
         s.replace('\\', "\\\\").replace('"', "\\\"")
     }
 
-    fn urlencoding_lite(s: &str) -> String {
-        let mut out = String::new();
-        for b in s.as_bytes() {
-            match *b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    out.push(*b as char);
-                }
-                _ => out.push_str(&format!("%{b:02X}")),
-            }
-        }
-        out
-    }
-
     fn js_err(v: JsValue) -> String {
         if let Some(s) = v.as_string() {
             return s;
@@ -1831,6 +1818,7 @@ mod native_impl {
             _me_url: String,
             _token: Option<String>,
             _bytes: Vec<u8>,
+            _what: &'static str,
         ) {
         }
         pub fn stored_share_auth() -> (Option<String>, bool) {
@@ -1838,7 +1826,7 @@ mod native_impl {
         }
         pub fn clear_share_resume_flag(&self) {}
         pub fn check_share_session(&self, _gen: u64, _url: String, _token: Option<String>) {}
-        pub fn open_share_login(&self, _url: &str) -> bool {
+        pub fn open_share_login(&self, _popup_url: &str, _tab_url: &str) -> bool {
             false
         }
         pub fn from_capture_url(_url: &str) -> Self {
@@ -2090,7 +2078,8 @@ mod tests {
     }
 }
 
-/// A query value, percent-encoded: paths carry `/`, spaces and worse.
+/// A file path as a query value: like `share::percent_encode` but `/` is
+/// kept, so a source path stays readable in the request line.
 #[allow(dead_code)]
 fn percent_encode(text: &str) -> String {
     let mut out = String::with_capacity(text.len() * 3);

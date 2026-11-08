@@ -53,13 +53,20 @@
 </head>
 <body>
   <script>
-    // Login return for Share. The keys match share.rs: LOGIN_WINDOW_NAME
+    // Login return for Share. The names match share.rs: LOGIN_MODE_PARAM
+    // (share_login) with LOGIN_MODE_POPUP / LOGIN_MODE_TAB, LOGIN_WINDOW_NAME
     // (perfr-share-login), LOGIN_SIGNAL_KEY (perfr.share.logged_in),
-    // SHARE_TOKEN_KEY (perfr.share.token), SHARE_TOKEN_FRAGMENT (share_token).
-    // A popup sent back here signals the opener and closes before wasm boots.
-    // COOP same-origin severs window.opener on a cross-origin round trip, so
-    // the storage key is the signal that still arrives. Same-tab returns
-    // stash a #share_token= into sessionStorage and keep booting.
+    // SHARE_TOKEN_KEY (perfr.share.token), LOGIN_RESUME_KEY (perfr.share.resume),
+    // SHARE_TOKEN_FRAGMENT (share_token).
+    //
+    // The popup is recognised by `share_login=popup` in its own URL, which the
+    // login `next` carried round. window.name is checked too, but it is not
+    // enough: a round trip from this page (Cross-Origin-Opener-Policy:
+    // same-origin) to perfr.dev and back swaps the browsing context group,
+    // which clears window.name and window.opener. A localStorage write is the
+    // signal that still reaches the opener. A same-tab return
+    // (`share_login=tab`) stashes the token and a resume flag into
+    // sessionStorage and keeps booting; the viewer reopens Share.
     (function () {
       function tokenFromHash(hash) {
         var q = String(hash || "").replace(/^#/, "");
@@ -75,13 +82,25 @@
         }
         return "";
       }
+      var params = new URLSearchParams(location.search);
+      var mode = params.get("share_login") || "";
       var token = tokenFromHash(location.hash);
-      var popup = window.name === "perfr-share-login";
-      if (token && !popup) {
-        try { sessionStorage.setItem("perfr.share.token", token); } catch (e) {}
-        try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+      var popup = mode === "popup" || window.name === "perfr-share-login";
+      if (!popup) {
+        if (token) {
+          try { sessionStorage.setItem("perfr.share.token", token); } catch (e) {}
+        }
+        if (mode === "tab") {
+          try { sessionStorage.setItem("perfr.share.resume", "1"); } catch (e) {}
+        }
+        if (token || mode) {
+          params.delete("share_login");
+          var search = params.toString();
+          var clean = location.pathname + (search ? "?" + search : "");
+          try { history.replaceState(null, "", clean); } catch (e) {}
+        }
+        return;
       }
-      if (!popup) return;
       window.__perfrLoginPopup = true;
       try {
         if (token) localStorage.setItem("perfr.share.token", token);
@@ -92,7 +111,18 @@
           window.opener.postMessage({ source: "perfr", type: "login" }, location.origin);
         }
       } catch (e) {}
+      // The sign-in added history entries, so the browser may refuse to
+      // close a window that is no longer a one-page popup. Say so instead of
+      // booting a second viewer in it.
       window.close();
+      setTimeout(function () {
+        if (window.closed) return;
+        document.body.innerHTML = "";
+        var note = document.createElement("p");
+        note.style.cssText = "font: 15px system-ui, sans-serif; color: #e6e6e6; margin: 40px;";
+        note.textContent = "Signed in. You can close this window and go back to perfr.";
+        document.body.appendChild(note);
+      }, 150);
     })();
   </script>
   <canvas id="the_canvas_id" tabindex="0"></canvas>

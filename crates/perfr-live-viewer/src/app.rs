@@ -2420,9 +2420,17 @@ impl PerfrLiveApp {
             crate::share::ShareSession::SignedOut { login_url } => login_url.clone(),
             _ => String::new(),
         };
-        let next = crate::share::login_next_url(&crate::dev::location_href());
-        let url = crate::share::login_url(&self.share_base(), &server, provider, &next);
-        if self.net.open_share_login(&url) {
+        // Two URLs, one per way back: the page that returns reads
+        // `share_login=` to know whether it is the popup (signal the opener
+        // and close) or this tab (reopen Share). `window.name` would not
+        // survive the cross-origin round trip.
+        let href = crate::dev::location_href();
+        let base = self.share_base();
+        let popup_next = crate::share::login_next_url(&href, crate::share::LOGIN_MODE_POPUP);
+        let tab_next = crate::share::login_next_url(&href, crate::share::LOGIN_MODE_TAB);
+        let popup_url = crate::share::login_url(&base, &server, provider, &popup_next);
+        let tab_url = crate::share::login_url(&base, &server, provider, &tab_next);
+        if self.net.open_share_login(&popup_url, &tab_url) {
             self.share_login_waiting = true;
             self.share_login_probe = false;
             self.share_login_returned = false;
@@ -2550,7 +2558,8 @@ impl PerfrLiveApp {
         self.share_ui = ShareUi::Authorizing;
         let endpoint = crate::share::share_post_url(&self.share_base());
         let me = crate::share::me_url(&self.share_base());
-        self.net.share_capture(self.share_gen, endpoint, me, self.share_token.clone(), bytes);
+        self.net
+            .share_capture(self.share_gen, endpoint, me, self.share_token.clone(), bytes, what);
     }
 
     fn apply_share_note(&mut self, kind: crate::share::ShareNoteKind) {
@@ -2598,7 +2607,12 @@ impl PerfrLiveApp {
             }
             crate::share::ShareNoteKind::Failed(failure) => {
                 if failure.needs_login {
-                    self.share_session = crate::share::ShareSession::SignedOut { login_url: String::new() };
+                    // A Session(LoginRequired) note usually arrives just before
+                    // this one and carries the server's login_url; keep it.
+                    if !matches!(self.share_session, crate::share::ShareSession::SignedOut { .. }) {
+                        self.share_session =
+                            crate::share::ShareSession::SignedOut { login_url: String::new() };
+                    }
                     self.share_login_waiting = false;
                     self.share_login_probe = false;
                 }
@@ -4204,7 +4218,7 @@ impl PerfrLiveApp {
             match line.role {
                 crate::share::ShareLineRole::Title if signed_in => {
                     ui.horizontal(|ui| {
-                        let who = line.text.trim_start_matches("Sharing as ").trim();
+                        let who = view.account_name.as_deref().unwrap_or("");
                         let initial = who
                             .chars()
                             .next()

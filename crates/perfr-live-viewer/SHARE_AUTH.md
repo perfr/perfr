@@ -26,6 +26,10 @@ bearer (see below) it also sends `Authorization: Bearer <token>`.
 ```
 
 `avatar` may be empty. `name` may be empty; the dialog then shows `id`.
+A zero `limit_bytes` or `max_capture_bytes` means that limit is not set:
+the dialog says "no quota limit" / "no per-capture limit" and blocks
+nothing on that count. An account that must not share gets a `403` on the
+upload, not a zero quota.
 
 `401`:
 
@@ -46,16 +50,17 @@ Other statuses are shown as a short error with Try again. Nothing is posted.
 ### Dialog
 
 Signed out: the dialog says **Sign in to share** and offers GitHub and Google.
-Each button opens the login URL in a popup (`window.name` is
-`perfr-share-login`). If the browser blocks the popup, the same tab
-navigates and Share reopens when it returns (`sessionStorage` key
-`perfr.share.resume`).
+Each button opens the login URL in a popup named `perfr-share-login`, with
+`next` carrying `share_login=popup`. If the browser blocks the popup, the
+same tab navigates with `share_login=tab` instead, and Share reopens when
+it returns (`index.html` turns that parameter into the `sessionStorage`
+key `perfr.share.resume` and strips it from the URL).
 
 Signed in: the dialog says **Sharing as {name}** and shows
 `{used} of {limit} used · {remaining} left · up to {max} per capture`.
 Upload is refused in the dialog when the bytes exceed `max_capture_bytes`
-or the remaining quota (`limit_bytes - used_bytes`). A size equal to the
-limit is allowed. The message tells the reader to share a selected range,
+or the remaining quota (`limit_bytes - used_bytes`), whichever of those is
+set. A size equal to the limit is allowed. The message tells the reader to share a selected range,
 and that button is offered only when the range itself fits.
 
 `POST {base}/api/share` (`Content-Type: application/octet-stream`) is sent
@@ -80,16 +85,22 @@ The flow that matches the cookie session, without a second device-code
 protocol:
 
 1. The button opens the login URL above. `next` is this viewer's URL
-   (fragment stripped).
+   (fragment stripped) plus `share_login=popup`, or `share_login=tab` when
+   the popup was blocked and this tab navigated.
 2. `GET /api/me` and `POST /api/share` use `credentials: include`
    (`xhr.withCredentials = true` on the upload).
 3. When the popup is redirected back to the viewer, `index.html` runs
-   before wasm. If `window.name` is `perfr-share-login` it writes
+   before wasm. If its URL says `share_login=popup` (or `window.name` is
+   still `perfr-share-login`, which only the same-origin case keeps: the
+   cross-origin round trip swaps the browsing context group and clears
+   both `window.name` and `window.opener`) it writes
    `localStorage['perfr.share.logged_in']`, copies a `#share_token=` into
    `localStorage['perfr.share.token']`, `postMessage`s
    `{source: "perfr", type: "login"}` to the opener when that still
-   exists (the same-origin case), and closes. A storage event reaches the
-   opener across COOP browsing-context groups. `window.opener` does not.
+   exists, and closes. A storage event reaches the opener across COOP
+   browsing-context groups. When the browser refuses to close a popup
+   whose history grew during sign-in, the page says the sign-in is done
+   and can be closed.
 4. While the signed-out dialog is up, the viewer also rechecks `/api/me`
    every couple of seconds, so a cookie that becomes visible resumes the
    share on its own.
@@ -149,8 +160,9 @@ bearer. The fragment name is `share_token` (`SHARE_TOKEN_FRAGMENT`).
 ### Login redirect
 
 `/login` must honor `next` only when it is this site or a loopback viewer
-URL, then redirect there after GitHub or Google sign-in. Reject every
-other host.
+URL, then redirect there after GitHub or Google sign-in, keeping its query
+string (`share_login=` is how the page knows which window it is). Reject
+every other host.
 
 ### Why this and not a device code
 

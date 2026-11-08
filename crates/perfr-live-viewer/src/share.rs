@@ -50,12 +50,18 @@ pub const SHARE_PATH: &str = "/api/share";
 /// Fallback login path when a 401 does not name one on this share host.
 pub const LOGIN_PATH: &str = "/login";
 
-/// `credentials` mode on `GET /api/me` and `POST /api/share`.
-pub const SHARE_CREDENTIALS: &str = "include";
-
-/// `window.name` of the login popup. `index.html` sees this when the
-/// popup is sent back to the viewer and signals the opener before wasm boots.
+/// `window.name` the login popup is opened with. `index.html` also checks
+/// it, but a cross-origin login round trip through a page with
+/// `Cross-Origin-Opener-Policy: same-origin` swaps the browsing context
+/// group and clears `window.name`, so the return URL carries the mode too.
 pub const LOGIN_WINDOW_NAME: &str = "perfr-share-login";
+
+/// Query parameter added to the `next` URL: `share_login=popup` when the
+/// login was opened in a popup, `share_login=tab` when this tab navigated.
+/// `index.html` reads it before wasm boots and strips it from the URL.
+pub const LOGIN_MODE_PARAM: &str = "share_login";
+pub const LOGIN_MODE_POPUP: &str = "popup";
+pub const LOGIN_MODE_TAB: &str = "tab";
 
 /// `sessionStorage` key set before a same-tab login navigation, so Share
 /// reopens when the browser comes back.
@@ -65,12 +71,10 @@ pub const LOGIN_RESUME_KEY: &str = "perfr.share.resume";
 /// reaches the opener even when COOP has severed `window.opener`.
 pub const LOGIN_SIGNAL_KEY: &str = "perfr.share.logged_in";
 
-/// `localStorage` / `sessionStorage` key for the optional bearer.
+/// `localStorage` / `sessionStorage` key for the optional bearer, which
+/// `index.html` moves there out of the login redirect's `#share_token=`
+/// fragment (a fragment is not sent to the local perfr service).
 pub const SHARE_TOKEN_KEY: &str = "perfr.share.token";
-
-/// URL fragment the login redirect may append: `{next}#share_token=<token>`.
-/// A fragment is not sent to the local perfr service.
-pub const SHARE_TOKEN_FRAGMENT: &str = "share_token";
 
 /// `postMessage` data the popup (or the website) may send the opener.
 pub const LOGIN_MESSAGE_SOURCE: &str = "perfr";
@@ -100,27 +104,6 @@ pub struct LoginProvider {
     pub id: &'static str,
     pub label: &'static str,
 }
-
-/// CORS response headers `GET /api/me`, `POST /api/share`, and their
-/// preflight must send when the viewer is not on the share host.
-/// `Access-Control-Allow-Origin` is the request's Origin, never `*`.
-/// Read by the contract test and `SHARE_AUTH.md`; the browser applies
-/// whatever the website actually sends.
-#[cfg_attr(not(test), allow(dead_code))]
-pub const SHARE_CORS: &[(&str, &str)] = &[
-    (
-        "Access-Control-Allow-Origin",
-        "<the request Origin, never *>",
-    ),
-    ("Access-Control-Allow-Credentials", "true"),
-    ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
-    (
-        "Access-Control-Allow-Headers",
-        "Content-Type, Authorization",
-    ),
-    ("Access-Control-Max-Age", "600"),
-    ("Vary", "Origin"),
-];
 
 /// What `POST /api/share` returns.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -283,16 +266,10 @@ pub fn is_stream_file(name: &str) -> bool {
     name.ends_with(".perfr.stream") || name.ends_with(".orbit.stream")
 }
 
-/// The words for the status codes the share server uses. Other failures stay
-/// a short line; an HTML body is not shown.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn share_failure_message(status: u16, body: &str) -> String {
-    share_failure(status, body).message
-}
-
 /// The words for a failed upload, and whether the dialog should go back
 /// to sign-in. 401 is a dead session. 403 is permission. 413 is the
-/// capture itself. 429 is the account's rate.
+/// capture itself. 429 is the account's rate. Other failures stay a short
+/// line; an HTML body is not shown.
 pub fn share_failure(status: u16, body: &str) -> ShareFailure {
     let message = match status {
         0 => "Could not reach the share server.".into(),
@@ -551,10 +528,22 @@ fn absolute_login_endpoint(url: &str, share_base: &str) -> Option<String> {
     Some(url.to_string())
 }
 
-/// The viewer URL to send as `next`, without a fragment so a previous
-/// token is not nested into the next login.
-pub fn login_next_url(href: &str) -> String {
-    href.split('#').next().unwrap_or(href).to_string()
+/// The viewer URL to send as `next`: no fragment, so a previous token is
+/// not nested into the next login, and `share_login=<mode>` so the page
+/// that comes back knows whether it is the popup or this tab. `window.name`
+/// cannot carry that: a COOP browsing-context-group swap clears it.
+pub fn login_next_url(href: &str, mode: &str) -> String {
+    let without_fragment = href.split('#').next().unwrap_or(href);
+    let (path, query) = without_fragment
+        .split_once('?')
+        .unwrap_or((without_fragment, ""));
+    let mut params: Vec<&str> = query
+        .split('&')
+        .filter(|kv| !kv.is_empty() && !kv.starts_with(&format!("{LOGIN_MODE_PARAM}=")))
+        .collect();
+    let mode_param = format!("{LOGIN_MODE_PARAM}={mode}");
+    params.push(&mode_param);
+    format!("{path}?{}", params.join("&"))
 }
 
 /// Scheme, host, and port. Host is lowercased. No path.
@@ -591,21 +580,6 @@ pub fn share_is_cross_origin(page_href: &str, share_base: &str) -> bool {
     }
 }
 
-/// `#share_token=` from a login redirect, when it is safe to put in a header.
-pub fn fragment_share_token(hash: &str) -> Option<String> {
-    let hash = hash.trim().trim_start_matches('#');
-    if hash.is_empty() {
-        return None;
-    }
-    for kv in hash.split('&') {
-        let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-        if crate::dev::percent_decode(k) == SHARE_TOKEN_FRAGMENT {
-            return usable_share_token(&crate::dev::percent_decode(v));
-        }
-    }
-    None
-}
-
 /// A bearer that can sit in `Authorization` without breaking the header.
 pub fn usable_share_token(token: &str) -> Option<String> {
     let token = token.trim();
@@ -626,47 +600,69 @@ pub fn bearer_value(token: &str) -> String {
     format!("Bearer {token}")
 }
 
-/// `Sharing as Ada Lovelace`. An empty name falls back to the id.
-pub fn sharing_as_line(user: &ShareUser) -> String {
+/// The name the dialog shows for an account: the name, or the id when the
+/// name is blank.
+pub fn display_name(user: &ShareUser) -> &str {
     let name = user.name.trim();
-    let name = if name.is_empty() {
+    if name.is_empty() {
         user.id.as_str()
     } else {
         name
-    };
-    format!("Sharing as {name}")
+    }
+}
+
+/// `Sharing as Ada Lovelace`.
+pub fn sharing_as_line(user: &ShareUser) -> String {
+    format!("Sharing as {}", display_name(user))
 }
 
 /// `12.0 MB of 1.0 GB used · 988.0 MB left · up to 50.0 MB per capture`.
+/// A zero `limit_bytes` or `max_capture_bytes` means that limit is not
+/// set, and the line says so instead of printing `0 B`.
 pub fn quota_usage_line(quota: &ShareQuota) -> String {
-    let remaining = quota.limit_bytes.saturating_sub(quota.used_bytes);
-    format!(
-        "{} of {} used · {} left · up to {} per capture",
-        format_share_bytes(quota.used_bytes),
-        format_share_bytes(quota.limit_bytes),
-        format_share_bytes(remaining),
-        format_share_bytes(quota.max_capture_bytes),
-    )
+    let usage = if quota.limit_bytes == 0 {
+        format!("{} shared · no quota limit", format_share_bytes(quota.used_bytes))
+    } else {
+        format!(
+            "{} of {} used · {} left",
+            format_share_bytes(quota.used_bytes),
+            format_share_bytes(quota.limit_bytes),
+            format_share_bytes(quota.limit_bytes.saturating_sub(quota.used_bytes)),
+        )
+    };
+    let cap = if quota.max_capture_bytes == 0 {
+        "no per-capture limit".to_string()
+    } else {
+        format!("up to {} per capture", format_share_bytes(quota.max_capture_bytes))
+    };
+    format!("{usage} · {cap}")
 }
 
-/// 0 when the account has no quota, else `used / limit` clamped to 0..=1.
+/// `used / limit` clamped to 0..=1, or 0 when the account has no quota
+/// limit (`limit_bytes == 0`), so the bar is empty rather than full.
 pub fn quota_fraction(quota: &ShareQuota) -> f32 {
     if quota.limit_bytes == 0 {
-        return 1.0;
+        return 0.0;
     }
     (quota.used_bytes as f64 / quota.limit_bytes as f64).clamp(0.0, 1.0) as f32
 }
 
 /// Why `size` cannot be uploaded, or `None` when it fits.
 /// A size equal to the limit is allowed. The per-capture cap is checked
-/// first; remaining quota is `limit_bytes - used_bytes`.
+/// first; remaining quota is `limit_bytes - used_bytes`. A cap of zero is
+/// "not set" (the `/api/me` example in `SHARE_AUTH.md` is all zeros) and
+/// blocks nothing: an account the website wants to stop gets a 403 on the
+/// upload, not a zero quota.
 pub fn fit_block(size: u64, quota: &ShareQuota, what: &str) -> Option<String> {
-    if size > quota.max_capture_bytes {
+    if quota.max_capture_bytes != 0 && size > quota.max_capture_bytes {
         return Some(format!(
             "{what} is {}. The largest capture you can share is {}. Share a selected range to upload less.",
             format_share_bytes(size),
             format_share_bytes(quota.max_capture_bytes),
         ));
+    }
+    if quota.limit_bytes == 0 {
+        return None;
     }
     let remaining = quota.limit_bytes.saturating_sub(quota.used_bytes);
     if size > remaining {
@@ -724,6 +720,9 @@ pub struct ShareConfirmView {
     pub actions: Vec<ShareAction>,
     /// Set when the whole-capture size is known, for the harness tag.
     pub whole_bytes: Option<u64>,
+    /// The signed-in account's display name, for the avatar and the
+    /// harness tag. The title line is formatted from this, not parsed back.
+    pub account_name: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -756,6 +755,7 @@ pub fn confirm_view(input: &ConfirmInput<'_>) -> ShareConfirmView {
             lines: vec![progress("Checking your perfr.dev account…")],
             actions: vec![ShareAction::Cancel],
             whole_bytes: input.whole_bytes,
+            account_name: None,
         },
         ShareSession::Unavailable(message) => ShareConfirmView {
             kind: ShareConfirmKind::Unavailable,
@@ -765,6 +765,7 @@ pub fn confirm_view(input: &ConfirmInput<'_>) -> ShareConfirmView {
             }],
             actions: vec![ShareAction::Retry, ShareAction::Cancel],
             whole_bytes: input.whole_bytes,
+            account_name: None,
         },
         ShareSession::SignedOut { .. } => signed_out_view(input),
         ShareSession::SignedIn(account) => signed_in_view(input, account),
@@ -812,6 +813,7 @@ fn signed_out_view(input: &ConfirmInput<'_>) -> ShareConfirmView {
             .chain(std::iter::once(ShareAction::Cancel))
             .collect(),
         whole_bytes: input.whole_bytes,
+        account_name: None,
     }
 }
 
@@ -900,6 +902,7 @@ fn signed_in_view(input: &ConfirmInput<'_>, account: &ShareAccount) -> ShareConf
         lines,
         actions,
         whole_bytes: input.whole_bytes,
+        account_name: Some(display_name(&account.user).to_string()),
     }
 }
 
@@ -910,7 +913,9 @@ fn progress(text: &str) -> ShareLine {
     }
 }
 
-fn percent_encode(s: &str) -> String {
+/// A query value, percent-encoded. Everything but unreserved characters is
+/// escaped, `/` included, so a URL fits inside another URL's query.
+pub(crate) fn percent_encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.as_bytes() {
         match *b {
@@ -1043,24 +1048,24 @@ mod tests {
         assert!(!forbidden.needs_login);
         assert!(forbidden.message.contains("permission"));
         assert_eq!(
-            share_failure_message(429, ""),
+            share_failure(429, "").message,
             "Too many shares. Try again later."
         );
         assert!(!share_failure(429, "").needs_login);
         assert_eq!(
-            share_failure_message(503, "missing bucket"),
+            share_failure(503, "missing bucket").message,
             "Sharing is not configured."
         );
         assert_eq!(
-            share_failure_message(0, ""),
+            share_failure(0, "").message,
             "Could not reach the share server."
         );
         assert_eq!(
-            share_failure_message(500, "disk full"),
+            share_failure(500, "disk full").message,
             "Could not share this capture (500): disk full"
         );
         assert_eq!(
-            share_failure_message(502, "<html>bad gateway</html>"),
+            share_failure(502, "<html>bad gateway</html>").message,
             "Could not share this capture (502)."
         );
     }
@@ -1195,7 +1200,7 @@ mod tests {
             let (base, _) = serve(status, b"no", "text/plain");
             let (got, text) = post(&share_post_url(&base), b"bytes");
             assert_eq!(got, status);
-            assert_eq!(share_failure_message(got, &text), words);
+            assert_eq!(share_failure(got, &text).message, words);
         }
     }
 
@@ -1436,18 +1441,26 @@ mod tests {
             "https://Perfr.dev"
         ));
         assert!(!share_is_cross_origin("not a url", "https://perfr.dev"));
+        // The bearer arrives from storage, where index.html put it after
+        // reading `#share_token=`; only a header-safe token is kept.
+        assert_eq!(usable_share_token(" abc.def~ ").as_deref(), Some("abc.def~"));
+        assert!(usable_share_token("a b").is_none());
+        assert!(usable_share_token("").is_none());
+        // `next` drops the fragment and names the mode; a stale mode from a
+        // previous round trip is replaced, not stacked.
         assert_eq!(
-            fragment_share_token("#share_token=abc.def~").as_deref(),
-            Some("abc.def~")
+            login_next_url("http://127.0.0.1:9/?capture=1#share_token=abc", LOGIN_MODE_POPUP),
+            "http://127.0.0.1:9/?capture=1&share_login=popup"
         );
-        assert!(fragment_share_token("#share_token=a%20b").is_none());
-        assert!(fragment_share_token("").is_none());
         assert_eq!(
-            login_next_url("http://127.0.0.1:9/?capture=1#share_token=abc"),
-            "http://127.0.0.1:9/?capture=1"
+            login_next_url("http://127.0.0.1:9/", LOGIN_MODE_TAB),
+            "http://127.0.0.1:9/?share_login=tab"
+        );
+        assert_eq!(
+            login_next_url("http://127.0.0.1:9/?share_login=popup&capture=1", LOGIN_MODE_TAB),
+            "http://127.0.0.1:9/?capture=1&share_login=tab"
         );
         assert_eq!(bearer_value("abc"), "Bearer abc");
-        assert_eq!(SHARE_CREDENTIALS, "include");
     }
 
     #[test]
@@ -1464,6 +1477,21 @@ mod tests {
         // The per-capture cap wins when both are exceeded.
         let both = fit_block(80_000_000, &tight, "This capture").unwrap();
         assert!(both.contains("largest capture"));
+        // Zero is "no limit", which is what SHARE_AUTH.md's example sends.
+        let unlimited = account(0, 0, 0).quota;
+        assert!(fit_block(u64::MAX, &unlimited, "This capture").is_none());
+        assert_eq!(quota_fraction(&unlimited), 0.0);
+        assert_eq!(
+            quota_usage_line(&unlimited),
+            "0 B shared · no quota limit · no per-capture limit"
+        );
+        let capped_only = account(5, 0, 50_000_000).quota;
+        assert!(fit_block(50_000_000, &capped_only, "This capture").is_none());
+        assert!(fit_block(50_000_001, &capped_only, "This capture").is_some());
+        assert_eq!(
+            quota_usage_line(&capped_only),
+            "5 B shared · no quota limit · up to 50.0 MB per capture"
+        );
     }
 
     #[test]
@@ -1520,6 +1548,7 @@ mod tests {
         let view = confirm_view(&input(&session, Some(2_100_000), None));
         assert_eq!(view.kind, ShareConfirmKind::SignedIn);
         assert_eq!(view.lines[0].text, "Sharing as Ada Lovelace");
+        assert_eq!(view.account_name.as_deref(), Some("Ada Lovelace"));
         assert!(view.lines.iter().any(
             |line| line.role == ShareLineRole::Quota && line.text.contains("12.0 MB of 1.0 GB")
         ));
@@ -1566,11 +1595,10 @@ mod tests {
     #[test]
     fn the_auth_doc_and_the_popup_page_use_this_contract() {
         let doc = include_str!("../SHARE_AUTH.md");
-        for (name, _) in SHARE_CORS {
-            assert!(doc.contains(name), "{name} missing from SHARE_AUTH.md");
-        }
+        assert!(doc.contains("Access-Control-Allow-Credentials: true"));
         assert!(doc.contains(SIGN_IN_TITLE));
-        assert!(doc.contains(SHARE_TOKEN_FRAGMENT));
+        assert!(doc.contains(LOGIN_MODE_PARAM));
+        assert!(doc.contains("#share_token="));
         assert!(doc.contains("SameSite=None"));
         assert!(doc.contains(ME_PATH));
         assert_eq!(LOGIN_RESUME_KEY, "perfr.share.resume");
@@ -1579,9 +1607,13 @@ mod tests {
         assert!(!ShareFailure::message("Nothing to share.").needs_login);
         let html = include_str!("../viewer-dist/index.html");
         assert!(html.contains(LOGIN_WINDOW_NAME));
+        assert!(html.contains(&format!("\"{LOGIN_MODE_PARAM}\"")));
+        assert!(html.contains(&format!("\"{LOGIN_MODE_POPUP}\"")));
+        assert!(html.contains(&format!("\"{LOGIN_MODE_TAB}\"")));
+        assert!(html.contains(LOGIN_RESUME_KEY));
         assert!(html.contains(LOGIN_SIGNAL_KEY));
         assert!(html.contains(SHARE_TOKEN_KEY));
-        assert!(html.contains(SHARE_TOKEN_FRAGMENT));
+        assert!(html.contains("\"share_token\""));
         assert!(html.contains(LOGIN_MESSAGE_SOURCE));
     }
 }

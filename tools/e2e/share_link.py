@@ -60,6 +60,7 @@ def demo_stream():
 def main():
     stream = demo_stream()
     store = {"demo": stream}
+    logins = []
     posted = {}
 
     class Handler(BaseHTTPRequestHandler):
@@ -103,6 +104,7 @@ def main():
             if path == "/login":
                 query = urllib.parse.parse_qs(parsed.query)
                 nxt = (query.get("next") or ["/"])[0]
+                logins.append(nxt)
                 host = urllib.parse.urlsplit(nxt).hostname
                 if host not in (None, "127.0.0.1", "localhost"):
                     nxt = "/"
@@ -245,7 +247,9 @@ def main():
         assert rect("share-range-bytes:") is None, "a range was offered with nothing selected"
         assert "body" not in posted, "Share posted before Upload"
         assert chrome.screenshot(str(signed_in_shot)) > 20000, "signed-in dialog screenshot looks blank"
-        confirm_shot = Path(os.environ.get("PERFR_SHARE_CONFIRM_SHOT", str(signed_in_shot)))
+        # The popup's return URL named itself, so index.html did not need
+        # window.name (which a COOP swap clears) to know it was the popup.
+        assert logins and "share_login=popup" in logins[-1], logins
         upload = wait_until(lambda: rect("share-upload"), timeout=5)
         chrome.click(upload[1] + upload[3] / 2, upload[2] + upload[4] / 2)
         try:
@@ -270,7 +274,6 @@ def main():
         print(f"screenshot {shot}")
         print(f"signed-out {signed_out_shot}")
         print(f"signed-in {signed_in_shot}")
-        print(f"confirm {confirm_shot}")
     finally:
         if chrome:
             chrome.close()

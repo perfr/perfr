@@ -17,11 +17,6 @@ description = "eframe WebRunner live viewer: perfr chrome + hybrid wgpu timeline
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[[bin]]
-name = "perfr-log-preview"
-path = "src/bin/log_preview.rs"
-required-features = ["egui"]
-
 [features]
 default = ["egui"]
 egui = ["dep:eframe", "dep:egui", "dep:egui-wgpu"]

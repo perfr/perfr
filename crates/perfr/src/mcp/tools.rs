@@ -600,12 +600,6 @@ impl Mcp {
         if let Some(tid) = arg_u32(args, "tid") {
             path.push_str(&format!("&tid={tid}"));
         }
-        if let Some(channel) = arg_str(args, "channel") {
-            if !channel.is_empty() {
-                path.push_str("&channel=");
-                path.push_str(&urlencode(channel));
-            }
-        }
         if let Some(scope) = arg_str(args, "scope") {
             if !scope.is_empty() {
                 path.push_str("&scope=");
@@ -908,15 +902,14 @@ pub fn tool_specs() -> Vec<Value> {
         ),
         tool(
             "perfr_logs",
-            "Log lines from the current capture. Filter by time range (t0_ns, t1_ns; omit t1_ns for everything after t0), thread id, and channel name or id. A channel filter keeps scopes recorded with that channel and the log lines inside them. Pass scope to the name of a scope to list lines emitted during its interval on that thread; when the name occurs more than once the lines are grouped with counts. Logs are correlated to scopes by timestamp and thread, not by an id stored on the line.",
+            "Log lines from the current capture. Filter by time range (t0_ns, t1_ns; omit t1_ns for everything after t0) and thread id. Pass scope, the exact name of a manual scope, to keep only the lines logged while that scope was open on the same thread: scopes are how log lines are grouped. With scope, identical lines are folded into one row with a count (grouped is true), and the time range limits which instances of the scope are considered. A line is matched to a scope by timestamp and thread, not by an id stored on the line.",
             json!({
                 "type": "object",
                 "properties": {
                     "t0_ns": { "type": "integer", "description": "Range start, inclusive. Default 0." },
                     "t1_ns": { "type": "integer", "description": "Range end, inclusive. Omit or 0 for no end." },
                     "tid": { "type": "integer", "description": "Only this thread." },
-                    "channel": { "type": "string", "description": "Channel name or id. Filters scopes, then their logs." },
-                    "scope": { "type": "string", "description": "Scope name. Lines inside its instances, grouped when it recurs." },
+                    "scope": { "type": "string", "description": "Exact scope name. Lines logged inside its instances, identical lines folded with a count." },
                     "limit": { "type": "integer", "description": "Page size. Default 30, max 100." },
                     "offset": { "type": "integer", "description": "Rows to skip. Default 0." }
                 },

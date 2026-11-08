@@ -115,14 +115,20 @@ struct perfr_api_table_v1 {
   uint64_t (*now_ns)(void);
   void (*span)(const char* name, size_t name_len, uint64_t start_ns, uint64_t end_ns);
   void (*span_async)(const char* name, size_t name_len, uint64_t start_ns, uint64_t end_ns);
-  /* Appended. A header checks `size` before calling these, so a library
-   * built before logging still loads and the new calls stay no-ops. */
-  uint8_t (*register_channel)(const char* name, size_t name_len);
-  uint8_t (*channel_current)(void);
-  uint8_t (*channel_push)(uint8_t id);
-  uint8_t (*channel_pop)(void);
+  /* Appended after the first release of this table. Everything above this
+   * line is what a library must provide to load at all
+   * (PERFR_API_TABLE_BASE_SIZE_); a field below it is read only when the
+   * library's `size` covers it, so a library built before logging still
+   * loads and perfr_log stays a no-op against it. */
   void (*log)(uint8_t level, const char* message, size_t message_len);
 };
+
+/* The table as first released: the fields every library has. */
+#define PERFR_API_TABLE_BASE_SIZE_ offsetof(struct perfr_api_table_v1, log)
+/* Whether table `t` is long enough to hold `field`. */
+#define PERFR_API_HAS_(t, field)                                    \
+  ((t)->size >= offsetof(struct perfr_api_table_v1, field) +        \
+                    sizeof(((const struct perfr_api_table_v1*)0)->field))
 
 #ifdef PERFR_STATIC
 
@@ -142,10 +148,6 @@ void perfr_value(const char* name, size_t name_len, double value);
 uint64_t perfr_now_ns(void);
 void perfr_span(const char* name, size_t name_len, uint64_t start_ns, uint64_t end_ns);
 void perfr_span_async(const char* name, size_t name_len, uint64_t start_ns, uint64_t end_ns);
-uint8_t perfr_register_channel(const char* name, size_t name_len);
-uint8_t perfr_channel_current(void);
-uint8_t perfr_channel_push(uint8_t id);
-uint8_t perfr_channel_pop(void);
 void perfr_log(uint8_t level, const char* message, size_t message_len);
 
 /* Whether a library is loaded and the process has a segment. Always 1 here:
@@ -397,8 +399,10 @@ static inline const struct perfr_api_table_v1* perfr_api_load_(int* status) {
   }
   /* A library too old to have the getter speaks an older ABI by definition. */
   table = get ? get(PERFR_API_ABI_VERSION) : 0;
+  /* Only the base table is required. Fields appended since are checked one
+   * by one where they are called, so an older library keeps working. */
   if (!table || table->abi_version != PERFR_API_ABI_VERSION ||
-      table->size < sizeof(struct perfr_api_table_v1)) {
+      table->size < PERFR_API_TABLE_BASE_SIZE_) {
     perfr_api_dlclose_(handle);
     *status = PERFR_E_ABI;
     return 0;
@@ -532,37 +536,11 @@ static inline void perfr_span_async(const char* name, size_t name_len, uint64_t 
   if (t) t->span_async(name, name_len, start_ns, end_ns);
 }
 
-/* The logging calls were appended to the table. A library built before them
- * has a smaller `size`; calling through it would read off the end. */
-static inline const struct perfr_api_table_v1* perfr_api_logging_(void) {
-  const struct perfr_api_table_v1* t = perfr_api_get_();
-  if (!t || t->size < sizeof *t || !t->log) return 0;
-  return t;
-}
-
-static inline uint8_t perfr_register_channel(const char* name, size_t name_len) {
-  const struct perfr_api_table_v1* t = perfr_api_logging_();
-  return t ? t->register_channel(name, name_len) : 0;
-}
-
-static inline uint8_t perfr_channel_current(void) {
-  const struct perfr_api_table_v1* t = perfr_api_logging_();
-  return t ? t->channel_current() : 0;
-}
-
-static inline uint8_t perfr_channel_push(uint8_t id) {
-  const struct perfr_api_table_v1* t = perfr_api_logging_();
-  return t ? t->channel_push(id) : 0;
-}
-
-static inline uint8_t perfr_channel_pop(void) {
-  const struct perfr_api_table_v1* t = perfr_api_logging_();
-  return t ? t->channel_pop() : 0;
-}
-
+/* Records a log line at `level` (PERFR_LOG_*). A no-op when nobody is
+ * capturing, and against a library built before logging. */
 static inline void perfr_log(uint8_t level, const char* message, size_t message_len) {
-  const struct perfr_api_table_v1* t = perfr_api_logging_();
-  if (t) t->log(level, message, message_len);
+  const struct perfr_api_table_v1* t = perfr_api_get_();
+  if (t && PERFR_API_HAS_(t, log) && t->log) t->log(level, message, message_len);
 }
 
 #endif /* PERFR_STATIC */
@@ -609,21 +587,9 @@ class Scope {
   perfr_scope handle_;
 };
 
-/* Sets the thread's channel until the end of the scope. Scopes entered
- * inside record that channel. Log lines are unchanged. */
-class Channel {
- public:
-  explicit Channel(uint8_t id) { perfr_channel_push(id); }
-  explicit Channel(const char* name, size_t len) : Channel(perfr_register_channel(name, len)) {}
-  ~Channel() { perfr_channel_pop(); }
-  Channel(const Channel&) = delete;
-  Channel& operator=(const Channel&) = delete;
-};
-
 } /* namespace perfr */
 
 #define PERFR_SCOPE(lit) ::perfr::Scope PERFR_CONCAT(perfr_scope_, __LINE__)(PERFR_LIT(lit))
-#define PERFR_CHANNEL(lit) ::perfr::Channel PERFR_CONCAT(perfr_channel_, __LINE__)(PERFR_LIT(lit))
 
 #elif defined(__GNUC__) || defined(__clang__)
 
@@ -634,15 +600,6 @@ static inline void perfr_scope_cleanup_(const perfr_scope* scope) { perfr_stop(*
 #define PERFR_SCOPE(lit)                                                                     \
   perfr_scope PERFR_CONCAT(perfr_scope_, __LINE__) __attribute__((cleanup(perfr_scope_cleanup_), \
                                                                   unused)) = perfr_start(PERFR_LIT(lit))
-
-static inline void perfr_channel_cleanup_(uint8_t* ignored) {
-  (void)ignored;
-  perfr_channel_pop();
-}
-#define PERFR_CHANNEL(lit)                                                                          \
-  uint8_t PERFR_CONCAT(perfr_channel_, __LINE__)                                                    \
-      __attribute__((cleanup(perfr_channel_cleanup_), unused)) =                                    \
-          perfr_channel_push(perfr_register_channel(PERFR_LIT(lit)))
 
 #endif /* __cplusplus / GNU C */
 

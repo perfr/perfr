@@ -34,7 +34,7 @@ pub mod bundle;
 pub mod slice;
 pub mod zipstore;
 
-pub use bundle::{CaptureBundle, ChannelName, ProcessName, ThreadName, BUNDLE_SUFFIX};
+pub use bundle::{CaptureBundle, ProcessName, ThreadName, BUNDLE_SUFFIX};
 pub use slice::{slice_bundle_bytes, slice_bundle_file, SliceStats};
 
 /// [`CaptureBundle::to_zip_with_level`], as a free function for tools.
@@ -68,9 +68,7 @@ pub const CHUNK_ROWS: usize = 65_536;
 
 /// The dataset layout version written into `manifest.json`. Bump when a
 /// table's schema changes shape, so a reader can tell what it has.
-/// Dataset layout. `/2` adds an optional `bundle.channels` array. Readers
-/// accept any `perfr-capture/` version, so a `/1` capture still loads.
-pub const DATASET_FORMAT: &str = "perfr-capture/2";
+pub const DATASET_FORMAT: &str = "perfr-capture/1";
 
 /// Anything that can go wrong writing or reading a capture.
 #[derive(Debug)]

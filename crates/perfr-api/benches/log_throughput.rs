@@ -62,8 +62,6 @@ fn main() {
     perfr_api::init().expect("segment");
     let reader = ScopeRingReader::open(std::process::id()).expect("reader");
     reader.set_capturing(true);
-    // Publish a read cursor far ahead so the bench measures the write path
-    // and not a lap. The consumer in a real capture does this every drain.
     // A cursor at the far end of the claim space: every claim looks caught
     // up, so the bench measures the write plus the cursor load and not a lap.
     // A real capture publishes the cursor it has actually read.
@@ -92,7 +90,7 @@ fn main() {
             let _s = scope(black_box("frame"));
             black_box(_s.handle());
         });
-        row(n, "scope guard (channel byte included)", rate, 8);
+        row(n, "scope guard", rate, 8);
 
         let (rate, _) = time(n, || log(level::INFO, black_box(short.as_bytes())));
         row(n, "log 5 B", rate, short.len());
@@ -101,19 +99,6 @@ fn main() {
         let (rate, _) = time(n, || log(level::INFO, black_box(multi.as_bytes())));
         row(n, &format!("log {multi_bytes} B (multi-chunk)"), rate, multi_bytes);
     }
-
-    // Channel guard is off the scope-enter path except for the byte already
-    // in the thread state. Time the guard itself so it is not confused with
-    // the enter cost.
-    let id = perfr_api::register_channel("bench");
-    let started = Instant::now();
-    for _ in 0..1_000_000u64 {
-        let g = perfr_api::ChannelGuard::push(id);
-        black_box(g);
-    }
-    let ns = started.elapsed().as_nanos() as f64 / 1_000_000.0;
-    println!();
-    println!("channel guard push+drop: {ns:.1} ns (not on the log path; scope enter reads the byte)");
     let _ = reader;
 }
 

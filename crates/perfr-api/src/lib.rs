@@ -22,7 +22,7 @@ use perfr_scope_ring::event::{flags, kind};
 use perfr_scope_ring::logmsg::{self, write_log};
 use perfr_scope_ring::shm::now_monotonic_ns;
 use perfr_scope_ring::text::split_name;
-use perfr_scope_ring::{ring_for_thread, ScopeEvent, ScopeRingWriter, CHANNEL_SLOTS};
+use perfr_scope_ring::{ring_for_thread, ScopeEvent, ScopeRingWriter};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
@@ -79,6 +79,15 @@ fn active_segment() -> Option<&'static ScopeRingWriter> {
     writer.is_capturing().then_some(writer)
 }
 
+/// Whether a service is draining this process right now.
+///
+/// Every call below already checks this; it is for a caller that would do
+/// work only to feed one of them -- format a log line, walk a span's
+/// fields -- and can skip it when nobody is capturing.
+pub fn capturing() -> bool {
+    active_segment().is_some()
+}
+
 /// Serialises `init`. A compare-exchange on the pointer is not enough:
 /// creating a segment unlinks any existing one of the same name first, so two
 /// threads initialising at once would have the loser destroy the winner's
@@ -112,7 +121,6 @@ pub fn init() -> Result<(), i32> {
     let writer = Box::leak(Box::new(writer));
     SEGMENT.store(writer, Ordering::Release);
     writer.publish_api_descriptor(&DYNAMIC_API as *const DynamicApiV1 as u64);
-    publish_channels(writer);
     Ok(())
 }
 
@@ -131,26 +139,6 @@ struct ThreadState {
     tid: u32,
     ring: usize,
     counter: u32,
-    /// Channel id stamped onto scope enter. Logs do not read it.
-    channel: u8,
-}
-
-// The thread's current channel. 0 is the default, used for scopes entered
-// with no guard active. The guard only changes this; it does not emit.
-thread_local! {
-    static CHANNEL: Cell<u8> = const { Cell::new(0) };
-    static CH_LEN: Cell<u8> = const { Cell::new(0) };
-    static CH_STACK: Cell<[u8; 32]> = const { Cell::new([0; 32]) };
-}
-
-fn set_current_channel(id: u8) {
-    CHANNEL.with(|c| c.set(id));
-    THREAD.with(|cell| {
-        if let Some(mut state) = cell.get() {
-            state.channel = id;
-            cell.set(Some(state));
-        }
-    });
 }
 
 thread_local! {
@@ -164,8 +152,7 @@ fn with_thread<R>(ring_count: usize, f: impl FnOnce(&mut ThreadState) -> R) -> R
             // The one OS call, paid once per thread rather than per scope.
             let raw = perfr_scope_ring::platform::thread_id();
             let tid = raw as u32;
-            let channel = CHANNEL.with(|c| c.get());
-            ThreadState { tid, ring: ring_for_thread(raw, ring_count), counter: 0, channel }
+            ThreadState { tid, ring: ring_for_thread(raw, ring_count), counter: 0 }
         });
         let out = f(&mut state);
         cell.set(Some(state));
@@ -202,9 +189,6 @@ fn start_at(flag: u8, name: &[u8], timestamp_ns: u64) -> Handle {
             tid: state.tid,
             kind: kind::SCOPE_START,
             flags: flag,
-            // The channel the thread was in at enter. One byte of the record
-            // that was already being stored; logs do not carry it.
-            depth: state.channel,
             ..ScopeEvent::default()
         };
         push_named(writer, state, head, name);
@@ -360,134 +344,15 @@ pub fn scope_async(name: impl AsRef<[u8]>) -> Scope {
     Scope(start_async(name))
 }
 
-// --------------------------------------------------------------- channels --
-
-struct ChannelDir {
-    by_name: std::collections::HashMap<String, u8>,
-    next: u8,
-}
-
-static CHANNELS: std::sync::LazyLock<std::sync::Mutex<ChannelDir>> = std::sync::LazyLock::new(|| {
-    std::sync::Mutex::new(ChannelDir {
-        by_name: std::collections::HashMap::new(),
-        next: 1,
-    })
-});
-
-fn publish_channels(writer: &ScopeRingWriter) {
-    let guard = CHANNELS.lock().unwrap_or_else(|p| p.into_inner());
-    for (name, id) in &guard.by_name {
-        writer.rings().write_channel(*id, name.as_bytes());
-    }
-}
-
-/// Registers `name` and returns its id. Empty is the default channel, id 0.
-/// The same name always returns the same id. Registration is the only place
-/// the name is looked up; scope enter and logging do not.
-///
-/// The id is what a scope records at enter. Log lines do not carry it.
-pub fn register_channel(name: impl AsRef<[u8]>) -> u8 {
-    let text = String::from_utf8_lossy(name.as_ref());
-    if text.is_empty() {
-        return 0;
-    }
-    let mut guard = CHANNELS.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some(id) = guard.by_name.get(text.as_ref()) {
-        return *id;
-    }
-    if guard.next == 0 || guard.next as usize > CHANNEL_SLOTS {
-        return 0;
-    }
-    let id = guard.next;
-    guard.next = guard.next.saturating_add(1);
-    guard.by_name.insert(text.to_string(), id);
-    drop(guard);
-    if let Some(writer) = segment() {
-        writer.rings().write_channel(id, text.as_bytes());
-    }
-    id
-}
-
-/// The channel scopes entered on this thread will record. 0 is the default.
-pub fn current_channel() -> u8 {
-    CHANNEL.with(|c| c.get())
-}
-
-/// Sets the thread's channel and returns the previous one. Does not emit.
-pub fn channel_set(id: u8) -> u8 {
-    let prev = current_channel();
-    set_current_channel(id);
-    prev
-}
-
-/// Pushes `id` as the thread's channel. Returns the previous id. Nesting is
-/// a stack: [`channel_pop`] restores what this replaced. No event is written.
-pub fn channel_push(id: u8) -> u8 {
-    let prev = current_channel();
-    CH_LEN.with(|len| {
-        let n = len.get();
-        if (n as usize) < 32 {
-            CH_STACK.with(|stack| {
-                let mut slots = stack.get();
-                slots[n as usize] = prev;
-                stack.set(slots);
-            });
-            len.set(n + 1);
-        }
-    });
-    set_current_channel(id);
-    prev
-}
-
-/// Restores the channel saved by the matching [`channel_push`].
-pub fn channel_pop() -> u8 {
-    let prev = CH_LEN.with(|len| {
-        let n = len.get();
-        if n == 0 {
-            return 0;
-        }
-        let prev = CH_STACK.with(|stack| stack.get()[n as usize - 1]);
-        len.set(n - 1);
-        prev
-    });
-    set_current_channel(prev);
-    prev
-}
-
-/// Sets the thread channel to `id` until dropped, then restores the previous
-/// one. Nesting works. Nothing is written to the ring.
-pub struct ChannelGuard {
-    armed: bool,
-}
-
-impl ChannelGuard {
-    pub fn push(id: u8) -> ChannelGuard {
-        channel_push(id);
-        ChannelGuard { armed: true }
-    }
-
-    /// Registers `name` if needed and pushes that id.
-    pub fn named(name: impl AsRef<[u8]>) -> ChannelGuard {
-        ChannelGuard::push(register_channel(name))
-    }
-}
-
-impl Drop for ChannelGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            channel_pop();
-        }
-    }
-}
-
 // ------------------------------------------------------------------ logs --
 
 /// Records a log line on the calling thread.
 ///
 /// A no-op, one branch, when nobody is capturing. The line is chunked into
 /// the same ring as scopes. It carries the level, the thread and the
-/// timestamp, and not a channel: a scope's channel is metadata on the scope,
-/// and the viewer decides which lines fell inside it.
+/// timestamp, and nothing that names a scope: the viewer decides which
+/// scopes a line fell inside from the thread and the time. A scope is
+/// therefore the way to group lines.
 pub fn log(level: u8, message: impl AsRef<[u8]>) {
     let Some(writer) = active_segment() else { return };
     let message = message.as_ref();
@@ -610,28 +475,6 @@ pub extern "C" fn perfr_now_ns() -> u64 {
 }
 
 /// # Safety
-/// `name` must point at `name_len` readable bytes, or `name_len` must be 0.
-#[no_mangle]
-pub unsafe extern "C" fn perfr_register_channel(name: *const libc::c_char, name_len: usize) -> u8 {
-    register_channel(bytes(name, name_len))
-}
-
-#[no_mangle]
-pub extern "C" fn perfr_channel_current() -> u8 {
-    current_channel()
-}
-
-#[no_mangle]
-pub extern "C" fn perfr_channel_push(id: u8) -> u8 {
-    channel_push(id)
-}
-
-#[no_mangle]
-pub extern "C" fn perfr_channel_pop() -> u8 {
-    channel_pop()
-}
-
-/// # Safety
 /// `message` must point at `message_len` readable bytes, or `message_len` must be 0.
 #[no_mangle]
 pub unsafe extern "C" fn perfr_log(level: u8, message: *const libc::c_char, message_len: usize) {
@@ -671,10 +514,9 @@ pub struct ApiTableV1 {
     pub now_ns: extern "C" fn() -> u64,
     pub span: unsafe extern "C" fn(*const libc::c_char, usize, u64, u64),
     pub span_async: unsafe extern "C" fn(*const libc::c_char, usize, u64, u64),
-    pub register_channel: unsafe extern "C" fn(*const libc::c_char, usize) -> u8,
-    pub channel_current: extern "C" fn() -> u8,
-    pub channel_push: extern "C" fn(u8) -> u8,
-    pub channel_pop: extern "C" fn() -> u8,
+    /// Appended after the first release of this table. A header reads it
+    /// only when `size` covers it, so every field above this line is the
+    /// part an older library is guaranteed to have.
     pub log: unsafe extern "C" fn(u8, *const libc::c_char, usize),
 }
 
@@ -693,10 +535,6 @@ static API_TABLE: ApiTableV1 = ApiTableV1 {
     now_ns: perfr_now_ns,
     span: perfr_span,
     span_async: perfr_span_async,
-    register_channel: perfr_register_channel,
-    channel_current: perfr_channel_current,
-    channel_push: perfr_channel_push,
-    channel_pop: perfr_channel_pop,
     log: perfr_log,
 };
 
@@ -722,6 +560,13 @@ mod tests {
         let table = unsafe { &*table };
         assert_eq!(table.abi_version, API_ABI_VERSION);
         assert_eq!(table.size as usize, std::mem::size_of::<ApiTableV1>());
+        // The table as first released ends where `log` begins. perfr.h loads
+        // any library at least that long (PERFR_API_TABLE_BASE_SIZE_), so
+        // nothing may ever be inserted above `log`, only appended below it.
+        assert_eq!(
+            std::mem::offset_of!(ApiTableV1, log),
+            8 + 12 * std::mem::size_of::<usize>()
+        );
         assert_eq!((table.now_ns)() > 0, true);
         assert!(perfr_api_table_v1(API_ABI_VERSION + 1).is_null());
         assert!(perfr_api_table_v1(0).is_null());
@@ -899,53 +744,6 @@ mod tests {
         };
         assert!(has(b"visible"));
         assert!(!has(b"silent"), "a log while capture is off writes nothing");
-        assert!(events.iter().filter(|e| e.kind == kind::LOG).all(|e| e.depth == 0));
-        reader.set_capturing(false);
-    }
-
-    #[test]
-    fn a_channel_guard_nests_and_only_scopes_record_it() {
-        let _serial = WRITES.lock().unwrap_or_else(|p| p.into_inner());
-        init().expect("init");
-        let reader = ScopeRingReader::open(std::process::id()).unwrap();
-        reader.set_capturing(true);
-        assert_eq!(current_channel(), 0);
-        let sim = register_channel(b"simulation");
-        let proc_ = register_channel(b"procedure");
-        assert_ne!(sim, 0);
-        assert_eq!(register_channel(b"simulation"), sim, "registration is once");
-        assert_eq!(current_channel(), 0, "registering does not change the thread");
-        {
-            let _outer = ChannelGuard::push(sim);
-            assert_eq!(current_channel(), sim);
-            let outer = start(b"frame");
-            {
-                let _inner = ChannelGuard::push(proc_);
-                assert_eq!(current_channel(), proc_);
-                let inner = start(b"step");
-                log(level::INFO, b"inside");
-                stop(inner);
-            }
-            assert_eq!(current_channel(), sim, "the inner guard restored");
-            log(level::WARN, b"still-in-frame");
-            stop(outer);
-        }
-        assert_eq!(current_channel(), 0, "the outer guard restored");
-        let bare = start(b"after");
-        stop(bare);
-
-        let events = all_events();
-        let depth_of = |name: &[u8]| {
-            events.iter().find(|e| e.kind == kind::SCOPE_START && e.text_bytes() == name).map(|e| e.depth)
-        };
-        assert_eq!(depth_of(b"frame"), Some(sim));
-        assert_eq!(depth_of(b"step"), Some(proc_));
-        assert_eq!(depth_of(b"after"), Some(0), "the default channel outside any guard");
-        assert!(events.iter().filter(|e| e.kind == kind::LOG).all(|e| e.depth == 0));
-        let names = reader.rings().read_channels();
-        assert!(names.iter().any(|(id, n)| *id == sim && n == "simulation"));
-        assert!(names.iter().any(|(id, n)| *id == proc_ && n == "procedure"));
         reader.set_capturing(false);
     }
 }
-

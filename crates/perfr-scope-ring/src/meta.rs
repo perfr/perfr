@@ -7,24 +7,30 @@
 //! The record layout and every ring offset are unchanged from segment
 //! version 2. These tables occupy bytes of the control page that used to be
 //! zero, past the reader-lease table. An older producer leaves them zero,
-//! which a new reader treats as "no named channels" and "no attributed
-//! drops". A new producer writes them; an older reader never looks.
+//! which a new reader treats as "no attributed drops". A new producer writes
+//! them; an older reader never looks.
 //!
 //! Two tables:
 //!
-//! * **Read cursors.** The consumer publishes each ring's read claim so the
+//! * **Read cursors.** A consumer publishes each ring's read claim so the
 //!   producer can see, at the moment it claims a slot, whether that claim
 //!   will overwrite an event the consumer has not read.
 //! * **Drop counts.** When a claim will overwrite an unread slot, the
 //!   producer reads the event still sitting there and adds one to that
 //!   event's `(tid, kind)` counter. The lost event is counted as what it
 //!   was, not as whatever replaced it.
-//! * **Channel names.** `register_channel` writes a name once. Scope enter
-//!   stamps the id; the service resolves the name when it serializes the
-//!   capture. Logs do not carry a channel id.
+//!
+//! The drop table says *what* was lost. It is not the count of what a reader
+//! lost: that is the reader's own lap count, which is exact. The table can
+//! run ahead of it, for two reasons. The published cursor is always a little
+//! behind the reader (it is stored once per drain), so a slot the reader has
+//! copied but not yet published is counted when it is overwritten. And there
+//! is one cursor per ring however many readers drain the segment: the last
+//! one to publish wins, and the table then counts against that reader. A
+//! consumer therefore uses the table to break its own loss down by thread and
+//! kind, and never reports more than it lost itself.
 
-use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::ring::READER_LEASES_OFFSET;
 
@@ -41,17 +47,10 @@ pub const DROP_CELL_STRIDE: usize = 40;
 pub const DROP_KIND_SLOTS: usize = 8;
 pub const DROP_KIND_UNKNOWN: u8 = 0xFF;
 
-/// First byte of the channel-name directory.
-pub const CHANNEL_TABLE_OFFSET: usize = 2048;
-pub const CHANNEL_SLOTS: usize = 48;
-pub const CHANNEL_NAME_MAX: usize = 28;
-pub const CHANNEL_SLOT_STRIDE: usize = 32;
-
 const _: () = assert!(READ_CURSOR_OFFSET >= READER_LEASES_OFFSET + 256);
 const _: () = assert!(READ_CURSOR_OFFSET + READ_CURSOR_SLOTS * 8 <= DROP_TABLE_OFFSET);
-const _: () = assert!(DROP_TABLE_OFFSET + DROP_CELLS * DROP_CELL_STRIDE <= CHANNEL_TABLE_OFFSET);
 const _: () = assert!(
-    CHANNEL_TABLE_OFFSET + CHANNEL_SLOTS * CHANNEL_SLOT_STRIDE <= 4096,
+    DROP_TABLE_OFFSET + DROP_CELLS * DROP_CELL_STRIDE <= 4096,
     "the tables have to fit the smallest control page"
 );
 
@@ -72,19 +71,6 @@ struct DropCell {
 
 const _: () = assert!(std::mem::size_of::<DropCell>() <= DROP_CELL_STRIDE);
 
-#[repr(C)]
-struct ChannelSlot {
-    /// 0 while empty. Otherwise the channel id, which is `index + 1`.
-    id: AtomicU16,
-    len: AtomicU8,
-    _pad: u8,
-    /// Written before `id` is published. `UnsafeCell` because a reader may
-    /// hold `&ChannelSlot` while registration fills the bytes.
-    name: UnsafeCell<[u8; CHANNEL_NAME_MAX]>,
-}
-
-const _: () = assert!(std::mem::size_of::<ChannelSlot>() <= CHANNEL_SLOT_STRIDE);
-
 fn cursor_ptr(base: *mut u8, ring: usize) -> *const AtomicU64 {
     // SAFETY: ring is bounded by the caller; the offset stays inside the
     // control page, which the asserts above pin under 4096.
@@ -93,10 +79,6 @@ fn cursor_ptr(base: *mut u8, ring: usize) -> *const AtomicU64 {
 
 fn drop_cell(base: *mut u8, index: usize) -> *const DropCell {
     unsafe { base.add(DROP_TABLE_OFFSET + index * DROP_CELL_STRIDE).cast() }
-}
-
-fn channel_slot(base: *mut u8, index: usize) -> *const ChannelSlot {
-    unsafe { base.add(CHANNEL_TABLE_OFFSET + index * CHANNEL_SLOT_STRIDE).cast() }
 }
 
 /// Publishes a ring's read claim. Stored as `read + 1` so zero still means
@@ -201,61 +183,12 @@ pub unsafe fn snapshot_drops(base: *const u8) -> Vec<DropTally> {
     out
 }
 
-/// Writes a channel name into the directory. `id` is 1-based and at most
-/// [`CHANNEL_SLOTS`]. Returns false when the id or the name is empty.
-///
-/// # Safety
-/// `base` must be the writable control page.
-pub unsafe fn write_channel(base: *mut u8, id: u8, name: &[u8]) -> bool {
-    if id == 0 || id as usize > CHANNEL_SLOTS || name.is_empty() {
-        return false;
-    }
-    let take = name.len().min(CHANNEL_NAME_MAX);
-    // SAFETY: id is inside the table. The bytes are published before the id
-    // store, so a reader that observes the id observes the name.
-    unsafe {
-        let slot = &*channel_slot(base, id as usize - 1);
-        let name_ptr = slot.name.get().cast::<u8>();
-        std::ptr::copy_nonoverlapping(name.as_ptr(), name_ptr, take);
-        if take < CHANNEL_NAME_MAX {
-            std::ptr::write_bytes(name_ptr.add(take), 0, CHANNEL_NAME_MAX - take);
-        }
-        slot.len.store(take as u8, Ordering::Relaxed);
-        slot.id.store(u16::from(id), Ordering::Release);
-    }
-    true
-}
-
-/// Channel names the producer has published, in id order.
-///
-/// # Safety
-/// `base` must be a mapped control page.
-pub unsafe fn read_channels(base: *const u8) -> Vec<(u8, String)> {
-    let mut out = Vec::new();
-    for index in 0..CHANNEL_SLOTS {
-        // SAFETY: index is inside the table.
-        let slot = unsafe { &*channel_slot(base as *mut u8, index) };
-        let id = slot.id.load(Ordering::Acquire);
-        if id == 0 {
-            continue;
-        }
-        let len = (slot.len.load(Ordering::Acquire) as usize).min(CHANNEL_NAME_MAX);
-        // SAFETY: the acquire load of `id` pairs with the release store that
-        // published the bytes; `len` is at most the array. `[u8; N]` is sized,
-        // so the pointer is thin.
-        let bytes = unsafe { std::slice::from_raw_parts(slot.name.get().cast::<u8>(), len) };
-        let name = String::from_utf8_lossy(bytes).into_owned();
-        out.push((id as u8, name));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn cursors_drops_and_channels_round_trip_on_a_control_page() {
+    fn cursors_and_drops_round_trip_on_a_control_page() {
         let mut page = vec![0u8; 4096];
         let base = page.as_mut_ptr();
         unsafe {
@@ -274,14 +207,6 @@ mod tests {
             assert!(got.contains(&DropTally { tid: 7, kind: 6, count: 2 }));
             assert!(got.contains(&DropTally { tid: 9, kind: 0, count: 1 }));
             assert!(got.iter().any(|d| d.tid == 0 && d.kind == DROP_KIND_UNKNOWN && d.count == 1));
-
-            assert!(write_channel(base, 1, b"simulation"));
-            assert!(write_channel(base, 2, b"procedure"));
-            assert!(!write_channel(base, 0, b"nope"));
-            assert_eq!(
-                read_channels(base),
-                vec![(1, "simulation".into()), (2, "procedure".into())]
-            );
         }
     }
 }

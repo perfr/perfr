@@ -313,7 +313,6 @@ mod tests {
         write_log(5, 1, 1, level::INFO, b"", |e| chunks.push(e));
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text_len, LOG_LEN_HEADER as u8);
-        assert_eq!(chunks[0].depth, 0, "a log chunk carries no channel");
         let msg = round_trip(level::INFO, "");
         assert_eq!(msg.message, "");
         assert_eq!(msg.completeness, Completeness::Complete);

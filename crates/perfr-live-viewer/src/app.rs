@@ -1058,7 +1058,7 @@ pub struct PerfrLiveApp {
     thread_names: HashMap<(u32, u32), String>,
     trace_processes: Vec<ProcessJson>,
     /// Log window: lines in the visible range, or the lines inside a clicked
-    /// scope. Channel names arrive as their own frames.
+    /// scope.
     log_ui: crate::logs::LogUi,
     #[cfg(target_arch = "wasm32")]
     pending_file: chrome_load::PendingFile,
@@ -1933,6 +1933,7 @@ impl PerfrLiveApp {
         }
         self.clear_file_trace();
         self.index.clear();
+        self.log_ui.reset_capture();
         self.live_all.clear();
         self.live_sel.clear();
         self.intern = InternTable::default();
@@ -2217,6 +2218,7 @@ impl PerfrLiveApp {
     fn begin_trace_load(&mut self, load: TraceLoad) {
         self.stop_record();
         self.index.clear();
+        self.log_ui.reset_capture();
         self.live_all.clear();
         self.intern = InternTable::default();
         self.tracks = TrackStrip::default();
@@ -2898,9 +2900,7 @@ impl PerfrLiveApp {
                 self.clear_file_trace();
                 self.index.clear();
                 self.live_all.clear();
-                self.log_ui.channels.clear();
-                self.log_ui.scope = None;
-                self.log_ui.highlight_ns = None;
+                self.log_ui.reset_capture();
                 self.selected = None;
                 self.hover = None;
                 self.measure = None;
@@ -2983,9 +2983,6 @@ impl PerfrLiveApp {
                     }),
                 }
             }
-            LiveFrame::ChannelName { id, name } => {
-                self.log_ui.note_channel(id as u8, name);
-            }
             LiveFrame::CaptureFinished => {
                 self.live_resort_pending = true;
                 // A live capture that just stopped stays where it was -- the
@@ -3025,8 +3022,7 @@ impl PerfrLiveApp {
                 if !self.file_trace_active() {
                     self.index.clear();
                     self.live_all.clear();
-                    self.log_ui.channels.clear();
-                    self.log_ui.scope = None;
+                    self.log_ui.reset_capture();
                     self.thread_names.clear();
                     self.trace_processes.clear();
                     self.hover = None;
@@ -4714,11 +4710,12 @@ impl PerfrLiveApp {
                 crate::logs::paint_ticks(
                     ui,
                     body,
-                    self.t0,
-                    self.t1,
+                    t0,
+                    t1,
                     &self.index,
                     self.tracks.layout(),
                     self.tracks.scale,
+                    Some(y_cull),
                 );
                 if let Some(ns) = self.log_ui.highlight_ns {
                     crate::logs::paint_highlight(ui, body, self.t0, self.t1, ns);
@@ -6389,13 +6386,15 @@ impl PerfrLiveApp {
                     }
                     // A click on a sample tick puts its callstack on the
                     // clipboard, leaf first, one frame a line.
+                    // A click on a scope points the log window at it. The
+                    // window is not opened for it: whether it is on screen is
+                    // the user's choice, and most captures have no log lines.
                     if pick.kind == kind::API_SCOPE || pick.kind == kind::API_TRACK {
                         self.log_ui.scope = Some(crate::logs::ScopeFocus {
                             pid: pick.pid,
                             tid: pick.tid,
                             name_id: pick.name_id,
                         });
-                        self.log_ui.open = true;
                     }
                     if pick.kind == kind::SAMPLE {
                         let stack = sample_callstack(&self.index, &self.intern, pick);
@@ -9324,104 +9323,6 @@ impl PerfrLiveApp {
     }
 }
 
-impl PerfrLiveApp {
-    /// Fills the timeline with a small log capture so the log window can be
-    /// shown without a running service. Used by `perfr-log-preview`.
-    pub fn seed_log_preview(&mut self) {
-        use perfr_live_event::{kind, LiveEvent};
-        self.intern.insert_id(1, "frame");
-        self.intern.insert_id(2, "step");
-        self.intern.insert_id(10, "tick");
-        self.intern.insert_id(11, "contact");
-        self.log_ui.note_channel(1, "simulation".into());
-        self.log_ui.note_channel(2, "procedure".into());
-        let pid = 42u32;
-        let main = 7u32;
-        let worker = 8u32;
-        for i in 0..6u64 {
-            let start = 1_000_000 + i * 20_000;
-            self.index.insert(LiveEvent {
-                start_ns: start,
-                duration_ns: 16_000,
-                tid: main,
-                pid,
-                kind: kind::API_SCOPE,
-                depth: 0,
-                extra: 1,
-                _pad: 0,
-                name_id: 1,
-            });
-            self.index.insert(LiveEvent {
-                start_ns: start + 2_000,
-                duration_ns: 6_000,
-                tid: main,
-                pid,
-                kind: kind::API_SCOPE,
-                depth: 1,
-                extra: 2,
-                _pad: 0,
-                name_id: 2,
-            });
-            self.index.insert(LiveEvent {
-                start_ns: start + 1_000,
-                duration_ns: 0,
-                tid: main,
-                pid,
-                kind: kind::LOG,
-                depth: 0,
-                extra: 2,
-                _pad: 0,
-                name_id: 10,
-            });
-            if i % 2 == 0 {
-                self.index.insert(LiveEvent {
-                    start_ns: start + 3_000,
-                    duration_ns: 0,
-                    tid: main,
-                    pid,
-                    kind: kind::LOG,
-                    depth: 0,
-                    extra: 3,
-                    _pad: 0,
-                    name_id: 11,
-                });
-            }
-        }
-        self.index.insert(LiveEvent {
-            start_ns: 1_012_000,
-            duration_ns: 0,
-            tid: worker,
-            pid,
-            kind: kind::LOG,
-            depth: 0,
-            extra: 4,
-            _pad: 0,
-            name_id: 11,
-        });
-        self.thread_names.insert((pid, main), "Main".into());
-        self.thread_names.insert((pid, worker), "Worker".into());
-        self.t0 = 980_000.0;
-        self.t1 = 1_130_000.0;
-        self.follow = false;
-        self.user_set_view = true;
-        self.content_t0 = Some(self.t0);
-        self.content_t1 = Some(self.t1);
-        self.log_ui.open = true;
-        self.log_ui.scope = Some(crate::logs::ScopeFocus { pid, tid: main, name_id: 1 });
-        self.selected = Some(perfr_live_render::ScopePick::from_event(LiveEvent {
-            start_ns: 1_000_000,
-            duration_ns: 16_000,
-            tid: main,
-            pid,
-            kind: kind::API_SCOPE,
-            depth: 0,
-            extra: 1,
-            _pad: 0,
-            name_id: 1,
-        }));
-    }
-}
-
 impl eframe::App for PerfrLiveApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.presets.receive();
@@ -9639,6 +9540,7 @@ impl eframe::App for PerfrLiveApp {
             }
             self.publish_selection();
 
+            self.log_ui.open_on_first_log(&self.index);
             if self.log_ui.open {
                 let t0 = self.t0;
                 let t1 = self.t1;

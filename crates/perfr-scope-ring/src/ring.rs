@@ -130,11 +130,10 @@ const _: () = assert!(READER_LEASES_OFFSET + std::mem::size_of::<ReaderLeases>()
 
 /// Semantic version of the API. Bumped when the meaning of a call changes.
 ///
-/// 2: a [`crate::event::kind::SCOPE_START`] record's `depth` is the channel
-/// id captured at enter, and [`crate::event::kind::LOG`] records carry log
-/// lines. The byte layout of the record and the segment is unchanged from
-/// version 1, so a reader still accepts a version-2 segment either way.
-/// Older captures (files, not segments) have no log rows and channel 0.
+/// 2: [`crate::event::kind::LOG`] records carry log lines, and the producer
+/// counts what it overwrites in the control page's drop table (see
+/// [`crate::meta`]). The byte layout of the record and the segment is
+/// unchanged from version 1, so a reader accepts either.
 pub const API_VERSION: u32 = 2;
 
 const _: () = assert!(std::mem::size_of::<Header>() == CACHE_LINE);
@@ -352,11 +351,12 @@ impl Rings {
     /// the oldest unread slot is overwritten, which the consumer detects.
     ///
     /// The whole write path: one relaxed bump, plain stores, one release
-    /// store. If the consumer has published its read cursor and this claim
-    /// will overwrite an unread slot, the event still sitting in that slot
-    /// is counted against its own thread and kind before the bytes are
+    /// store. If a consumer has published its read cursor and this claim
+    /// will overwrite a slot at or past it, the event still sitting in that
+    /// slot is counted against its own thread and kind before the bytes are
     /// replaced. The count lives on the control page, so a lap cannot erase
-    /// the fact of the loss.
+    /// what was lost. It is a breakdown for the consumer's own lap count, not
+    /// a second count of the loss: see [`crate::meta`].
     pub fn push(&self, ring: usize, event: ScopeEvent) {
         let ring = ring.min(self.ring_count.saturating_sub(1));
         let claim = self.ring_header(ring).write_cursor.fetch_add(1, Ordering::Relaxed);
@@ -413,18 +413,6 @@ impl Rings {
     pub fn snapshot_drops(&self) -> Vec<crate::meta::DropTally> {
         // SAFETY: the drop table is on the control page of this mapping.
         unsafe { crate::meta::snapshot_drops(self.base) }
-    }
-
-    /// Publishes a channel name. `id` is 1-based.
-    pub fn write_channel(&self, id: u8, name: &[u8]) -> bool {
-        // SAFETY: the channel table is on the control page of this mapping.
-        unsafe { crate::meta::write_channel(self.base, id, name) }
-    }
-
-    /// Channel names a producer has published.
-    pub fn read_channels(&self) -> Vec<(u8, String)> {
-        // SAFETY: the channel table is on the control page of this mapping.
-        unsafe { crate::meta::read_channels(self.base) }
     }
 
     /// Claims a slot and publishes its timestamp, but never commits it:

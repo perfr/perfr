@@ -32,7 +32,7 @@ use perfr_scope_ring::event::{flags, kind as rk};
 use perfr_scope_ring::logmsg::{LogAssembler, LogMessage};
 use perfr_scope_ring::merge::{drain_from, Cursors, Producer};
 use perfr_scope_ring::text::{Completeness, TextAssembler};
-use perfr_scope_ring::{NameInterner, ScopeEvent, ScopeRingReader};
+use perfr_scope_ring::{DropTally, NameInterner, ScopeEvent, ScopeRingReader};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -56,6 +56,24 @@ const MAX_TIMELINE_DEPTH: u8 = 64;
 /// never approach it.
 const MAX_OPEN_SCOPES: usize = 1 << 16;
 
+/// A thread and a ring-record kind: what a lost event was.
+type DropKey = (u32, u8);
+
+/// Losses the producer's drop table did not name: an older producer that
+/// keeps no table, or a lap it counted against another reader's cursor.
+const UNATTRIBUTED: DropKey = (0, 0xFF);
+
+/// How much distinct log text one capture keeps. Every distinct line is
+/// interned for the life of the capture, here and in every viewer, while the
+/// events that point at it are evicted from a bounded ring. A target that
+/// logs a counter in every line would otherwise grow that table without
+/// limit. Past the budget a line keeps its time, thread and level, and its
+/// text reads [`LOG_TEXT_DROPPED`]. Repeats of a line already kept cost
+/// nothing and are never affected.
+const LOG_TEXT_BUDGET_BYTES: usize = 64 << 20;
+
+const LOG_TEXT_DROPPED: &str = "(log text not kept: this capture's log text budget is spent)";
+
 /// A scope started and not yet stopped.
 #[derive(Clone, Copy)]
 struct Open {
@@ -66,8 +84,6 @@ struct Open {
     depth: u8,
     is_async: bool,
     dynamic: bool,
-    /// Channel id at enter. 0 is the default. Not copied onto log lines.
-    channel: u8,
 }
 
 /// One instrumented process's segment and the reader state over it.
@@ -77,14 +93,49 @@ struct Segment {
     cursors: Cursors,
     text: TextAssembler,
     logs: LogAssembler,
-    /// Drop-table totals already turned into capture markers.
-    drops_seen: HashMap<(u32, u8), u32>,
+    /// What the producer's drop table has said so far, and what of it is
+    /// still unmatched by a loss of ours.
+    drops: DropLedger,
     /// Heads whose names are still arriving in continuation records.
     awaiting_name: HashMap<(u32, u64), ScopeEvent>,
     /// Open scopes by handle, which is what a stop carries.
     open: HashMap<u64, Open>,
     /// Per-thread count of open sync scopes, which is the depth of the next.
     sync_depth: HashMap<u32, u8>,
+}
+
+impl Segment {
+    /// Takes over reading `reader`'s segment and tells its producer to write.
+    ///
+    /// Reading starts at the rings' write position: what an earlier session
+    /// wrote is not replayed, and a lap it suffered is not booked as this
+    /// capture's loss (a cursor at 0 said "11,610,727 records lost" before
+    /// anything was recorded). The drop table is the same story: its counts
+    /// are totals since the process started and are never reset, so where
+    /// they stand now is remembered and only what is added later is ours.
+    ///
+    /// The cursor is taken before the flag goes on, so the first drain reads
+    /// everything written for this capture and nothing older.
+    fn adopt(pid: u32, reader: ScopeRingReader) -> Segment {
+        let cursors = Cursors::at_write(reader.rings());
+        reader.publish_read_cursors(&cursors.read);
+        let drops = DropLedger::starting_at(&reader.rings().snapshot_drops());
+        // Until this, an instrumented process pays a relaxed load per call
+        // and writes nothing. This is also what turns on the service's own
+        // scopes, since it reads its own segment like any other.
+        reader.set_capturing(true);
+        Segment {
+            pid,
+            reader,
+            cursors,
+            text: TextAssembler::new(),
+            logs: LogAssembler::new(),
+            drops,
+            awaiting_name: HashMap::new(),
+            open: HashMap::new(),
+            sync_depth: HashMap::new(),
+        }
+    }
 }
 
 /// Drains the target's segment (and its descendants') into the timeline.
@@ -105,8 +156,15 @@ pub struct ScopeSource {
     /// Open scopes dropped because their ring lost records underneath them
     /// (see `drain`): the spans that would otherwise have been drawn wrong.
     pub scopes_discarded_on_loss: u64,
-    /// Losses attributed to a thread and a record kind, for the status line.
-    drop_totals: HashMap<(u32, u8), u64>,
+    /// [`Self::events_lost`] broken down by thread and record kind, for the
+    /// status line. Sums to `events_lost`; what the producer's table could
+    /// not name is under [`UNATTRIBUTED`].
+    drop_totals: HashMap<DropKey, u64>,
+    /// Bytes of distinct log text interned so far, against
+    /// [`LOG_TEXT_BUDGET_BYTES`].
+    log_text_bytes: usize,
+    /// Log lines recorded without their text because that budget was spent.
+    pub log_lines_without_text: u64,
     /// Name ids of hooks the Frida agent switched off for firing over its
     /// call-rate limit (a `\x02` marker record), in the order they arrived.
     pub auto_unhooked: Vec<u32>,
@@ -133,6 +191,8 @@ impl ScopeSource {
             events_lost: 0,
             scopes_discarded_on_loss: 0,
             drop_totals: HashMap::new(),
+            log_text_bytes: 0,
+            log_lines_without_text: 0,
             auto_unhooked: Vec::new(),
         }
     }
@@ -184,21 +244,7 @@ impl ScopeSource {
             return;
         }
         if let Ok(reader) = ScopeRingReader::open(self_pid) {
-            let cursors = Cursors::at_write(reader.rings());
-            reader.set_capturing(true);
-            self.segments.push(Segment {
-                pid: self_pid,
-                reader,
-                cursors,
-                text: TextAssembler::new(),
-                logs: LogAssembler::new(),
-                drops_seen: HashMap::new(),
-                awaiting_name: HashMap::new(),
-                open: HashMap::new(),
-                sync_depth: HashMap::new(),
-            });
-            let added = self.segments.last().unwrap();
-            added.reader.publish_read_cursors(&added.cursors.read);
+            self.segments.push(Segment::adopt(self_pid, reader));
         }
     }
 
@@ -299,31 +345,7 @@ impl ScopeSource {
     fn add_segment(&mut self, pid: u32, reader: ScopeRingReader) {
         let ring_count = reader.rings().ring_count();
         log::info!("manual instrumentation: opened segment of pid {pid} ({ring_count} rings)");
-        // Start at the rings' write position: what an earlier session wrote
-        // is not replayed, and a lap it suffered is not booked as this
-        // capture's loss (a cursor at 0 said "11,610,727 records lost" before
-        // anything was recorded). A hooked target is adopted right after its
-        // hooks arm (`adopt`), so nothing it writes for this capture is
-        // missed.
-        let cursors = Cursors::at_write(reader.rings());
-        // Tell the producer to start writing: until this, an instrumented
-        // process pays a relaxed load per call and writes nothing. This is
-        // also what turns on the service's own scopes, since it reads its
-        // own segment here like any other.
-        reader.set_capturing(true);
-        self.segments.push(Segment {
-            pid,
-            reader,
-            cursors,
-            text: TextAssembler::new(),
-            logs: LogAssembler::new(),
-            drops_seen: HashMap::new(),
-            awaiting_name: HashMap::new(),
-            open: HashMap::new(),
-            sync_depth: HashMap::new(),
-        });
-        let added = self.segments.last().unwrap();
-        added.reader.publish_read_cursors(&added.cursors.read);
+        self.segments.push(Segment::adopt(pid, reader));
     }
 
     /// A drain with no discovery, for the segments already adopted: the
@@ -341,7 +363,6 @@ impl ScopeSource {
     }
 
     fn drain(&mut self, now_ns: u64, batch: &mut Vec<LiveEvent>) {
-        let mut new_names = Vec::new();
         for index in 0..self.segments.len() {
             let alive = if perfr_scope_ring::platform::process_alive(self.segments[index].pid) {
                 Producer::Alive
@@ -352,7 +373,13 @@ impl ScopeSource {
                 let segment = &mut self.segments[index];
                 drain_from(segment.reader.rings(), &mut segment.cursors, now_ns, alive)
             };
+            // Say how far this reader has got before doing anything with
+            // what it read. The producer counts an overwrite as a loss when
+            // it lands at or past this cursor, so every moment it stays
+            // behind is a moment events already copied out are counted.
+            self.segments[index].reader.publish_read_cursors(&self.segments[index].cursors.read);
             self.events_lost = self.events_lost.saturating_add(pass.dropped);
+            self.account_drops(index, pass.dropped, now_ns, batch);
             // A lapped ring lost records in the middle of this process's
             // stream, STOPs among them. Every scope still open is now
             // unreliable: left alone, a START whose STOP was lost runs to the
@@ -393,17 +420,15 @@ impl ScopeSource {
             for event in events {
                 self.accept(index, event, batch);
             }
-            self.segments[index].reader.publish_read_cursors(&self.segments[index].cursors.read);
-            let attributed = self.emit_new_drops(index, now_ns, batch);
-            if pass.dropped > attributed {
-                let rest = pass.dropped - attributed;
-                *self.drop_totals.entry((0, 0xFF)).or_insert(0) += rest;
-                self.emit_drop_marker(index, now_ns, 0, 0xFF, rest, batch);
-            }
-            self.publish_channels(index);
-            new_names.extend(self.names.take_new());
         }
-        for (id, name) in new_names {
+        self.announce_new_names();
+    }
+
+    /// Tells the service, and through it every viewer, what the ids handed
+    /// out since the last call mean. Anything that interns a name has to be
+    /// followed by this before its events are pushed.
+    fn announce_new_names(&mut self) {
+        for (id, name) in self.names.take_new() {
             self.service.intern_id(id, &name);
         }
     }
@@ -524,7 +549,6 @@ impl ScopeSource {
                         depth,
                         is_async,
                         dynamic: event.flags & flags::DYNAMIC != 0,
-                        channel: event.depth,
                     },
                 );
             }
@@ -552,36 +576,44 @@ impl ScopeSource {
         }
     }
 
-    /// Per-thread, per-kind losses for the status line and the log.
+    /// [`Self::events_lost`] by thread and record kind, for the status line
+    /// and the log. Empty when nothing was lost.
     pub fn loss_summary(&self) -> String {
-        if self.events_lost == 0 && self.drop_totals.is_empty() {
-            return String::new();
-        }
-        let mut keys: Vec<(u32, u8)> = self.drop_totals.keys().copied().collect();
+        let mut keys: Vec<DropKey> = self.drop_totals.keys().copied().collect();
         keys.sort_unstable();
-        let mut parts: Vec<String> = keys
+        let parts: Vec<String> = keys
             .into_iter()
-            .map(|(tid, kind_id)| {
-                let n = self.drop_totals[&(tid, kind_id)];
-                let who = if tid == 0 { "unattributed".to_string() } else { format!("tid {tid}") };
-                format!("{who} {}={n}", kind_label(kind_id))
+            .map(|key| {
+                let n = self.drop_totals[&key];
+                if key == UNATTRIBUTED {
+                    format!("{n} not broken down by thread")
+                } else {
+                    format!("tid {} {}={n}", key.0, kind_label(key.1))
+                }
             })
             .collect();
-        let attributed: u64 = self.drop_totals.values().copied().sum();
-        if self.events_lost > attributed {
-            parts.push(format!("{} not broken down by thread", self.events_lost - attributed));
-        }
-        if parts.is_empty() {
-            format!("{} records lost", self.events_lost)
-        } else {
-            parts.join(", ")
-        }
+        parts.join(", ")
     }
 
     fn emit_log(&mut self, index: usize, msg: LogMessage, batch: &mut Vec<LiveEvent>) {
         let pid = self.segments[index].pid;
-        let truncated = msg.completeness == Completeness::Truncated;
-        let name_id = self.names.id_for(msg.message.as_bytes());
+        let mut truncated = msg.completeness == Completeness::Truncated;
+        let name_id = match self.log_text_id(msg.message.as_bytes()) {
+            Some(id) => id,
+            None => {
+                // The line happened, and when, where and how loudly are
+                // still true. Only its text is not kept, and it says so.
+                truncated = true;
+                if self.log_lines_without_text == 0 {
+                    log::warn!(
+                        "log text budget spent ({} MiB of distinct lines): later new lines keep their time, thread and level but not their text",
+                        LOG_TEXT_BUDGET_BYTES >> 20
+                    );
+                }
+                self.log_lines_without_text += 1;
+                self.names.id_for(LOG_TEXT_DROPPED.as_bytes())
+            }
+        };
         batch.push(LiveEvent {
             start_ns: msg.timestamp_ns,
             duration_ns: 0,
@@ -596,56 +628,48 @@ impl ScopeSource {
         self.events_pushed += 1;
     }
 
-    /// New drop-table counts since the previous drain, as capture markers.
-    /// Returns how many losses were attributed this pass.
-    fn emit_new_drops(&mut self, index: usize, now_ns: u64, batch: &mut Vec<LiveEvent>) -> u64 {
-        let snap = self.segments[index].reader.rings().snapshot_drops();
-        let mut attributed = 0u64;
-        for tally in snap {
-            let key = (tally.tid, tally.kind);
-            let seen = self.segments[index].drops_seen.get(&key).copied().unwrap_or(0);
-            if tally.count <= seen {
-                continue;
-            }
-            let delta = u64::from(tally.count - seen);
-            self.segments[index].drops_seen.insert(key, tally.count);
-            *self.drop_totals.entry(key).or_insert(0) += delta;
-            attributed += delta;
-            self.emit_drop_marker(index, now_ns, tally.tid, tally.kind, delta, batch);
+    /// The id of a log line's text, or `None` when the line is new and the
+    /// capture's budget for distinct log text is spent.
+    fn log_text_id(&mut self, text: &[u8]) -> Option<u32> {
+        if let Some(id) = self.names.get(text) {
+            return Some(id);
         }
-        attributed
+        let after = self.log_text_bytes.saturating_add(text.len());
+        if after > LOG_TEXT_BUDGET_BYTES {
+            return None;
+        }
+        self.log_text_bytes = after;
+        Some(self.names.id_for(text))
     }
 
-    fn emit_drop_marker(
-        &mut self,
-        index: usize,
-        now_ns: u64,
-        tid: u32,
-        kind_id: u8,
-        count: u64,
-        batch: &mut Vec<LiveEvent>,
-    ) {
-        if count == 0 {
-            return;
-        }
-        let pid = self.segments[index].pid;
-        batch.push(LiveEvent {
-            start_ns: now_ns,
-            duration_ns: count,
-            tid,
-            pid,
-            kind: kind::DROP,
-            depth: 0,
-            extra: kind_id,
-            _pad: 0,
-            name_id: 0,
-        });
-        self.events_pushed += 1;
-    }
-
-    fn publish_channels(&self, index: usize) {
-        for (id, name) in self.segments[index].reader.rings().read_channels() {
-            self.service.note_channel(id, &name);
+    /// Turns the `lost` records this pass's drain could not read into DROP
+    /// markers, named by thread and kind as far as the producer's table can.
+    ///
+    /// `lost` is the count: it is what this reader's own cursors say, and it
+    /// is exact. The table only says what the lost records were, and it can
+    /// run ahead of `lost` (see [`perfr_scope_ring::meta`]), so its counts are
+    /// spent against `lost` and never reported on their own. A pass that lost
+    /// nothing writes no marker, whatever the table says.
+    fn account_drops(&mut self, index: usize, lost: u64, now_ns: u64, batch: &mut Vec<LiveEvent>) {
+        let segment = &mut self.segments[index];
+        let table = segment.reader.rings().snapshot_drops();
+        let split = segment.drops.split(lost, &table);
+        let pid = segment.pid;
+        let unnamed = (split.unnamed > 0).then_some((UNATTRIBUTED, split.unnamed));
+        for ((tid, kind_id), count) in split.named.into_iter().chain(unnamed) {
+            *self.drop_totals.entry((tid, kind_id)).or_insert(0) += count;
+            batch.push(LiveEvent {
+                start_ns: now_ns,
+                duration_ns: count,
+                tid,
+                pid,
+                kind: kind::DROP,
+                depth: 0,
+                extra: kind_id,
+                _pad: 0,
+                name_id: 0,
+            });
+            self.events_pushed += 1;
         }
     }
 
@@ -660,12 +684,16 @@ impl ScopeSource {
             segment.reader.set_capturing(false);
         }
         self.drain(end_ns, batch);
+        // Lines whose last chunk never arrived. Their text is new, so it has
+        // to be announced like any other name: the drain above announced
+        // only what it had interned itself.
         for index in 0..self.segments.len() {
             let pending = self.segments[index].logs.finish();
             for msg in pending {
                 self.emit_log(index, msg, batch);
             }
         }
+        self.announce_new_names();
         for segment in &mut self.segments {
             for (_, open) in segment.open.drain() {
                 batch.push(span(open, end_ns));
@@ -691,10 +719,125 @@ fn span(open: Open, end_ns: u64) -> LiveEvent {
         pid: open.pid,
         kind: if open.is_async { kind::API_TRACK } else { kind::API_SCOPE },
         depth: open.depth,
-        extra: open.channel,
+        extra: 0,
         _pad: if open.dynamic { perfr_live_event::event_flags::DYNAMIC } else { 0 },
         name_id: open.name_id,
     }
+}
+
+/// One reader's reading of a producer's drop table across passes.
+#[derive(Default)]
+struct DropLedger {
+    /// Where each of the table's counters stood the last time it was read.
+    seen: HashMap<DropKey, u32>,
+    /// Counts read last pass that no loss of ours has matched yet.
+    carry: Vec<(DropKey, u64)>,
+}
+
+impl DropLedger {
+    /// A ledger for a reader that starts now. The table's counters are
+    /// totals since the producer started and are never reset, so everything
+    /// in `table` happened before this reader and is none of its losses.
+    fn starting_at(table: &[DropTally]) -> DropLedger {
+        DropLedger {
+            seen: table.iter().map(|tally| ((tally.tid, tally.kind), tally.count)).collect(),
+            carry: Vec::new(),
+        }
+    }
+
+    /// Splits the `lost` records of one pass by what `table` says was
+    /// overwritten since the last pass.
+    fn split(&mut self, lost: u64, table: &[DropTally]) -> DropSplit {
+        let mut fresh = Vec::new();
+        for tally in table {
+            let key = (tally.tid, tally.kind);
+            let seen = self.seen.insert(key, tally.count).unwrap_or(0);
+            // The counters are u32 and only go up, so a smaller total wrapped.
+            let delta = tally.count.wrapping_sub(seen);
+            if delta > 0 {
+                fresh.push((key, u64::from(delta)));
+            }
+        }
+        let mut split = attribute_drops(lost, &self.carry, &fresh);
+        self.carry = std::mem::take(&mut split.carry);
+        split
+    }
+}
+
+/// One pass's loss, split by what was lost.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DropSplit {
+    /// Losses the producer's table names. Never more than `lost` in total.
+    named: Vec<(DropKey, u64)>,
+    /// The rest of `lost`.
+    unnamed: u64,
+    /// Table counts no loss has matched yet, kept for the next pass only.
+    carry: Vec<(DropKey, u64)>,
+}
+
+/// Splits `lost` across the producer's drop-table counts.
+///
+/// `fresh` is what the table gained since the last pass and `carried` what
+/// the last pass left over. Together they are what the producer says it
+/// overwrote; `lost` is what this reader actually failed to read. When the
+/// table says less, the difference is unnamed. When it says more, each key
+/// gets its proportional share of `lost` and the surplus of `fresh` is
+/// carried: a producer counts an overwrite the moment it happens, which can
+/// be just after this pass's drain, and the lap then shows up in the next
+/// one. A count still unmatched after that pass was never this reader's loss
+/// (the slot had been read, or the count was against another reader's
+/// cursor), so `carried` is not carried twice.
+fn attribute_drops(lost: u64, carried: &[(DropKey, u64)], fresh: &[(DropKey, u64)]) -> DropSplit {
+    use std::collections::BTreeMap;
+    let mut pool: BTreeMap<DropKey, (u64, u64)> = BTreeMap::new();
+    for (key, count) in carried {
+        pool.entry(*key).or_default().0 += count;
+    }
+    for (key, count) in fresh {
+        pool.entry(*key).or_default().1 += count;
+    }
+    let claimed: u64 = pool.values().map(|(old, new)| old + new).sum();
+    if claimed <= lost {
+        return DropSplit {
+            named: pool.into_iter().map(|(key, (old, new))| (key, old + new)).filter(|(_, n)| *n > 0).collect(),
+            unnamed: lost - claimed,
+            carry: Vec::new(),
+        };
+    }
+    // More claimed than lost. Give every key the floor of its share, then
+    // hand the remainder out one at a time to the largest claims, so the
+    // shares add up to exactly `lost`.
+    let mut shares: Vec<(DropKey, u64, u64, u64)> = pool
+        .into_iter()
+        .map(|(key, (old, new))| {
+            let share = ((old + new) as u128 * lost as u128 / claimed as u128) as u64;
+            (key, old, new, share)
+        })
+        .collect();
+    let mut rest = lost - shares.iter().map(|s| s.3).sum::<u64>();
+    let mut by_size: Vec<usize> = (0..shares.len()).collect();
+    by_size.sort_by_key(|&i| std::cmp::Reverse(shares[i].1 + shares[i].2));
+    for i in by_size {
+        if rest == 0 {
+            break;
+        }
+        if shares[i].3 < shares[i].1 + shares[i].2 {
+            shares[i].3 += 1;
+            rest -= 1;
+        }
+    }
+    let mut out = DropSplit::default();
+    for (key, old, new, share) in shares {
+        if share > 0 {
+            out.named.push((key, share));
+        }
+        // The oldest claims are spent first; only this pass's may wait.
+        let left = (old + new - share).min(new);
+        if left > 0 {
+            out.carry.push((key, left));
+        }
+    }
+    out
 }
 
 fn mark_cut(name: &[u8], cut: bool) -> Vec<u8> {
@@ -744,5 +887,223 @@ mod token_tests {
         assert_eq!(name_token(b"FEngineLoop::Tick"), None);
         assert_eq!(name_token(b"\x0100000zzz"), None);
         assert_eq!(name_token(b"\x03deadbeef"), None);
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::{attribute_drops, DropKey, DropLedger, DropSplit, UNATTRIBUTED};
+    use perfr_scope_ring::DropTally;
+
+    const LOGS_T4: DropKey = (4, 6);
+    const STOPS_T9: DropKey = (9, 1);
+
+    fn tally(key: DropKey, count: u32) -> DropTally {
+        DropTally { tid: key.0, kind: key.1, count }
+    }
+
+    fn total(split: &DropSplit) -> u64 {
+        split.named.iter().map(|(_, n)| n).sum::<u64>() + split.unnamed
+    }
+
+    #[test]
+    fn a_reader_does_not_inherit_the_drops_of_the_capture_before_it() {
+        // The first capture lapped a ring: 100,000 logs lost, counted on the
+        // control page, which outlives the capture. The second capture loses
+        // nothing and must say nothing.
+        let history = [tally(LOGS_T4, 100_000)];
+        let mut ledger = DropLedger::starting_at(&history);
+        let split = ledger.split(0, &history);
+        assert_eq!(split, DropSplit::default());
+        // And when it does lose something, only that is reported.
+        let split = ledger.split(3, &[tally(LOGS_T4, 100_003)]);
+        assert_eq!(split.named, vec![(LOGS_T4, 3)]);
+        assert_eq!(split.unnamed, 0);
+    }
+
+    #[test]
+    fn the_table_never_reports_more_than_the_reader_lost() {
+        // The producer counted 10 overwrites, but the reader had already
+        // copied 8 of those slots out before its cursor said so. Two were
+        // lost; two are reported.
+        let mut ledger = DropLedger::starting_at(&[]);
+        let split = ledger.split(2, &[tally(LOGS_T4, 10)]);
+        assert_eq!(split.named, vec![(LOGS_T4, 2)]);
+        assert_eq!(total(&split), 2);
+        // A pass that lost nothing writes no marker, whatever is left over.
+        let split = ledger.split(0, &[tally(LOGS_T4, 10)]);
+        assert_eq!(total(&split), 0);
+    }
+
+    #[test]
+    fn a_loss_the_table_does_not_name_is_still_counted() {
+        // An older producer keeps no table at all.
+        let mut ledger = DropLedger::starting_at(&[]);
+        let split = ledger.split(500, &[]);
+        assert!(split.named.is_empty());
+        assert_eq!(split.unnamed, 500);
+        // A table that names part of a loss leaves the rest unnamed.
+        let split = ledger.split(10, &[tally(STOPS_T9, 4)]);
+        assert_eq!(split.named, vec![(STOPS_T9, 4)]);
+        assert_eq!(split.unnamed, 6);
+        assert_eq!(UNATTRIBUTED, (0, 0xFF));
+    }
+
+    #[test]
+    fn a_count_that_arrives_a_pass_early_is_matched_once_and_not_twice() {
+        // The producer overwrites 5 slots just after pass 1's drain: the
+        // table has them at pass 1, the reader sees the lap at pass 2.
+        let mut ledger = DropLedger::starting_at(&[]);
+        let first = ledger.split(0, &[tally(LOGS_T4, 5)]);
+        assert_eq!(total(&first), 0);
+        let second = ledger.split(5, &[tally(LOGS_T4, 5)]);
+        assert_eq!(second.named, vec![(LOGS_T4, 5)], "named, not lumped in as unattributed");
+        assert_eq!(second.unnamed, 0);
+        // Spent. A later loss with nothing new in the table is unnamed.
+        let third = ledger.split(5, &[tally(LOGS_T4, 5)]);
+        assert!(third.named.is_empty());
+        assert_eq!(third.unnamed, 5);
+    }
+
+    #[test]
+    fn a_count_nothing_matched_is_dropped_after_one_pass() {
+        // Counted against a slot this reader had already read. It waits one
+        // pass for a lap that never comes, then stops being evidence.
+        let mut ledger = DropLedger::starting_at(&[]);
+        ledger.split(0, &[tally(LOGS_T4, 7)]);
+        ledger.split(0, &[tally(LOGS_T4, 7)]);
+        let later = ledger.split(4, &[tally(LOGS_T4, 7), tally(STOPS_T9, 4)]);
+        assert_eq!(later.named, vec![(STOPS_T9, 4)], "the stale log count does not claim a scope loss");
+    }
+
+    #[test]
+    fn an_oversubscribed_loss_is_shared_in_proportion_and_adds_up() {
+        let fresh = [(LOGS_T4, 300), (STOPS_T9, 100)];
+        let split = attribute_drops(100, &[], &fresh);
+        assert_eq!(split.named, vec![(LOGS_T4, 75), (STOPS_T9, 25)]);
+        assert_eq!(split.unnamed, 0);
+        assert_eq!(split.carry, vec![(LOGS_T4, 225), (STOPS_T9, 75)]);
+        // Shares that do not divide evenly still add up to exactly `lost`.
+        for lost in 0..40u64 {
+            let split = attribute_drops(lost, &[((1, 0), 3)], &[((2, 0), 7), ((3, 6), 11), ((4, 1), 19)]);
+            assert_eq!(total(&split), lost, "lost {lost}");
+            assert!(split.named.iter().all(|(_, n)| *n > 0));
+        }
+        // What was carried in is spent first and never carried again.
+        let split = attribute_drops(4, &[(LOGS_T4, 10)], &[(LOGS_T4, 2)]);
+        assert_eq!(split.named, vec![(LOGS_T4, 4)]);
+        assert_eq!(split.carry, vec![(LOGS_T4, 2)]);
+    }
+
+    #[test]
+    fn a_counter_that_wrapped_is_read_as_what_it_gained() {
+        let mut ledger = DropLedger::starting_at(&[tally(LOGS_T4, u32::MAX - 1)]);
+        let split = ledger.split(10, &[tally(LOGS_T4, 3)]);
+        assert_eq!(split.named, vec![(LOGS_T4, 5)]);
+        assert_eq!(split.unnamed, 5);
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+    use perfr_scope_ring::logmsg::{level, write_log};
+
+    /// The tests share this process's one segment; one at a time.
+    static SEGMENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn source() -> (std::sync::MutexGuard<'static, ()>, Arc<perfr_live_server::LiveService>, ScopeSource) {
+        let serial = SEGMENT.lock().unwrap_or_else(|p| p.into_inner());
+        perfr_api::init().expect("this process's segment");
+        let service = perfr_live_server::LiveService::new(perfr_live_server::ServerConfig {
+            ring_buffer_bytes: 1 << 20,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut source = ScopeSource::new(service.clone());
+        source.begin_self_capture();
+        assert_eq!(source.segments.len(), 1, "the process's own segment");
+        (serial, service, source)
+    }
+
+    fn text_of(service: &perfr_live_server::LiveService, event: &LiveEvent) -> String {
+        service.intern.lock().get(event.name_id).unwrap_or("<not announced>").to_string()
+    }
+
+    #[test]
+    fn a_line_cut_off_by_the_end_of_the_capture_still_has_its_text() {
+        let (_serial, service, mut source) = source();
+        // A three-chunk line whose last chunk never arrives: the producer
+        // was mid-write when the capture stopped.
+        let message = format!("stopped-mid-line-{}", "x".repeat(70));
+        let mut chunks = Vec::new();
+        write_log(1, 77, 9, level::WARN, message.as_bytes(), |e| chunks.push(e));
+        assert!(chunks.len() >= 3);
+        for chunk in &chunks[..chunks.len() - 1] {
+            assert!(source.segments[0].logs.accept(chunk).is_none());
+        }
+        let mut batch = Vec::new();
+        source.finish(u64::MAX, &mut batch);
+        let line = batch
+            .iter()
+            .find(|e| e.kind == kind::LOG && e.tid == 77)
+            .expect("the unfinished line is reported, not lost");
+        assert!(line.log_truncated());
+        assert_eq!(line.log_level(), Some(level::WARN));
+        // Its text was interned after the drain announced its names. It has
+        // to be announced too, or the viewer shows an empty line.
+        let text = text_of(&service, line);
+        assert!(text.starts_with("stopped-mid-line-"), "got {text:?}");
+    }
+
+    #[test]
+    fn past_the_text_budget_a_new_line_keeps_everything_but_its_text() {
+        let (_serial, service, mut source) = source();
+        let line = |text: &str| LogMessage {
+            timestamp_ns: 5,
+            tid: 78,
+            message_id: 1,
+            level: level::ERROR,
+            message: text.to_string(),
+            completeness: Completeness::Complete,
+        };
+        let mut batch = Vec::new();
+        source.emit_log(0, line("kept before the budget ran out"), &mut batch);
+        assert_eq!(source.log_text_bytes, "kept before the budget ran out".len());
+        // Spend the budget.
+        source.log_text_bytes = LOG_TEXT_BUDGET_BYTES;
+        source.emit_log(0, line("a brand new line"), &mut batch);
+        source.emit_log(0, line("another brand new line"), &mut batch);
+        source.emit_log(0, line("kept before the budget ran out"), &mut batch);
+        source.announce_new_names();
+
+        assert_eq!(batch.len(), 4, "every line is still an event");
+        assert!(batch.iter().all(|e| e.kind == kind::LOG && e.tid == 78 && e.log_level() == Some(level::ERROR)));
+        assert_eq!(text_of(&service, &batch[1]), LOG_TEXT_DROPPED);
+        assert!(batch[1].log_truncated(), "and says it is not all there");
+        assert_eq!(batch[1].name_id, batch[2].name_id, "one shared notice, not a string per line");
+        assert_eq!(source.log_lines_without_text, 2);
+        // A line already kept costs nothing, so it is never affected.
+        assert_eq!(text_of(&service, &batch[3]), "kept before the budget ran out");
+        assert!(!batch[3].log_truncated());
+        assert_eq!(source.log_text_bytes, LOG_TEXT_BUDGET_BYTES, "the budget did not grow");
+    }
+
+    #[test]
+    fn a_log_written_through_the_api_reaches_the_timeline_with_its_text() {
+        let (_serial, service, mut source) = source();
+        let long = format!("api-line-{}", "z".repeat(120));
+        perfr_api::log_error(&long);
+        perfr_api::log_info("api-short-line");
+        let mut batch = Vec::new();
+        source.drain_now(perfr_scope_ring::shm::now_monotonic_ns(), &mut batch);
+        let texts: Vec<(String, u8, bool)> = batch
+            .iter()
+            .filter(|e| e.kind == kind::LOG)
+            .map(|e| (text_of(&service, e), e.log_level().unwrap(), e.log_truncated()))
+            .collect();
+        assert!(texts.contains(&(long, level::ERROR, false)), "{texts:?}");
+        assert!(texts.contains(&("api-short-line".to_string(), level::INFO, false)), "{texts:?}");
+        assert!(batch.iter().all(|e| e.kind != kind::DROP), "nothing was lost, so nothing says so");
     }
 }

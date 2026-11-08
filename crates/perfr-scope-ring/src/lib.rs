@@ -77,5 +77,5 @@ pub use shm::{
     DEFAULT_BUDGET_BYTES, DEFAULT_SLOTS_PER_RING,
 };
 pub use logmsg::{write_log, LogAssembler, LogMessage, MAX_LOG_BYTES};
-pub use meta::{DropTally, CHANNEL_NAME_MAX, CHANNEL_SLOTS};
+pub use meta::DropTally;
 pub use text::{split_name, Completeness, TextAssembler};

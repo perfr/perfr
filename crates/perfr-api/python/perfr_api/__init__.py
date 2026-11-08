@@ -47,9 +47,8 @@ import sys
 
 __all__ = [
     "ABI_VERSION", "DEBUG", "E_ABI", "E_NOLIB", "ERROR", "FATAL", "INFO", "TRACE", "WARN",
-    "available", "channel", "init", "instant", "library_path", "link", "log", "now_ns",
-    "register_channel", "scope", "scope_async", "shutdown", "span", "span_async", "start",
-    "start_async", "stop", "value",
+    "available", "init", "instant", "library_path", "link", "log", "now_ns", "scope",
+    "scope_async", "shutdown", "span", "span_async", "start", "start_async", "stop", "value",
 ]
 __version__ = "0.1.0"
 
@@ -127,16 +126,8 @@ def _open(path):
         fn.argtypes = (ctypes.c_char_p, ctypes.c_size_t, ctypes.c_uint64, ctypes.c_uint64)
         fn.restype = None
     # Logging was appended. A library from before this package leaves the
-    # symbols absent; the calls below then stay no-ops.
+    # symbol absent; `log` then stays a no-op.
     if hasattr(lib, "perfr_log"):
-        lib.perfr_register_channel.argtypes = (ctypes.c_char_p, ctypes.c_size_t)
-        lib.perfr_register_channel.restype = ctypes.c_uint8
-        lib.perfr_channel_current.argtypes = ()
-        lib.perfr_channel_current.restype = ctypes.c_uint8
-        lib.perfr_channel_push.argtypes = (ctypes.c_uint8,)
-        lib.perfr_channel_push.restype = ctypes.c_uint8
-        lib.perfr_channel_pop.argtypes = ()
-        lib.perfr_channel_pop.restype = ctypes.c_uint8
         lib.perfr_log.argtypes = (ctypes.c_uint8, ctypes.c_char_p, ctypes.c_size_t)
         lib.perfr_log.restype = None
     return lib
@@ -301,51 +292,16 @@ def scope_async(name=None):
     return scope(name, async_=True)
 
 
-def register_channel(name):
-    """Registers a scope channel and returns its id. The same name returns
-    the same id. Empty is the default channel, ``0``. Does not change the
-    calling thread's current channel, and does not affect log lines."""
-    if not _lib or not hasattr(_lib, "perfr_register_channel"):
-        return 0
-    b = _name(name)
-    return _lib.perfr_register_channel(b, len(b))
-
-
 def log(level, message):
     """Records a log line. A no-op when the library is missing or nobody is
-    capturing. The line carries ``level``, the thread and the timestamp.
-    It does not carry a channel."""
+    capturing. The line carries ``level`` (``TRACE`` .. ``FATAL``), the thread
+    and the timestamp. The viewer files it under every scope that was open on
+    this thread at that time, so a scope is the way to group lines:
+
+        with perfr.scope("simulation"):
+            perfr.log(perfr.INFO, "tick")
+    """
     if _lib and hasattr(_lib, "perfr_log"):
         b = _name(message)
         _lib.perfr_log(int(level) & 0xFF, b, len(b))
 
-
-class channel:
-    """Sets the thread's channel for the duration of the block.
-
-    Scopes entered inside record that channel. Log lines do not. Nesting
-    restores the previous channel on the way out.
-
-        sim = perfr.register_channel("simulation")
-        with perfr.channel(sim):
-            with perfr.scope("frame"):
-                perfr.log(perfr.INFO, "tick")
-    """
-
-    __slots__ = ("id",)
-
-    def __init__(self, name_or_id):
-        if isinstance(name_or_id, int):
-            self.id = name_or_id
-        else:
-            self.id = register_channel(name_or_id)
-
-    def __enter__(self):
-        if _lib and hasattr(_lib, "perfr_channel_push"):
-            _lib.perfr_channel_push(self.id)
-        return self.id
-
-    def __exit__(self, *exc):
-        if _lib and hasattr(_lib, "perfr_channel_pop"):
-            _lib.perfr_channel_pop()
-        return False

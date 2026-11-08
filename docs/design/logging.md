@@ -22,23 +22,18 @@ Segment layout version **2**. `ScopeEvent` is 56 bytes:
 Names longer than 32 bytes continue as `kind = TEXT` records. `depth` is
 the chain index (1..=255), so a name stops at 8 KiB. A missing chunk is
 `Completeness::Truncated`. A lap is a single `dropped` count on the drain.
-The capture file is `perfr-capture/1`: the events table has no channel column.
+The capture file is `perfr-capture/1`.
 
 ## Queue record, after
 
 Segment layout version stays **2**. Ring offsets do not move, so a segment
-written by an older `libperfr_api` still opens. `api_version` in the header
-is **2**, which only records the new meanings below. Older captures on disk
-are `perfr-capture/1` and still load; new bundles are `perfr-capture/2` and
-add an optional `bundle.channels` array. A file without that array has no
-named channels (every scope is the default channel, id 0).
+written by an older library still opens. `api_version` in the header
+is **2**, which only records the new meanings below. The capture file is
+still `perfr-capture/1`: no table changed shape.
 
 What changed inside the same 56 bytes:
 
 * `kind = 6` (`LOG`) is one chunk of a log line.
-* On `SCOPE_START` only, `depth` is the channel id captured at enter
-  (0 is the default). The reader still computes nesting itself. Continuations
-  still use `depth` as the chain index. Log chunks store 0 there.
 * Log `scope_id`: bits 0..16 chunk index, bits 16..32 total chunks, bits
   32..64 message id. Flags bit 0 is cleared on the last chunk, bit 1 (`CUT`)
   is set when the line was longer than `MAX_LOG_BYTES` (~32 KiB), bits 4..6
@@ -51,31 +46,83 @@ What changed inside the same 56 bytes:
 * A missing chunk inserts U+FFFD and the live event is flagged truncated.
   The line is never presented as complete.
 * The control page, in bytes that used to be zero (after the reader leases,
-  still inside the first 4 KiB), holds published read cursors, a per-thread
-  per-kind drop table, and the channel-name directory (48 names, 28 bytes
-  each). An older producer leaves them zero.
+  still inside the first 4 KiB), holds published read cursors and a
+  per-thread per-kind drop table. An older producer leaves them zero.
 
-A log line does **not** store a channel id or a scope id. The viewer
-attaches a line to a scope when the line's timestamp is inside that scope's
+## Scopes group log lines
+
+A log line does **not** store a scope id, and there is no category on it.
+A line belongs to a scope when its timestamp is inside that scope's
 enter/exit interval on the same thread. The interval is closed at both ends.
+Nested scopes each contain the line.
 
-## Channel
+That makes a scope the grouping: to read what a subsystem logged, wrap it in
+a scope and ask for the lines inside that scope (click it in the viewer, or
+pass `scope` to `/api/logs` and `perfr_logs`). A separate channel system
+would be a second way to say the same thing, with its own registry, ids and
+names to carry through the ring, the wire and the file.
 
-`register_channel(name)` runs once and writes the name into the control-page
-directory. The hot path is a thread-local id. `ChannelGuard` pushes and
-pops that id and emits nothing. Scope enter copies the id into `depth`.
-That byte was already stored (it used to be zero). Logging does not read it.
+The lookup is not the product of lines and scopes. A scope's instances on a
+thread are merged into disjoint sorted intervals once, and each line is one
+binary search on its own thread (`perfr_live_event::logs::SpanSet`).
+
+## The loadable table
+
+`perfr_log` was appended to `perfr_api_table_v1`. `perfr.h` loads any
+library whose table is at least as long as the table first released
+(`PERFR_API_TABLE_BASE_SIZE_`, the offset of `log`) and checks `size`
+again where it calls `log`, so a program built with the new header still
+runs against a library from before logging: every other call works and
+`perfr_log` is a no-op. Nothing may be inserted above `log`; new entries
+go below it and are checked the same way.
 
 ## Drops
 
-When the consumer has published its read cursor and a claim would overwrite
-an unread slot, the producer reads the event still in that slot and adds one
-to that event's `(tid, kind)` counter before replacing it. The counter is on
-the control page, so the lap cannot erase the record of the loss. The
-consumer still counts the lap (`events_lost`) and writes a `DROP` live event
-per thread and kind, plus an unattributed marker for any lap it saw that the
-table did not name. The CLI prints the breakdown. The log window shows the
-total in red, and each thread grows a drops lane.
+There are two numbers, and only one of them is a count.
+
+**How many** records a reader lost is its own lap count: its cursor fell
+more than a ring behind the write cursor, and the difference is gone. This
+is exact, per reader, and is what `events_lost` and every `DROP` marker add
+up to.
+
+**What** was lost comes from the producer. When a consumer has published
+its read cursor and a claim would overwrite a slot at or past it, the
+producer reads the event still in that slot and adds one to that event's
+`(tid, kind)` counter before replacing it. The counter is on the control
+page, so the lap cannot erase it.
+
+The table can say more than the reader lost, so it is never reported on its
+own:
+
+* The cursor is published once per drain, right after the copy and before
+  anything is done with the events. A slot the reader has copied but not yet
+  published is counted when it is overwritten.
+* There is one cursor per ring however many readers drain the segment
+  (every `perfr` on a machine reads every segment). The last to publish
+  wins, and the table then counts against that reader.
+* The counters are totals since the process started. A reader records where
+  they stand when it adopts a segment and only looks at what is added.
+
+Each pass the consumer spends the table's new counts against its own loss.
+If the table names less than was lost, the rest is one unattributed marker.
+If it names more, each `(tid, kind)` gets its proportional share and the
+surplus waits one pass, because a producer counts an overwrite the moment it
+happens and the reader sees that lap on its next drain. A count still
+unmatched after that was never this reader's loss and is dropped. A pass
+that lost nothing writes no marker.
+
+The CLI prints the breakdown. The log window shows the total in red, and
+each thread grows a drops lane.
+
+## Log text
+
+A live event has no room for text, so a line's text is interned like a scope
+name, once per distinct line, for the life of the capture, in the service
+and in every viewer. The events are in a bounded ring and are evicted; the
+strings are not. A capture therefore keeps at most 64 MiB of distinct log
+text (`LOG_TEXT_BUDGET_BYTES`). Past that, a new line keeps its time, thread
+and level, is flagged truncated, and reads "(log text not kept: ...)".
+A line already kept is never affected, however often it repeats.
 
 ## Live event and capture file
 
@@ -86,8 +133,6 @@ total in red, and each thread grows a drops lane.
 | `LOG` (8) | instant | `extra` = level, `_pad` bit 6 = truncated, `name_id` = message |
 | `DROP` (9) | instant | `duration_ns` = count (not a duration), `extra` = ring kind lost |
 
-`API_SCOPE` / `API_TRACK` `extra` is the channel id. Older events have
-`extra = 0`, which is the default channel.
-
-The events Arrow schema is unchanged, so a `/1` file and a `/2` file use the
-same columns. `/2` only adds `bundle.channels` in the manifest.
+The events Arrow schema is unchanged and so is the manifest, so the file
+format is still `perfr-capture/1`. A reader from before logging sees two
+event kinds it does not know.

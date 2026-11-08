@@ -176,8 +176,7 @@ impl LiveViewer {
             | LiveFrame::Hello { .. }
             | LiveFrame::Status { .. }
             | LiveFrame::ThreadName { .. }
-            | LiveFrame::ProcessName { .. }
-            | LiveFrame::ChannelName { .. } => {}
+            | LiveFrame::ProcessName { .. } => {}
         }
     }
 }

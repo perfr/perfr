@@ -2036,11 +2036,6 @@ fn capture_loop(
                 scopes.loss_summary(),
                 scopes.scopes_discarded_on_loss
             ));
-            log::warn!(
-                "DROPPING EVENTS: {} lost ({})",
-                scopes.events_lost,
-                scopes.loss_summary()
-            );
         }
 
         if !batch.is_empty() {
@@ -2433,15 +2428,10 @@ pub fn run_on(
         let (_, events) = bundle_service.ring().snapshot();
         let (threads, processes) = bundle_service.capture_names();
         let target_pid = bundle_target.load(Ordering::Relaxed).max(0) as u32;
-        let mut bundle = {
+        let bundle = {
             let intern = bundle_service.intern.lock();
             crate::names::capture_bundle(&events, &intern, &bundle_store, &threads, &processes, target_pid)
         };
-        bundle.channels = bundle_service
-            .channel_names()
-            .into_iter()
-            .map(|(id, name)| perfr_capture::ChannelName { id, name })
-            .collect();
         match window {
             Some((a, b)) => bundle.slice(a, b),
             None => bundle,

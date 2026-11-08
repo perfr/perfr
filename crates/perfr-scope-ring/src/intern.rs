@@ -41,6 +41,12 @@ impl NameInterner {
         id
     }
 
+    /// The id `name` already has, without allocating one. For a caller that
+    /// has to decide whether a new name is worth keeping before it is kept.
+    pub fn get(&self, name: &[u8]) -> Option<u32> {
+        self.ids.get(name).copied()
+    }
+
     /// Ids allocated since the last call, for telling the viewer what they
     /// mean. A caller drains this after each batch.
     pub fn take_new(&mut self) -> Vec<(u32, String)> {

@@ -113,7 +113,7 @@ namespace Perfr
             {
                 if (exclusive && !File.Exists(path))
                 {
-                    error = Perfr.ENoLib;
+                    error = Profiler.ENoLib;
                     return null;
                 }
                 if (Path.IsPathRooted(path) && !File.Exists(path)) continue;
@@ -122,7 +122,7 @@ namespace Perfr
                 {
                     if (exclusive)
                     {
-                        error = Perfr.ENoLib;
+                        error = Profiler.ENoLib;
                         return null;
                     }
                     continue;
@@ -131,13 +131,13 @@ namespace Perfr
                 if (!NativeApi.TryBind(handle, path, out var api))
                 {
                     DynLib.Close(handle);
-                    error = Perfr.EAbi;
+                    error = Profiler.EAbi;
                     return null;
                 }
                 error = 0;
                 return api;
             }
-            error = Perfr.ENoLib;
+            error = Profiler.ENoLib;
             return null;
         }
 
@@ -310,11 +310,11 @@ namespace Perfr
             var tableExport = DynLib.Symbol(handle, "perfr_api_table_v1");
             if (tableExport == IntPtr.Zero) return false;
             var get = Marshal.GetDelegateForFunctionPointer<TableDelegate>(tableExport);
-            var tablePtr = get((uint)Perfr.AbiVersion);
+            var tablePtr = get((uint)Profiler.AbiVersion);
             if (tablePtr == IntPtr.Zero) return false;
             var table = Marshal.PtrToStructure<ApiTable>(tablePtr);
             var need = Marshal.SizeOf<ApiTable>();
-            if (table.AbiVersion != Perfr.AbiVersion || table.Size < (uint)need) return false;
+            if (table.AbiVersion != Profiler.AbiVersion || table.Size < (uint)need) return false;
             if (IntPtr.Size == 8 && table.Size < 8 + 12 * 8) return false;
 
             api = new NativeApi(
@@ -363,10 +363,18 @@ namespace Perfr
         public void Span(ReadOnlySpan<byte> utf8Name, ulong startNs, ulong endNs, bool async) =>
             Call(async ? _spanAsync : _span, utf8Name, startNs, endNs);
 
+        // A string name is encoded into a stack buffer. These three are the
+        // hot path, so there is no helper taking a delegate: a closure per
+        // scope would be an allocation per scope.
         static ulong CallNamed(StartDelegate fn, string? name)
         {
             if (string.IsNullOrEmpty(name)) return Call(fn, ReadOnlySpan<byte>.Empty);
-            return WithUtf8(name, (bytes) => Call(fn, bytes));
+            if (Encoding.UTF8.GetMaxByteCount(name.Length) <= StackBytes)
+            {
+                Span<byte> buf = stackalloc byte[StackBytes];
+                return Call(fn, buf.Slice(0, Encoding.UTF8.GetBytes(name, buf)));
+            }
+            return Call(fn, Encoding.UTF8.GetBytes(name));
         }
 
         static void CallNamed(ValueDelegate fn, string? name, double value)
@@ -376,7 +384,13 @@ namespace Perfr
                 Call(fn, ReadOnlySpan<byte>.Empty, value);
                 return;
             }
-            WithUtf8(name, (bytes) => Call(fn, bytes, value));
+            if (Encoding.UTF8.GetMaxByteCount(name.Length) <= StackBytes)
+            {
+                Span<byte> buf = stackalloc byte[StackBytes];
+                Call(fn, buf.Slice(0, Encoding.UTF8.GetBytes(name, buf)), value);
+                return;
+            }
+            Call(fn, Encoding.UTF8.GetBytes(name), value);
         }
 
         static void CallNamed(SpanDelegate fn, string? name, ulong startNs, ulong endNs)
@@ -386,32 +400,16 @@ namespace Perfr
                 Call(fn, ReadOnlySpan<byte>.Empty, startNs, endNs);
                 return;
             }
-            WithUtf8(name, (bytes) => Call(fn, bytes, startNs, endNs));
-        }
-
-        static T WithUtf8<T>(string name, Utf8Func<T> body)
-        {
-            var max = Encoding.UTF8.GetMaxByteCount(name.Length);
-            if (max <= 256)
+            if (Encoding.UTF8.GetMaxByteCount(name.Length) <= StackBytes)
             {
-                Span<byte> buf = stackalloc byte[256];
-                var n = Encoding.UTF8.GetBytes(name, buf);
-                return body(buf.Slice(0, n));
+                Span<byte> buf = stackalloc byte[StackBytes];
+                Call(fn, buf.Slice(0, Encoding.UTF8.GetBytes(name, buf)), startNs, endNs);
+                return;
             }
-            return body(Encoding.UTF8.GetBytes(name));
+            Call(fn, Encoding.UTF8.GetBytes(name), startNs, endNs);
         }
 
-        static void WithUtf8(string name, Utf8Action body)
-        {
-            WithUtf8(name, (ReadOnlySpan<byte> bytes) =>
-            {
-                body(bytes);
-                return 0;
-            });
-        }
-
-        delegate T Utf8Func<T>(ReadOnlySpan<byte> bytes);
-        delegate void Utf8Action(ReadOnlySpan<byte> bytes);
+        const int StackBytes = 256;
 
         static unsafe ulong Call(StartDelegate fn, ReadOnlySpan<byte> name)
         {
@@ -440,37 +438,111 @@ namespace Perfr
         }
     }
 
-    /// <summary>dlopen / LoadLibrary. <c>NativeLibrary</c> is not in the netstandard2.1 contract.</summary>
+    /// <summary>
+    /// dlopen / LoadLibrary. On .NET 6 and later this is <c>NativeLibrary</c>.
+    /// The netstandard2.1 target has no <c>NativeLibrary</c> and calls the
+    /// loader directly; a runtime without <c>libdl.so.2</c> (musl, as on
+    /// Alpine) makes that P/Invoke throw, which is caught here so
+    /// <c>Init</c> reports <see cref="Profiler.ENoLib"/> instead.
+    /// </summary>
     internal static class DynLib
     {
+#if NET6_0_OR_GREATER
+        public static IntPtr Open(string path) =>
+            NativeLibrary.TryLoad(path, out var handle) ? handle : IntPtr.Zero;
+
+        public static IntPtr Symbol(IntPtr handle, string name) =>
+            handle != IntPtr.Zero && NativeLibrary.TryGetExport(handle, name, out var export) ? export : IntPtr.Zero;
+
+        public static void Close(IntPtr handle)
+        {
+            if (handle != IntPtr.Zero) NativeLibrary.Free(handle);
+        }
+#else
         public static IntPtr Open(string path)
         {
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                return LoadLibraryW(path);
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-                return MacDlopen(path, 6); // RTLD_NOW | RTLD_LOCAL
-            return LinuxDlopen(path, 2); // RTLD_NOW
+            try
+            {
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                    return LoadLibraryW(path);
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+                    return MacDlopen(path, 6); // RTLD_NOW | RTLD_LOCAL
+                try
+                {
+                    return LinuxDlopen(path, 2); // RTLD_NOW
+                }
+                catch (DllNotFoundException)
+                {
+                    // No libdl.so.2: musl keeps dlopen in libc itself.
+                    return LibcDlopen(path, 2);
+                }
+            }
+            catch (DllNotFoundException)
+            {
+                return IntPtr.Zero;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return IntPtr.Zero;
+            }
         }
 
         public static IntPtr Symbol(IntPtr handle, string name)
         {
             if (handle == IntPtr.Zero) return IntPtr.Zero;
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                return GetProcAddress(handle, name);
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-                return MacDlsym(handle, name);
-            return LinuxDlsym(handle, name);
+            try
+            {
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                    return GetProcAddress(handle, name);
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+                    return MacDlsym(handle, name);
+                try
+                {
+                    return LinuxDlsym(handle, name);
+                }
+                catch (DllNotFoundException)
+                {
+                    return LibcDlsym(handle, name);
+                }
+            }
+            catch (DllNotFoundException)
+            {
+                return IntPtr.Zero;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return IntPtr.Zero;
+            }
         }
 
         public static void Close(IntPtr handle)
         {
             if (handle == IntPtr.Zero) return;
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                FreeLibrary(handle);
-            else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-                MacDlclose(handle);
-            else
-                LinuxDlclose(handle);
+            try
+            {
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                    FreeLibrary(handle);
+                else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+                    MacDlclose(handle);
+                else
+                {
+                    try
+                    {
+                        LinuxDlclose(handle);
+                    }
+                    catch (DllNotFoundException)
+                    {
+                        LibcDlclose(handle);
+                    }
+                }
+            }
+            catch (DllNotFoundException)
+            {
+                // The handle came from a loader this process does not have.
+            }
+            catch (EntryPointNotFoundException)
+            {
+            }
         }
 
         [DllImport("libdl.so.2", EntryPoint = "dlopen")]
@@ -481,6 +553,15 @@ namespace Perfr
 
         [DllImport("libdl.so.2", EntryPoint = "dlclose")]
         static extern int LinuxDlclose(IntPtr handle);
+
+        [DllImport("libc", EntryPoint = "dlopen")]
+        static extern IntPtr LibcDlopen(string file, int mode);
+
+        [DllImport("libc", EntryPoint = "dlsym")]
+        static extern IntPtr LibcDlsym(IntPtr handle, string name);
+
+        [DllImport("libc", EntryPoint = "dlclose")]
+        static extern int LibcDlclose(IntPtr handle);
 
         [DllImport("libSystem.B.dylib", EntryPoint = "dlopen")]
         static extern IntPtr MacDlopen(string file, int mode);
@@ -499,5 +580,6 @@ namespace Perfr
 
         [DllImport("kernel32")]
         static extern bool FreeLibrary(IntPtr module);
+#endif
     }
 }

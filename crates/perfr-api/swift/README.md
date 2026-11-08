@@ -29,8 +29,11 @@ swift run PerfrSample
 ```
 
 The package tools version is 5.10 so a Swift 6 compiler builds it in Swift 5
-mode. `pthread_setname_np` is declared with `@_silgen_name` because the
-Swift Glibc overlay on Linux does not re-export it.
+mode. `CPerfrShim` is a twenty-line C target: the acquire/release slot that
+publishes the loaded library (so a scope is a load and an indirect call, with
+no lock on the hot path; Swift 5 has no atomics without a dependency) and
+`pthread_setname_np`, whose signature differs between Linux and macOS and
+which the Swift Glibc overlay does not re-export.
 
 ## What was tested
 

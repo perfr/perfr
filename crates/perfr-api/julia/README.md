@@ -40,6 +40,6 @@ On Linux x86-64 with Julia 1.13.3 and `libperfr.so` from
   byte 28 is set. `name_thread` matches `/proc/thread-self/comm`.
 - The sample prints the library path.
 
-Julia 1.11 is declared in `[compat]` and was not run. macOS and Windows
+`[compat]` declares Julia 1.10, which was not run. macOS and Windows
 were not run. The capture check knows the internal segment header.
 `Project.toml` is a local package; it is not registered.

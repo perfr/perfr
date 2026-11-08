@@ -7,14 +7,18 @@ that library is missing or `Init` was not called.
 ```csharp
 using Perfr;
 
-Perfr.Init();
-Perfr.NameThread("sim");
-using (Perfr.Scope("frame"))
+Profiler.Init();
+Profiler.NameThread("sim");
+using (Profiler.Scope("frame"))
 {
-    using (Perfr.Scope("update")) { }
-    Perfr.Value("fps", 59.9);
+    using (Profiler.Scope("update")) { }
+    Profiler.Value("fps", 59.9);
 }
 ```
+
+The namespace is `Perfr` and the class is `Profiler`. A class named `Perfr`
+inside namespace `Perfr` would resolve to the namespace from any other
+namespace, so `Perfr.Init()` would not compile there.
 
 Run `perfr`, open its viewer, pick this process, press Record. With no
 `libperfr` the same binary still runs.
@@ -30,8 +34,8 @@ Same order as `perfr.h`:
 4. The system loader (`libperfr.so`, `libperfr.dylib`, or `libperfr.dll`).
 
 The service is the authority on the ring protocol, so its own library wins
-over a copy beside the application. `Init` returns `0`, `Perfr.ENoLib`
-(`-1000`), `Perfr.EAbi` (`-1001`), or a negative errno. Later calls stay
+over a copy beside the application. `Init` returns `0`, `Profiler.ENoLib`
+(`-1000`), `Profiler.EAbi` (`-1001`), or a negative errno. Later calls stay
 valid no-ops in every failure case. After a library is loaded, `libperfr`
 still writes nothing until a perfr service is capturing the process.
 
@@ -54,8 +58,11 @@ macOS, and `SetThreadDescription` on Windows. It also sets
 ## Build
 
 The library targets `net6.0`, `net8.0`, and `netstandard2.1` (so it loads on
-.NET 6 and later). `NativeLibrary` is not in the netstandard2.1 contract, so
-the loader calls `dlopen` / `LoadLibrary` directly.
+.NET 6 and later). The `net6.0` and `net8.0` builds load through
+`NativeLibrary`. `NativeLibrary` is not in the netstandard2.1 contract, so
+that build calls `dlopen` / `LoadLibrary` directly, and a runtime whose
+loader is not where glibc keeps it (musl has no `libdl.so.2`) falls back to
+`libc` and then to `ENoLib`; nothing throws out of `Init`.
 
 ```sh
 dotnet test -c Release          # no library: every call is a no-op

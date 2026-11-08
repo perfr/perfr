@@ -466,11 +466,12 @@ in the URL opens a tab on load.
 - **Python** is the pure-Python package at `crates/perfr-api/python`
   (`pip install perfr-api`, module `perfr_api`): the same search order,
   ctypes over the same library, `with perfr.scope(...)` and `@perfr.scope`.
-- **C#** is `crates/perfr-api/csharp`, package id `Perfr`, targets
-  `net6.0`, `net8.0`, and `netstandard2.1`. It `dlopen`s / `LoadLibrary`s
-  `libperfr` (the netstandard2.1 contract has no `NativeLibrary`) and
-  checks `perfr_api_table_v1`. `using (Perfr.Scope("name"))` stops the
-  scope. Tested on Linux x86-64 with the .NET 8 SDK: a missing `PERFR_LIB`
+- **C#** is `crates/perfr-api/csharp`, package id `Perfr`, namespace
+  `Perfr`, class `Profiler`, targets `net6.0`, `net8.0`, and
+  `netstandard2.1`. It loads `libperfr` through `NativeLibrary` (or
+  `dlopen` / `LoadLibrary` on netstandard2.1, whose contract has no
+  `NativeLibrary`) and checks `perfr_api_table_v1`.
+  `using (Profiler.Scope("name"))` stops the scope. Tested on Linux x86-64 with the .NET 8 SDK: a missing `PERFR_LIB`
   is a no-op, and with `libperfr.so` a scope is written into the process
   segment only while the capturing word is set. `dotnet pack` builds a
   nupkg and nothing is pushed to NuGet. macOS and Windows were not run.

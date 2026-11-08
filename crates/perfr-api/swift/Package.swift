@@ -12,7 +12,8 @@ let package = Package(
         .executable(name: "PerfrSample", targets: ["PerfrSample"]),
     ],
     targets: [
-        .target(name: "Perfr"),
+        .target(name: "CPerfrShim"),
+        .target(name: "Perfr", dependencies: ["CPerfrShim"]),
         .executableTarget(name: "PerfrSample", dependencies: ["Perfr"]),
         .testTarget(name: "PerfrTests", dependencies: ["Perfr"]),
     ]

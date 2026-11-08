@@ -7,8 +7,10 @@ using System;
 namespace Perfr
 {
     /// <summary>
-    /// Manual instrumentation for perfr. Every call is safe from any thread
-    /// at any time. Until <see cref="Init"/> has loaded <c>libperfr</c>, each
+    /// Manual instrumentation for perfr: <c>using Perfr; Profiler.Init();</c>.
+    /// (The class is not called <c>Perfr</c> because a type with the same
+    /// name as its namespace cannot be reached by its simple name from any
+    /// other namespace.) Every call is safe from any thread at any time. Until <see cref="Init"/> has loaded <c>libperfr</c>, each
     /// call returns immediately. After that, <c>libperfr</c> itself writes
     /// nothing unless a perfr service is capturing the process.
     /// </summary>
@@ -18,7 +20,7 @@ namespace Perfr
     /// API. Handles are opaque. Zero means "no event", which is what every
     /// call returns while profiling is off, and every function accepts zero.
     /// </remarks>
-    public static class Perfr
+    public static class Profiler
     {
         /// <summary>The ABI this assembly speaks. <c>libperfr</c> returns a table only for it.</summary>
         public const int AbiVersion = 1;
@@ -102,7 +104,7 @@ namespace Perfr
 
         /// <summary>
         /// A scope that stops when disposed.
-        /// <code>using (Perfr.Scope("frame")) { }</code>
+        /// <code>using (Profiler.Scope("frame")) { }</code>
         /// </summary>
         public static ScopeGuard Scope(string? name) => new ScopeGuard(Start(name));
 
@@ -134,7 +136,7 @@ namespace Perfr
             internal ScopeGuard(ulong handle) => Handle = handle;
 
             /// <summary>Ends the scope. A second call stops the same handle again, which the C API also allows.</summary>
-            public void Dispose() => Perfr.Stop(Handle);
+            public void Dispose() => Profiler.Stop(Handle);
         }
     }
 }

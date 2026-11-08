@@ -105,9 +105,9 @@ C#, the `Perfr` package at `crates/perfr-api/csharp` (`net6.0`, `net8.0`, and `n
 
 ```csharp
 using Perfr;
-Perfr.Init();
-using (Perfr.Scope("frame")) { }
-Perfr.Value("fps", 59.9);
+Profiler.Init();
+using (Profiler.Scope("frame")) { }
+Profiler.Value("fps", 59.9);
 ```
 
 Lua (`crates/perfr-api/lua`: LuaJIT FFI, or a Lua 5.4 module that includes `perfr.h`):

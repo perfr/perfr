@@ -24,14 +24,14 @@ namespace Perfr.Tests
         {
             if (!RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
             {
-                Perfr.NameThread("perfr-cs");
+                Profiler.NameThread("perfr-cs");
                 return;
             }
 
-            Assert.True(Perfr.NameThread("perfr-cs"));
+            Assert.True(Profiler.NameThread("perfr-cs"));
             Assert.Equal("perfr-cs", Comm());
 
-            Assert.True(Perfr.NameThread("0123456789abcdefEXTRA"));
+            Assert.True(Profiler.NameThread("0123456789abcdefEXTRA"));
             Assert.Equal("0123456789abcde", Comm());
         }
 
@@ -47,40 +47,40 @@ namespace Perfr.Tests
 
         static void WithoutLibrary(string? configured)
         {
-            Assert.False(Perfr.Available);
-            Assert.Equal(0UL, Perfr.Start("quiet"));
-            Assert.Equal(0UL, Perfr.NowNs());
-            using (Perfr.Scope("quiet")) { }
-            Perfr.Stop(0);
-            Perfr.Stop(1);
-            Perfr.Link(0, 1);
-            Perfr.Value("quiet", 1.0);
-            Perfr.Span("quiet", 1, 2);
-            Perfr.SpanAsync("quiet", 1, 2);
+            Assert.False(Profiler.Available);
+            Assert.Equal(0UL, Profiler.Start("quiet"));
+            Assert.Equal(0UL, Profiler.NowNs());
+            using (Profiler.Scope("quiet")) { }
+            Profiler.Stop(0);
+            Profiler.Stop(1);
+            Profiler.Link(0, 1);
+            Profiler.Value("quiet", 1.0);
+            Profiler.Span("quiet", 1, 2);
+            Profiler.SpanAsync("quiet", 1, 2);
 
             if (string.IsNullOrEmpty(configured))
                 Environment.SetEnvironmentVariable("PERFR_LIB", "/no/such/libperfr.so");
 
-            Assert.Equal(Perfr.ENoLib, Perfr.Init());
-            Assert.False(Perfr.Available);
-            Assert.Null(Perfr.LibraryPath);
-            Assert.Equal(0UL, Perfr.Start("still-quiet"));
-            Assert.Equal(0UL, Perfr.Instant("still-quiet"));
-            Assert.Equal(0UL, Perfr.NowNs());
+            Assert.Equal(Profiler.ENoLib, Profiler.Init());
+            Assert.False(Profiler.Available);
+            Assert.Null(Profiler.LibraryPath);
+            Assert.Equal(0UL, Profiler.Start("still-quiet"));
+            Assert.Equal(0UL, Profiler.Instant("still-quiet"));
+            Assert.Equal(0UL, Profiler.NowNs());
         }
 
         static void WithLibrary(string path)
         {
-            Assert.Equal(0, Perfr.Init());
-            Assert.Equal(0, Perfr.Init());
-            Assert.True(Perfr.Available);
-            Assert.Equal(path, Perfr.LibraryPath);
+            Assert.Equal(0, Profiler.Init());
+            Assert.Equal(0, Profiler.Init());
+            Assert.True(Profiler.Available);
+            Assert.Equal(path, Profiler.LibraryPath);
 
-            var t0 = Perfr.NowNs();
+            var t0 = Profiler.NowNs();
             Assert.True(t0 > 0);
-            Assert.True(Perfr.NowNs() >= t0);
-            Assert.Equal(0UL, Perfr.Start("before-capture"));
-            using (Perfr.Scope("before-capture")) { }
+            Assert.True(Profiler.NowNs() >= t0);
+            Assert.Equal(0UL, Profiler.Start("before-capture"));
+            using (Profiler.Scope("before-capture")) { }
 
             var segment = "/dev/shm/perfr-scopes-" + Environment.ProcessId;
             Assert.True(File.Exists(segment), segment);
@@ -99,22 +99,22 @@ namespace Perfr.Tests
 
                 WriteU32(fd, 28, 1);
                 ulong handle;
-                using (var scope = Perfr.Scope("csharp-probe"))
+                using (var scope = Profiler.Scope("csharp-probe"))
                 {
                     handle = scope.Handle;
                     Assert.NotEqual(0UL, handle);
-                    Perfr.Value("csharp-fps", 59.9);
-                    var mark = Perfr.Instant("csharp-mark");
+                    Profiler.Value("csharp-fps", 59.9);
+                    var mark = Profiler.Instant("csharp-mark");
                     Assert.NotEqual(0UL, mark);
-                    Perfr.Link(mark, handle);
-                    var asyncHandle = Perfr.StartAsync("csharp-job");
+                    Profiler.Link(mark, handle);
+                    var asyncHandle = Profiler.StartAsync("csharp-job");
                     Assert.NotEqual(0UL, asyncHandle);
-                    Perfr.Stop(asyncHandle);
+                    Profiler.Stop(asyncHandle);
                 }
-                var now = Perfr.NowNs();
-                Perfr.Span("csharp-span", now - 1000, now);
-                Perfr.SpanAsync("csharp-gpu", now - 5000, now - 1000);
-                Perfr.Start("csharp-\u03c0");
+                var now = Profiler.NowNs();
+                Profiler.Span("csharp-span", now - 1000, now);
+                Profiler.SpanAsync("csharp-gpu", now - 5000, now - 1000);
+                Profiler.Start("csharp-\u03c0");
 
                 var length = libc_lseek(fd, 0, 2);
                 Assert.True(length > 0);
@@ -137,10 +137,10 @@ namespace Perfr.Tests
                 libc_close(fd);
             }
 
-            Assert.Equal(0UL, Perfr.Start("after-capture"));
-            Perfr.Shutdown();
+            Assert.Equal(0UL, Profiler.Start("after-capture"));
+            Profiler.Shutdown();
             Assert.False(File.Exists(segment));
-            Assert.True(Perfr.Available);
+            Assert.True(Profiler.Available);
         }
 
         static void WriteU32(int fd, long offset, uint value)

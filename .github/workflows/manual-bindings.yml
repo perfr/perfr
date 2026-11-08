@@ -4,8 +4,7 @@
 #
 # Linux build and test for the libperfr language bindings. One job builds
 # libperfr; the others test against that .so. The C# job also packs a nupkg
-# and uploads it. Nothing is published to NuGet. Mojo is compiled only when
-# the runner already has `mojo` on PATH, which the GitHub image does not.
+# and uploads it. Nothing is published to NuGet. Mojo comes from pip.
 
 name: manual-bindings
 on:
@@ -178,10 +177,22 @@ jobs:
   mojo:
     needs: libperfr
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Build if mojo is installed
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Mojo
+        run: |
+          python -m venv /tmp/mojo
+          /tmp/mojo/bin/pip install --quiet 'mojo==1.0.*'
+          echo /tmp/mojo/bin >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v4
+        with:
+          name: libperfr
+          path: dist
+      - name: Test
         run: |
           chmod +x crates/perfr-api/mojo/test.sh
-          crates/perfr-api/mojo/test.sh
+          crates/perfr-api/mojo/test.sh "$PWD/dist/libperfr.so"

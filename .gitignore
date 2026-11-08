@@ -62,3 +62,4 @@ crates/perfr-api/java/build/
 crates/perfr-api/zig/.zig-cache/
 crates/perfr-api/zig/zig-out/
 crates/perfr-api/swift/.build/
+crates/perfr-api/mojo/build/

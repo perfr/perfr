@@ -45,13 +45,25 @@ const Api = struct {
     span_async: SpanFn,
 };
 
-var loaded: ?Api = null;
+// The table is published the way perfr.h publishes its own: filled in
+// completely, then one pointer stored with release and loaded with acquire
+// on every call. A by-value `?Api` read without synchronisation could show
+// a thread the "present" tag before the eleven function pointers behind it.
+var api_storage: Api = undefined;
+var loaded = std.atomic.Value(?*const Api).init(null);
 var loaded_path: [4096]u8 = undefined;
 var loaded_path_len: usize = 0;
 var gate: std.atomic.Mutex = .unlocked;
 
+/// The table's `size` for this word size: two u32 then twelve pointers.
+const table_size: u32 = 8 + 12 * @sizeOf(usize);
+
 fn lock() void {
     while (!gate.tryLock()) {}
+}
+
+inline fn current() ?*const Api {
+    return loaded.load(.acquire);
 }
 
 /// A scope that ends when `end` is called. Pair it with `defer`.
@@ -64,63 +76,63 @@ pub const Scope = struct {
 };
 
 pub fn init() i32 {
-    if (loaded) |api| return api.init_fn();
+    if (current()) |api| return api.init_fn();
     lock();
     defer gate.unlock();
-    if (loaded) |api| return api.init_fn();
-    const api = bind() catch |err| switch (err) {
+    if (current()) |api| return api.init_fn();
+    api_storage = bind() catch |err| switch (err) {
         error.NoLib => return e_nolib,
         error.Abi => return e_abi,
     };
-    loaded = api;
-    return api.init_fn();
+    loaded.store(&api_storage, .release);
+    return api_storage.init_fn();
 }
 
 pub fn shutdown() void {
-    if (loaded) |api| api.shutdown_fn();
+    if (current()) |api| api.shutdown_fn();
 }
 
 pub fn available() bool {
-    return loaded != null;
+    return current() != null;
 }
 
 pub fn libraryPath() ?[]const u8 {
-    if (loaded == null or loaded_path_len == 0) return null;
+    if (current() == null or loaded_path_len == 0) return null;
     return loaded_path[0..loaded_path_len];
 }
 
 pub fn start(name: []const u8) u64 {
-    const api = loaded orelse return 0;
+    const api = current() orelse return 0;
     if (name.len == 0) return api.start(null, 0);
     return api.start(name.ptr, name.len);
 }
 
 pub fn startAsync(name: []const u8) u64 {
-    const api = loaded orelse return 0;
+    const api = current() orelse return 0;
     if (name.len == 0) return api.start_async(null, 0);
     return api.start_async(name.ptr, name.len);
 }
 
 pub fn stop(handle: u64) void {
     if (handle == 0) return;
-    const api = loaded orelse return;
+    const api = current() orelse return;
     api.stop(handle);
 }
 
 pub fn instant(name: []const u8) u64 {
-    const api = loaded orelse return 0;
+    const api = current() orelse return 0;
     if (name.len == 0) return api.instant(null, 0);
     return api.instant(name.ptr, name.len);
 }
 
 pub fn link(from: u64, to: u64) void {
     if (from == 0 or to == 0) return;
-    const api = loaded orelse return;
+    const api = current() orelse return;
     api.link(from, to);
 }
 
 pub fn value(name: []const u8, sample: f64) void {
-    const api = loaded orelse return;
+    const api = current() orelse return;
     if (name.len == 0) {
         api.value(null, 0, sample);
         return;
@@ -129,12 +141,12 @@ pub fn value(name: []const u8, sample: f64) void {
 }
 
 pub fn nowNs() u64 {
-    const api = loaded orelse return 0;
+    const api = current() orelse return 0;
     return api.now_ns();
 }
 
 pub fn span(name: []const u8, start_ns: u64, end_ns: u64) void {
-    const api = loaded orelse return;
+    const api = current() orelse return;
     if (name.len == 0) {
         api.span(null, 0, start_ns, end_ns);
         return;
@@ -143,7 +155,7 @@ pub fn span(name: []const u8, start_ns: u64, end_ns: u64) void {
 }
 
 pub fn spanAsync(name: []const u8, start_ns: u64, end_ns: u64) void {
-    const api = loaded orelse return;
+    const api = current() orelse return;
     if (name.len == 0) {
         api.span_async(null, 0, start_ns, end_ns);
         return;
@@ -186,7 +198,7 @@ fn bind() error{ NoLib, Abi }!Api {
         lib.close();
         return error.Abi;
     };
-    if (table[0] != abi_version or table[1] < 104) {
+    if (table[0] != abi_version or table[1] < table_size) {
         lib.close();
         return error.Abi;
     }

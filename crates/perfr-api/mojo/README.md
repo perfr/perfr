@@ -1,9 +1,8 @@
 # perfr for Mojo
 
-Manual instrumentation for Mojo. `perfr/__init__.mojo` loads `libperfr`
-with `OwnedDLHandle` (the std.ffi owner of a `dlopen` handle; earlier Mojo
-docs call this `DLHandle`) and uses `external_call` for libc (`getenv`,
-`access`, `pthread_setname_np`).
+Manual instrumentation for Mojo 1.0. `perfr/__init__.mojo` loads `libperfr`
+with `OwnedDLHandle` (std.ffi's owner of a `dlopen` handle) and reaches libc
+(`getenv`, `access`, `pthread_setname_np`) with `external_call`.
 
 ```mojo
 from perfr import Perfr, name_thread
@@ -14,37 +13,49 @@ def main() raises:
     _ = name_thread(String("sim"))
     with perfr.scope(String("frame")) as handle:
         _ = handle
-        _ = perfr.value(String("fps"), 60.0)
+        perfr.value(String("fps"), 60.0)
 ```
 
-`with` uses `__enter__` / `__exit__`. `__exit__` opens the library path
-again and calls `perfr_stop`, so the scope does not borrow the handle
-across the block. `name_thread` sets the OS thread name. `libperfr` has
-no thread-name call. Linux keeps 15 bytes.
+`with` uses `__enter__` / `__exit__`. The scope points at the `Perfr` it
+came from and calls `stop` when the block ends, so `perfr` must not move
+inside the block. `name_thread` sets the OS thread name. `libperfr` has no
+thread-name call. Linux keeps 15 bytes.
 
-`init` returns `0`, `-1000` (no library), or `-1001` (wrong ABI). Until it
-succeeds, calls return immediately. The search checks `$PERFR_LIB` (exclusive),
-then `~/.local/bin` and `~/.perfr/bin`, then `libperfr.so` on the loader
-path. It does not walk `PATH` for the `perfr` binary; that part of the C
-search is not in this file.
+`init` returns `0`, `-1000` (`E_NOLIB`), `-1001` (`E_ABI`), or a negative
+errno. Until it succeeds, calls return immediately. The search is the one in
+`perfr.h`: `$PERFR_LIB` (exclusive), beside a `perfr` on `PATH`, then
+`~/.local/bin` and `~/.perfr/bin`, then the loader's own search for
+`libperfr.so`.
+
+Each call resolves its entry point with `get_function`, that is a `dlsym`
+per call. Mojo 1.0 has no way to keep a function pointer from a `dlsym`
+result in a struct field (`get_function`'s callable borrows the handle, and
+a raw symbol cannot be cast to a function type), so this binding is slower
+per scope than the C header. It is correct, and fine for frame-level scopes.
+
+## Build and test
+
+```sh
+pip install mojo          # or any Mojo 1.0 install
+./test.sh /path/to/libperfr.so
+```
+
+`test.sh` builds `sample.mojo` and `test/test_perfr.mojo`, runs the test
+with a missing library and then with the real one, and exits non-zero when
+`mojo` is not on `PATH`.
 
 ## What was tested
 
-Nothing. The Mojo compiler was not installed in this environment, and the
-Linux CI image used for the other bindings does not have it either. The
-workflow runs `mojo build` on `sample.mojo` when `mojo` is on `PATH` and
-otherwise prints that it skipped. Treat the package as unchecked source
-written against the std.ffi manual (`OwnedDLHandle.get_function` parameterized
-by return type, `external_call` parameterized by symbol and return type).
+On Linux x86-64 with Mojo 1.0.0 and `libperfr.so` from
+`cargo build -p perfr-lib`:
 
-To try it locally, from this directory, with `mojo` on `PATH` and
-`PERFR_LIB` pointing at `libperfr.so`:
+- The package and the sample compile without errors.
+- A missing `PERFR_LIB`: `init` returns `E_NOLIB` and calls are no-ops.
+- With the library: `init` returns 0 twice, `library_path` is the configured
+  path, `now_ns` advances, and handles stay zero while nobody is capturing.
+- With `PERFR_LIB` unset and a directory holding `perfr` and `libperfr.so`
+  first on `PATH`, `init` finds that copy.
+- `name_thread` returns true.
 
-```sh
-mojo build sample.mojo
-# or
-mojo run sample.mojo
-```
-
-If that fails, the compiler's FFI surface has moved. The file's module
-docstring names the calls it expects.
+The test does not poke the segment's capturing word the way the other
+bindings' tests do. macOS was not run.

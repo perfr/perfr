@@ -27,11 +27,28 @@ const ABI_VERSION = 1
 const E_NOLIB = Int32(-1000)
 const E_ABI = Int32(-1001)
 
-mutable struct Api
+# Every entry point, resolved once in `_load`. The fields are immutable and
+# the struct is published through `STATE` after it is complete, so a call on
+# another thread is a field read and a `ccall`, with no table to probe and
+# nothing to race: a `Dict` filled lazily from several threads is not safe.
+struct Api
     lib::Ptr{Cvoid}
     path::String
-    fn::Dict{Symbol,Ptr{Cvoid}}
+    init::Ptr{Cvoid}
+    shutdown::Ptr{Cvoid}
+    start::Ptr{Cvoid}
+    start_async::Ptr{Cvoid}
+    stop::Ptr{Cvoid}
+    instant::Ptr{Cvoid}
+    link::Ptr{Cvoid}
+    value::Ptr{Cvoid}
+    now_ns::Ptr{Cvoid}
+    span::Ptr{Cvoid}
+    span_async::Ptr{Cvoid}
 end
+
+# The table's `size` for this word size: two UInt32 then twelve pointers.
+const TABLE_SIZE = 8 + 12 * sizeof(Ptr{Cvoid})
 
 const STATE = Ref{Union{Api,Nothing}}(nothing)
 const LOAD_ERROR = Ref{Int32}(E_NOLIB)
@@ -75,10 +92,20 @@ function _candidates()
     return list, false
 end
 
-function _symbol(api::Api, name::Symbol)
-    get!(api.fn, name) do
-        dlsym(api.lib, name)
+# All twelve entry points, or `nothing` when one is missing, which means the
+# library speaks another ABI. `dlsym` throws by default; a library that lacks
+# a symbol is an ABI miss to report, not an exception to raise.
+function _resolve(lib::Ptr{Cvoid}, path::String)
+    names = (:perfr_init, :perfr_shutdown, :perfr_start, :perfr_start_async,
+             :perfr_stop, :perfr_instant, :perfr_link, :perfr_value,
+             :perfr_now_ns, :perfr_span, :perfr_span_async)
+    ptrs = Ptr{Cvoid}[]
+    for name in names
+        ptr = dlsym(lib, name; throw_error=false)
+        (ptr === nothing || ptr == C_NULL) && return nothing
+        push!(ptrs, ptr)
     end
+    return Api(lib, path, ptrs...)
 end
 
 function _load()
@@ -98,7 +125,10 @@ function _load()
             exclusive && return nothing
             continue
         end
-        table = ccall(dlsym(lib, :perfr_api_table_v1), Ptr{Cvoid}, (UInt32,), UInt32(ABI_VERSION))
+        # A library without the getter speaks an older ABI by definition.
+        getter = dlsym(lib, :perfr_api_table_v1; throw_error=false)
+        table = getter === nothing || getter == C_NULL ? C_NULL :
+                ccall(getter, Ptr{Cvoid}, (UInt32,), UInt32(ABI_VERSION))
         if table == C_NULL
             dlclose(lib)
             LOAD_ERROR[] = E_ABI
@@ -106,13 +136,14 @@ function _load()
         end
         abi = unsafe_load(Ptr{UInt32}(table))
         size = unsafe_load(Ptr{UInt32}(table) + 1)
-        if abi != ABI_VERSION || size < 104
+        api = abi == ABI_VERSION && size >= TABLE_SIZE ? _resolve(lib, path) : nothing
+        if api === nothing
             dlclose(lib)
             LOAD_ERROR[] = E_ABI
             return nothing
         end
-        STATE[] = Api(lib, path, Dict{Symbol,Ptr{Cvoid}}())
-        return STATE[]
+        STATE[] = api
+        return api
     end
     return nothing
 end
@@ -120,13 +151,13 @@ end
 function init()
     api = _load()
     api === nothing && return LOAD_ERROR[]
-    ccall(_symbol(api, :perfr_init), Cint, ())
+    ccall(api.init, Cint, ())
 end
 
 function shutdown()
     api = STATE[]
     api === nothing && return
-    ccall(_symbol(api, :perfr_shutdown), Cvoid, ())
+    ccall(api.shutdown, Cvoid, ())
 end
 
 available() = STATE[] !== nothing
@@ -136,62 +167,62 @@ function start(name::AbstractString)
     api = STATE[]
     api === nothing && return UInt64(0)
     s = String(name)
-    GC.@preserve s ccall(_symbol(api, :perfr_start), UInt64, (Ptr{UInt8}, Csize_t), pointer(s), sizeof(s))
+    GC.@preserve s ccall(api.start, UInt64, (Ptr{UInt8}, Csize_t), pointer(s), sizeof(s))
 end
 
 function start_async(name::AbstractString)
     api = STATE[]
     api === nothing && return UInt64(0)
     s = String(name)
-    GC.@preserve s ccall(_symbol(api, :perfr_start_async), UInt64, (Ptr{UInt8}, Csize_t), pointer(s), sizeof(s))
+    GC.@preserve s ccall(api.start_async, UInt64, (Ptr{UInt8}, Csize_t), pointer(s), sizeof(s))
 end
 
 function stop(handle::UInt64)
     handle == 0 && return
     api = STATE[]
     api === nothing && return
-    ccall(_symbol(api, :perfr_stop), Cvoid, (UInt64,), handle)
+    ccall(api.stop, Cvoid, (UInt64,), handle)
 end
 
 function instant(name::AbstractString)
     api = STATE[]
     api === nothing && return UInt64(0)
     s = String(name)
-    GC.@preserve s ccall(_symbol(api, :perfr_instant), UInt64, (Ptr{UInt8}, Csize_t), pointer(s), sizeof(s))
+    GC.@preserve s ccall(api.instant, UInt64, (Ptr{UInt8}, Csize_t), pointer(s), sizeof(s))
 end
 
 function link(from::UInt64, to::UInt64)
     (from == 0 || to == 0) && return
     api = STATE[]
     api === nothing && return
-    ccall(_symbol(api, :perfr_link), Cvoid, (UInt64, UInt64), from, to)
+    ccall(api.link, Cvoid, (UInt64, UInt64), from, to)
 end
 
 function value(name::AbstractString, sample::Real)
     api = STATE[]
     api === nothing && return
     s = String(name)
-    GC.@preserve s ccall(_symbol(api, :perfr_value), Cvoid, (Ptr{UInt8}, Csize_t, Cdouble), pointer(s), sizeof(s), Float64(sample))
+    GC.@preserve s ccall(api.value, Cvoid, (Ptr{UInt8}, Csize_t, Cdouble), pointer(s), sizeof(s), Float64(sample))
 end
 
 function now_ns()
     api = STATE[]
     api === nothing && return UInt64(0)
-    ccall(_symbol(api, :perfr_now_ns), UInt64, ())
+    ccall(api.now_ns, UInt64, ())
 end
 
 function span(name::AbstractString, start_ns::UInt64, end_ns::UInt64)
     api = STATE[]
     api === nothing && return
     s = String(name)
-    GC.@preserve s ccall(_symbol(api, :perfr_span), Cvoid, (Ptr{UInt8}, Csize_t, UInt64, UInt64), pointer(s), sizeof(s), start_ns, end_ns)
+    GC.@preserve s ccall(api.span, Cvoid, (Ptr{UInt8}, Csize_t, UInt64, UInt64), pointer(s), sizeof(s), start_ns, end_ns)
 end
 
 function span_async(name::AbstractString, start_ns::UInt64, end_ns::UInt64)
     api = STATE[]
     api === nothing && return
     s = String(name)
-    GC.@preserve s ccall(_symbol(api, :perfr_span_async), Cvoid, (Ptr{UInt8}, Csize_t, UInt64, UInt64), pointer(s), sizeof(s), start_ns, end_ns)
+    GC.@preserve s ccall(api.span_async, Cvoid, (Ptr{UInt8}, Csize_t, UInt64, UInt64), pointer(s), sizeof(s), start_ns, end_ns)
 end
 
 """`scope("frame") do ... end` stops the scope when the block returns."""
@@ -228,8 +259,16 @@ function name_thread(name::AbstractString)
     buf = Vector{UInt8}(codeunits(s))
     push!(buf, 0)
     GC.@preserve buf begin
-        rc = ccall(:pthread_setname_np, Cint, (Culong, Ptr{UInt8}),
-                   ccall(:pthread_self, Culong, ()), pointer(buf))
+        # macOS names only the calling thread and takes just the name;
+        # Linux takes the thread too.
+        rc = if Sys.isapple()
+            ccall(:pthread_setname_np, Cint, (Ptr{UInt8},), pointer(buf))
+        elseif Sys.iswindows()
+            return false
+        else
+            ccall(:pthread_setname_np, Cint, (Ptr{Cvoid}, Ptr{UInt8}),
+                  ccall(:pthread_self, Ptr{Cvoid}, ()), pointer(buf))
+        end
         return rc == 0
     end
 end

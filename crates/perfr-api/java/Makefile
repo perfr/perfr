@@ -25,6 +25,7 @@ build/classes/dev/perfr/ScopesKt.class: build/classes/dev/perfr/Perfr.class src/
 	$(KOTLINC) -cp build/classes -d build/classes src/main/kotlin/dev/perfr/Scopes.kt src/test/kotlin/dev/perfr/ScopeTest.kt
 
 test: build/classes/dev/perfr/Perfr.class build/classes/dev/perfr/ScopesKt.class
+	PERFR_JNI=/no/such/libperfr_jni.so PERFR_LIB=/no/such/libperfr.so java -cp $(CP) dev.perfr.PerfrTest
 	PERFR_JNI=$(CURDIR)/build/libperfr_jni.so PERFR_LIB=/no/such/libperfr.so java -cp $(CP) dev.perfr.PerfrTest
 	PERFR_JNI=$(CURDIR)/build/libperfr_jni.so PERFR_LIB=/no/such/libperfr.so java -cp $(CP) dev.perfr.ScopeTestKt
 	@if [ -f "$(LIB)" ]; then \

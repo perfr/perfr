@@ -20,6 +20,11 @@ public final class PerfrTest {
     public static void main(String[] args) throws Exception {
         String configured = System.getenv("PERFR_LIB");
         if (configured == null || configured.isEmpty()) fail("set PERFR_LIB");
+        if (!Perfr.shimLoaded()) {
+            withoutShim();
+            System.out.println("perfr java ok (no shim)");
+            return;
+        }
         expect(Perfr.nameThread("perfr-java"), "nameThread");
         expect("perfr-java".equals(comm()), "comm " + comm());
         expect(Perfr.nameThread("0123456789abcdefEXTRA"), "long name");
@@ -27,6 +32,22 @@ public final class PerfrTest {
         if (Files.exists(Path.of(configured))) withLibrary(configured);
         else withoutLibrary();
         System.out.println("perfr java ok");
+    }
+
+    /** PERFR_JNI names a file that does not exist: nothing may throw. */
+    private static void withoutShim() {
+        expect(Perfr.init() == Perfr.E_NOLIB, "init without shim " + Perfr.init());
+        expect(!Perfr.available(), "available without shim");
+        expect(Perfr.libraryPath() == null, "path without shim");
+        expect(Perfr.start("quiet") == 0, "start without shim");
+        expect(Perfr.nowNs() == 0, "now without shim");
+        try (Perfr.Scope ignored = Perfr.scope("quiet")) { }
+        Perfr.stop(1);
+        Perfr.link(1, 2);
+        Perfr.value("quiet", 1);
+        Perfr.span("quiet", 1, 2);
+        expect(!Perfr.nameThread("quiet"), "nameThread without shim");
+        Perfr.shutdown();
     }
 
     private static void withoutLibrary() {

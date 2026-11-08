@@ -138,6 +138,8 @@ static int l_span_async(lua_State *L) {
   return 0;
 }
 
+/* stop(), <close> and __gc all land here. The box is zeroed so a scope
+ * that was stopped by hand is not stopped again when it is collected. */
 static int scope_close(lua_State *L) {
   uint64_t *box = luaL_checkudata(L, 1, SCOPE_MT);
   perfr_stop(*box);
@@ -215,12 +217,16 @@ static const luaL_Reg kFuncs[] = {
 };
 
 int luaopen_perfr(lua_State *L) {
+  /* Method lookup on a userdata goes through __index, so the metatable
+   * indexes itself: scope(name):stop() is the same call <close> makes. */
   luaL_newmetatable(L, SCOPE_MT);
+  lua_pushvalue(L, -1);
+  lua_setfield(L, -2, "__index");
   lua_pushcfunction(L, scope_close);
   lua_setfield(L, -2, "__close");
   lua_pushcfunction(L, scope_close);
   lua_setfield(L, -2, "__gc");
-  lua_pushcfunction(L, l_stop);
+  lua_pushcfunction(L, scope_close);
   lua_setfield(L, -2, "stop");
   lua_pop(L, 1);
 

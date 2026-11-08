@@ -7,6 +7,7 @@ import Glibc
 #elseif canImport(Darwin)
 import Darwin
 #endif
+import CPerfrShim
 import Foundation
 
 /// A scope that stops when `stop()` runs, and again from `deinit` if it
@@ -38,10 +39,21 @@ public enum Perfr {
     public static let eNoLib: Int32 = -1000
     public static let eAbi: Int32 = -1001
 
+    // Only initialize() takes this lock. The loaded library is published
+    // once through an acquire/release slot (CPerfrShim) and every other call
+    // reads that slot: a lock on the hot path would serialise every
+    // instrumented thread on one cache line and time the lock, not the code.
     private static let lock = NSLock()
-    private static var state: Library?
+
+    /// The published library, or nil. The object is retained for the life of
+    /// the process, like the mapping it owns.
+    private static var state: Library? {
+        guard let raw = perfr_shim_load() else { return nil }
+        return Unmanaged<Library>.fromOpaque(raw).takeUnretainedValue()
+    }
 
     public static func initialize() -> Int32 {
+        if let state = state { return state.initialize() }
         lock.lock()
         defer { lock.unlock() }
         if let state = state { return state.initialize() }
@@ -49,28 +61,21 @@ public enum Perfr {
         case .err(let code):
             return code
         case .ok(let library):
-            state = library
+            perfr_shim_store(UnsafeRawPointer(Unmanaged.passRetained(library).toOpaque()))
             return library.initialize()
         }
     }
 
     public static func shutdown() {
-        lock.lock()
-        let library = state
-        lock.unlock()
-        library?.shutdown()
+        state?.shutdown()
     }
 
     public static var available: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return state != nil
+        state != nil
     }
 
     public static var libraryPath: String? {
-        lock.lock()
-        defer { lock.unlock() }
-        return state?.path
+        state?.path
     }
 
     public static func start(_ name: String) -> UInt64 { call(name) { $0.start } }
@@ -78,48 +83,30 @@ public enum Perfr {
 
     public static func stop(_ handle: UInt64) {
         if handle == 0 { return }
-        lock.lock()
-        let library = state
-        lock.unlock()
-        library?.stop(handle)
+        state?.stop(handle)
     }
 
     public static func instant(_ name: String) -> UInt64 { call(name) { $0.instant } }
 
     public static func link(from: UInt64, to: UInt64) {
         if from == 0 || to == 0 { return }
-        lock.lock()
-        let library = state
-        lock.unlock()
-        library?.link(from, to)
+        state?.link(from, to)
     }
 
     public static func value(_ name: String, _ sample: Double) {
-        lock.lock()
-        let library = state
-        lock.unlock()
-        library?.value(name, sample)
+        state?.value(name, sample)
     }
 
     public static func nowNs() -> UInt64 {
-        lock.lock()
-        let library = state
-        lock.unlock()
-        return library?.nowNs() ?? 0
+        state?.nowNs() ?? 0
     }
 
     public static func span(_ name: String, startNs: UInt64, endNs: UInt64) {
-        lock.lock()
-        let library = state
-        lock.unlock()
-        library?.span(name, startNs, endNs, async: false)
+        state?.span(name, startNs, endNs, async: false)
     }
 
     public static func spanAsync(_ name: String, startNs: UInt64, endNs: UInt64) {
-        lock.lock()
-        let library = state
-        lock.unlock()
-        library?.span(name, startNs, endNs, async: true)
+        state?.span(name, startNs, endNs, async: true)
     }
 
     public static func scope(_ name: String) -> PerfrScope {
@@ -141,22 +128,12 @@ public enum Perfr {
         let bytes = utf8Prefix(name, 15)
         return bytes.withUnsafeBufferPointer { raw in
             guard let base = raw.baseAddress else { return false }
-            #if os(Linux)
-            return perfr_pthread_setname(pthread_self(), base) == 0
-            #elseif os(macOS)
-            return perfr_pthread_setname_mac(base) == 0
-            #else
-            _ = base
-            return false
-            #endif
+            return perfr_shim_set_thread_name(base) == 0
         }
     }
 
     private static func call(_ name: String, _ pick: (Library) -> StartFn) -> UInt64 {
-        lock.lock()
-        let library = state
-        lock.unlock()
-        guard let library = library else { return 0 }
+        guard let library = state else { return 0 }
         return name.withCString { ptr in
             pick(library)(ptr, name.utf8.count)
         }
@@ -254,14 +231,6 @@ private enum LoadResult {
     case err(Int32)
 }
 
-#if os(Linux)
-@_silgen_name("pthread_setname_np")
-private func perfr_pthread_setname(_ thread: pthread_t, _ name: UnsafePointer<CChar>?) -> Int32
-#elseif os(macOS)
-@_silgen_name("pthread_setname_np")
-private func perfr_pthread_setname_mac(_ name: UnsafePointer<CChar>?) -> Int32
-#endif
-
 private typealias StartFn = @convention(c) (UnsafePointer<CChar>?, Int) -> UInt64
 private typealias StopFn = @convention(c) (UInt64) -> Void
 private typealias ValueFn = @convention(c) (UnsafePointer<CChar>?, Int, Double) -> Void
@@ -290,8 +259,10 @@ private final class Library {
     init?(handle: UnsafeMutableRawPointer, path: String) {
         guard let get: TableFn = bind(handle, "perfr_api_table_v1"),
               let table = get(1) else { return nil }
+        // Two UInt32 then twelve pointers: the table's size at this word size.
+        let tableSize = UInt32(8 + 12 * MemoryLayout<UnsafeRawPointer>.size)
         let head = table.assumingMemoryBound(to: UInt32.self)
-        if head[0] != 1 || head[1] < 104 { return nil }
+        if head[0] != Perfr.abiVersion || head[1] < tableSize { return nil }
         guard let initFn: InitFn = bind(handle, "perfr_init"),
               let shutdownFn: ShutdownFn = bind(handle, "perfr_shutdown"),
               let start: StartFn = bind(handle, "perfr_start"),

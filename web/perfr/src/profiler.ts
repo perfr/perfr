@@ -31,6 +31,7 @@ type WasmProfiler = {
   name_process(name: string): void;
   stop(nowNs: number): void;
   clear(): void;
+  resume(): void;
   resync(): void;
   set_enabled(on: boolean): void;
   flush(): Uint8Array;
@@ -78,6 +79,12 @@ export class Profiler {
 
   constructor(capacity = 200_000) {
     this.capacity = capacity;
+  }
+
+  /** Ring length. Takes effect when the encoder loads; later calls are ignored. */
+  setCapacity(capacity: number): void {
+    if (this.wasm || !Number.isFinite(capacity) || capacity < 1) return;
+    this.capacity = Math.floor(capacity);
   }
 
   setTid(tid: number): void {
@@ -186,6 +193,15 @@ export class Profiler {
     this.emit();
   }
 
+  /**
+   * Record again after {@link stop}. The ring is kept. The stream starts
+   * over (hello, names, the ring) so an attached viewer stays consistent.
+   */
+  resume(): void {
+    this.wasm?.resume();
+    this.emit();
+  }
+
   clear(): void {
     this.buf = [];
     this.wasmHandles.clear();
@@ -246,7 +262,8 @@ export class Profiler {
     a.href = url;
     a.download = filename;
     a.click();
-    URL.revokeObjectURL(url);
+    // Revoking in the same task can cancel the download in some browsers.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   /** Bytes from the last flush, for the Emscripten EM_JS shim. */

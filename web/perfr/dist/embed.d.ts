@@ -30,6 +30,12 @@ export interface ViewerHandle {
     readonly element: HTMLElement | null;
     readonly usingSharedBuffer: boolean;
 }
+/** What the viewer's Stop, Record and Clear buttons call on the page. */
+export interface ViewerControls {
+    stop(): void;
+    start(): void;
+    clear(): void;
+}
 /**
  * Mount the existing live viewer and stream this profiler's frames into it.
  * The viewer page (embed.js) accepts the stream on a MessageChannel. When the
@@ -40,4 +46,4 @@ export interface ViewerHandle {
  * Share in the viewer reads the ring back through the same channel, then
  * posts it with the viewer's existing Share dialog.
  */
-export declare function attachViewer(profiler: Profiler, options: AttachViewerOptions): ViewerHandle;
+export declare function attachViewer(profiler: Profiler, options: AttachViewerOptions, controls?: ViewerControls): ViewerHandle;

@@ -14,7 +14,11 @@ import assert from "node:assert/strict";
 import puppeteer from "puppeteer-core";
 
 const repo = fileURLToPath(new URL("../../..", import.meta.url));
-const chrome = process.env.CHROME || "/usr/bin/google-chrome";
+const chrome =
+  process.env.CHROME ||
+  (process.platform === "darwin"
+    ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    : "/usr/bin/google-chrome");
 
 const types = {
   ".html": "text/html",

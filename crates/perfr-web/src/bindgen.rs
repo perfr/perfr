@@ -89,6 +89,10 @@ impl WebProfiler {
         self.session.clear();
     }
 
+    pub fn resume(&mut self) {
+        self.session.resume();
+    }
+
     pub fn resync(&mut self) {
         self.session.resync();
     }

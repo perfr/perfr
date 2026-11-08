@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<!-- Copyright (c) 2026 The perfr Authors. All rights reserved.
+     Use of this source code is governed by a BSD-style license that can be
+     found in the LICENSE file. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>perfr in-page API tour</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; background: #0b0c0e; color: #e7e9ee; font: 14px/1.45 ui-sans-serif, system-ui, sans-serif; }
+    body { display: grid; grid-template-columns: minmax(300px, 380px) 1fr; grid-template-rows: auto 1fr; min-height: 100vh; }
+    header { grid-column: 1 / -1; padding: 10px 16px; border-bottom: 1px solid #2c3340; display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+    header p { margin: 0; color: #b7bec9; font-size: 12px; }
+    aside { padding: 12px 14px; border-right: 1px solid #2c3340; overflow: auto; }
+    main { display: grid; grid-template-rows: minmax(360px, 55vh) 1fr; min-width: 0; }
+    #viewer { min-height: 360px; border-bottom: 1px solid #2c3340; }
+    #viewer .perfr-embed-fill { height: 100%; }
+    section { margin-bottom: 14px; }
+    h2 { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: #8e97a5; margin: 0 0 6px; }
+    button { background: #1c2430; color: inherit; border: 1px solid #3a4250; border-radius: 4px; padding: 4px 9px; cursor: pointer; margin: 0 6px 6px 0; font: inherit; font-size: 13px; }
+    button:hover { background: #26303f; }
+    button.danger { border-color: #7a3a3a; }
+    dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 0; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+    dt { color: #8e97a5; } dd { margin: 0; }
+    table { border-collapse: collapse; width: 100%; font-size: 12px; }
+    td, th { text-align: left; padding: 3px 6px 3px 0; border-bottom: 1px solid #1f2530; vertical-align: top; }
+    th { color: #8e97a5; font-weight: 500; }
+    td.note { color: #9aa3b2; font-size: 11px; }
+    .ok { color: #9ece6a; } .no { color: #f7768e; }
+    #log { font-family: ui-monospace, Menlo, monospace; font-size: 12px; padding: 10px 14px; overflow: auto; white-space: pre-wrap; color: #c5cad3; }
+    #log .t { color: #6a7382; }
+    #summary { font-family: ui-monospace, Menlo, monospace; font-size: 12px; white-space: pre; background: #11151b; border: 1px solid #1f2530; border-radius: 6px; padding: 8px 10px; overflow: auto; max-height: 260px; }
+    #shift-box { height: 0; overflow: hidden; background: #2a3440; transition: none; }
+    code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+    @media (max-width: 900px) { body { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid #2c3340; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>perfr in-page API tour</h1>
+    <p>Each button records with one part of <code>@perfr/web</code>. The viewer on the right is the real perfr viewer in embed mode, fed over a MessageChannel. Nothing here is sampled; the page records what it calls and what the browser reports.</p>
+  </header>
+  <aside>
+    <div id="shift-box"></div>
+    <section>
+      <h2>Status</h2>
+      <dl>
+        <dt>produced</dt><dd id="s-produced">0</dd>
+        <dt>in ring</dt><dd id="s-live">0</dd>
+        <dt>dropped</dt><dd id="s-dropped">0</dd>
+        <dt>capturing</dt><dd id="s-capturing">–</dd>
+        <dt>viewer</dt><dd id="s-viewer">loading</dd>
+        <dt>shared buffer</dt><dd id="s-sab">–</dd>
+      </dl>
+    </section>
+    <section>
+      <h2>Record</h2>
+      <button id="b-scopes" title="perfr.scope, nested three deep, with a decorated method">Nested scopes</button>
+      <button id="b-async" title="perfr.scopeAsync and beginAsync/endAsync around overlapping fetches">Async spans</button>
+      <button id="b-values" title="perfr.value and perfr.mark for one second of frames">Values &amp; marks</button>
+      <button id="b-worker" title="20 messages to an attached worker">Worker burst</button>
+      <button id="b-stall" title="an 80 ms busy loop: a long task and a jank marker">Long task</button>
+      <button id="b-shift" title="a layout shift without input">Layout shift</button>
+      <button id="b-timing" title="performance.mark and performance.measure">User timing</button>
+      <button id="b-all">Run everything</button>
+    </section>
+    <section>
+      <h2>Control</h2>
+      <button id="b-stop" class="danger">Stop</button>
+      <button id="b-start">Start</button>
+      <button id="b-clear" class="danger">Clear</button>
+      <button id="b-export">Export and decode</button>
+      <button id="b-download">Download .perfr.stream</button>
+      <div id="summary" hidden></div>
+    </section>
+    <section>
+      <h2>Built-in tracks in this browser</h2>
+      <table id="tracks"><thead><tr><th></th><th>track</th><th>available</th></tr></thead><tbody></tbody></table>
+    </section>
+  </aside>
+  <main>
+    <div id="viewer"></div>
+    <div id="log"></div>
+  </main>
+  <script type="module" src="./tour.js"></script>
+</body>
+</html>

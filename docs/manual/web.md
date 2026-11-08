@@ -54,10 +54,15 @@ event is dropped.
 
 ```ts
 await perfr.start({ browser: true }); // also the default
-perfr.stop();                          // keeps the ring
+perfr.stop();                          // keeps the ring; scopes are dropped until start
+await perfr.start();                   // records again into the same ring
 const bytes = await perfr.exportStream(); // a .perfr.stream
 await perfr.download("capture.perfr.stream");
 ```
+
+After `stop`, a `scope` call does not restart recording on its own; only
+`start` does. A viewer attached to the page sees a resumed capture as a fresh
+stream of the whole ring, not as events after an end marker.
 
 `browser: false` records only your scopes. A partial object turns individual
 built-in tracks off: `perfr.start({ browser: { gc: false, loaf: false } })`.
@@ -94,8 +99,8 @@ The viewer's Save item "Stream for a web page" downloads that same stream.
 The `.perfr.zip` export is the native service's bundle; this path does not
 produce one.
 
-Stop in the viewer stops the page recorder. Clear drops the ring. Record
-starts it again.
+Stop in the viewer stops the page recorder and its browser tracks. Clear
+drops the ring. Record starts both again.
 
 ## Workers
 
@@ -151,7 +156,8 @@ let bytes = perfr_web::flush(); // new .perfr.stream frames
 ```
 
 `flush` is empty when nothing changed. `snapshot` is the whole ring, which
-is what Share posts. Thread ids for the built-in tracks are `perfr_web::tid`.
+is what Share posts. `stop` keeps the ring and `resume` records again.
+Thread ids for the built-in tracks are `perfr_web::tid`.
 The page pid is `perfr_web::PAGE_PID` (`0xB10B_0001`).
 
 ## C and Emscripten
@@ -193,7 +199,11 @@ python3 -m http.server 44767
 ```
 
 The page is a canvas animation with a worker, a deliberate stall button, and
-the viewer in an overlay. For the SharedArrayBuffer path, serve with
+the viewer in an overlay. `web/demo/tour.html` is the API walked through one
+button at a time: nested scopes, async spans, values and marks, a worker
+burst, a long task, a layout shift, stop, start and clear, and an export that
+is decoded on the page so the frame and event counts can be read next to the
+viewer. For the SharedArrayBuffer path, serve with
 `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy:
 require-corp`. The demo works without those headers; the channel is the
 fallback.

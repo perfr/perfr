@@ -30,6 +30,8 @@ export declare class Profiler {
     private flushTimer;
     private raf;
     constructor(capacity?: number);
+    /** Ring length. Takes effect when the encoder loads; later calls are ignored. */
+    setCapacity(capacity: number): void;
     setTid(tid: number): void;
     currentTid(): number;
     nowNs(): number;
@@ -51,6 +53,11 @@ export declare class Profiler {
     nameThread(name: string, tid?: number): void;
     nameProcess(name: string): void;
     stop(): void;
+    /**
+     * Record again after {@link stop}. The ring is kept. The stream starts
+     * over (hello, names, the ring) so an attached viewer stays consistent.
+     */
+    resume(): void;
     clear(): void;
     resync(): void;
     stats(): Stats;

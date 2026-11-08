@@ -56,9 +56,15 @@ export interface Perfr {
    * `@perfr.decorate("physics")` or `@perfr.decorate()`.
    */
   decorate(name?: string): PerfrDecorator;
-  /** Load the encoder and, unless `browser` is false, start the built-in tracks. */
+  /**
+   * Load the encoder and, unless `browser` is false, start the built-in
+   * tracks. After {@link stop}, records again into the same ring.
+   */
   start(options?: StartOptions): Promise<void>;
-  /** Stop recording. Open scopes are closed. The ring is kept for export. */
+  /**
+   * Stop recording. Open scopes are closed. The ring is kept for export.
+   * Scopes recorded after this are dropped until {@link start}.
+   */
   stop(): void;
   /** Drop the ring and start a fresh capture. */
   clear(): void;
@@ -106,6 +112,8 @@ export function createPerfr(): Perfr {
   let browser: BrowserHandles | null = null;
   let viewer: ViewerHandle | null = null;
   let started = false;
+  /** Set by `stop()`. A plain `scope()` call does not restart recording. */
+  let stopped = false;
   let browserOpt: boolean | TrackToggles | undefined = true;
 
   const api: Perfr = {
@@ -129,8 +137,12 @@ export function createPerfr(): Perfr {
     decorate: (name) => decorator(profiler, name),
     start(options) {
       if (options && "browser" in options) browserOpt = options.browser;
+      if (options?.capacity != null) profiler.setCapacity(options.capacity);
       const wasmUrl = options?.wasmUrl;
+      stopped = false;
       return profiler.start(wasmUrl).then(() => {
+        if (stopped) return;
+        profiler.resume();
         if (started) return;
         started = true;
         if (browserOpt !== false && typeof window !== "undefined") {
@@ -139,6 +151,7 @@ export function createPerfr(): Perfr {
       });
     },
     stop() {
+      stopped = true;
       browser?.stop();
       browser = null;
       profiler.stop();
@@ -152,8 +165,12 @@ export function createPerfr(): Perfr {
     download: (filename) => profiler.download(filename),
     attachViewer(options) {
       viewer?.close();
-      void api.start({ browser: browserOpt });
-      viewer = attachViewer(profiler, options);
+      if (!stopped) void api.start({ browser: browserOpt });
+      viewer = attachViewer(profiler, options, {
+        stop: () => api.stop(),
+        start: () => void api.start({ browser: browserOpt }),
+        clear: () => api.clear(),
+      });
       return viewer;
     },
     detachViewer() {
@@ -174,7 +191,7 @@ export function createPerfr(): Perfr {
   };
 
   const kick = () => {
-    if (!started) void api.start({ browser: browserOpt });
+    if (!started && !stopped) void api.start({ browser: browserOpt });
   };
   const wrap =
     <A extends unknown[], R>(fn: (...args: A) => R) =>

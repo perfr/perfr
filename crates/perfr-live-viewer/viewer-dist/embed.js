@@ -174,16 +174,32 @@
   var realBeacon = navigator.sendBeacon ? navigator.sendBeacon.bind(navigator) : null;
   if (realBeacon) {
     navigator.sendBeacon = function (url, data) {
-      if (String(url).indexOf("/api/log") !== -1) return true;
+      var path = localApiPath(url);
+      if (path !== null && path.indexOf("/api/log") !== -1) return true;
       return realBeacon(url, data);
     };
   }
 
+  // The service API the viewer would talk to is on this page's origin.
+  // perfr.dev (Share, /api/me) and anything else cross-origin passes through.
+  function localApiPath(url) {
+    var text = typeof url === "string" ? url : url && url.url ? url.url : String(url || "");
+    var parsed;
+    try {
+      parsed = new URL(text, location.href);
+    } catch (e) {
+      return null;
+    }
+    if (parsed.origin !== location.origin) return null;
+    var path = parsed.pathname + parsed.search;
+    return path.indexOf("/api/") === -1 ? null : path;
+  }
+
   var realFetch = window.fetch.bind(window);
   window.fetch = function (input, init) {
-    var url = typeof input === "string" ? input : input && input.url ? input.url : "";
+    var url = localApiPath(input);
     var method = (init && init.method ? init.method : "GET").toUpperCase();
-    if (url.indexOf("/api/") === -1) return realFetch(input, init);
+    if (url === null) return realFetch(input, init);
     if (url.indexOf("/api/status") !== -1) return Promise.resolve(jsonResponse(stats));
     if (url.indexOf("/api/processes") !== -1) {
       return Promise.resolve(jsonResponse([{ pid: PAGE_PID, name: "this page", cpu: 0, path: location.href }]));
@@ -223,7 +239,7 @@
 
   var realOpen = window.open;
   window.open = function (url) {
-    var text = String(url || "");
+    var text = localApiPath(url) || "";
     if (text.indexOf("/api/capture/export") !== -1 && text.indexOf("format=stream") !== -1) {
       requestExport().then(function (bytes) {
         if (!bytes.byteLength) return;

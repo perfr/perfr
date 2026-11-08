@@ -85,6 +85,10 @@ EM_JS(void, perfr_web_clear, (void), {
   if (Module.perfr) Module.perfr.clear();
 });
 
+EM_JS(void, perfr_web_resume, (void), {
+  if (Module.perfr) Module.perfr.start();
+});
+
 EM_JS(double, perfr_web_copy, (int which), {
   var bytes = !Module.perfr ? new Uint8Array()
     : which === 0 ? Module.perfr.takeFlush() : Module.perfr.takeSnapshot();

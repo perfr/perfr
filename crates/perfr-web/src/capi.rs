@@ -6,6 +6,7 @@
 //! symbols. The pointer returned by flush and snapshot points at a buffer
 //! owned by this crate and is invalid after the next call to either.
 
+use std::ffi::c_char;
 use std::sync::Mutex;
 
 use crate::{with_session, PAGE_PID};
@@ -25,17 +26,13 @@ fn store(bytes: Vec<u8>, out_len: *mut usize) -> *const u8 {
     }
 }
 
-unsafe fn cstr(ptr: *const libc_char, len: usize) -> String {
+unsafe fn cstr(ptr: *const c_char, len: usize) -> String {
     if ptr.is_null() || len == 0 {
         return String::new();
     }
     let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
     String::from_utf8_lossy(bytes).into_owned()
 }
-
-/// `libc::c_char` without depending on the libc crate.
-#[allow(non_camel_case_types)]
-type libc_char = i8;
 
 #[no_mangle]
 pub extern "C" fn perfr_web_page_pid() -> u32 {
@@ -53,7 +50,7 @@ pub extern "C" fn perfr_web_set_tid(tid: u32) {
 }
 
 #[no_mangle]
-pub extern "C" fn perfr_web_begin(name: *const libc_char, name_len: usize) -> u64 {
+pub extern "C" fn perfr_web_begin(name: *const c_char, name_len: usize) -> u64 {
     let name = unsafe { cstr(name, name_len) };
     crate::begin(&name)
 }
@@ -64,7 +61,7 @@ pub extern "C" fn perfr_web_end(handle: u64) {
 }
 
 #[no_mangle]
-pub extern "C" fn perfr_web_begin_async(name: *const libc_char, name_len: usize) -> u64 {
+pub extern "C" fn perfr_web_begin_async(name: *const c_char, name_len: usize) -> u64 {
     let name = unsafe { cstr(name, name_len) };
     crate::begin_async(&name)
 }
@@ -76,7 +73,7 @@ pub extern "C" fn perfr_web_end_async(handle: u64) {
 
 #[no_mangle]
 pub extern "C" fn perfr_web_span(
-    name: *const libc_char,
+    name: *const c_char,
     name_len: usize,
     start_ns: u64,
     end_ns: u64,
@@ -87,7 +84,7 @@ pub extern "C" fn perfr_web_span(
 
 #[no_mangle]
 pub extern "C" fn perfr_web_span_async(
-    name: *const libc_char,
+    name: *const c_char,
     name_len: usize,
     start_ns: u64,
     end_ns: u64,
@@ -97,13 +94,13 @@ pub extern "C" fn perfr_web_span_async(
 }
 
 #[no_mangle]
-pub extern "C" fn perfr_web_value(name: *const libc_char, name_len: usize, value: f64) {
+pub extern "C" fn perfr_web_value(name: *const c_char, name_len: usize, value: f64) {
     let name = unsafe { cstr(name, name_len) };
     crate::value(&name, value);
 }
 
 #[no_mangle]
-pub extern "C" fn perfr_web_mark(name: *const libc_char, name_len: usize) {
+pub extern "C" fn perfr_web_mark(name: *const c_char, name_len: usize) {
     let name = unsafe { cstr(name, name_len) };
     crate::mark(&name);
 }
@@ -114,13 +111,13 @@ pub extern "C" fn perfr_web_frame() {
 }
 
 #[no_mangle]
-pub extern "C" fn perfr_web_name_thread(tid: u32, name: *const libc_char, name_len: usize) {
+pub extern "C" fn perfr_web_name_thread(tid: u32, name: *const c_char, name_len: usize) {
     let name = unsafe { cstr(name, name_len) };
     crate::name_thread(tid, &name);
 }
 
 #[no_mangle]
-pub extern "C" fn perfr_web_name_process(name: *const libc_char, name_len: usize) {
+pub extern "C" fn perfr_web_name_process(name: *const c_char, name_len: usize) {
     let name = unsafe { cstr(name, name_len) };
     crate::name_process(&name);
 }
@@ -133,6 +130,11 @@ pub extern "C" fn perfr_web_stop() {
 #[no_mangle]
 pub extern "C" fn perfr_web_clear() {
     crate::clear();
+}
+
+#[no_mangle]
+pub extern "C" fn perfr_web_resume() {
+    crate::resume();
 }
 
 /// Live bytes since the previous flush. `*out_len` is the length. The
@@ -163,7 +165,7 @@ mod tests {
         set_manual_now(Some(5_000));
         perfr_web_set_tid(7);
         let name = b"c-scope";
-        let handle = perfr_web_begin(name.as_ptr() as *const libc_char, name.len());
+        let handle = perfr_web_begin(name.as_ptr() as *const c_char, name.len());
         assert_ne!(handle, 0);
         set_manual_now(Some(5_250));
         perfr_web_end(handle);

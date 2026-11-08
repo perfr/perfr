@@ -25,7 +25,7 @@ function isTyping(target) {
  * Share in the viewer reads the ring back through the same channel, then
  * posts it with the viewer's existing Share dialog.
  */
-export function attachViewer(profiler, options) {
+export function attachViewer(profiler, options, controls) {
     if (!options.viewerUrl) {
         throw new Error("perfr.attachViewer needs viewerUrl: the perfr viewer index.html");
     }
@@ -61,11 +61,13 @@ export function attachViewer(profiler, options) {
         frame.src = url;
         frame.title = "perfr";
         shell.append(header, frame);
+        ensureStyles();
         if (overlay) {
-            const style = document.createElement("style");
-            style.textContent = overlayCss(options.width ?? 0, options.height ?? 320);
-            document.head.append(style);
             shell.classList.add("perfr-embed-overlay");
+            if (options.width && options.width > 0)
+                shell.style.width = `${options.width}px`;
+            if (options.height && options.height > 0)
+                shell.style.height = `${options.height}px`;
             document.body.append(shell);
         }
         else if (options.container) {
@@ -124,11 +126,11 @@ export function attachViewer(profiler, options) {
             }
             else if (body.kind === "control") {
                 if (body.action === "stop")
-                    profiler.stop();
+                    controls ? controls.stop() : profiler.stop();
                 else if (body.action === "start")
-                    void profiler.start();
+                    controls ? controls.start() : profiler.resume();
                 else if (body.action === "clear")
-                    profiler.clear();
+                    controls ? controls.clear() : profiler.clear();
             }
         };
         if (sabAvailable()) {
@@ -181,17 +183,25 @@ export function attachViewer(profiler, options) {
     };
     return handle;
 }
-function overlayCss(width, height) {
-    const h = height > 0 ? `${height}px` : "42vh";
-    const w = width > 0 ? `${width}px` : "min(960px, 100vw)";
+const STYLE_ID = "perfr-embed-style";
+/** One stylesheet for every mode, added once per document. */
+function ensureStyles() {
+    if (document.getElementById(STYLE_ID))
+        return;
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = embedCss();
+    document.head.append(style);
+}
+function embedCss() {
     return `
 .perfr-embed-overlay {
   position: fixed;
   z-index: 2147483000;
   right: 12px;
   bottom: 12px;
-  width: ${w};
-  height: ${h};
+  width: min(960px, 100vw);
+  height: 42vh;
   display: flex;
   flex-direction: column;
   background: #14181e;

@@ -284,6 +284,9 @@ export class WebProfiler {
     clear() {
         wasm.webprofiler_clear(this.__wbg_ptr);
     }
+    resume() {
+        wasm.webprofiler_resume(this.__wbg_ptr);
+    }
     resync() {
         wasm.webprofiler_resync(this.__wbg_ptr);
     }

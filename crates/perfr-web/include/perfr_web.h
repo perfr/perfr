@@ -43,6 +43,8 @@ void perfr_web_name_thread(uint32_t tid, const char* name, size_t name_len);
 void perfr_web_name_process(const char* name, size_t name_len);
 
 void perfr_web_stop(void);
+/* Record again after perfr_web_stop. The ring is kept. */
+void perfr_web_resume(void);
 void perfr_web_clear(void);
 
 const uint8_t* perfr_web_flush(size_t* out_len);

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import { nowNs, nowNsAligned } from "./clock.js";
+import { nowNs } from "./clock.js";
 import type { Profiler } from "./profiler.js";
 import { WORKER_BASE } from "./tracks.js";
 
@@ -39,7 +39,8 @@ export function installWorker(options: WorkerOptions = {}): WorkerProfiler {
 }
 
 class WorkerProfiler {
-  private pageOrigin = 0;
+  /** Added to this worker's clock to land on the page's `timeOrigin`. */
+  private shiftNs = 0;
   private tid = WORKER_BASE;
   private configured = false;
   private queue: WorkerOp[] = [];
@@ -52,15 +53,25 @@ class WorkerProfiler {
   }
 
   configure(pageOrigin: number, tid: number, name?: string): void {
-    this.pageOrigin = pageOrigin;
+    const origin = globalThis.performance?.timeOrigin;
+    this.shiftNs = typeof origin === "number" ? (origin - pageOrigin) * 1e6 : 0;
     this.tid = tid;
     if (name) this.label = name;
     this.configured = true;
     this.flush();
   }
 
+  /**
+   * Nanoseconds on the page's clock. Before the page has attached this
+   * worker the shift is unknown, so scopes are stored on the worker's own
+   * clock and shifted when they are sent.
+   */
   nowNs(): number {
-    return this.configured ? nowNsAligned(this.pageOrigin) : nowNs();
+    return nowNs() + this.shiftNs;
+  }
+
+  private localNs(): number {
+    return nowNs();
   }
 
   scope<T>(name: string, fn: () => T): T {
@@ -83,7 +94,7 @@ class WorkerProfiler {
 
   begin(name: string): number {
     const h = this.local++;
-    this.open.set(h, { name, t: this.nowNs(), async: false });
+    this.open.set(h, { name, t: this.localNs(), async: false });
     return h;
   }
 
@@ -93,7 +104,7 @@ class WorkerProfiler {
 
   beginAsync(name: string): number {
     const h = this.local++;
-    this.open.set(h, { name, t: this.nowNs(), async: true });
+    this.open.set(h, { name, t: this.localNs(), async: true });
     return h;
   }
 
@@ -102,12 +113,12 @@ class WorkerProfiler {
   }
 
   mark(name: string): void {
-    this.queue.push({ k: "mark", name, a: this.nowNs(), b: 0 });
+    this.queue.push({ k: "mark", name, a: this.localNs(), b: 0 });
     this.schedule();
   }
 
   value(name: string, value: number): void {
-    this.queue.push({ k: "value", name, a: this.nowNs(), b: 0, v: value });
+    this.queue.push({ k: "value", name, a: this.localNs(), b: 0, v: value });
     this.schedule();
   }
 
@@ -119,7 +130,7 @@ class WorkerProfiler {
       k: async ? "async" : "span",
       name: open.name,
       a: open.t,
-      b: this.nowNs(),
+      b: this.localNs(),
     });
     this.schedule();
   }
@@ -138,6 +149,13 @@ class WorkerProfiler {
     if (!this.configured || this.queue.length === 0) return;
     const ops = this.queue;
     this.queue = [];
+    const shift = this.shiftNs;
+    if (shift !== 0) {
+      for (const op of ops) {
+        op.a += shift;
+        if (op.k === "span" || op.k === "async") op.b += shift;
+      }
+    }
     self.postMessage({ source: SOURCE, kind: "batch", tid: this.tid, name: this.label, ops });
   }
 }

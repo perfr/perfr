@@ -26,6 +26,8 @@ export function createPerfr() {
     let browser = null;
     let viewer = null;
     let started = false;
+    /** Set by `stop()`. A plain `scope()` call does not restart recording. */
+    let stopped = false;
     let browserOpt = true;
     const api = {
         pagePid: profiler.pagePid,
@@ -49,8 +51,14 @@ export function createPerfr() {
         start(options) {
             if (options && "browser" in options)
                 browserOpt = options.browser;
+            if (options?.capacity != null)
+                profiler.setCapacity(options.capacity);
             const wasmUrl = options?.wasmUrl;
+            stopped = false;
             return profiler.start(wasmUrl).then(() => {
+                if (stopped)
+                    return;
+                profiler.resume();
                 if (started)
                     return;
                 started = true;
@@ -60,6 +68,7 @@ export function createPerfr() {
             });
         },
         stop() {
+            stopped = true;
             browser?.stop();
             browser = null;
             profiler.stop();
@@ -73,8 +82,13 @@ export function createPerfr() {
         download: (filename) => profiler.download(filename),
         attachViewer(options) {
             viewer?.close();
-            void api.start({ browser: browserOpt });
-            viewer = attachViewer(profiler, options);
+            if (!stopped)
+                void api.start({ browser: browserOpt });
+            viewer = attachViewer(profiler, options, {
+                stop: () => api.stop(),
+                start: () => void api.start({ browser: browserOpt }),
+                clear: () => api.clear(),
+            });
             return viewer;
         },
         detachViewer() {
@@ -94,7 +108,7 @@ export function createPerfr() {
         takeSnapshot: () => profiler.takeSnapshot(),
     };
     const kick = () => {
-        if (!started)
+        if (!started && !stopped)
             void api.start({ browser: browserOpt });
     };
     const wrap = (fn) => (...args) => {

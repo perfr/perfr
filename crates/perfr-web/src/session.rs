@@ -115,6 +115,19 @@ impl Session {
         self.enabled = on;
     }
 
+    /// Record again after [`stop`]. The ring is kept. The next [`flush`]
+    /// starts over with hello, names and every event still in the ring, so
+    /// a viewer that saw `CaptureFinished` gets one consistent snapshot
+    /// instead of events after an end marker.
+    pub fn resume(&mut self) {
+        if self.enabled {
+            return;
+        }
+        self.enabled = true;
+        self.finish_pending = false;
+        self.resync();
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -321,8 +334,7 @@ impl Session {
         let depth = match kind_of {
             SpanKind::Sync => {
                 let stack = self.sync_stack.entry(tid).or_default();
-                let depth = (stack.len() as u8).min(MAX_DEPTH - 1);
-                depth
+                (stack.len() as u8).min(MAX_DEPTH - 1)
             }
             SpanKind::Async => self.alloc_async_depth(tid),
         };
@@ -737,6 +749,33 @@ mod tests {
         s.span("nope", 1, 1, 2);
         s.value("x", 1, 1.0, 3);
         assert_eq!(s.stats().produced, 0);
+    }
+
+    #[test]
+    fn resume_after_stop_records_again_and_restarts_the_stream() {
+        let mut s = Session::new(8);
+        s.span("before", 1, 1, 2);
+        assert!(!s.flush().is_empty());
+        s.stop(3);
+        let stopped = decode_all(&s.flush()).unwrap();
+        assert!(stopped
+            .iter()
+            .any(|f| matches!(f, LiveFrame::CaptureFinished)));
+        assert!(!s.stats().capturing);
+        s.resume();
+        assert!(s.stats().capturing);
+        s.span("after", 1, 4, 5);
+        let again = decode_all(&s.flush()).unwrap();
+        assert!(
+            matches!(again[0], LiveFrame::Hello { .. }),
+            "a resumed stream starts over so the viewer drops the finished one"
+        );
+        assert!(!again
+            .iter()
+            .any(|f| matches!(f, LiveFrame::CaptureFinished)));
+        let events = events_of(&again);
+        assert_eq!(events.len(), 2, "the ring is kept across stop and resume");
+        assert!(s.flush().is_empty());
     }
 
     #[test]

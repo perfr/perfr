@@ -48,9 +48,15 @@ export interface Perfr {
      * `@perfr.decorate("physics")` or `@perfr.decorate()`.
      */
     decorate(name?: string): PerfrDecorator;
-    /** Load the encoder and, unless `browser` is false, start the built-in tracks. */
+    /**
+     * Load the encoder and, unless `browser` is false, start the built-in
+     * tracks. After {@link stop}, records again into the same ring.
+     */
     start(options?: StartOptions): Promise<void>;
-    /** Stop recording. Open scopes are closed. The ring is kept for export. */
+    /**
+     * Stop recording. Open scopes are closed. The ring is kept for export.
+     * Scopes recorded after this are dropped until {@link start}.
+     */
     stop(): void;
     /** Drop the ring and start a fresh capture. */
     clear(): void;

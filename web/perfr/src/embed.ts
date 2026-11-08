@@ -40,6 +40,13 @@ export interface ViewerHandle {
 
 const SOURCE = "perfr-embed";
 
+/** What the viewer's Stop, Record and Clear buttons call on the page. */
+export interface ViewerControls {
+  stop(): void;
+  start(): void;
+  clear(): void;
+}
+
 function withEmbed(viewerUrl: string): string {
   const url = new URL(viewerUrl, globalThis.location?.href ?? "http://localhost/");
   if (!url.searchParams.has("capture")) url.searchParams.set("embed", "1");
@@ -62,7 +69,11 @@ function isTyping(target: EventTarget | null): boolean {
  * Share in the viewer reads the ring back through the same channel, then
  * posts it with the viewer's existing Share dialog.
  */
-export function attachViewer(profiler: Profiler, options: AttachViewerOptions): ViewerHandle {
+export function attachViewer(
+  profiler: Profiler,
+  options: AttachViewerOptions,
+  controls?: ViewerControls,
+): ViewerHandle {
   if (!options.viewerUrl) {
     throw new Error("perfr.attachViewer needs viewerUrl: the perfr viewer index.html");
   }
@@ -98,11 +109,11 @@ export function attachViewer(profiler: Profiler, options: AttachViewerOptions): 
     frame.src = url;
     frame.title = "perfr";
     shell.append(header, frame);
+    ensureStyles();
     if (overlay) {
-      const style = document.createElement("style");
-      style.textContent = overlayCss(options.width ?? 0, options.height ?? 320);
-      document.head.append(style);
       shell.classList.add("perfr-embed-overlay");
+      if (options.width && options.width > 0) shell.style.width = `${options.width}px`;
+      if (options.height && options.height > 0) shell.style.height = `${options.height}px`;
       document.body.append(shell);
     } else if (options.container) {
       options.container.append(shell);
@@ -156,9 +167,9 @@ export function attachViewer(profiler: Profiler, options: AttachViewerOptions): 
           );
         });
       } else if (body.kind === "control") {
-        if (body.action === "stop") profiler.stop();
-        else if (body.action === "start") void profiler.start();
-        else if (body.action === "clear") profiler.clear();
+        if (body.action === "stop") controls ? controls.stop() : profiler.stop();
+        else if (body.action === "start") controls ? controls.start() : profiler.resume();
+        else if (body.action === "clear") controls ? controls.clear() : profiler.clear();
       }
     };
     if (sabAvailable()) {
@@ -208,17 +219,26 @@ export function attachViewer(profiler: Profiler, options: AttachViewerOptions): 
   return handle;
 }
 
-function overlayCss(width: number, height: number): string {
-  const h = height > 0 ? `${height}px` : "42vh";
-  const w = width > 0 ? `${width}px` : "min(960px, 100vw)";
+const STYLE_ID = "perfr-embed-style";
+
+/** One stylesheet for every mode, added once per document. */
+function ensureStyles(): void {
+  if (document.getElementById(STYLE_ID)) return;
+  const style = document.createElement("style");
+  style.id = STYLE_ID;
+  style.textContent = embedCss();
+  document.head.append(style);
+}
+
+function embedCss(): string {
   return `
 .perfr-embed-overlay {
   position: fixed;
   z-index: 2147483000;
   right: 12px;
   bottom: 12px;
-  width: ${w};
-  height: ${h};
+  width: min(960px, 100vw);
+  height: 42vh;
   display: flex;
   flex-direction: column;
   background: #14181e;

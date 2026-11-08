@@ -158,6 +158,11 @@ pub fn stop() {
     with_session(|s| s.stop(now));
 }
 
+/// Record again after [`stop`]. The ring is kept.
+pub fn resume() {
+    with_session(|s| s.resume());
+}
+
 pub fn clear() {
     with_session(|s| s.clear());
 }
@@ -197,7 +202,7 @@ mod tests {
     fn c_api_and_rust_api_share_one_ring() {
         // One test owns the process-global session. Other tests use Session.
         let _guard = lock_global_test();
-        let _ = with_session(|s| s.clear());
+        with_session(|s| s.clear());
         set_manual_now(Some(1_000));
         set_tid(tid::MAIN);
         let handle = begin("rust-scope");

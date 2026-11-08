@@ -10,7 +10,8 @@ export interface WorkerOptions {
  */
 export declare function installWorker(options?: WorkerOptions): WorkerProfiler;
 declare class WorkerProfiler {
-    private pageOrigin;
+    /** Added to this worker's clock to land on the page's `timeOrigin`. */
+    private shiftNs;
     private tid;
     private configured;
     private queue;
@@ -19,7 +20,13 @@ declare class WorkerProfiler {
     private label;
     constructor(name?: string);
     configure(pageOrigin: number, tid: number, name?: string): void;
+    /**
+     * Nanoseconds on the page's clock. Before the page has attached this
+     * worker the shift is unknown, so scopes are stored on the worker's own
+     * clock and shifted when they are sent.
+     */
     nowNs(): number;
+    private localNs;
     scope<T>(name: string, fn: () => T): T;
     scopeAsync<T>(name: string, fn: () => Promise<T>): Promise<T>;
     begin(name: string): number;

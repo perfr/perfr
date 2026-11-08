@@ -59,6 +59,7 @@
     Rebuild with <code>build_wasm.sh</code> so
     <code>perfr_live_viewer.js</code> / <code>.wasm</code> are served.
   </div>
+  <script src="embed.js"></script>
   <script type="module">
     const canvas = document.getElementById("the_canvas_id");
 
@@ -106,7 +107,9 @@
         // A static capture (?capture=) has no service. /api/log would 404,
         // and the leading slash would leave a project-site prefix (/perfr/)
         // and hit the host root.
-        if (new URLSearchParams(location.search).get("capture")) return;
+        const params = new URLSearchParams(location.search);
+        // A static capture or an embedded page has no service log to relay to.
+        if (params.get("capture") || params.get("embed") === "1") return;
         const text = String((message && (message.stack || message.message)) || message).slice(0, 4000);
         const body = JSON.stringify({ page: "js", lines: [{ t_ms: Date.now(), level, target: "index.html", message: text }] });
         navigator.sendBeacon("/api/log", body);

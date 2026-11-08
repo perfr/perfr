@@ -13,6 +13,12 @@ __pycache__
 # Cargo build output
 target/
 
+# The in-page package's installed toolchain. dist/ and pkg/ are generated and committed.
+web/perfr/node_modules/
+examples/web-emscripten/perfr_web_example.html
+examples/web-emscripten/perfr_web_example.js
+examples/web-emscripten/perfr_web_example.wasm
+
 # Packaged macOS service and manual instrumentation SDK
 /dist/macos/
 /dist/macos-universal/

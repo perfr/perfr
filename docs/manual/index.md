@@ -101,6 +101,8 @@ with perfr.scope("update"):
 perfr.value("fps", 59.9)
 ```
 
+A page running in the browser uses a different entry point, `@perfr/web`. It records into the same stream format and can mount this viewer in the page. It does not sample CPU stacks. [In-page profiling](web.md) has the API and the browser tracks.
+
 ## HTTP API
 
 The viewer and the API share the port. The routes the page itself uses:

@@ -1,0 +1,32 @@
+{
+  "name": "@perfr/web",
+  "version": "0.1.1",
+  "description": "In-page perfr profiling for JS, TypeScript and WASM apps. Records scopes into a .perfr.stream and can mount the live viewer.",
+  "type": "module",
+  "license": "BSD-2-Clause",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "pkg",
+    "README.md"
+  ],
+  "scripts": {
+    "build:wasm": "bash build_wasm.sh",
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "24.15.0",
+    "typescript": "5.6.3"
+  }
+}

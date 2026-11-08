@@ -640,6 +640,8 @@ enum ShareUi {
     /// Fetching the capture so its size can be shown. Nothing is posted.
     Reading,
     Confirm,
+    /// `GET /api/me` once more, after Upload is clicked and before the bytes go.
+    Authorizing,
     Uploading { loaded: u64, total: u64 },
     Ready { url: String, copied_until: f64 },
     Failed(String),
@@ -829,6 +831,22 @@ pub struct PerfrLiveApp {
     /// Bytes the confirm dialog is showing. Present from Confirm through a
     /// failed upload; cleared when the link arrives or the capture changes.
     share_draft: Option<ShareDraft>,
+    /// Who `GET /api/me` says is signed in, if anyone.
+    share_session: crate::share::ShareSession,
+    /// Bearer from a login return's `#share_token=`, when the website sent one.
+    share_token: Option<String>,
+    /// A login popup is open. The dialog stays up and waits for the session.
+    share_login_waiting: bool,
+    /// The popup came back and the `/api/me` that follows has not answered yet.
+    share_login_probe: bool,
+    /// That check was still signed out (the cookie did not travel).
+    share_login_returned: bool,
+    /// The page origin is not the share host (the native service's viewer).
+    share_cross_origin: bool,
+    share_session_checked_at: f64,
+    /// This load is the `next` of a same-tab sign-in. Open Share once the
+    /// capture is in hand.
+    share_resume: bool,
     /// Last frame's per-lane listing rows (TODO item 21); swapped with the
     /// self pane's like the rest of the timeline state.
     listing_cache: perfr_live_render::ListingCache,
@@ -1615,6 +1633,11 @@ impl PerfrLiveApp {
         cc.egui_ctx.options_mut(|o| o.input_options.max_double_click_delay = 0.5);
         let intern = InternTable::default();
         let static_capture = crate::dev::query_capture_url_from_location();
+        let (share_token, share_resume) = Net::stored_share_auth();
+        let share_cross_origin = crate::share::share_is_cross_origin(
+            &crate::dev::location_href(),
+            &crate::share::resolve_share_base(&crate::dev::location_search()),
+        );
         let net = match &static_capture {
             Some(url) => Net::from_capture_url(url),
             None => Net::connect(),
@@ -1848,6 +1871,14 @@ impl PerfrLiveApp {
             share_gen: 0,
             share_ui: ShareUi::Idle,
             share_draft: None,
+            share_session: crate::share::ShareSession::Unknown,
+            share_token,
+            share_login_waiting: false,
+            share_login_probe: false,
+            share_login_returned: false,
+            share_cross_origin,
+            share_session_checked_at: 0.0,
+            share_resume,
             capture_start_ns: 0,
             capture_timer: CaptureTimer::default(),
             settle_frames: 0,
@@ -2298,6 +2329,10 @@ impl PerfrLiveApp {
         self.share_gen = self.share_gen.wrapping_add(1);
         self.share_ui = ShareUi::Idle;
         self.share_draft = None;
+        self.share_session = crate::share::ShareSession::Unknown;
+        self.share_login_waiting = false;
+        self.share_login_probe = false;
+        self.share_login_returned = false;
         self.share_open = false;
     }
 
@@ -2344,10 +2379,19 @@ impl PerfrLiveApp {
         }
         self.share_open = true;
         match self.share_ui {
-            ShareUi::Reading | ShareUi::Uploading { .. } | ShareUi::Confirm => return,
+            ShareUi::Reading | ShareUi::Uploading { .. } | ShareUi::Authorizing => return,
+            // The dialog was only hidden. Show it again and re-check the session
+            // so a sign-in that finished while it was closed is picked up.
+            ShareUi::Confirm => {
+                self.request_share_session(true);
+                return;
+            }
             ShareUi::Idle | ShareUi::Ready { .. } | ShareUi::Failed(_) => {}
         }
         self.share_gen = self.share_gen.wrapping_add(1);
+        self.share_login_waiting = false;
+        self.share_login_probe = false;
+        self.share_login_returned = false;
         if self.stream_bytes.as_ref().is_some_and(|b| !b.is_empty()) {
             self.share_draft = Some(ShareDraft::loaded());
             self.share_ui = ShareUi::Confirm;
@@ -2359,6 +2403,51 @@ impl PerfrLiveApp {
                 crate::share::STREAM_EXPORT_PATH.to_string(),
             );
         }
+        self.request_share_session(false);
+    }
+
+    fn share_base(&self) -> String {
+        crate::share::resolve_share_base(&crate::dev::location_search())
+    }
+
+    /// `quiet` keeps the dialog as it is until the answer arrives, so a
+    /// poll does not flash "Checking…" over the sign-in buttons.
+    fn request_share_session(&mut self, quiet: bool) {
+        if !quiet {
+            self.share_session = crate::share::ShareSession::Checking;
+        }
+        self.share_session_checked_at = self.now_s;
+        let url = crate::share::me_url(&self.share_base());
+        self.net.check_share_session(self.share_gen, url, self.share_token.clone());
+    }
+
+    fn begin_share_login(&mut self, provider: &str) {
+        let server = match &self.share_session {
+            crate::share::ShareSession::SignedOut { login_url } => login_url.clone(),
+            _ => String::new(),
+        };
+        let next = crate::share::login_next_url(&crate::dev::location_href());
+        let url = crate::share::login_url(&self.share_base(), &server, provider, &next);
+        if self.net.open_share_login(&url) {
+            self.share_login_waiting = true;
+            self.share_login_probe = false;
+            self.share_login_returned = false;
+            self.needs_repaint = true;
+        }
+    }
+
+    /// Same-tab sign-in lands back on this page. Open the dialog once the
+    /// capture is loaded so the reader is not left at the timeline.
+    fn maybe_resume_share(&mut self) {
+        if !self.share_resume || self.share_open {
+            return;
+        }
+        if !self.can_share() {
+            return;
+        }
+        self.share_resume = false;
+        self.net.clear_share_resume_flag();
+        self.open_share();
     }
 
     /// A copy of the bytes the Upload button would post: the whole capture.
@@ -2448,15 +2537,26 @@ impl PerfrLiveApp {
             }
             return;
         };
-        let total = bytes.len() as u64;
+        let what = if range { "The selected range" } else { "This capture" };
+        let block = match &self.share_session {
+            crate::share::ShareSession::SignedIn(account) => {
+                crate::share::fit_block(bytes.len() as u64, &account.quota, what)
+            }
+            _ => return,
+        };
+        if let Some(message) = block {
+            if let Some(draft) = &mut self.share_draft {
+                draft.error = Some(message);
+            }
+            return;
+        }
         if let Some(draft) = &mut self.share_draft {
             draft.error = None;
         }
-        self.share_ui = ShareUi::Uploading { loaded: 0, total };
-        let endpoint = crate::share::share_post_url(&crate::share::resolve_share_base(
-            &crate::dev::location_search(),
-        ));
-        self.net.share_capture(self.share_gen, endpoint, bytes);
+        self.share_ui = ShareUi::Authorizing;
+        let endpoint = crate::share::share_post_url(&self.share_base());
+        let me = crate::share::me_url(&self.share_base());
+        self.net.share_capture(self.share_gen, endpoint, me, self.share_token.clone(), bytes);
     }
 
     fn apply_share_note(&mut self, kind: crate::share::ShareNoteKind) {
@@ -2465,12 +2565,12 @@ impl PerfrLiveApp {
         }
         match kind {
             crate::share::ShareNoteKind::Reading => {
-                if !matches!(self.share_ui, ShareUi::Confirm | ShareUi::Uploading { .. }) {
+                if !matches!(self.share_ui, ShareUi::Confirm | ShareUi::Uploading { .. } | ShareUi::Authorizing) {
                     self.share_ui = ShareUi::Reading;
                 }
             }
             crate::share::ShareNoteKind::Prepared(bytes) => {
-                if !matches!(self.share_ui, ShareUi::Uploading { .. }) {
+                if !matches!(self.share_ui, ShareUi::Uploading { .. } | ShareUi::Authorizing) {
                     self.share_draft = Some(ShareDraft::fetched(bytes));
                     self.share_ui = ShareUi::Confirm;
                 }
@@ -2489,9 +2589,28 @@ impl PerfrLiveApp {
                 self.share_draft = None;
                 self.share_ui = ShareUi::Ready { url: link.url, copied_until: 0.0 };
             }
-            crate::share::ShareNoteKind::Failed(message) => {
+            crate::share::ShareNoteKind::Session(check) => {
+                let signed_in = matches!(check, crate::share::SessionCheck::SignedIn(_));
+                self.share_session = crate::share::ShareSession::from_check(check);
+                self.share_session_checked_at = self.now_s;
+                if signed_in {
+                    self.share_login_waiting = false;
+                    self.share_login_probe = false;
+                    self.share_login_returned = false;
+                } else if self.share_login_probe {
+                    self.share_login_probe = false;
+                    self.share_login_returned = true;
+                }
+            }
+            crate::share::ShareNoteKind::Failed(failure) => {
+                if failure.needs_login {
+                    self.share_session = crate::share::ShareSession::SignedOut { login_url: String::new() };
+                    self.share_login_waiting = false;
+                    self.share_login_probe = false;
+                }
+                let message = failure.message;
                 let keep = self.share_draft.is_some()
-                    && matches!(self.share_ui, ShareUi::Uploading { .. } | ShareUi::Confirm);
+                    && matches!(self.share_ui, ShareUi::Uploading { .. } | ShareUi::Confirm | ShareUi::Authorizing | ShareUi::Reading);
                 if keep {
                     if let Some(draft) = &mut self.share_draft {
                         draft.error = Some(message);
@@ -2967,11 +3086,23 @@ impl PerfrLiveApp {
         if let Some(bytes) = inbox.loaded_stream {
             self.accept_stream(bytes);
         }
+        if let Some(token) = inbox.share_token {
+            self.share_token = Some(token);
+        }
+        let login_signalled = inbox.share_login_signalled;
         for note in inbox.share_notes {
             if note.gen != self.share_gen {
                 continue;
             }
             self.apply_share_note(note.kind);
+        }
+        if login_signalled
+            && self.share_open
+            && !matches!(self.share_ui, ShareUi::Uploading { .. } | ShareUi::Authorizing)
+        {
+            self.share_login_waiting = false;
+            self.share_login_probe = true;
+            self.request_share_session(true);
         }
         self.http_ok = inbox.http_ok;
         self.ws_ok = inbox.ws_ok;
@@ -3872,7 +4003,7 @@ impl PerfrLiveApp {
         }
         let enabled = self.can_share();
         let tip = if enabled {
-            "Upload this capture and get a link. The size is shown before anything is sent."
+            "Upload this capture and get a link. Sign-in is required; the size is shown before anything is sent."
         } else if self.static_capture.is_some() && self.stream_bytes.is_none() {
             "The capture is still loading."
         } else {
@@ -3898,30 +4029,36 @@ impl PerfrLiveApp {
             return;
         }
         self.refresh_share_range();
+        if matches!(
+            self.share_session,
+            crate::share::ShareSession::SignedOut { .. }
+        ) && !matches!(
+            self.share_ui,
+            ShareUi::Uploading { .. } | ShareUi::Authorizing
+        ) && self.now_s - self.share_session_checked_at >= 2.0
+        {
+            self.request_share_session(true);
+        }
         let mut open = true;
         let mut retry = false;
         let mut copied = false;
         let mut upload_entire = false;
         let mut upload_range = false;
         let mut cancel = false;
+        let mut retry_session = false;
+        let mut sign_in: Option<&'static str> = None;
         egui::Window::new("Share")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_width(460.0)
+            .default_width(520.0)
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .frame(Frame::window(&ctx.style()).fill(theme::RAIL()))
             .show(ctx, |ui| {
-                ui.set_min_width(420.0);
+                ui.set_min_width(440.0);
                 ui.label("Anyone with this link can view the capture.");
                 ui.add_space(6.0);
-                if matches!(self.share_ui, ShareUi::Confirm) {
-                    self.share_confirm_body(ui, &mut upload_entire, &mut upload_range, &mut cancel);
-                } else { match &self.share_ui {
-                    ShareUi::Confirm | ShareUi::Idle | ShareUi::Reading => {
-                        let label = ui.label("Reading the capture…");
-                        note_ui_rect("share-progress", label.rect);
-                    }
+                match &self.share_ui {
                     ShareUi::Uploading { loaded, total } => {
                         ui.label("Uploading…");
                         let frac = if *total > 0 {
@@ -3939,12 +4076,20 @@ impl PerfrLiveApp {
                             let width = (ui.available_width() - 36.0).max(80.0);
                             let text = ui.add_sized(
                                 Vec2::new(width, 22.0),
-                                egui::Label::new(RichText::new(url).font(FontId::monospace(12.0)).color(theme::TEXT()))
-                                    .truncate(),
+                                egui::Label::new(
+                                    RichText::new(url)
+                                        .font(FontId::monospace(12.0))
+                                        .color(theme::TEXT()),
+                                )
+                                .truncate(),
                             );
                             note_ui_rect(&format!("share-url:{url}"), text.rect);
                             text.on_hover_text(url);
-                            let (label, tip, paint): (&str, &str, fn(&egui::Painter, Rect, Color32)) = if show_check {
+                            let (label, tip, paint): (
+                                &str,
+                                &str,
+                                fn(&egui::Painter, Rect, Color32),
+                            ) = if show_check {
                                 ("Copied", "Copied", paint_check_icon)
                             } else {
                                 ("Copy", "Copy the link", paint_copy_icon)
@@ -3955,7 +4100,8 @@ impl PerfrLiveApp {
                             }
                         });
                         if show_check {
-                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+                            ui.ctx()
+                                .request_repaint_after(std::time::Duration::from_millis(200));
                         }
                     }
                     ShareUi::Failed(message) => {
@@ -3965,7 +4111,17 @@ impl PerfrLiveApp {
                             retry = true;
                         }
                     }
-                }}
+                    ShareUi::Confirm | ShareUi::Idle | ShareUi::Reading | ShareUi::Authorizing => {
+                        self.share_confirm_body(
+                            ui,
+                            &mut upload_entire,
+                            &mut upload_range,
+                            &mut cancel,
+                            &mut retry_session,
+                            &mut sign_in,
+                        );
+                    }
+                }
             });
         if copied {
             let now = ctx.input(|i| i.time);
@@ -3973,10 +4129,15 @@ impl PerfrLiveApp {
                 *copied_until = now + 2.0;
             }
         }
-        if upload_entire {
+        if let Some(provider) = sign_in {
+            self.begin_share_login(provider);
+        } else if upload_entire {
             self.start_share_upload(false);
         } else if upload_range {
             self.start_share_upload(true);
+        }
+        if retry_session {
+            self.request_share_session(false);
         }
         if retry {
             self.share_ui = ShareUi::Idle;
@@ -3987,69 +4148,197 @@ impl PerfrLiveApp {
             open = false;
         }
         self.share_open = open;
-        if matches!(self.share_ui, ShareUi::Reading | ShareUi::Uploading { .. }) {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        if self.share_open
+            && (matches!(
+                self.share_ui,
+                ShareUi::Reading | ShareUi::Uploading { .. } | ShareUi::Authorizing
+            ) || matches!(
+                self.share_session,
+                crate::share::ShareSession::Checking | crate::share::ShareSession::SignedOut { .. }
+            ))
+        {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
     }
 
-    /// The confirm step: the size of the bytes Upload will post, and how to
-    /// share the selected time range instead.
-    fn share_confirm_body(&mut self, ui: &mut Ui, upload_entire: &mut bool, upload_range: &mut bool, cancel: &mut bool) {
-        let (error, fetched_len, unslicable, range_info) = {
-            let Some(draft) = self.share_draft.as_ref() else {
-                let label = ui.label("Reading the capture…");
-                note_ui_rect("share-progress", label.rect);
-                return;
+    fn share_confirm_view(&self) -> crate::share::ShareConfirmView {
+        let (error, whole_bytes, unslicable, range_bytes, has_range) = {
+            let span = if self.measure_dragging {
+                None
+            } else {
+                self.selection_span()
             };
-            let fetched_len = match &draft.source {
-                ShareSource::Fetched(bytes) => Some(bytes.len()),
-                ShareSource::Loaded => None,
-            };
-            let range_info = draft.range.as_ref().map(|r| (r.span, r.bytes.len()));
-            (draft.error.clone(), fetched_len, draft.range_unslicable, range_info)
+            match self.share_draft.as_ref() {
+                None => (None, None, false, None, false),
+                Some(draft) => {
+                    let fetched_len = match &draft.source {
+                        ShareSource::Fetched(bytes) => Some(bytes.len()),
+                        ShareSource::Loaded => None,
+                    };
+                    let whole_len = fetched_len.unwrap_or_else(|| {
+                        self.stream_bytes.as_ref().map(|b| b.len()).unwrap_or(0)
+                    });
+                    let range = draft.range.as_ref().filter(|r| Some(r.span) == span);
+                    (
+                        draft.error.clone(),
+                        Some(whole_len as u64),
+                        draft.range_unslicable,
+                        range.map(|r| r.bytes.len() as u64),
+                        range.is_some(),
+                    )
+                }
+            }
         };
-        let whole_len = fetched_len.unwrap_or_else(|| self.stream_bytes.as_ref().map(|b| b.len()).unwrap_or(0));
-        if let Some(error) = error {
-            let label = ui.label(RichText::new(&error).color(RECORD_RED));
-            note_ui_rect(&format!("share-error:{error}"), label.rect);
+        crate::share::confirm_view(&crate::share::ConfirmInput {
+            session: &self.share_session,
+            whole_bytes,
+            range_bytes,
+            can_slice: !unslicable,
+            has_range,
+            error: error.as_deref(),
+            login_waiting: self.share_login_waiting || self.share_login_probe,
+            login_returned: self.share_login_returned,
+            cross_origin: self.share_cross_origin,
+            busy: matches!(self.share_ui, ShareUi::Authorizing),
+        })
+    }
+
+    /// The confirm step: sign-in, or the account, the quota, and the size
+    /// of the bytes Upload will post.
+    fn share_confirm_body(
+        &mut self,
+        ui: &mut Ui,
+        upload_entire: &mut bool,
+        upload_range: &mut bool,
+        cancel: &mut bool,
+        retry_session: &mut bool,
+        sign_in: &mut Option<&'static str>,
+    ) {
+        let view = self.share_confirm_view();
+        let signed_in = matches!(view.kind, crate::share::ShareConfirmKind::SignedIn);
+        for line in &view.lines {
+            match line.role {
+                crate::share::ShareLineRole::Title if signed_in => {
+                    ui.horizontal(|ui| {
+                        let who = line.text.trim_start_matches("Sharing as ").trim();
+                        let initial = who
+                            .chars()
+                            .next()
+                            .map(|c| c.to_uppercase().to_string())
+                            .unwrap_or_else(|| "?".into());
+                        let (rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(28.0), egui::Sense::hover());
+                        ui.painter()
+                            .circle_filled(rect.center(), 14.0, theme::ACCENT());
+                        ui.painter().text(
+                            rect.center(),
+                            Align2::CENTER_CENTER,
+                            initial,
+                            FontId::new(13.0, fonts::medium()),
+                            theme::CANVAS(),
+                        );
+                        let label =
+                            ui.label(RichText::new(&line.text).size(16.0).color(theme::TEXT()));
+                        note_ui_rect(&format!("share-account:{who}"), label.rect);
+                    });
+                }
+                crate::share::ShareLineRole::Title => {
+                    let label = ui.label(RichText::new(&line.text).size(18.0).color(theme::TEXT()));
+                    note_ui_rect("share-signin", label.rect);
+                }
+                crate::share::ShareLineRole::Quota => {
+                    let label =
+                        ui.label(RichText::new(&line.text).size(12.0).color(theme::MUTED()));
+                    note_ui_rect(&format!("share-quota:{}", line.text), label.rect);
+                    if let crate::share::ShareSession::SignedIn(account) = &self.share_session {
+                        ui.add(egui::ProgressBar::new(crate::share::quota_fraction(
+                            &account.quota,
+                        )));
+                    }
+                }
+                crate::share::ShareLineRole::Size => {
+                    let sentence = format!("The entire capture is {}.", line.text);
+                    let label = ui.label(RichText::new(sentence).size(16.0).color(theme::TEXT()));
+                    note_ui_rect(&format!("share-size:{}", line.text), label.rect);
+                    if let Some(n) = view.whole_bytes {
+                        note_ui_rect(&format!("share-bytes:{n}"), label.rect);
+                    }
+                }
+                crate::share::ShareLineRole::Hint => {
+                    let label =
+                        ui.label(RichText::new(&line.text).size(12.0).color(theme::MUTED()));
+                    note_ui_rect(&format!("share-hint:{}", line.text), label.rect);
+                }
+                crate::share::ShareLineRole::Error => {
+                    let label = ui.label(RichText::new(&line.text).color(RECORD_RED));
+                    note_ui_rect(&format!("share-error:{}", line.text), label.rect);
+                    note_ui_rect(&format!("share-block:{}", line.text), label.rect);
+                }
+                crate::share::ShareLineRole::Body => {
+                    ui.label(RichText::new(&line.text).size(12.0).color(theme::MUTED()));
+                }
+                crate::share::ShareLineRole::Progress => {
+                    let label = ui.label(&line.text);
+                    note_ui_rect("share-progress", label.rect);
+                }
+            }
+            ui.add_space(4.0);
+        }
+        ui.add_space(4.0);
+        let mut providers = false;
+        ui.horizontal(|ui| {
+            for action in &view.actions {
+                if let crate::share::ShareAction::Provider { id, label } = action {
+                    providers = true;
+                    let button = ui.button(*label);
+                    note_ui_rect(&format!("share-provider:{id}"), button.rect);
+                    if button.clicked() {
+                        *sign_in = Some(*id);
+                    }
+                }
+            }
+        });
+        if providers {
             ui.add_space(6.0);
         }
-        let size = crate::share::format_share_bytes(whole_len as u64);
-        let line = ui.label(
-            RichText::new(format!("The entire capture is {size}."))
-                .size(16.0)
-                .color(theme::TEXT()),
-        );
-        note_ui_rect(&format!("share-size:{size}"), line.rect);
-        note_ui_rect(&format!("share-bytes:{whole_len}"), line.rect);
-        ui.add_space(8.0);
-        let upload = ui.button("Upload");
-        note_ui_rect("share-upload", upload.rect);
-        if upload.clicked() {
-            *upload_entire = true;
-        }
-        ui.add_space(10.0);
-        let span = if self.measure_dragging { None } else { self.selection_span() };
-        let has_range = range_info.as_ref().is_some_and(|(s, _)| Some(*s) == span);
-        let hint = crate::share::share_section_hint(!unslicable, has_range);
-        let hint_label = ui.label(RichText::new(hint).size(12.0).color(theme::MUTED()));
-        note_ui_rect(&format!("share-hint:{hint}"), hint_label.rect);
-        if has_range {
-            let n = range_info.map(|(_, n)| n).unwrap_or(0);
-            let label = format!("Share selected range ({})", crate::share::format_share_bytes(n as u64));
-            ui.add_space(4.0);
-            let button = ui.button(label).on_hover_text(
-                "Events that overlap the selected time range, on every thread.",
-            );
-            note_ui_rect("share-range", button.rect);
-            note_ui_rect(&format!("share-range-bytes:{n}"), button.rect);
-            if button.clicked() {
-                *upload_range = true;
+        for action in &view.actions {
+            match action {
+                crate::share::ShareAction::Provider { .. } => {}
+                crate::share::ShareAction::Upload => {
+                    let button = ui.button("Upload");
+                    note_ui_rect("share-upload", button.rect);
+                    if button.clicked() {
+                        *upload_entire = true;
+                    }
+                    ui.add_space(4.0);
+                }
+                crate::share::ShareAction::Range { bytes } => {
+                    let label = format!(
+                        "Share selected range ({})",
+                        crate::share::format_share_bytes(*bytes)
+                    );
+                    let button = ui.button(label).on_hover_text(
+                        "Events that overlap the selected time range, on every thread.",
+                    );
+                    note_ui_rect("share-range", button.rect);
+                    note_ui_rect(&format!("share-range-bytes:{bytes}"), button.rect);
+                    if button.clicked() {
+                        *upload_range = true;
+                    }
+                    ui.add_space(4.0);
+                }
+                crate::share::ShareAction::Retry => {
+                    if ui.button("Try again").clicked() {
+                        *retry_session = true;
+                    }
+                    ui.add_space(4.0);
+                }
+                crate::share::ShareAction::Cancel => {
+                    if ui.button("Cancel").clicked() {
+                        *cancel = true;
+                    }
+                }
             }
-        }
-        ui.add_space(8.0);
-        if ui.button("Cancel").clicked() {
-            *cancel = true;
         }
     }
 
@@ -10016,6 +10305,7 @@ impl eframe::App for PerfrLiveApp {
                 self.sampling_panel(ctx);
             }
             self.tweaks_window(ctx);
+            self.maybe_resume_share();
             self.share_window(ctx);
             self.presets_window(ctx);
             self.bench_window(ctx);

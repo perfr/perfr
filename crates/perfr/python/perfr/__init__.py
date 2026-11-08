@@ -19,7 +19,7 @@ import os
 import sys
 
 __all__ = ["binary_path", "header_path", "library_path", "main"]
-__version__ = "0.1.1"
+__version__ = "0.1.3"
 
 if sys.platform == "win32":
     _BINARY, _LIBRARY = "perfr.exe", "libperfr.dll"

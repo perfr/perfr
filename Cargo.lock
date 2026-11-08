@@ -2929,7 +2929,7 @@ dependencies = [
  "perfr-object",
  "perfr-perf-records",
  "perfr-perf-ring",
- "perfr-scope-ring",
+  "perfr-scope-ring",
  "perfr-thread-states",
  "perfr-tracing-state",
  "perfr-unwind",
@@ -3183,6 +3183,14 @@ name = "perfr-scope-ring"
 version = "0.1.1"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "perfr-story"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

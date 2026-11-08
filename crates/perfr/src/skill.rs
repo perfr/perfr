@@ -37,6 +37,7 @@ use serde_json::{Map, Value};
 
 const SKILL: &str = include_str!("../skills/perfr/SKILL.md");
 const SETUP_SKILL: &str = include_str!("../skills/perfr-setup/SKILL.md");
+const STORY_SKILL: &str = include_str!("../skills/perfr-story/SKILL.md");
 
 const MCP_BEGIN: &str = "# BEGIN perfr mcp";
 const MCP_END: &str = "# END perfr mcp";
@@ -223,11 +224,12 @@ fn selected(action: &SkillAction) -> Result<Vec<Agent>, String> {
         })
 }
 
-fn skill_paths(agent: Agent, env: &SkillEnv, scope: Scope) -> [PathBuf; 2] {
+fn skill_paths(agent: Agent, env: &SkillEnv, scope: Scope) -> Vec<PathBuf> {
     let root = skill_root(agent, env, scope);
-    [
+    vec![
         root.join("perfr").join("SKILL.md"),
         root.join("perfr-setup").join("SKILL.md"),
+        root.join("perfr-story").join("SKILL.md"),
     ]
 }
 
@@ -247,6 +249,8 @@ fn skill_root(agent: Agent, env: &SkillEnv, scope: Scope) -> PathBuf {
 fn body_for(path: &Path) -> &'static str {
     if path.ends_with(Path::new("perfr-setup").join("SKILL.md")) {
         SETUP_SKILL
+    } else if path.ends_with(Path::new("perfr-story").join("SKILL.md")) {
+        STORY_SKILL
     } else {
         SKILL
     }
@@ -783,6 +787,9 @@ mod tests {
             assert!(!body.contains("annotation"));
         }
         assert!(SETUP_SKILL.contains("name: perfr-setup"));
+        assert!(STORY_SKILL.contains("name: perfr-story"));
+        assert!(STORY_SKILL.contains("Hypothesis"));
+        assert!(STORY_SKILL.contains("cores_busy"));
         assert!(SETUP_SKILL.contains("perfr doctor"));
         assert!(SKILL.contains("perfr_capabilities"));
     }
@@ -812,8 +819,10 @@ mod tests {
         let text = install(&env, &action("all", false, false, false)).unwrap();
         let claude_skill = home.join(".claude/skills/perfr/SKILL.md");
         let setup = home.join(".claude/skills/perfr-setup/SKILL.md");
+        let story_skill = home.join(".claude/skills/perfr-story/SKILL.md");
         assert_eq!(fs::read_to_string(&claude_skill).unwrap(), SKILL);
         assert_eq!(fs::read_to_string(&setup).unwrap(), SETUP_SKILL);
+        assert_eq!(fs::read_to_string(&story_skill).unwrap(), STORY_SKILL);
         let claude_json: Value =
             serde_json::from_str(&fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
         assert_eq!(claude_json["mcpServers"]["perfr"]["command"], "perfr");
@@ -832,10 +841,12 @@ mod tests {
         let list_text = list(&env, &action("claude", false, false, false));
         assert!(list_text.contains("installed"), "{list_text}");
         assert!(list_text.contains("perfr-setup"), "{list_text}");
+        assert!(list_text.contains("perfr-story"), "{list_text}");
 
         let removed = uninstall(&env, &action("claude", false, false, false)).unwrap();
         assert!(!claude_skill.exists(), "{removed}");
         assert!(!setup.exists(), "{removed}");
+        assert!(!story_skill.exists(), "{removed}");
         let after: Value =
             serde_json::from_str(&fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
         assert!(after["mcpServers"].get("perfr").is_none(), "{after}");

@@ -8,6 +8,7 @@ pub mod bench;
 pub mod demo;
 mod sharing;
 pub mod http;
+mod targets;
 pub mod ingest;
 pub mod peers;
 pub mod settings;

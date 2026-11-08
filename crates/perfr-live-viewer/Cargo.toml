@@ -27,6 +27,7 @@ wasm-threads = ["perfr-live-render/parallel", "dep:wasm-bindgen-rayon"]
 
 [dependencies]
 perfr-live-event = { path = "../perfr-live-event" }
+perfr-story = { path = "../perfr-story" }
 perfr-live-chrome = { path = "../perfr-live-chrome" }
 perfr-live-protocol = { path = "../perfr-live-protocol" }
 perfr-live-render = { path = "../perfr-live-render" }

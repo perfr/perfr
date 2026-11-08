@@ -297,6 +297,55 @@ pub fn query_capture_url(search: &str) -> Option<String> {
     Some(percent_decode(value))
 }
 
+/// `?story=<url>` -- open a story on top of the capture. `demo` and
+/// `box3d` are the story shipped with the viewer. Any other value is a
+/// URL, fetched the same way as `capture=`.
+pub fn query_story_url_from_location() -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.location().search().ok())
+            .and_then(|s| query_story_url(&s))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        None
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn query_story_url(search: &str) -> Option<String> {
+    let value = search
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("story="))?;
+    if value.is_empty() {
+        return None;
+    }
+    Some(percent_decode(value))
+}
+
+/// `?chrome=compact` -- a short bar for an iframe. Capture controls stay
+/// available from the story bar's Share button, and `?capture=` still loads.
+pub fn query_chrome_compact_from_location() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.location().search().ok())
+            .map(|s| query_chrome_compact(&s))
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn query_chrome_compact(search: &str) -> bool {
+    search.trim_start_matches('?').split('&').any(|kv| kv == "chrome=compact")
+}
+
 /// Enough of percent-decoding for a path: `%2F`, `%3A` and friends.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) fn percent_decode(s: &str) -> String {
@@ -625,5 +674,24 @@ mod capture_url_tests {
             query_capture_url("?share_base=http%3A%2F%2F127.0.0.1%3A9&capture=%2Fapi%2Fshare%2Fabc"),
             Some("/api/share/abc".into())
         );
+        // A story and a compact bar ride along. They must not change which capture the page opens.
+        assert_eq!(
+            query_capture_url("?capture=captures/box3d.perfr.stream&story=stories/box3d.perfr.story&chrome=compact"),
+            Some("captures/box3d.perfr.stream".into())
+        );
+    }
+
+    #[test]
+    fn story_and_chrome_queries_are_independent_of_capture() {
+        use super::{query_chrome_compact, query_story_url};
+        let q = "?capture=captures/box3d.perfr.stream&story=stories%2Fbox3d.perfr.story&chrome=compact";
+        assert_eq!(query_capture_url(q), Some("captures/box3d.perfr.stream".into()));
+        assert_eq!(query_story_url(q), Some("stories/box3d.perfr.story".into()));
+        assert!(query_chrome_compact(q));
+        assert_eq!(query_story_url("?story=demo"), Some("demo".into()));
+        assert_eq!(query_story_url("?story="), None);
+        assert_eq!(query_story_url("?capture=x"), None);
+        assert!(!query_chrome_compact("?capture=x&chrome=full"));
+        assert!(!query_chrome_compact(""));
     }
 }

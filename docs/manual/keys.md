@@ -12,6 +12,9 @@ Taken from the viewer’s key handler and the track gestures. A text field keeps
 | **F2** | Toggle the Self pane. More → “Self   F2” |
 | **F3** | Toggle Benchmark. More → “Benchmark   F3” |
 | **Space** | Toggle Follow latest |
+| **Alt+Space** | Play or pause a story, when one is open |
+| **[** / **]** | Previous / next story step |
+| **Alt+Left** / **Alt+Right** | Previous / next story step |
 | **Home** | Fit the capture to its content. The window is at least 1 µs wide |
 | **Ctrl+O** / **⌘O** | Open a file |
 | **Ctrl+Shift+P** / **⌘⇧P** | Open the process list. Up, Down and Enter move and select inside it |
@@ -55,3 +58,5 @@ More also lists “Pan time: A / D”, “Zoom: W / S” and “Scroll tracks: �
 | `?theme=` | `perfr`, `dracula`, `nord`, `gruvbox`, `solarized`, `solarized-light`, `gruvbox-light` |
 | `?webgpu` | Try WebGPU instead of WebGL2 |
 | `?capture=` | Open a `.perfr.stream` with no service. The site’s embedded viewer uses this |
+| `?story=` | Open a story on that capture. `demo` is the story shipped with the viewer; any other value is a URL of a `perfr.story` document. `?capture=` still chooses the capture |
+| `?chrome=compact` | A short story bar, for an iframe. Share stays on that bar |

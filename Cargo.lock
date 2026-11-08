@@ -3123,6 +3123,7 @@ dependencies = [
  "perfr-live-event",
  "perfr-live-protocol",
  "perfr-live-render",
+ "perfr-story",
  "rfd",
  "serde",
  "serde_json",

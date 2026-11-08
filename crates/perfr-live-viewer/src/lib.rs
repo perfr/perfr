@@ -37,6 +37,8 @@ mod rect_select;
 mod report_copy;
 #[cfg(feature = "egui")]
 mod share;
+#[cfg(feature = "egui")]
+mod story;
 mod self_pane;
 #[cfg(feature = "egui")]
 mod theme;

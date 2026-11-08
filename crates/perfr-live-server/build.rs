@@ -24,7 +24,7 @@ fn mime_for(name: &str) -> &'static str {
         "application/wasm"
     } else if name.ends_with(".css") {
         "text/css; charset=utf-8"
-    } else if name.ends_with(".json") {
+    } else if name.ends_with(".json") || name.ends_with(".story") {
         "application/json"
     } else {
         "application/octet-stream"

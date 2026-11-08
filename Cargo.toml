@@ -45,6 +45,7 @@ members = [
     "crates/perfr-tracing-state",
     "crates/perfr-trampoline",
     "crates/perfr-unwind",
+    "crates/perfr-web",
     "crates/perfr-wire",
 ]
 

@@ -3223,6 +3223,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "perfr-web"
+version = "0.1.1"
+dependencies = [
+ "js-sys",
+ "perfr-live-event",
+ "perfr-live-protocol",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "perfr-wire"
 version = "0.1.1"
 

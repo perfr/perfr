@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net6.0;net8.0;netstandard2.1</TargetFrameworks>
+    <LangVersion>10.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Perfr</RootNamespace>
+    <AssemblyName>Perfr</AssemblyName>
+    <Version>0.1.1</Version>
+    <Description>perfr manual instrumentation for C#: scopes, async spans, instants, links and values. Loads libperfr at run time and is a no-op when it is absent.</Description>
+    <Authors>The perfr Authors</Authors>
+    <Company>The perfr Authors</Company>
+    <Copyright>Copyright (c) 2026 The perfr Authors</Copyright>
+    <PackageId>Perfr</PackageId>
+    <PackageLicenseExpression>BSD-2-Clause</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/perfr/perfr</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/perfr/perfr</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <IsPackable>true</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;CS0419</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+</Project>

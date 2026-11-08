@@ -493,6 +493,35 @@ mod tests {
     }
 
     #[test]
+    fn log_and_drop_rows_round_trip() {
+        let mut bundle = sample_bundle();
+        let row = |kind_id: u8, duration_ns: u64, extra: u8, pad: u8, name_id: u32, name: &str| EventRow {
+            event: LiveEvent {
+                start_ns: 120,
+                duration_ns,
+                tid: 70,
+                pid: 7,
+                kind: kind_id,
+                depth: 0,
+                extra,
+                _pad: pad,
+                name_id,
+            },
+            name: name.into(),
+        };
+        bundle.events.push(row(kind::LOG, 0, 3, perfr_live_event::event_flags::TRUNCATED, 9, "tick"));
+        bundle.events.push(row(kind::DROP, 41, 6, 0, 0, ""));
+        let again = CaptureBundle::from_zip(&bundle.to_zip().unwrap()).unwrap();
+        let log = again.events.iter().find(|r| r.event.kind == kind::LOG).expect("the log row");
+        assert_eq!(log.name, "tick");
+        assert_eq!(log.event.log_level(), Some(3));
+        assert!(log.event.log_truncated(), "the truncated flag survives the file");
+        let drop = again.events.iter().find(|r| r.event.kind == kind::DROP).expect("the drop row");
+        assert_eq!(drop.event.drop_count(), Some(41), "a drop's count is not a duration");
+        assert_eq!(drop.event.extra, 6);
+    }
+
+    #[test]
     fn a_bundle_saved_with_arrow_tables_in_a_deflated_zip_still_opens() {
         // The layout of the first day's bundles: IPC tables, deflate entries.
         let b = sample_bundle();

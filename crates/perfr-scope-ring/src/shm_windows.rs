@@ -646,6 +646,16 @@ impl ScopeRingReader {
         &self.rings
     }
 
+    /// Publishes this reader's cursors through the writable control view.
+    /// The ring view is read-only.
+    pub fn publish_read_cursors(&self, reads: &[u64]) {
+        for (ring, read) in reads.iter().copied().enumerate() {
+            // SAFETY: `control` is the writable view of the control page,
+            // and the cursor table lives on it.
+            unsafe { crate::meta::publish_read_cursor(self.control.base, ring, read) }
+        }
+    }
+
     pub fn pid(&self) -> u32 {
         self.pid
     }

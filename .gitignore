@@ -57,3 +57,15 @@ tools/test-programs/PerfrTestCpp/*.ilk
 # Local CMake build tree and the elevated-test log on Windows
 /build/
 /tools/windows/elevated-tests.log
+
+# Language bindings over libperfr (build output only)
+crates/perfr-api/csharp/**/bin/
+crates/perfr-api/csharp/**/obj/
+crates/perfr-api/csharp/**/*.nupkg
+crates/perfr-api/csharp/**/*.snupkg
+crates/perfr-api/lua/*.so
+crates/perfr-api/java/build/
+crates/perfr-api/zig/.zig-cache/
+crates/perfr-api/zig/zig-out/
+crates/perfr-api/swift/.build/
+crates/perfr-api/mojo/build/

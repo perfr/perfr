@@ -25,6 +25,35 @@ pub mod kind {
     /// against the events it has seen. Text past the target, if any, labels
     /// the arrow.
     pub const LINK: u8 = 5;
+    /// A log line. Named exactly like a scope: up to [`INLINE_TEXT`] bytes
+    /// ride in the record and the rest continue as [`TEXT`] records sharing
+    /// its `(tid, scope_id)`, where `scope_id` is the thread's next handle.
+    /// Bits 4..7 of `flags` are the [`level`]. The line names no scope: the
+    /// viewer files it under the scopes open on its thread at its timestamp.
+    pub const LOG: u8 = 6;
+}
+
+/// Log levels, as stored in bits 4..7 of a [`kind::LOG`] record's `flags`
+/// and carried in a live event's `extra`.
+pub mod level {
+    pub const TRACE: u8 = 0;
+    pub const DEBUG: u8 = 1;
+    pub const INFO: u8 = 2;
+    pub const WARN: u8 = 3;
+    pub const ERROR: u8 = 4;
+    pub const FATAL: u8 = 5;
+
+    const SHIFT: u8 = 4;
+
+    /// The flag bits for `level`. Anything past fatal is fatal.
+    pub fn to_flags(level: u8) -> u8 {
+        level.min(FATAL) << SHIFT
+    }
+
+    /// The level a [`super::kind::LOG`] record's flags carry.
+    pub fn from_flags(flags: u8) -> u8 {
+        (flags >> SHIFT) & 0x7
+    }
 }
 
 /// Bits in `ScopeEvent::flags`.

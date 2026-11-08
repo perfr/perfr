@@ -15,13 +15,14 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 mod color;
+pub mod logs;
 pub mod dev;
 pub mod theme;
 pub use color::{
-    argb_to_css, async_scope_color, encode_manual_color, event_color, inactive,
+    argb_to_css, async_scope_color, encode_manual_color, event_color, inactive, log_level_color,
     material_index_to_argb, name_hash, named_scope_color, palette_index, rgba_word_to_argb,
     same_scope_highlight, sample_tick, scale_rgb, selection, thread_scope_color, thread_state_color,
-    BOX_BORDER, PERFR_API_COLORS_RGBA, PERFR_COLOR_RED, SHADE_LEFT, THREAD_PALETTE,
+    BOX_BORDER, DROP_MARK, PERFR_API_COLORS_RGBA, PERFR_COLOR_RED, SHADE_LEFT, THREAD_PALETTE,
 };
 pub use color::{chrome, mode as color_mode};
 
@@ -42,6 +43,14 @@ pub mod kind {
     /// `duration_ns` is the sampling period, not a measured duration:
     /// what the mark means is "a sample landed here".
     pub const SAMPLE: u8 = 7;
+    /// A log line. An instant: `duration_ns` is 0. `extra` is the level.
+    /// `depth` is unused (the lane ignores it). There is no scope id on the
+    /// line; it belongs to the scopes open on its thread at its timestamp
+    /// (see [`crate::logs`]).
+    pub const LOG: u8 = 8;
+    /// A loss marker. `duration_ns` is the count, not a duration.
+    /// `extra` is the ring-record kind that was lost, or 0xFF if unknown.
+    pub const DROP: u8 = 9;
 }
 
 /// The process id agent scopes are filed under (TODO item 12): scopes an
@@ -79,6 +88,10 @@ pub mod thread_state {
 pub mod event_flags {
     pub const DYNAMIC: u8 = 1 << 7;
     pub const COLOR_MASK: u8 = 0x7f;
+    /// A log line that is not all there: it lost a chunk (the text has a
+    /// hole marker where), was cut at the length cap, or its text was not
+    /// kept at all.
+    pub const TRUNCATED: u8 = 1 << 6;
 }
 
 /// Packed 32-byte event. Layout is little-endian on the wire.
@@ -103,11 +116,30 @@ impl LiveEvent {
         // `duration_ns` carries the sampling period for tooltips, but what it
         // means is "a sample landed at this timestamp", so it must draw as a
         // tick at every zoom rather than widening into a box.
-        if self.kind == kind::VALUE || self.kind == kind::SAMPLE {
+        if self.kind == kind::VALUE
+            || self.kind == kind::SAMPLE
+            || self.kind == kind::LOG
+            || self.kind == kind::DROP
+        {
             self.start_ns.saturating_add(1)
         } else {
             self.start_ns.saturating_add(self.duration_ns)
         }
+    }
+
+    /// The level of a [`kind::LOG`] line (see [`crate::logs::level_name`]).
+    pub fn log_level(self) -> Option<u8> {
+        (self.kind == kind::LOG).then_some(self.extra)
+    }
+
+    /// Whether a [`kind::LOG`] line is missing some of its text.
+    pub fn log_truncated(self) -> bool {
+        self.kind == kind::LOG && self._pad & event_flags::TRUNCATED != 0
+    }
+
+    /// How many events a [`kind::DROP`] marker accounts for.
+    pub fn drop_count(self) -> Option<u64> {
+        (self.kind == kind::DROP).then_some(self.duration_ns)
     }
 
     /// Decode a [`kind::VALUE`] sample. `duration_ns` stores `f32` bits.
@@ -155,6 +187,17 @@ impl LiveEvent {
     pub fn lane_key(self) -> LaneKey {
         if self.kind == kind::SCHEDULING_SLICE {
             return LaneKey::scheduler(self.extra);
+        }
+        if self.kind == kind::LOG || self.kind == kind::DROP {
+            // One strip per thread. Level and the lost kind stay on the
+            // event; they must not split the lane.
+            return LaneKey {
+                pid: self.pid,
+                tid: self.tid,
+                kind: self.kind,
+                depth: 0,
+                extra: 0,
+            };
         }
         if self.kind == kind::VALUE {
             // One graph per value name, not one per thread: a thread that
@@ -537,6 +580,7 @@ mod tests {
 
     #[test]
     fn cpu_scope_uses_tid_mod_6_and_even_depth_darkens() {
+        let _guard = crate::theme::switch_lock();
         let odd = thread_scope_color(0, 1);
         let even = thread_scope_color(0, 0);
         assert_eq!(odd, 0xFFE7_4435);
@@ -560,6 +604,7 @@ mod tests {
 
     #[test]
     fn api_scope_color_is_name_hash_not_tid() {
+        let _guard = crate::theme::switch_lock();
         let mut intern = InternTable::default();
         let tick = intern.intern("Tick");
         let a = LiveEvent {
@@ -606,6 +651,7 @@ mod tests {
 
     #[test]
     fn async_name_hash_indexes_the_same_six_colors() {
+        let _guard = crate::theme::switch_lock();
         let h = name_hash(b"GpuSubmit");
         assert_eq!(async_scope_color(h), THREAD_PALETTE[(h as usize) % 6]);
         let mut intern = InternTable::default();
@@ -633,6 +679,7 @@ mod tests {
 
     #[test]
     fn manual_api_material_red_is_perfr_h_word() {
+        let _guard = crate::theme::switch_lock();
         assert_eq!(
             encode_manual_color(0xF443_36FF),
             (color_mode::MANUAL_API, 1)
@@ -672,6 +719,7 @@ mod tests {
 
     #[test]
     fn thread_state_colors_match_thread_state_bar() {
+        let _guard = crate::theme::switch_lock();
         assert_eq!(thread_state_color(thread_state::RUNNING), 0xFF4C_AF50);
         assert_eq!(thread_state_color(thread_state::RUNNABLE), 0xFF21_96F3);
         assert_eq!(
@@ -692,6 +740,7 @@ mod tests {
 
     #[test]
     fn pairer_keeps_manual_api_color() {
+        let _guard = crate::theme::switch_lock();
         let mut p = ScopePairer::default();
         let a = p.intern("red");
         p.on_scope_start(1, 10, 100, 0xF443_36FF, a);
@@ -737,6 +786,7 @@ mod tests {
 
     #[test]
     fn scheduling_lane_key_is_core_only() {
+        let _guard = crate::theme::switch_lock();
         let a = LiveEvent {
             tid: 100,
             pid: 1,
@@ -778,6 +828,7 @@ mod tests {
 
     #[test]
     fn bytes_roundtrip_preserves_fields() {
+        let _guard = crate::theme::switch_lock();
         let ev = LiveEvent {
             start_ns: 1_000_000,
             duration_ns: 250,

@@ -52,6 +52,49 @@
   </style>
 </head>
 <body>
+  <script>
+    // Login return for Share. The keys match share.rs: LOGIN_WINDOW_NAME
+    // (perfr-share-login), LOGIN_SIGNAL_KEY (perfr.share.logged_in),
+    // SHARE_TOKEN_KEY (perfr.share.token), SHARE_TOKEN_FRAGMENT (share_token).
+    // A popup sent back here signals the opener and closes before wasm boots.
+    // COOP same-origin severs window.opener on a cross-origin round trip, so
+    // the storage key is the signal that still arrives. Same-tab returns
+    // stash a #share_token= into sessionStorage and keep booting.
+    (function () {
+      function tokenFromHash(hash) {
+        var q = String(hash || "").replace(/^#/, "");
+        if (!q) return "";
+        var parts = q.split("&");
+        for (var i = 0; i < parts.length; i++) {
+          var kv = parts[i].split("=");
+          var key = kv[0] || "";
+          try { key = decodeURIComponent(key); } catch (e) {}
+          if (key !== "share_token") continue;
+          var raw = kv.slice(1).join("=");
+          try { return decodeURIComponent(raw); } catch (e) { return raw; }
+        }
+        return "";
+      }
+      var token = tokenFromHash(location.hash);
+      var popup = window.name === "perfr-share-login";
+      if (token && !popup) {
+        try { sessionStorage.setItem("perfr.share.token", token); } catch (e) {}
+        try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+      }
+      if (!popup) return;
+      window.__perfrLoginPopup = true;
+      try {
+        if (token) localStorage.setItem("perfr.share.token", token);
+        localStorage.setItem("perfr.share.logged_in", String(Date.now()));
+      } catch (e) {}
+      try {
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage({ source: "perfr", type: "login" }, location.origin);
+        }
+      } catch (e) {}
+      window.close();
+    })();
+  </script>
   <canvas id="the_canvas_id" tabindex="0"></canvas>
   <div id="fallback">
     eframe WASM failed to start.
@@ -61,6 +104,9 @@
   </div>
   <script src="embed.js"></script>
   <script type="module">
+    if (window.__perfrLoginPopup) {
+      // The login popup already told the opener. Do not boot a second viewer.
+    } else {
     const canvas = document.getElementById("the_canvas_id");
 
     // Fill the visual viewport (Safari URL / toolbars) so "fullscreen"
@@ -155,6 +201,7 @@
       await mod.start_eframe(canvas);
     } catch (e) {
       showFallback(e);
+    }
     }
   </script>
 <script>

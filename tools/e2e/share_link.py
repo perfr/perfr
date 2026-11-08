@@ -4,15 +4,17 @@
 # found in the LICENSE file.
 """Open the viewer against a local share server and exercise Share.
 
-The server speaks the website contract: POST /api/share of a .perfr.stream
-returns {"id", "url"}, and GET /api/share/<id> returns those bytes. The page
-is opened as /?capture=/api/share/<id>&share_base=<this server>, which is how
+The server speaks the website contract: GET /api/me is 401 until /login
+sets a session cookie, then 200 with a user and quota. POST /api/share of
+a .perfr.stream returns {"id", "url"}, and GET /api/share/<id> returns
+those bytes. The page is opened as
+/?capture=/api/share/<id>&share_base=<this server>, which is how
 https://perfr.dev/c/<id> loads the viewer.
 
-Share opens a confirm step first. Nothing is posted until Upload, and the
-dialog shows the byte size of the loaded capture. With no time range
-selected, the hint explains how to share one and does not offer a range
-size.
+Share opens a confirm step first. Signed out, it says "Sign in to share".
+After GitHub sign-in it names the account and the quota. Nothing is posted
+until Upload, and the dialog shows the byte size of the loaded capture.
+With no time range selected, the hint explains how to share one.
 
 Usage:
   python3 tools/e2e/share_link.py [/path/to/viewer-dist]
@@ -23,6 +25,8 @@ from pathlib import Path
 import struct
 import sys
 import threading
+import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -69,8 +73,44 @@ def main():
             self.send_header("Cache-Control", "no-store")
             super().end_headers()
 
+        def signed_in(self):
+            return "perfr_session=ok" in self.headers.get("Cookie", "")
+
+        def json_response(self, status, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
-            path = self.path.split("?", 1)[0]
+            parsed = urllib.parse.urlsplit(self.path)
+            path = parsed.path
+            if path == "/api/me":
+                if self.signed_in():
+                    self.json_response(200, {
+                        "user": {"id": "u1", "name": "Ada Lovelace", "avatar": ""},
+                        "quota": {
+                            "used_bytes": 12_000_000,
+                            "limit_bytes": 1_000_000_000,
+                            "max_capture_bytes": 50_000_000,
+                        },
+                    })
+                else:
+                    self.json_response(401, {"error": "login_required", "login_url": "/login?next=/"})
+                return
+            if path == "/login":
+                query = urllib.parse.parse_qs(parsed.query)
+                nxt = (query.get("next") or ["/"])[0]
+                host = urllib.parse.urlsplit(nxt).hostname
+                if host not in (None, "127.0.0.1", "localhost"):
+                    nxt = "/"
+                self.send_response(302)
+                self.send_header("Set-Cookie", "perfr_session=ok; Path=/; SameSite=Lax")
+                self.send_header("Location", nxt)
+                self.end_headers()
+                return
             if path.startswith("/api/share/"):
                 body = store.get(path.rsplit("/", 1)[-1])
                 if body is None:
@@ -106,6 +146,14 @@ def main():
             if path != "/api/share":
                 self.send_error(404)
                 return
+            if "perfr_session=ok" not in self.headers.get("Cookie", ""):
+                body = json.dumps({"error": "login_required", "login_url": "/login?next=/"}).encode()
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if self.headers.get("Content-Type") != "application/octet-stream":
                 self.send_error(415)
                 return
@@ -125,6 +173,8 @@ def main():
     host_port = httpd.server_address[1]
     page = f"http://127.0.0.1:{host_port}/?capture=/api/share/demo&share_base=http://127.0.0.1:{host_port}"
     shot = Path(os.environ.get("PERFR_SHARE_SHOT", "/tmp/perfr-share-dialog.png"))
+    signed_out_shot = Path(os.environ.get("PERFR_SHARE_SIGNED_OUT_SHOT", "/tmp/perfr-share-signed-out.png"))
+    signed_in_shot = Path(os.environ.get("PERFR_SHARE_SIGNED_IN_SHOT", "/tmp/perfr-share-signed-in.png"))
     chrome = None
     try:
         chrome = Chrome(port=port(), width=1280, height=800)
@@ -149,8 +199,42 @@ def main():
                     return row
             return None
 
+        def wait_rect(prefix, timeout=30):
+            # Navigation (same-tab sign-in) makes eval fail until the page is back.
+            deadline = time.monotonic() + timeout
+            last = None
+            while time.monotonic() < deadline:
+                try:
+                    row = rect(prefix)
+                    if row:
+                        return row
+                except Exception as exc:  # noqa: BLE001 - the page is mid-navigation
+                    last = exc
+                time.sleep(0.2)
+            raise AssertionError(f"timed out waiting for {prefix}: {last}")
+
         label, x, y, w, h = wait_until(lambda: rect("Share"), timeout=30)
         chrome.click(x + w / 2, y + h / 2)
+        signin = wait_until(lambda: rect("share-signin"), timeout=20)
+        assert signin[0] == "share-signin", signin
+        github = wait_until(lambda: rect("share-provider:github"), timeout=5)
+        google = wait_until(lambda: rect("share-provider:google"), timeout=5)
+        assert github[0] == "share-provider:github"
+        assert google[0] == "share-provider:google"
+        assert rect("share-upload") is None, "Upload was offered before sign-in"
+        assert "body" not in posted, "Share posted before sign-in"
+        assert chrome.screenshot(str(signed_out_shot)) > 20000, "signed-out dialog screenshot looks blank"
+        chrome.click(github[1] + github[3] / 2, github[2] + github[4] / 2)
+        try:
+            account = wait_rect("share-account:Ada Lovelace", timeout=40)
+        except AssertionError:
+            rows = chrome.eval("JSON.parse(window.__perfr_ui || '[]')") or []
+            print("UI after sign-in", [row[0] for row in rows])
+            chrome.screenshot("/tmp/perfr-share-signin-fail.png")
+            raise
+        assert account[0] == "share-account:Ada Lovelace"
+        quota = wait_until(lambda: rect("share-quota:"), timeout=5)
+        assert "12.0 MB of 1.0 GB used" in quota[0], quota[0]
         size_row = wait_until(lambda: rect(f"share-bytes:{len(stream)}"), timeout=15)
         assert size_row[0] == f"share-bytes:{len(stream)}"
         human = wait_until(lambda: rect("share-size:"), timeout=5)
@@ -160,8 +244,8 @@ def main():
         assert "right-drag" in hint[0] and "sample bar" in hint[0], hint[0]
         assert rect("share-range-bytes:") is None, "a range was offered with nothing selected"
         assert "body" not in posted, "Share posted before Upload"
-        confirm_shot = Path(os.environ.get("PERFR_SHARE_CONFIRM_SHOT", "/tmp/perfr-share-confirm.png"))
-        assert chrome.screenshot(str(confirm_shot)) > 20000, "confirm dialog screenshot looks blank"
+        assert chrome.screenshot(str(signed_in_shot)) > 20000, "signed-in dialog screenshot looks blank"
+        confirm_shot = Path(os.environ.get("PERFR_SHARE_CONFIRM_SHOT", str(signed_in_shot)))
         upload = wait_until(lambda: rect("share-upload"), timeout=5)
         chrome.click(upload[1] + upload[3] / 2, upload[2] + upload[4] / 2)
         try:
@@ -182,8 +266,10 @@ def main():
         chrome.click(copy[1] + copy[3] / 2, copy[2] + copy[4] / 2)
         wait_until(lambda: rect("Copied"), timeout=10)
         assert chrome.screenshot(str(shot)) > 20000, "share dialog screenshot looks blank"
-        print(f"PASS: share confirm showed {human[0][len('share-size:'):]} ({len(stream)} bytes) before upload, posted the loaded capture, link {url_row[0][len('share-url:'):]}")
+        print(f"PASS: signed out, then shared as Ada Lovelace, showed {human[0][len('share-size:'):]} ({len(stream)} bytes) before upload, posted the loaded capture, link {url_row[0][len('share-url:'):]}")
         print(f"screenshot {shot}")
+        print(f"signed-out {signed_out_shot}")
+        print(f"signed-in {signed_in_shot}")
         print(f"confirm {confirm_shot}")
     finally:
         if chrome:

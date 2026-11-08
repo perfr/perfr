@@ -18,7 +18,10 @@ Orbit repository.
 
 Both systems attach to a process that is already running. Both can hook
 functions with Frida, and both take manual scopes from Rust, C, C++, and
-Python. A loaded capture in the viewer is capped at a 2 GiB heap. What else
+Python. This tree also has bindings for C#, Lua, Zig, Swift, Java, Kotlin,
+and Julia, exercised on Linux against `libperfr`, plus a Mojo package that
+has not been compiled here and a note on why there is no GDScript extension.
+A loaded capture in the viewer is capped at a 2 GiB heap. What else
 each system records is in the table below.
 
 ## Quick start

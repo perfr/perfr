@@ -101,6 +101,25 @@ with perfr.scope("update"):
 perfr.value("fps", 59.9)
 ```
 
+C#, the `Perfr` package at `crates/perfr-api/csharp` (`net6.0`, `net8.0`, and `netstandard2.1`):
+
+```csharp
+using Perfr;
+Profiler.Init();
+using (Profiler.Scope("frame")) { }
+Profiler.Value("fps", 59.9);
+```
+
+Lua (`crates/perfr-api/lua`: LuaJIT FFI, or a Lua 5.4 module that includes `perfr.h`):
+
+```lua
+local perfr = require("perfr")
+perfr.init()
+perfr.with_scope("frame", function() end)
+```
+
+Zig 0.17 (`crates/perfr-api/zig`), Swift (`crates/perfr-api/swift`), Java and Kotlin (`crates/perfr-api/java`, JNI plus `scope(name) { }`), and Julia (`crates/perfr-api/julia`, `ccall`) call the same `libperfr`. A Mojo package is at `crates/perfr-api/mojo` and was not compiled here. GDScript is a design note at `crates/perfr-api/gdscript/README.md`, not an extension. Each binding's README says what was run. On Linux, `NameThread` / `name_thread` sets the 15-byte thread `comm` perfr already reads; `libperfr` has no thread-name call.
+
 A page running in the browser uses a different entry point, `@perfr/web`. It records into the same stream format and can mount this viewer in the page. It does not sample CPU stacks. [In-page profiling](web.md) has the API and the browser tracks.
 
 ## HTTP API

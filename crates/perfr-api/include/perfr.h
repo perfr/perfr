@@ -128,7 +128,20 @@ struct perfr_api_table_v1 {
   uint64_t (*now_ns)(void);
   void (*span)(const char* name, size_t name_len, uint64_t start_ns, uint64_t end_ns);
   void (*span_async)(const char* name, size_t name_len, uint64_t start_ns, uint64_t end_ns);
+  /* Appended after the first release of this table. Everything above this
+   * line is what a library must provide to load at all
+   * (PERFR_API_TABLE_BASE_SIZE_); a field below it is read only when the
+   * library's `size` covers it, so a library built before logging still
+   * loads and perfr_log stays a no-op against it. */
+  void (*log)(uint8_t level, const char* message, size_t message_len);
 };
+
+/* The table as first released: the fields every library has. */
+#define PERFR_API_TABLE_BASE_SIZE_ offsetof(struct perfr_api_table_v1, log)
+/* Whether table `t` is long enough to hold `field`. */
+#define PERFR_API_HAS_(t, field)                                    \
+  ((t)->size >= offsetof(struct perfr_api_table_v1, field) +        \
+                    sizeof(((const struct perfr_api_table_v1*)0)->field))
 
 #ifdef PERFR_STATIC
 
@@ -148,6 +161,7 @@ void perfr_value(const char* name, size_t name_len, double value);
 uint64_t perfr_now_ns(void);
 void perfr_span(const char* name, size_t name_len, uint64_t start_ns, uint64_t end_ns);
 void perfr_span_async(const char* name, size_t name_len, uint64_t start_ns, uint64_t end_ns);
+void perfr_log(uint8_t level, const char* message, size_t message_len);
 
 /* Whether a library is loaded and the process has a segment. Always 1 here:
  * the library is linked in. */
@@ -398,8 +412,10 @@ static inline const struct perfr_api_table_v1* perfr_api_load_(int* status) {
   }
   /* A library too old to have the getter speaks an older ABI by definition. */
   table = get ? get(PERFR_API_ABI_VERSION) : 0;
+  /* Only the base table is required. Fields appended since are checked one
+   * by one where they are called, so an older library keeps working. */
   if (!table || table->abi_version != PERFR_API_ABI_VERSION ||
-      table->size < sizeof(struct perfr_api_table_v1)) {
+      table->size < PERFR_API_TABLE_BASE_SIZE_) {
     perfr_api_dlclose_(handle);
     *status = PERFR_E_ABI;
     return 0;
@@ -533,6 +549,13 @@ static inline void perfr_span_async(const char* name, size_t name_len, uint64_t 
   if (t) t->span_async(name, name_len, start_ns, end_ns);
 }
 
+/* Records a log line at `level` (PERFR_LOG_*). A no-op when nobody is
+ * capturing, and against a library built before logging. */
+static inline void perfr_log(uint8_t level, const char* message, size_t message_len) {
+  const struct perfr_api_table_v1* t = perfr_api_get_();
+  if (t && PERFR_API_HAS_(t, log) && t->log) t->log(level, message, message_len);
+}
+
 #endif /* PERFR_STATIC */
 
 /* --------------------------------------------------------------------------
@@ -545,6 +568,16 @@ static inline void perfr_span_async(const char* name, size_t name_len, uint64_t 
 #define PERFR_INSTANT(lit) ((void)perfr_instant(PERFR_LIT(lit)))
 #define PERFR_VALUE(lit, v) perfr_value(PERFR_LIT(lit), (double)(v))
 #define PERFR_SPAN(lit, start_ns, end_ns) perfr_span(PERFR_LIT(lit), (start_ns), (end_ns))
+
+/* Log levels. A line carries one of these, plus its thread and timestamp. */
+#define PERFR_LOG_TRACE 0u
+#define PERFR_LOG_DEBUG 1u
+#define PERFR_LOG_INFO 2u
+#define PERFR_LOG_WARN 3u
+#define PERFR_LOG_ERROR 4u
+#define PERFR_LOG_FATAL 5u
+
+#define PERFR_LOG(level, lit) perfr_log((uint8_t)(level), PERFR_LIT(lit))
 
 #define PERFR_CONCAT_(a, b) a##b
 #define PERFR_CONCAT(a, b) PERFR_CONCAT_(a, b)

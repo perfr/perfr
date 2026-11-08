@@ -187,6 +187,7 @@ impl Mcp {
             "perfr_sampling_report" => self.sampling_report(args),
             "perfr_callstacks" => self.callstacks(args),
             "perfr_function_stats" => self.function_stats(args),
+            "perfr_logs" => self.logs(args),
             _ => Err(format!("unknown tool {name}")),
         }
     }
@@ -586,6 +587,32 @@ impl Mcp {
         }
     }
 
+    fn logs(&self, args: &Value) -> Result<Value, String> {
+        let limit = page_limit(args, 30, 100);
+        let offset = page_offset(args);
+        let mut path = format!("/api/logs?offset={offset}&limit={limit}");
+        if let Some(t0) = arg_u64(args, "t0_ns") {
+            path.push_str(&format!("&t0={t0}"));
+        }
+        if let Some(t1) = arg_u64(args, "t1_ns") {
+            path.push_str(&format!("&t1={t1}"));
+        }
+        if let Some(tid) = arg_u32(args, "tid") {
+            path.push_str(&format!("&tid={tid}"));
+        }
+        if let Some(scope) = arg_str(args, "scope") {
+            if !scope.is_empty() {
+                path.push_str("&scope=");
+                path.push_str(&urlencode(scope));
+            }
+        }
+        let body = self.http.get_json(&path, Duration::from_secs(60))?;
+        if let Some(error) = body.get("error").and_then(|v| v.as_str()) {
+            return Err(error.to_string());
+        }
+        Ok(body)
+    }
+
     fn function_stats(&self, args: &Value) -> Result<Value, String> {
         let limit = page_limit(args, 15, 40);
         let offset = page_offset(args);
@@ -869,6 +896,22 @@ pub fn tool_specs() -> Vec<Value> {
                 "properties": {
                     "limit": { "type": "integer", "description": "Page size. Default 8, max 20." },
                     "offset": { "type": "integer", "description": "Stacks to skip. Default 0." }
+                },
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_logs",
+            "Log lines from the current capture. Filter by time range (t0_ns, t1_ns; omit t1_ns for everything after t0) and thread id. Pass scope, the exact name of a manual scope, to keep only the lines logged while that scope was open on the same thread: scopes are how log lines are grouped. With scope, identical lines are folded into one row with a count (grouped is true), and the time range limits which instances of the scope are considered. A line is matched to a scope by timestamp and thread, not by an id stored on the line.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "t0_ns": { "type": "integer", "description": "Range start, inclusive. Default 0." },
+                    "t1_ns": { "type": "integer", "description": "Range end, inclusive. Omit or 0 for no end." },
+                    "tid": { "type": "integer", "description": "Only this thread." },
+                    "scope": { "type": "string", "description": "Exact scope name. Lines logged inside its instances, identical lines folded with a count." },
+                    "limit": { "type": "integer", "description": "Page size. Default 30, max 100." },
+                    "offset": { "type": "integer", "description": "Rows to skip. Default 0." }
                 },
                 "additionalProperties": false,
             }),

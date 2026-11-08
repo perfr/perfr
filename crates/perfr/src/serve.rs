@@ -2031,8 +2031,10 @@ fn capture_loop(
         }
         if lost_delta > 0 && !overflow_stopped {
             service.set_instrumentation_status(format!(
-                "DROPPING EVENTS: {} scope records lost, {} open scopes discarded -- hook fewer or colder functions, or hook with Uprobes (kernel), which does not go through the shared ring",
-                scopes.events_lost, scopes.scopes_discarded_on_loss
+                "DROPPING EVENTS: {} records lost ({}); {} open scopes discarded -- hook fewer or colder functions, or hook with Uprobes (kernel), which does not go through the shared ring",
+                scopes.events_lost,
+                scopes.loss_summary(),
+                scopes.scopes_discarded_on_loss
             ));
         }
 
@@ -2176,6 +2178,13 @@ fn capture_loop(
                 scopes.segment_count(),
                 scopes.events_pushed,
                 scopes.links_seen
+            );
+        }
+        if scopes.events_lost > 0 {
+            log::warn!(
+                "capture lost {} events: {}",
+                scopes.events_lost,
+                scopes.loss_summary()
             );
         }
         let refused = service.dropped_before_start();

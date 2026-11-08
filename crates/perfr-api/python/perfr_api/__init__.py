@@ -46,9 +46,9 @@ import shutil
 import sys
 
 __all__ = [
-    "ABI_VERSION", "E_ABI", "E_NOLIB", "available", "init", "instant", "library_path",
-    "link", "now_ns", "scope", "scope_async", "shutdown", "span", "span_async", "start",
-    "start_async", "stop", "value",
+    "ABI_VERSION", "DEBUG", "E_ABI", "E_NOLIB", "ERROR", "FATAL", "INFO", "TRACE", "WARN",
+    "available", "init", "instant", "library_path", "link", "log", "now_ns", "scope",
+    "scope_async", "shutdown", "span", "span_async", "start", "start_async", "stop", "value",
 ]
 __version__ = "0.1.1"
 
@@ -57,6 +57,8 @@ ABI_VERSION = 1
 #: ``init()`` results beyond 0 (ok) and a negative errno.
 E_NOLIB = -1000
 E_ABI = -1001
+
+TRACE, DEBUG, INFO, WARN, ERROR, FATAL = range(6)
 
 _lib = None
 _lib_path = None
@@ -123,6 +125,11 @@ def _open(path):
     for fn in (lib.perfr_span, lib.perfr_span_async):
         fn.argtypes = (ctypes.c_char_p, ctypes.c_size_t, ctypes.c_uint64, ctypes.c_uint64)
         fn.restype = None
+    # Logging was appended. A library from before this package leaves the
+    # symbol absent; `log` then stays a no-op.
+    if hasattr(lib, "perfr_log"):
+        lib.perfr_log.argtypes = (ctypes.c_uint8, ctypes.c_char_p, ctypes.c_size_t)
+        lib.perfr_log.restype = None
     return lib
 
 
@@ -283,3 +290,18 @@ class scope:
 def scope_async(name=None):
     """``scope`` for a scope that may be stopped from any thread."""
     return scope(name, async_=True)
+
+
+def log(level, message):
+    """Records a log line. A no-op when the library is missing or nobody is
+    capturing. The line carries ``level`` (``TRACE`` .. ``FATAL``), the thread
+    and the timestamp. The viewer files it under every scope that was open on
+    this thread at that time, so a scope is the way to group lines:
+
+        with perfr.scope("simulation"):
+            perfr.log(perfr.INFO, "tick")
+    """
+    if _lib and hasattr(_lib, "perfr_log"):
+        b = _name(message)
+        _lib.perfr_log(int(level) & 0xFF, b, len(b))
+

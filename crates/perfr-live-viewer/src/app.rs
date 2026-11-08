@@ -1132,6 +1132,9 @@ pub struct PerfrLiveApp {
     trace_flows: Vec<FlowEdge>,
     thread_names: HashMap<(u32, u32), String>,
     trace_processes: Vec<ProcessJson>,
+    /// Log window: lines in the visible range, or the lines inside a clicked
+    /// scope.
+    log_ui: crate::logs::LogUi,
     #[cfg(target_arch = "wasm32")]
     pending_file: chrome_load::PendingFile,
 }
@@ -1548,6 +1551,7 @@ impl PerfrLiveApp {
         self.selected_thread = None;
         self.measure = None;
         self.scope_menu = None;
+        self.log_ui.scope = None;
         if self.scope_report.take().is_some() {
             self.sampling_ranges.clear();
             self.request_reports();
@@ -1867,6 +1871,7 @@ impl PerfrLiveApp {
             trace_flows: Vec::new(),
             thread_names: HashMap::new(),
             trace_processes: Vec::new(),
+            log_ui: crate::logs::LogUi::default(),
             #[cfg(target_arch = "wasm32")]
             pending_file: {
                 let p = chrome_load::new_pending_file();
@@ -2008,6 +2013,7 @@ impl PerfrLiveApp {
         }
         self.clear_file_trace();
         self.index.clear();
+        self.log_ui.reset_capture();
         self.live_all.clear();
         self.live_sel.clear();
         self.intern = InternTable::default();
@@ -2503,6 +2509,7 @@ impl PerfrLiveApp {
     fn begin_trace_load(&mut self, load: TraceLoad) {
         self.stop_record();
         self.index.clear();
+        self.log_ui.reset_capture();
         self.live_all.clear();
         self.intern = InternTable::default();
         self.tracks = TrackStrip::default();
@@ -3208,6 +3215,7 @@ impl PerfrLiveApp {
                 self.clear_file_trace();
                 self.index.clear();
                 self.live_all.clear();
+                self.log_ui.reset_capture();
                 self.selected = None;
                 self.hover = None;
                 self.measure = None;
@@ -3329,6 +3337,7 @@ impl PerfrLiveApp {
                 if !self.file_trace_active() {
                     self.index.clear();
                     self.live_all.clear();
+                    self.log_ui.reset_capture();
                     self.thread_names.clear();
                     self.trace_processes.clear();
                     self.hover = None;
@@ -3784,6 +3793,13 @@ impl PerfrLiveApp {
                 self.transport_share(ui);
             }
             self.paint_search(ui);
+            if ui
+                .selectable_label(self.log_ui.open, "Logs")
+                .on_hover_text("Log lines for the visible time range")
+                .clicked()
+            {
+                self.log_ui.open = !self.log_ui.open;
+            }
             self.paint_track_filter(ui);
             self.paint_symbols_status(ui);
             self.paint_capture_timer(ui);
@@ -5172,6 +5188,19 @@ impl PerfrLiveApp {
                 );
                 if let Some(x) = self.hover_body_x {
                     paint_cursor_line(ui, body, x);
+                }
+                crate::logs::paint_ticks(
+                    ui,
+                    body,
+                    t0,
+                    t1,
+                    &self.index,
+                    self.tracks.layout(),
+                    self.tracks.scale,
+                    Some(y_cull),
+                );
+                if let Some(ns) = self.log_ui.highlight_ns {
+                    crate::logs::paint_highlight(ui, body, self.t0, self.t1, ns);
                 }
                 paint_playhead(
                     ui,
@@ -6769,6 +6798,17 @@ impl PerfrLiveApp {
         self.lane_scroll = next;
     }
 
+    fn focus_log_time(&mut self, ns: u64) {
+        let span = (self.t1 - self.t0).max(1.0);
+        let mid = ns as f64;
+        self.t0 = mid - span * 0.5;
+        self.t1 = self.t0 + span;
+        self.follow = false;
+        self.user_set_view = true;
+        self.log_ui.highlight_ns = Some(ns);
+        self.needs_repaint = true;
+    }
+
     fn zoom_to_scope(&mut self, pick: ScopePick) {
         if pick.kind == kind::VALUE {
             return;
@@ -6831,6 +6871,16 @@ impl PerfrLiveApp {
                     }
                     // A click on a sample tick puts its callstack on the
                     // clipboard, leaf first, one frame a line.
+                    // A click on a scope points the log window at it. The
+                    // window is not opened for it: whether it is on screen is
+                    // the user's choice, and most captures have no log lines.
+                    if pick.kind == kind::API_SCOPE || pick.kind == kind::API_TRACK {
+                        self.log_ui.scope = Some(crate::logs::ScopeFocus {
+                            pid: pick.pid,
+                            tid: pick.tid,
+                            name_id: pick.name_id,
+                        });
+                    }
                     if pick.kind == kind::SAMPLE {
                         let stack = sample_callstack(&self.index, &self.intern, pick);
                         if !stack.is_empty() {
@@ -9975,6 +10025,25 @@ impl eframe::App for PerfrLiveApp {
                 self.self_pane(ctx, dt, &devf);
             }
             self.publish_selection();
+
+            self.log_ui.open_on_first_log(&self.index);
+            if self.log_ui.open {
+                let t0 = self.t0;
+                let t1 = self.t1;
+                egui::TopBottomPanel::bottom("perfr_logs")
+                    .resizable(true)
+                    .default_height(180.0)
+                    .height_range(72.0..=480.0)
+                    .show_separator_line(true)
+                    .frame(Frame::new().fill(theme::PANEL()).inner_margin(8))
+                    .show(ctx, |ui| {
+                        if let Some(crate::logs::LogAction::Focus(ns)) =
+                            crate::logs::show(ui, &mut self.log_ui, &self.index, &self.intern, t0, t1)
+                        {
+                            self.focus_log_time(ns);
+                        }
+                    });
+            }
 
             egui::CentralPanel::default()
                 .frame(Frame::new().fill(theme::CANVAS()).inner_margin(0))

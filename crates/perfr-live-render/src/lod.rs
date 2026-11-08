@@ -326,6 +326,8 @@ pub fn lane_height(key: LaneKey) -> f32 {
         // A tick strip, not a lane of boxes: it carries no text, so it only
         // needs to be tall enough to read as a bar of marks.
         kind::SAMPLE => 8.0,
+        kind::LOG => 8.0,
+        kind::DROP => 6.0,
         kind::SCHEDULING_SLICE => 12.0,
         kind::VALUE => 38.0,
         _ => 20.0,
@@ -350,6 +352,8 @@ fn leaf_rank(kind_id: u8) -> u8 {
         // Directly under the state bar: both answer "what was this thread
         // doing", at a glance, before any stack detail.
         kind::SAMPLE => 1,
+        kind::LOG => 1,
+        kind::DROP => 1,
         kind::SCHEDULING_SLICE => 2,
         kind::API_SCOPE => 2,
         kind::FUNCTION_CALL => 3,
@@ -363,6 +367,8 @@ pub fn leaf_label(key: LaneKey) -> String {
     match key.kind {
         kind::THREAD_STATE => "state".into(),
         kind::SAMPLE => "samples".into(),
+        kind::LOG => "logs".into(),
+        kind::DROP => "drops".into(),
         kind::SCHEDULING_SLICE => format!("Core {}", key.extra),
         kind::FUNCTION_CALL => "calls".into(),
         kind::API_TRACK => "async".into(),

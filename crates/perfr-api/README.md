@@ -7,7 +7,13 @@ scopes, async spans, instants, links and values that a running
 ```rust
 let _frame = perfr_api::scope("frame");
 perfr_api::value("fps", 59.9);
+perfr_api::log_info("tick");
 ```
+
+`log` is a no-op until a service is capturing, then the line is another event
+on the same ring as scopes. A line carries its level, thread and timestamp.
+The viewer files it under every scope open on that thread at that time, so a
+scope is the way to group lines: click `frame` to read what was logged in it.
 
 Every call is safe from any thread at any time and is a single predictable
 branch until a service is capturing the process. The producer is a lock-free

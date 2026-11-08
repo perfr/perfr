@@ -479,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn initialize_lists_twelve_tools_with_schemas() {
+    fn initialize_lists_the_tools_with_schemas() {
         let routes = Arc::new(Mutex::new(Vec::new()));
         let url = spawn_service(routes);
         let mcp = mcp(&url);
@@ -490,7 +490,8 @@ mod tests {
         assert!(mcp.handle(&json!({"jsonrpc":"2.0","method":"notifications/initialized"})).is_none());
         let listed = call(&mcp, 2, "tools/list", json!({}));
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 13);
+        assert!(tools.iter().any(|spec| spec["name"] == "perfr_logs"));
         for spec in tools {
             assert!(spec["description"].as_str().unwrap().len() > 40, "{spec}");
             assert_eq!(spec["inputSchema"]["type"], "object");

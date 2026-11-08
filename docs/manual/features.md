@@ -498,6 +498,13 @@ in the URL opens a tab on load.
 - **What reaches the timeline.** Scopes nest per thread, async spans get
   their own track, `instant` is a zero-length mark, `link` joins a start to
   a later thread, `value` draws a lane.
+- **Log lines.** `log(level, text)` (`perfr_log`, `PERFR_LOG`,
+  `perfr_api.log`) writes a line on the same ring as scopes, with its
+  level, thread and timestamp. Each thread grows a `logs` lane of ticks,
+  and the **Logs** window lists the lines in the visible range. A line names
+  no scope: clicking a scope lists the lines logged while it was open on
+  that thread, and a scope that recurs folds identical lines with a count.
+  `GET /api/logs` and the `perfr_logs` MCP tool read the same thing.
 - **The service instruments itself** with the same API: read context
   switches, read samples, unwind, symbolize, drain scope rings, push to
   viewer, and its `events per pass`, `service cpu %` and `service rss MiB`

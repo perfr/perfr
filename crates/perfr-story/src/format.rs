@@ -96,7 +96,25 @@ impl Story {
 
     /// Replace fields present in `patch`. Absent fields stay.
     /// `view` and `overlays`, when present, replace the whole value.
+    /// A patch that does not parse changes nothing.
     pub fn update_step(&mut self, id: &str, patch: &serde_json::Value) -> Result<(), String> {
+        let kind: Option<StepKind> = patch
+            .get("kind")
+            .map(|v| serde_json::from_value(v.clone()).map_err(|e| format!("kind: {e}")))
+            .transpose()?;
+        let duration_ms = patch
+            .get("duration_ms")
+            .and_then(|v| v.as_u64())
+            .map(|ms| u32::try_from(ms).map_err(|_| "duration_ms does not fit".to_string()))
+            .transpose()?;
+        let view: Option<View> = patch
+            .get("view")
+            .map(|v| serde_json::from_value(v.clone()).map_err(|e| format!("view: {e}")))
+            .transpose()?;
+        let overlays: Option<Vec<Overlay>> = patch
+            .get("overlays")
+            .map(|v| serde_json::from_value(v.clone()).map_err(|e| format!("overlays: {e}")))
+            .transpose()?;
         let step = self
             .steps
             .iter_mut()
@@ -108,19 +126,17 @@ impl Story {
         if let Some(body) = patch.get("body").and_then(|v| v.as_str()) {
             step.body = body.to_string();
         }
-        if let Some(kind) = patch.get("kind") {
-            step.kind = serde_json::from_value(kind.clone()).map_err(|e| format!("kind: {e}"))?;
+        if let Some(kind) = kind {
+            step.kind = kind;
         }
-        if let Some(ms) = patch.get("duration_ms").and_then(|v| v.as_u64()) {
-            step.duration_ms =
-                u32::try_from(ms).map_err(|_| "duration_ms does not fit".to_string())?;
+        if let Some(ms) = duration_ms {
+            step.duration_ms = ms;
         }
-        if let Some(view) = patch.get("view") {
-            step.view = serde_json::from_value(view.clone()).map_err(|e| format!("view: {e}"))?;
+        if let Some(view) = view {
+            step.view = view;
         }
-        if let Some(overlays) = patch.get("overlays") {
-            step.overlays =
-                serde_json::from_value(overlays.clone()).map_err(|e| format!("overlays: {e}"))?;
+        if let Some(overlays) = overlays {
+            step.overlays = overlays;
         }
         Ok(())
     }
@@ -878,6 +894,16 @@ mod tests {
         assert_eq!(story.steps[0].title, "renamed");
         assert_eq!(story.steps[0].kind, StepKind::Problem);
         assert!(validate(&story).is_empty(), "{:?}", validate(&story));
+        // A patch that fails to parse leaves every field alone, including
+        // the ones that would have applied.
+        let err = story
+            .update_step(
+                "a",
+                &serde_json::json!({"title": "half", "kind": "not-a-kind"}),
+            )
+            .unwrap_err();
+        assert!(err.starts_with("kind:"), "{err}");
+        assert_eq!(story.steps[0].title, "renamed");
     }
 
     #[test]

@@ -23,12 +23,12 @@ use crate::fonts;
 use crate::theme;
 use crate::tracks::{RowId, TrackStrip};
 
-/// One rail row the story can anchor to. `y` and `h` are in rail points,
+/// One rail row the story can anchor to. `y` and `bottom` are in rail points,
 /// the same space as [`TrackStrip::rows`].
+#[derive(Clone)]
 struct Band {
     track: TrackRef,
     y: f32,
-    h: f32,
     /// Following lane rows folded into this band, so a thread highlight
     /// covers its scopes and not only the header.
     bottom: f32,
@@ -403,13 +403,11 @@ impl StorySession {
         } else {
             self.player.prev()
         };
-        if moved.is_some() || delta != 0 {
-            self.retarget = moved.is_some();
-            if moved.is_some() {
-                self.released = false;
-                self.hold = true;
-                self.snap = false;
-            }
+        if moved.is_some() {
+            self.retarget = true;
+            self.released = false;
+            self.hold = true;
+            self.snap = false;
         }
     }
 
@@ -436,9 +434,8 @@ impl StorySession {
                 }
                 if released {
                     if let Some(drag) = self.drag.take() {
-                        if let Some(overlay) =
-                            overlay_from_drag(self.tool, &drag, &self.callout_text)
-                        {
+                        let id = self.fresh_overlay_id();
+                        if let Some(overlay) = overlay_from_drag(self.tool, &drag, id) {
                             return self.push_overlay(overlay);
                         }
                     }
@@ -446,9 +443,11 @@ impl StorySession {
             }
             Tool::Callout | Tool::Code => {
                 if released {
+                    let id = self.fresh_overlay_id();
                     if let Some(overlay) = overlay_from_click(
                         self.tool,
                         &hit,
+                        id,
                         &self.callout_text,
                         &self.code_file,
                         &self.code_line,
@@ -468,6 +467,26 @@ impl StorySession {
             Tool::Select => {}
         }
         None
+    }
+
+    /// An overlay id no overlay on the current step uses. A step drawn with
+    /// the editor gets `o1`, `o2`, ... in the order they were added.
+    fn fresh_overlay_id(&self) -> String {
+        let step = self.doc.as_ref().and_then(|doc| {
+            let index = self.player.step.min(doc.steps.len().checked_sub(1)?);
+            doc.steps.get(index)
+        });
+        let taken: Vec<&str> = step
+            .map(|s| s.overlays.iter().map(Overlay::id).collect())
+            .unwrap_or_default();
+        let mut n = taken.len() + 1;
+        loop {
+            let id = format!("o{n}");
+            if !taken.contains(&id.as_str()) {
+                return id;
+            }
+            n += 1;
+        }
     }
 
     fn push_overlay(&mut self, overlay: Overlay) -> Option<StoryCmd> {
@@ -491,33 +510,42 @@ impl StorySession {
         let Some(doc) = self.doc.as_mut() else {
             return;
         };
-        let id = step.id.clone();
+        let step_id = step.id.clone();
         if let Err(message) = doc.add_step(step, None) {
             self.error = message;
             return;
         }
-        let len = doc.steps.len();
         self.error.clear();
-        let _ = self.player.go(len - 1, len);
-        self.player.step = len - 1;
         if let Some(overlay) = self.pending_overlay.take() {
-            let step_id = self
-                .doc
-                .as_ref()
-                .and_then(|d| d.steps.last().map(|s| s.id.clone()));
-            if let Some(step_id) = step_id {
-                if let Some(doc) = self.doc.as_mut() {
-                    if let Err(message) = doc.add_overlay(&step_id, overlay) {
-                        self.error = message;
-                    }
-                }
+            if let Err(message) = doc.add_overlay(&step_id, overlay) {
+                self.error = message;
             }
         }
+        let len = doc.steps.len();
+        let _ = self.player.go(len - 1, len);
         self.retarget = true;
         self.released = false;
         self.hold = true;
         self.snap = true;
-        let _ = id;
+    }
+
+    /// Drop the story. The capture stays as it is. In an iframe the bar
+    /// stays, so Play can bring a story back.
+    pub fn close(&mut self) {
+        self.doc = None;
+        self.player = Player::default();
+        self.error.clear();
+        self.open = self.compact;
+        self.editing = false;
+        self.list_open = false;
+        self.export_open = false;
+        self.drag = None;
+        self.pending_overlay = None;
+        self.retarget = false;
+        self.released = false;
+        self.hold = false;
+        self.posed = None;
+        self.applied = None;
     }
 
     pub fn bar(&mut self, ui: &mut Ui) -> Vec<StoryCmd> {
@@ -570,6 +598,14 @@ impl StorySession {
                 if self.doc.is_none() {
                     cmds.push(StoryCmd::AddStep);
                 }
+            }
+            if !self.compact
+                && ui
+                    .button("Close")
+                    .on_hover_text("Close the story. The capture stays open.")
+                    .clicked()
+            {
+                self.close();
             }
         });
         if self.editing {
@@ -892,7 +928,7 @@ impl StorySession {
             paint_scope_spans(ui, body, &spans, t0, t1, reveal);
         }
         if let Some(drag) = &self.drag {
-            if let Some(overlay) = overlay_from_drag(self.tool, drag, &self.callout_text) {
+            if let Some(overlay) = overlay_from_drag(self.tool, drag, "preview".into()) {
                 paint_overlay(
                     ui,
                     painter,
@@ -956,9 +992,7 @@ where
     F: Fn(u32, u32) -> String,
     G: Fn(u32) -> String,
 {
-    let (t0, t1) = view
-        .resolve_window(content.map(|(a, b)| (a, b)))
-        .unwrap_or((0, 1_000_000_000));
+    let (t0, t1) = view.resolve_window(content).unwrap_or((0, 1_000_000_000));
     let scroll = match &view.scroll {
         Some(Scroll::Y { y }) => *y,
         Some(Scroll::Track { track }) => band_for(tracks, track, thread_name, process_name)
@@ -997,7 +1031,6 @@ fn bands(tracks: &TrackStrip) -> Vec<Band> {
         out.push(Band {
             track,
             y: row.y,
-            h: row.height,
             bottom,
         });
         i = j;
@@ -1043,7 +1076,7 @@ where
                     .iter()
                     .find(|b| matches!(b.track, TrackRef::Scheduler))
                 {
-                    return Some(clone_band(band));
+                    return Some(band.clone());
                 }
             }
             bands.into_iter().find(|band| match &band.track {
@@ -1084,15 +1117,6 @@ where
         TrackRef::Thread { pid, tid } => Some(RowId::Thread(crate::tracks::ThreadId { pid, tid })),
         TrackRef::Async { pid, tid } => Some(RowId::Async(crate::tracks::ThreadId { pid, tid })),
         TrackRef::Name { .. } => None,
-    }
-}
-
-fn clone_band(band: &Band) -> Band {
-    Band {
-        track: band.track.clone(),
-        y: band.y,
-        h: band.h,
-        bottom: band.bottom,
     }
 }
 
@@ -1509,9 +1533,33 @@ fn lite_job(text: &str, size: f32, color: Color32) -> LayoutJob {
 }
 
 fn append_inline(job: &mut LayoutJob, text: &str, size: f32, color: Color32) {
+    let plain = |job: &mut LayoutJob, text: &str| {
+        if !text.is_empty() {
+            job.append(
+                text,
+                0.0,
+                TextFormat {
+                    font_id: FontId::proportional(size),
+                    color,
+                    ..Default::default()
+                },
+            );
+        }
+    };
     let mut rest = text;
     while !rest.is_empty() {
-        if let Some(code) = rest.strip_prefix('`') {
+        // The nearest marker of either kind. Everything before it is plain.
+        let next = match (rest.find('`'), rest.find("**")) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => {
+                plain(job, rest);
+                return;
+            }
+        };
+        let (head, tail) = rest.split_at(next);
+        plain(job, head);
+        if let Some(code) = tail.strip_prefix('`') {
             if let Some(end) = code.find('`') {
                 job.append(
                     &code[..end],
@@ -1526,8 +1574,7 @@ fn append_inline(job: &mut LayoutJob, text: &str, size: f32, color: Color32) {
                 rest = &code[end + 1..];
                 continue;
             }
-        }
-        if let Some(bold) = rest.strip_prefix("**") {
+        } else if let Some(bold) = tail.strip_prefix("**") {
             if let Some(end) = bold.find("**") {
                 job.append(
                     &bold[..end],
@@ -1542,26 +1589,15 @@ fn append_inline(job: &mut LayoutJob, text: &str, size: f32, color: Color32) {
                 continue;
             }
         }
-        let next = rest
-            .find(['`'])
-            .or_else(|| rest.find("**"))
-            .unwrap_or(rest.len());
-        let (plain, tail) = rest.split_at(next);
-        job.append(
-            plain,
-            0.0,
-            TextFormat {
-                font_id: FontId::proportional(size),
-                color,
-                ..Default::default()
-            },
-        );
-        rest = tail;
+        // A marker with no closing partner is ordinary text. Consuming it
+        // is what keeps this loop finite.
+        let marker = if tail.starts_with("**") { 2 } else { 1 };
+        plain(job, &tail[..marker]);
+        rest = &tail[marker..];
     }
 }
 
-fn overlay_from_drag(tool: Tool, drag: &Drag, _callout: &str) -> Option<Overlay> {
-    let id = format!("e{}", drag.start.time_ns % 1_000_000);
+fn overlay_from_drag(tool: Tool, drag: &Drag, id: String) -> Option<Overlay> {
     match tool {
         Tool::Arrow => Some(Overlay::Arrow {
             id,
@@ -1603,12 +1639,12 @@ fn overlay_from_drag(tool: Tool, drag: &Drag, _callout: &str) -> Option<Overlay>
 fn overlay_from_click(
     tool: Tool,
     hit: &Hit,
+    id: String,
     callout: &str,
     file: &str,
     line: &str,
     snippet: &str,
 ) -> Option<Overlay> {
-    let id = format!("e{}", hit.time_ns % 1_000_000);
     match tool {
         Tool::Callout if !callout.trim().is_empty() => Some(Overlay::Callout {
             id,
@@ -1662,5 +1698,69 @@ pub fn next_step_id(story: &Story) -> String {
             return id;
         }
         n += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn section_texts(job: &LayoutJob) -> Vec<String> {
+        job.sections
+            .iter()
+            .map(|s| job.text[s.byte_range.clone()].to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn lite_markdown_splits_code_and_bold_in_source_order() {
+        let job = lite_job("a **b** `c` d", 12.0, Color32::WHITE);
+        assert_eq!(job.text, "a b c d");
+        assert_eq!(section_texts(&job), ["a ", "b", " ", "c", " d"]);
+        let bold = &job.sections[1];
+        assert_eq!(bold.format.font_id.family, fonts::medium());
+        let code = &job.sections[3];
+        assert_eq!(code.format.font_id.family, egui::FontFamily::Monospace);
+    }
+
+    #[test]
+    fn lite_markdown_keeps_unmatched_markers_as_text() {
+        // Each of these used to spin forever: the marker was found at offset
+        // 0, nothing was consumed, and the loop never advanced.
+        for text in ["**unterminated", "`lonely", "a ** b ` c", "``", "****"] {
+            let job = lite_job(text, 12.0, Color32::WHITE);
+            let expected = text.replace("``", "").replace("****", "");
+            assert_eq!(job.text, expected, "{text:?}");
+        }
+        let job = lite_job("one\n\ntwo", 12.0, Color32::WHITE);
+        assert_eq!(job.text, "one\ntwo");
+    }
+
+    #[test]
+    fn overlay_ids_from_the_editor_do_not_collide() {
+        let mut session = StorySession::from_query(None, false);
+        session.ensure_blank();
+        let hit = Hit {
+            time_ns: 5,
+            track: TrackRef::Scheduler,
+            y: 0.2,
+        };
+        session.push_step(step_from_view("s", View::default()));
+        for _ in 0..3 {
+            let id = session.fresh_overlay_id();
+            let overlay = overlay_from_click(Tool::Callout, &hit, id, "note", "", "1", "").unwrap();
+            assert!(session.push_overlay(overlay).is_none());
+            assert!(session.error.is_empty(), "{}", session.error);
+        }
+        let ids: Vec<&str> = session.doc.as_ref().unwrap().steps[0]
+            .overlays
+            .iter()
+            .map(Overlay::id)
+            .collect();
+        assert_eq!(ids, ["o1", "o2", "o3"]);
+        session.close();
+        assert!(session.doc.is_none());
+        assert!(!session.visible());
     }
 }

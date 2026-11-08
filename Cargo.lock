@@ -2929,7 +2929,7 @@ dependencies = [
  "perfr-object",
  "perfr-perf-records",
  "perfr-perf-ring",
-  "perfr-scope-ring",
+ "perfr-scope-ring",
  "perfr-story",
  "perfr-thread-states",
  "perfr-tracing-state",

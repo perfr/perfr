@@ -1407,8 +1407,7 @@ impl Mcp {
             Ok(raw) if raw.status == 501 => Ok(unsupported_feature("sampling")),
             Ok(raw) => {
                 let body = parse_body(&raw)?;
-                let shaped = shape_hotspots(&body, args);
-                let mut shaped = shaped;
+                let mut shaped = shape_hotspots(&body, args);
                 if let Some(obj) = shaped.as_object_mut() {
                     obj.insert(
                         "note".into(),

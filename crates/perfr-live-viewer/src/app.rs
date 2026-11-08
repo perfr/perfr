@@ -10190,13 +10190,11 @@ impl PerfrLiveApp {
         self.content_span().map(|(a, b)| (a.max(0.0) as u64, b.max(0.0) as u64))
     }
 
-    /// The story's `capture` URL, when the page did not already pass `?capture=`.
+    /// The story's `capture` URL, when the page did not already pass
+    /// `?capture=`, a file is not already open, and nothing is recording.
     fn story_maybe_fetch_capture(&mut self) {
         if self.static_capture.is_some() || self.local_stream || self.recording || self.status.capturing {
             let _ = self.story.take_capture_url();
-            return;
-        }
-        if self.index.event_count() > 0 && self.story.doc.as_ref().is_some_and(|d| d.capture.is_empty()) {
             return;
         }
         if let Some(url) = self.story.take_capture_url() {
@@ -10600,50 +10598,52 @@ impl eframe::App for PerfrLiveApp {
                 } else {
                     36.0
                 };
+                // `?chrome=compact` (an iframe) drops the transport bar; the
+                // story bar below carries Share instead.
                 if !self.story.compact {
-            egui::TopBottomPanel::top("perfr_transport")
-                    .exact_height(bar_h + sat[0])
-                    .frame(
-                        Frame::new()
-                            .fill(theme::PANEL())
-                            .inner_margin(Margin {
-                                left: 4 + sat_i8(sat[3]),
-                                right: 4 + sat_i8(sat[1]),
-                                top: 4 + sat_i8(sat[0]),
-                                bottom: 4,
-                            })
-                            .stroke(Stroke::NONE)
-                            .shadow(egui::Shadow {
-                                offset: [0, 2],
-                                blur: 10,
-                                spread: 0,
-                                color: Color32::from_black_alpha(80),
-                            }),
-                    )
-                    .show(ctx, |ui| self.transport(ui));
-            }
-            if self.story.visible() {
-                let story_h = self.story.bar_height() + if self.story.compact { 28.0 } else { 0.0 };
-                egui::TopBottomPanel::top("perfr_story")
-                    .exact_height(story_h)
-                    .frame(
-                        Frame::new()
-                            .fill(theme::PANEL())
-                            .inner_margin(Margin { left: 6, right: 6, top: 4, bottom: 2 })
-                            .stroke(Stroke::NONE),
-                    )
-                    .show(ctx, |ui| {
-                        let cmds = self.story.bar(ui);
-                        if self.story.compact {
-                            ui.horizontal(|ui| self.transport_share(ui));
-                        }
-                        for cmd in cmds {
-                            match cmd {
-                                crate::story::StoryCmd::AddStep => self.story_add_step(),
+                    egui::TopBottomPanel::top("perfr_transport")
+                        .exact_height(bar_h + sat[0])
+                        .frame(
+                            Frame::new()
+                                .fill(theme::PANEL())
+                                .inner_margin(Margin {
+                                    left: 4 + sat_i8(sat[3]),
+                                    right: 4 + sat_i8(sat[1]),
+                                    top: 4 + sat_i8(sat[0]),
+                                    bottom: 4,
+                                })
+                                .stroke(Stroke::NONE)
+                                .shadow(egui::Shadow {
+                                    offset: [0, 2],
+                                    blur: 10,
+                                    spread: 0,
+                                    color: Color32::from_black_alpha(80),
+                                }),
+                        )
+                        .show(ctx, |ui| self.transport(ui));
+                }
+                if self.story.visible() {
+                    let story_h = self.story.bar_height() + if self.story.compact { 28.0 } else { 0.0 };
+                    egui::TopBottomPanel::top("perfr_story")
+                        .exact_height(story_h)
+                        .frame(
+                            Frame::new()
+                                .fill(theme::PANEL())
+                                .inner_margin(Margin { left: 6, right: 6, top: 4, bottom: 2 })
+                                .stroke(Stroke::NONE),
+                        )
+                        .show(ctx, |ui| {
+                            let cmds = self.story.bar(ui);
+                            if self.story.compact {
+                                ui.horizontal(|ui| self.transport_share(ui));
                             }
-                        }
-                    });
-            }
+                            for cmd in cmds {
+                                match cmd {
+                                    crate::story::StoryCmd::AddStep => self.story_add_step(),
+                                }
+                            }
+                        });
+                }
             }
 
             if sat[2] > 0.5 {

@@ -9,7 +9,9 @@
 //! slices on each core. A core counts as busy at 5% or more. That is a
 //! reading of this window, not a statement about how the program was written.
 
-use perfr_live_event::{kind, InternTable, LaneKey};
+use std::collections::HashMap;
+
+use perfr_live_event::{kind, InternTable};
 use perfr_live_render::TrackIndex;
 use serde_json::{json, Value};
 
@@ -64,7 +66,9 @@ pub fn summarize(
     let thread_total = thread_rows.len();
     thread_rows.truncate(LIMIT);
 
-    let mut scopes: Vec<ScopeRow> = Vec::new();
+    // One row per (scope, thread). A capture has thousands of these, so
+    // they are keyed, not searched.
+    let mut scopes: HashMap<(u32, u32, u32), ScopeRow> = HashMap::new();
     for (key, lane) in index.lanes() {
         if key.kind != kind::API_SCOPE
             && key.kind != kind::FUNCTION_CALL
@@ -80,25 +84,21 @@ pub fn summarize(
             if overlap == 0 {
                 continue;
             }
-            if let Some(row) = scopes
-                .iter_mut()
-                .find(|row| row.scope_id == ev.name_id && row.pid == key.pid && row.tid == key.tid)
-            {
-                row.count += 1;
-                row.total_ns += overlap;
-            } else {
-                scopes.push(ScopeRow {
+            let row = scopes
+                .entry((ev.name_id, key.pid, key.tid))
+                .or_insert(ScopeRow {
                     scope_id: ev.name_id,
                     pid: key.pid,
                     tid: key.tid,
-                    count: 1,
-                    total_ns: overlap,
+                    count: 0,
+                    total_ns: 0,
                 });
-            }
+            row.count += 1;
+            row.total_ns += overlap;
         }
     }
     let mut scope_rows = Vec::new();
-    for row in scopes {
+    for row in scopes.into_values() {
         let name = intern.get(row.scope_id).unwrap_or("");
         if !needle.is_empty() && !name.to_ascii_lowercase().contains(&needle) {
             continue;
@@ -184,12 +184,6 @@ fn busy_ns(events: &[perfr_live_event::LiveEvent], t0: u64, t1: u64) -> u64 {
         busy += ev.end_ns().min(t1).saturating_sub(ev.start_ns.max(t0));
     }
     busy
-}
-
-/// `LaneKey` is named so a reader of this module sees the scheduler test use it.
-#[allow(dead_code)]
-fn _lane(core: u8) -> LaneKey {
-    LaneKey::scheduler(core)
 }
 
 #[cfg(test)]

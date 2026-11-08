@@ -471,17 +471,17 @@ struct TargetsQuery {
 }
 
 /// `GET /api/capture/targets?q=&t0=&t1=` -- threads, scopes and per-core
-/// busy fraction in a window. `t1` absent or 0 means the end of the capture.
+/// busy fraction in a window. A missing `t0` is the start of the capture;
+/// a `t1` that is absent, 0, or not after `t0` is its end.
 /// The busy fraction is scheduling-slice coverage, not a claim about the program.
 async fn capture_targets(State(svc): State<Arc<LiveService>>, Query(q): Query<TargetsQuery>) -> Json<serde_json::Value> {
     let index = svc.cached_index();
+    let (start, end) = index.time_bounds().unwrap_or((0, 1));
     let (t0, t1) = match (q.t0, q.t1) {
         (Some(a), Some(b)) if b > a => (a, b),
-        (Some(a), None) | (Some(a), Some(0)) => {
-            let end = index.time_bounds().map(|(_, end)| end).unwrap_or(a.saturating_add(1));
-            (a, end.max(a.saturating_add(1)))
-        }
-        _ => index.time_bounds().unwrap_or((0, 1)),
+        (Some(a), _) => (a, end.max(a.saturating_add(1))),
+        (None, Some(b)) if b > start => (start, b),
+        (None, _) => (start, end),
     };
     let intern = svc.intern.lock();
     let (threads, processes) = svc.capture_names();

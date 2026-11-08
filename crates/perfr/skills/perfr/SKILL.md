@@ -45,6 +45,7 @@ Typical loop:
 6. `perfr_stop_capture`
 7. `perfr_function_stats` for hooks and manual scopes
 8. `perfr_sampling_report` and `perfr_callstacks` when sampling is supported
+9. `perfr_logs` for what the program logged; pass `scope` to read the lines inside one scope
 
 A capture that is already running keeps the hooks it started with. `perfr_unhook` edits the set for the next start.
 

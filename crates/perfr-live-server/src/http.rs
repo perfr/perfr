@@ -72,6 +72,7 @@ pub fn router(service: Arc<LiveService>) -> Router {
         .route("/api/sampling/tree", get(sampling_tree))
         .route("/api/sampling/callstacks", get(sampling_callstacks))
         .route("/api/functions/stats", get(function_stats))
+        .route("/api/logs", get(capture_logs))
         .route("/api/symbols/modules", get(symbols_modules))
         .route("/api/capture/export", get(capture_export))
         .route("/api/capture/targets", get(capture_targets))
@@ -872,6 +873,122 @@ struct StatsQuery {
     #[serde(default)]
     offset: u32,
     limit: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct LogsQuery {
+    #[serde(default)]
+    t0: u64,
+    #[serde(default)]
+    t1: u64,
+    tid: Option<u32>,
+    /// Scope name. Only lines logged while a scope of that name was open on
+    /// the same thread, on `tid` or on every thread when `tid` is omitted.
+    /// Identical lines come back as one row with a count.
+    scope: Option<String>,
+    #[serde(default)]
+    offset: u32,
+    limit: Option<u32>,
+}
+
+/// `GET /api/logs` — log lines in a time range, optionally one thread.
+///
+/// A scope name limits them to the lines logged inside that scope, which is
+/// how lines are grouped: there is no category on a line. With a scope, the
+/// time range selects which of its instances count, and identical lines are
+/// folded into one row with a count.
+async fn capture_logs(State(svc): State<Arc<LiveService>>, Query(q): Query<LogsQuery>) -> Response {
+    use perfr_live_event::logs::{aggregate, level_name, logs_in_window, ScopeSpan, SpanSet};
+    use perfr_live_event::kind;
+
+    let offset = q.offset as usize;
+    let limit = q.limit.unwrap_or(50).clamp(1, 200) as usize;
+    let t0 = q.t0;
+    let t1 = if q.t1 == 0 { u64::MAX } else { q.t1.max(t0) };
+    let tid = q.tid;
+    let scope_name = q.scope.unwrap_or_default();
+    match tokio::task::spawn_blocking(move || {
+        let (_gen, events) = svc.ring().snapshot();
+        // The intern table is locked only to turn ids into text and back,
+        // never across the scan: the capture thread interns every new name
+        // through the same lock, and a drain that waits on it lets the
+        // producers' rings lap.
+        let mut logs = logs_in_window(&events, t0, t1, tid);
+        let grouped = !scope_name.is_empty();
+        let (total, rows): (usize, Vec<serde_json::Value>) = if grouped {
+            // Which ids spell the scope's name. Checked per distinct scope
+            // id rather than per event, so the lock is held for a handful of
+            // lookups however long the capture is.
+            let mut candidates: Vec<u32> = events
+                .iter()
+                .filter(|e| e.kind == kind::API_SCOPE || e.kind == kind::API_TRACK)
+                .map(|e| e.name_id)
+                .collect();
+            candidates.sort_unstable();
+            candidates.dedup();
+            let named: std::collections::HashSet<u32> = {
+                let intern = svc.intern.lock();
+                candidates.into_iter().filter(|id| intern.get(*id) == Some(scope_name.as_str())).collect()
+            };
+            let spans: Vec<ScopeSpan> = events
+                .iter()
+                .filter(|e| named.contains(&e.name_id))
+                .filter_map(ScopeSpan::from_event)
+                .filter(|s| tid.is_none_or(|t| s.tid == t) && s.overlaps(t0, t1))
+                .collect();
+            let inside = SpanSet::new(&spans);
+            logs.retain(|e| inside.contains_log(e));
+            let groups = aggregate(&logs);
+            let total = groups.len();
+            let page: Vec<_> = groups.into_iter().skip(offset).take(limit).collect();
+            let intern = svc.intern.lock();
+            let rows = page
+                .into_iter()
+                .map(|g| serde_json::json!({
+                    "t_ns": g.first_ns,
+                    "last_ns": g.last_ns,
+                    "tid": g.tid,
+                    "pid": g.pid,
+                    "level": level_name(g.level),
+                    "message": intern.get(g.name_id).unwrap_or(""),
+                    "count": g.count,
+                    "truncated": g.truncated,
+                }))
+                .collect();
+            (total, rows)
+        } else {
+            let total = logs.len();
+            let page: Vec<_> = logs.into_iter().skip(offset).take(limit).collect();
+            let intern = svc.intern.lock();
+            let rows = page
+                .into_iter()
+                .map(|e| serde_json::json!({
+                    "t_ns": e.start_ns,
+                    "tid": e.tid,
+                    "pid": e.pid,
+                    "level": level_name(e.log_level().unwrap_or(0)),
+                    "message": intern.get(e.name_id).unwrap_or(""),
+                    "count": 1,
+                    "truncated": e.log_truncated(),
+                }))
+                .collect();
+            (total, rows)
+        };
+        serde_json::json!({
+            "t0": t0,
+            "t1": if t1 == u64::MAX { 0 } else { t1 },
+            "total": total,
+            "offset": offset,
+            "grouped": grouped,
+            "logs": rows,
+        })
+        .to_string()
+    })
+    .await
+    {
+        Ok(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 /// `GET /api/functions/stats` — one row per measured hook or manual scope.
@@ -2103,6 +2220,86 @@ mod isolation_tests {
         assert_eq!(body["rows"][0]["count"], 2);
         assert_eq!(body["rows"][0]["avg_ns"], 200);
         assert_eq!(body["rows"][0]["name"], "inner");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn logs_are_listed_by_window_and_grouped_by_the_scope_they_were_logged_in() {
+        use perfr_live_event::{event_flags, kind, LiveEvent};
+        let svc = test_service();
+        let frame = svc.intern_string("frame");
+        let load = svc.intern_string("load");
+        let tick = svc.intern_string("tick");
+        let slow = svc.intern_string("slow frame");
+        let outside = svc.intern_string("between frames");
+        let event = |kind_id, start_ns, duration_ns, tid, extra, pad, name_id| LiveEvent {
+            start_ns,
+            duration_ns,
+            tid,
+            pid: 9,
+            kind: kind_id,
+            depth: 0,
+            extra,
+            _pad: pad,
+            name_id,
+        };
+        let mut events = Vec::new();
+        // Ten frames on thread 1, each logging "tick"; frame 3 also warns.
+        for i in 0..10u64 {
+            let start = 1_000 + i * 100;
+            events.push(event(kind::API_SCOPE, start, 50, 1, 0, 0, frame));
+            events.push(event(kind::LOG, start + 10, 0, 1, 2, 0, tick));
+            events.push(event(kind::LOG, start + 70, 0, 1, 1, 0, outside));
+        }
+        events.push(event(kind::LOG, 1_320, 0, 1, 3, event_flags::TRUNCATED, slow));
+        // Another scope, and the same text on another thread.
+        events.push(event(kind::API_SCOPE, 5_000, 100, 1, 0, 0, load));
+        events.push(event(kind::LOG, 5_050, 0, 1, 2, 0, tick));
+        events.push(event(kind::LOG, 1_010, 0, 2, 2, 0, tick));
+        svc.push_events(&events);
+        let base = spawn_router(svc).await;
+        let get = |query: &str| -> serde_json::Value {
+            let out = std::process::Command::new("curl")
+                .args(["-s", "--max-time", "5", &format!("{base}/api/logs?{query}")])
+                .output()
+                .expect("curl");
+            serde_json::from_slice(&out.stdout).expect("json")
+        };
+
+        // No scope: the lines in the window, in time order, one row each.
+        let window = get("t0=1000&t1=1099&limit=200");
+        assert_eq!(window["grouped"], false);
+        assert_eq!(window["total"], 3);
+        let rows = window["logs"].as_array().unwrap();
+        assert_eq!(rows[0]["message"], "tick");
+        assert_eq!(rows[0]["level"], "info");
+        assert_eq!(rows[0]["t_ns"], 1_010);
+        assert_eq!(rows[2]["message"], "between frames");
+        assert_eq!(rows[2]["level"], "debug");
+        assert_eq!(get("t0=1000&t1=1099&tid=2")["total"], 1);
+
+        // A scope name: only what was logged inside it, on its thread,
+        // identical lines folded into one row with a count.
+        let scoped = get("scope=frame");
+        assert_eq!(scoped["grouped"], true);
+        assert_eq!(scoped["total"], 2);
+        let rows = scoped["logs"].as_array().unwrap();
+        assert_eq!(rows[0]["message"], "tick");
+        assert_eq!(rows[0]["count"], 10, "not the tick in load, nor the one on thread 2");
+        assert_eq!(rows[0]["t_ns"], 1_010);
+        assert_eq!(rows[0]["last_ns"], 1_910);
+        assert_eq!(rows[1]["message"], "slow frame");
+        assert_eq!(rows[1]["level"], "warn");
+        assert_eq!(rows[1]["truncated"], true);
+
+        // With a scope the time range still applies: frames 2 to 4 only.
+        let ranged = get("scope=frame&t0=1200&t1=1450");
+        assert_eq!(ranged["logs"][0]["count"], 3);
+        assert_eq!(ranged["logs"][0]["t_ns"], 1_210);
+        assert_eq!(ranged["logs"][0]["last_ns"], 1_410);
+        assert_eq!(ranged["total"], 2);
+
+        assert_eq!(get("scope=load")["logs"][0]["count"], 1);
+        assert_eq!(get("scope=no-such-scope")["total"], 0);
     }
 }
 

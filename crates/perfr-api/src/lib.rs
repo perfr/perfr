@@ -25,6 +25,8 @@ use perfr_scope_ring::{ring_for_thread, ScopeEvent, ScopeRingWriter};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
+pub use perfr_scope_ring::event::level;
+
 static FORK_CHILD: AtomicBool = AtomicBool::new(false);
 #[cfg(unix)]
 unsafe extern "C" fn after_fork() {
@@ -74,6 +76,15 @@ fn active_segment() -> Option<&'static ScopeRingWriter> {
     if FORK_CHILD.load(Ordering::Relaxed) { return None; }
     let writer = segment()?;
     writer.is_capturing().then_some(writer)
+}
+
+/// Whether a service is draining this process right now.
+///
+/// Every call below already checks this; it is for a caller that would do
+/// work only to feed one of them -- format a log line, walk a span's
+/// fields -- and can skip it when nobody is capturing.
+pub fn capturing() -> bool {
+    active_segment().is_some()
 }
 
 /// Serialises `init`. A compare-exchange on the pointer is not enough:
@@ -156,10 +167,7 @@ fn next_handle(state: &mut ThreadState) -> Handle {
 }
 
 fn push_named(writer: &ScopeRingWriter, state: &ThreadState, mut head: ScopeEvent, name: &[u8]) {
-    // split_name takes &str; the bytes may not be UTF-8 (C callers), and it
-    // only ever slices by byte, so lossless round-tripping is fine here.
-    let text = unsafe { std::str::from_utf8_unchecked(name) };
-    let rest = split_name(&mut head, text);
+    let rest = split_name(&mut head, name);
     let rings = writer.rings();
     rings.push(state.ring, head);
     for chunk in rest {
@@ -332,6 +340,38 @@ pub fn scope_async(name: impl AsRef<[u8]>) -> Scope {
     Scope(start_async(name))
 }
 
+// ------------------------------------------------------------------ logs --
+
+/// Records a log line on the calling thread.
+///
+/// A no-op, one branch, when nobody is capturing. The line goes into the
+/// same ring as scopes and is written exactly like a scope's name: the
+/// first 32 bytes in the record, the rest as continuations, cut at 8 KiB
+/// with the cut marked. It carries the level, the thread and the timestamp,
+/// and nothing that names a scope: the viewer files it under the scopes
+/// open on this thread at that time, so a scope is the way to group lines.
+pub fn log(level: u8, message: impl AsRef<[u8]>) {
+    let Some(writer) = active_segment() else { return };
+    with_thread(writer.rings().ring_count(), |state| {
+        let head = ScopeEvent {
+            timestamp_ns: now_monotonic_ns(),
+            scope_id: next_handle(state),
+            tid: state.tid,
+            kind: kind::LOG,
+            flags: level::to_flags(level),
+            ..ScopeEvent::default()
+        };
+        push_named(writer, state, head, message.as_ref());
+    });
+}
+
+pub fn log_trace(message: impl AsRef<[u8]>) { log(level::TRACE, message); }
+pub fn log_debug(message: impl AsRef<[u8]>) { log(level::DEBUG, message); }
+pub fn log_info(message: impl AsRef<[u8]>) { log(level::INFO, message); }
+pub fn log_warn(message: impl AsRef<[u8]>) { log(level::WARN, message); }
+pub fn log_error(message: impl AsRef<[u8]>) { log(level::ERROR, message); }
+pub fn log_fatal(message: impl AsRef<[u8]>) { log(level::FATAL, message); }
+
 // ---------------------------------------------------------------- C ABI --
 
 /// # Safety
@@ -430,6 +470,13 @@ pub extern "C" fn perfr_now_ns() -> u64 {
     now_ns()
 }
 
+/// # Safety
+/// `message` must point at `message_len` readable bytes, or `message_len` must be 0.
+#[no_mangle]
+pub unsafe extern "C" fn perfr_log(level: u8, message: *const libc::c_char, message_len: usize) {
+    log(level, bytes(message, message_len));
+}
+
 // ------------------------------------------------------- loadable table --
 
 /// The ABI the single-header `perfr.h` speaks. Bumped only when a field is
@@ -463,6 +510,10 @@ pub struct ApiTableV1 {
     pub now_ns: extern "C" fn() -> u64,
     pub span: unsafe extern "C" fn(*const libc::c_char, usize, u64, u64),
     pub span_async: unsafe extern "C" fn(*const libc::c_char, usize, u64, u64),
+    /// Appended after the first release of this table. A header reads it
+    /// only when `size` covers it, so every field above this line is the
+    /// part an older library is guaranteed to have.
+    pub log: unsafe extern "C" fn(u8, *const libc::c_char, usize),
 }
 
 static API_TABLE: ApiTableV1 = ApiTableV1 {
@@ -480,6 +531,7 @@ static API_TABLE: ApiTableV1 = ApiTableV1 {
     now_ns: perfr_now_ns,
     span: perfr_span,
     span_async: perfr_span_async,
+    log: perfr_log,
 };
 
 /// The table for `abi_version`, or null when this library does not speak
@@ -504,6 +556,13 @@ mod tests {
         let table = unsafe { &*table };
         assert_eq!(table.abi_version, API_ABI_VERSION);
         assert_eq!(table.size as usize, std::mem::size_of::<ApiTableV1>());
+        // The table as first released ends where `log` begins. perfr.h loads
+        // any library at least that long (PERFR_API_TABLE_BASE_SIZE_), so
+        // nothing may ever be inserted above `log`, only appended below it.
+        assert_eq!(
+            std::mem::offset_of!(ApiTableV1, log),
+            8 + 12 * std::mem::size_of::<usize>()
+        );
         assert_eq!((table.now_ns)() > 0, true);
         assert!(perfr_api_table_v1(API_ABI_VERSION + 1).is_null());
         assert!(perfr_api_table_v1(0).is_null());
@@ -665,5 +724,22 @@ mod tests {
         stop(h);
         reader.set_capturing(false);
     }
-}
 
+    #[test]
+    fn a_log_is_a_no_op_until_a_service_is_capturing() {
+        let _serial = WRITES.lock().unwrap_or_else(|p| p.into_inner());
+        init().expect("init");
+        let reader = ScopeRingReader::open(std::process::id()).unwrap();
+        reader.set_capturing(false);
+        log(level::INFO, b"silent");
+        reader.set_capturing(true);
+        log(level::ERROR, b"visible");
+        let events = all_events();
+        let has = |needle: &[u8]| {
+            events.iter().any(|e| e.kind == kind::LOG && e.text_bytes().windows(needle.len()).any(|w| w == needle))
+        };
+        assert!(has(b"visible"));
+        assert!(!has(b"silent"), "a log while capture is off writes nothing");
+        reader.set_capturing(false);
+    }
+}

@@ -48,6 +48,21 @@ pub const BOX_BORDER: u32 = 0xFFFF_FFFF;
 pub fn sample_tick() -> u32 {
     crate::theme::active().sample_tick
 }
+
+/// A log line's colour, by level: trace and debug are quiet, info is green,
+/// warn is amber, error and fatal are red. AARRGGBB, same packing as the
+/// scope palette.
+pub fn log_level_color(level: u8) -> u32 {
+    match level {
+        0 | 1 => 0xFF90_A4AE,
+        2 => 0xFF66_BB6A,
+        3 => 0xFFFF_C107,
+        _ => DROP_MARK,
+    }
+}
+
+/// A loss marker, and the loudest log levels: the red that means "look here".
+pub const DROP_MARK: u32 = 0xFFF4_4336;
 pub const SHADE_LEFT: f32 = 0.94;
 
 pub const PERFR_API_COLORS_RGBA: [u32; 19] = [
@@ -210,6 +225,8 @@ pub fn event_color_hashed(
         // name_id so hovering it says what was running, and colouring by that
         // name is exactly what must not happen here.
         kind::SAMPLE => sample_tick(),
+        kind::LOG => log_level_color(extra),
+        kind::DROP => DROP_MARK,
         kind::API_SCOPE | kind::API_TRACK | kind::VALUE => {
             let hash = name_hash.unwrap_or_else(|| self::name_hash(&name_id.to_le_bytes()));
             apply_even_depth(palette_index(hash), depth)

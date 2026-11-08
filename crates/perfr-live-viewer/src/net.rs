@@ -301,6 +301,10 @@ pub struct ServiceFrame {
 #[derive(Default)]
 pub struct Inbox {
     pub share_notes: Vec<crate::share::ShareNote>,
+    /// The login popup came back (storage event or postMessage).
+    pub share_login_signalled: bool,
+    /// A bearer the popup stored, if the login redirect sent `#share_token=`.
+    pub share_token: Option<String>,
     /// A `.perfr.stream` just loaded from a file or `?capture=` URL. The
     /// app ingests it and keeps the bytes for Share.
     pub loaded_stream: Option<Vec<u8>>,
@@ -581,6 +585,7 @@ mod wasm_impl {
             let inbox = Arc::new(Mutex::new(Inbox::default()));
             let ws = Arc::new(Mutex::new(None));
             start_ws(inbox.clone(), ws.clone());
+            install_login_listener(inbox.clone());
             Self {
                 inbox,
                 http_busy: Arc::new(AtomicBool::new(false)),
@@ -611,6 +616,7 @@ mod wasm_impl {
                     Err(e) => g.error = Some(format!("capture file: {e}")),
                 }
             });
+            install_login_listener(inbox.clone());
             Self {
                 inbox,
                 http_busy: Arc::new(AtomicBool::new(false)),
@@ -655,6 +661,68 @@ mod wasm_impl {
 
         /// Reads a `.perfr.stream` from the service so the dialog can show
         /// its size. Does not post it.
+        pub fn stored_share_auth() -> (Option<String>, bool) {
+            let Some(window) = web_sys::window() else {
+                return (None, false);
+            };
+            let token = window
+                .location()
+                .hash()
+                .ok()
+                .as_deref()
+                .and_then(crate::share::fragment_share_token)
+                .or_else(|| take_stored_share_token(&window));
+            let resume = window
+                .session_storage()
+                .ok()
+                .flatten()
+                .and_then(|s| s.get_item(crate::share::LOGIN_RESUME_KEY).ok().flatten())
+                .is_some_and(|v| v == "1");
+            (token, resume)
+        }
+
+        pub fn clear_share_resume_flag(&self) {
+            let Some(window) = web_sys::window() else {
+                return;
+            };
+            if let Ok(Some(storage)) = window.session_storage() {
+                let _ = storage.remove_item(crate::share::LOGIN_RESUME_KEY);
+            }
+        }
+
+        /// `GET /api/me` with the session cookie and, when we have one, the bearer.
+        pub fn check_share_session(&self, gen: u64, url: String, token: Option<String>) {
+            let inbox = self.inbox.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let check = fetch_session(&url, token.as_deref()).await;
+                push_share(&inbox, gen, crate::share::ShareNoteKind::Session(check));
+            });
+        }
+
+        /// Open the login URL in a popup. Returns false when the browser
+        /// blocked it and this tab is navigating there instead.
+        pub fn open_share_login(&self, url: &str) -> bool {
+            let Some(window) = web_sys::window() else {
+                return false;
+            };
+            match window.open_with_url_and_target_and_features(
+                url,
+                crate::share::LOGIN_WINDOW_NAME,
+                "popup=yes,width=520,height=720",
+            ) {
+                Ok(Some(_)) => true,
+                _ => {
+                    if let Ok(Some(storage)) = window.session_storage() {
+                        let _ = storage.set_item(crate::share::LOGIN_RESUME_KEY, "1");
+                    }
+                    let _ = window.location().set_href(url);
+                    false
+                }
+            }
+        }
+
+        /// Reads a `.perfr.stream` from the service so the dialog can show
+        /// its size. Does not post it.
         pub fn prepare_share(&self, gen: u64, path: String) {
             let inbox = self.inbox.clone();
             wasm_bindgen_futures::spawn_local(async move {
@@ -666,40 +734,106 @@ mod wasm_impl {
                     Ok(_) => push_share(
                         &inbox,
                         gen,
-                        crate::share::ShareNoteKind::Failed("Nothing to share.".into()),
+                        crate::share::ShareNoteKind::Failed(crate::share::ShareFailure::message(
+                            "Nothing to share.",
+                        )),
                     ),
                     Err(e) => push_share(
                         &inbox,
                         gen,
-                        crate::share::ShareNoteKind::Failed(format!("Could not read the capture. {e}")),
+                        crate::share::ShareNoteKind::Failed(crate::share::ShareFailure::message(
+                            format!("Could not read the capture. {e}"),
+                        )),
                     ),
                 }
             });
         }
 
-        /// Posts `.perfr.stream` bytes to `endpoint`. The dialog has already
-        /// shown `bytes.len()` and the user confirmed.
-        pub fn share_capture(&self, gen: u64, endpoint: String, bytes: Vec<u8>) {
+        /// Posts `.perfr.stream` bytes to `endpoint` after one more `GET /api/me`.
+        /// The dialog has already shown the size and the account.
+        pub fn share_capture(
+            &self,
+            gen: u64,
+            endpoint: String,
+            me_url: String,
+            token: Option<String>,
+            bytes: Vec<u8>,
+        ) {
             let inbox = self.inbox.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 if bytes.is_empty() {
-                    push_share(&inbox, gen, crate::share::ShareNoteKind::Failed("Nothing to share.".into()));
+                    push_share(
+                        &inbox,
+                        gen,
+                        crate::share::ShareNoteKind::Failed(crate::share::ShareFailure::message(
+                            "Nothing to share.",
+                        )),
+                    );
                     return;
+                }
+                let session = fetch_session(&me_url, token.as_deref()).await;
+                push_share(
+                    &inbox,
+                    gen,
+                    crate::share::ShareNoteKind::Session(session.clone()),
+                );
+                match session {
+                    crate::share::SessionCheck::SignedIn(account) => {
+                        if let Some(message) = crate::share::fit_block(
+                            bytes.len() as u64,
+                            &account.quota,
+                            "This capture",
+                        ) {
+                            push_share(
+                                &inbox,
+                                gen,
+                                crate::share::ShareNoteKind::Failed(
+                                    crate::share::ShareFailure::message(message),
+                                ),
+                            );
+                            return;
+                        }
+                    }
+                    crate::share::SessionCheck::LoginRequired { .. } => {
+                        push_share(
+                            &inbox,
+                            gen,
+                            crate::share::ShareNoteKind::Failed(crate::share::ShareFailure::login(
+                                "Your session expired. Sign in again to share.",
+                            )),
+                        );
+                        return;
+                    }
+                    crate::share::SessionCheck::Unavailable { message } => {
+                        push_share(
+                            &inbox,
+                            gen,
+                            crate::share::ShareNoteKind::Failed(
+                                crate::share::ShareFailure::message(message),
+                            ),
+                        );
+                        return;
+                    }
                 }
                 push_share(
                     &inbox,
                     gen,
-                    crate::share::ShareNoteKind::Progress { loaded: 0, total: bytes.len() as u64 },
+                    crate::share::ShareNoteKind::Progress {
+                        loaded: 0,
+                        total: bytes.len() as u64,
+                    },
                 );
-                let result = post_share_xhr(&endpoint, &bytes, &inbox, gen).await;
+                let result = post_share_xhr(&endpoint, &bytes, token.as_deref(), &inbox, gen).await;
                 let kind = match result {
                     Ok(text) => match crate::share::parse_share_reply(&text) {
                         Ok(link) => crate::share::ShareNoteKind::Done(link),
-                        Err(e) => crate::share::ShareNoteKind::Failed(e),
+                        Err(e) => crate::share::ShareNoteKind::Failed(
+                            crate::share::ShareFailure::message(e),
+                        ),
                     },
-                    Err((status, body)) => {
-                        crate::share::ShareNoteKind::Failed(crate::share::share_failure_message(status, &body))
-                    }
+                    Err((status, body)) => crate::share::ShareNoteKind::Failed(
+                        crate::share::share_failure(status, &body),
+                    ),
                 };
                 push_share(&inbox, gen, kind);
             });
@@ -729,6 +863,8 @@ mod wasm_impl {
             let mut inbox = self.inbox.lock().unwrap_or_else(|e| e.into_inner());
             Inbox {
                 share_notes: std::mem::take(&mut inbox.share_notes),
+                share_login_signalled: std::mem::take(&mut inbox.share_login_signalled),
+                share_token: inbox.share_token.take(),
                 loaded_stream: inbox.loaded_stream.take(),
                 loaded_story: inbox.loaded_story.take(),
                 status: inbox.status.take(),
@@ -1357,22 +1493,162 @@ mod wasm_impl {
 
     /// POST the stream with an XMLHttpRequest so the upload reports progress.
     /// `fetch` does not. The status is 0 when the browser could not reach the host.
+    fn share_request_credentials() -> web_sys::RequestCredentials {
+        if crate::share::SHARE_CREDENTIALS == "include" {
+            web_sys::RequestCredentials::Include
+        } else {
+            web_sys::RequestCredentials::SameOrigin
+        }
+    }
+
+    async fn fetch_session(url: &str, token: Option<&str>) -> crate::share::SessionCheck {
+        let opts = RequestInit::new();
+        opts.set_method("GET");
+        opts.set_credentials(share_request_credentials());
+        if let Some(token) = token.and_then(crate::share::usable_share_token) {
+            let headers = js_sys::Object::new();
+            if js_sys::Reflect::set(
+                &headers,
+                &JsValue::from_str("authorization"),
+                &JsValue::from_str(&crate::share::bearer_value(&token)),
+            )
+            .is_err()
+            {
+                return crate::share::SessionCheck::Unavailable {
+                    message: "Could not reach the share server.".into(),
+                };
+            }
+            opts.set_headers(&headers);
+        }
+        let Some(window) = web_sys::window() else {
+            return crate::share::SessionCheck::Unavailable {
+                message: "Could not reach the share server.".into(),
+            };
+        };
+        let resp = match JsFuture::from(window.fetch_with_str_and_init(url, &opts)).await {
+            Ok(resp) => resp,
+            Err(_) => {
+                return crate::share::parse_session_response(0, "");
+            }
+        };
+        let Ok(resp) = resp.dyn_into::<Response>() else {
+            return crate::share::parse_session_response(0, "");
+        };
+        let status = resp.status();
+        let text = match resp.text() {
+            Ok(promise) => JsFuture::from(promise)
+                .await
+                .ok()
+                .and_then(|v| v.as_string())
+                .unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+        crate::share::parse_session_response(status, &text)
+    }
+
+    fn take_stored_share_token(window: &web_sys::Window) -> Option<String> {
+        let mut found = None;
+        for storage in [window.session_storage(), window.local_storage()] {
+            let Ok(Some(storage)) = storage else { continue };
+            if let Ok(Some(raw)) = storage.get_item(crate::share::SHARE_TOKEN_KEY) {
+                if found.is_none() {
+                    found = crate::share::usable_share_token(&raw);
+                }
+                let _ = storage.remove_item(crate::share::SHARE_TOKEN_KEY);
+            }
+        }
+        found
+    }
+
+    fn install_login_listener(inbox: Arc<Mutex<Inbox>>) {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let inbox_storage = inbox.clone();
+        let onstorage = Closure::wrap(Box::new(move |ev: web_sys::StorageEvent| {
+            let key = ev.key().unwrap_or_default();
+            if key != crate::share::LOGIN_SIGNAL_KEY && key != crate::share::SHARE_TOKEN_KEY {
+                return;
+            }
+            let mut g = inbox_storage.lock().unwrap_or_else(|e| e.into_inner());
+            if key == crate::share::SHARE_TOKEN_KEY {
+                if let Some(token) = ev
+                    .new_value()
+                    .as_deref()
+                    .and_then(crate::share::usable_share_token)
+                {
+                    g.share_token = Some(token);
+                }
+            }
+            if g.share_token.is_none() {
+                if let Some(window) = web_sys::window() {
+                    g.share_token = take_stored_share_token(&window).or(g.share_token.take());
+                }
+            }
+            g.share_login_signalled = true;
+        }) as Box<dyn FnMut(_)>);
+        let _ =
+            window.add_event_listener_with_callback("storage", onstorage.as_ref().unchecked_ref());
+        onstorage.forget();
+
+        let inbox_message = inbox;
+        let onmessage = Closure::wrap(Box::new(move |ev: MessageEvent| {
+            let data = ev.data();
+            let source = js_sys::Reflect::get(&data, &JsValue::from_str("source"))
+                .ok()
+                .and_then(|v| v.as_string());
+            let kind = js_sys::Reflect::get(&data, &JsValue::from_str("type"))
+                .ok()
+                .and_then(|v| v.as_string());
+            if source.as_deref() != Some(crate::share::LOGIN_MESSAGE_SOURCE)
+                || kind.as_deref() != Some(crate::share::LOGIN_MESSAGE_TYPE)
+            {
+                return;
+            }
+            // The message is only a wake-up. A token from another origin is ignored;
+            // the bearer arrives through same-origin storage.
+            inbox_message
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .share_login_signalled = true;
+        }) as Box<dyn FnMut(_)>);
+        let _ =
+            window.add_event_listener_with_callback("message", onmessage.as_ref().unchecked_ref());
+        onmessage.forget();
+    }
+
     async fn post_share_xhr(
         url: &str,
         bytes: &[u8],
+        token: Option<&str>,
         inbox: &Arc<Mutex<Inbox>>,
         gen: u64,
     ) -> Result<String, (u16, String)> {
         let xhr = web_sys::XmlHttpRequest::new().map_err(|e| (0, js_err(e)))?;
-        xhr.open_with_async("POST", url, true).map_err(|e| (0, js_err(e)))?;
-        xhr.set_request_header("content-type", crate::share::SHARE_CONTENT_TYPE).map_err(|e| (0, js_err(e)))?;
+        xhr.open_with_async("POST", url, true)
+            .map_err(|e| (0, js_err(e)))?;
+        // Credentialed cross-origin upload. Same-origin cookies are sent either way.
+        xhr.set_with_credentials(crate::share::SHARE_CREDENTIALS == "include");
+        xhr.set_request_header("content-type", crate::share::SHARE_CONTENT_TYPE)
+            .map_err(|e| (0, js_err(e)))?;
+        if let Some(token) = token.and_then(crate::share::usable_share_token) {
+            xhr.set_request_header("authorization", &crate::share::bearer_value(&token))
+                .map_err(|e| (0, js_err(e)))?;
+        }
         let progress_inbox = inbox.clone();
         let onprogress = Closure::wrap(Box::new(move |ev: web_sys::ProgressEvent| {
-            let total = if ev.length_computable() { ev.total() as u64 } else { 0 };
+            let total = if ev.length_computable() {
+                ev.total() as u64
+            } else {
+                0
+            };
             push_share(
                 &progress_inbox,
                 gen,
-                crate::share::ShareNoteKind::Progress { loaded: ev.loaded() as u64, total },
+                crate::share::ShareNoteKind::Progress {
+                    loaded: ev.loaded() as u64,
+                    total,
+                },
             );
         }) as Box<dyn FnMut(_)>);
         if let Ok(upload) = xhr.upload() {
@@ -1399,7 +1675,8 @@ mod wasm_impl {
         // SharedArrayBuffer, and XMLHttpRequest refuses to send a view of one.
         let copied = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
         copied.copy_from(bytes);
-        xhr.send_with_opt_js_u8_array(Some(&copied)).map_err(|e| (0, js_err(e)))?;
+        xhr.send_with_opt_js_u8_array(Some(&copied))
+            .map_err(|e| (0, js_err(e)))?;
         let _ = JsFuture::from(promise).await;
         let status = xhr.status().unwrap_or(0);
         let text = xhr.response_text().ok().flatten().unwrap_or_default();
@@ -1582,7 +1859,23 @@ mod native_impl {
             Self
         }
         pub fn prepare_share(&self, _gen: u64, _path: String) {}
-        pub fn share_capture(&self, _gen: u64, _endpoint: String, _bytes: Vec<u8>) {}
+        pub fn share_capture(
+            &self,
+            _gen: u64,
+            _endpoint: String,
+            _me_url: String,
+            _token: Option<String>,
+            _bytes: Vec<u8>,
+        ) {
+        }
+        pub fn stored_share_auth() -> (Option<String>, bool) {
+            (None, false)
+        }
+        pub fn clear_share_resume_flag(&self) {}
+        pub fn check_share_session(&self, _gen: u64, _url: String, _token: Option<String>) {}
+        pub fn open_share_login(&self, _url: &str) -> bool {
+            false
+        }
         pub fn from_capture_url(_url: &str) -> Self {
             Self
         }

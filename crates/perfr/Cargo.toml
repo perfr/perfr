@@ -28,6 +28,7 @@ miniz_oxide = "0.8"
 # already carries it.
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "instr_info", "intel"] }
 perfr-api = { path = "../perfr-api" }
+perfr-build-info = { path = "../perfr-build-info" }
 perfr-capture = { path = "../perfr-capture" }
 perfr-live-event = { path = "../perfr-live-event" }
 perfr-story = { path = "../perfr-story" }

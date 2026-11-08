@@ -16,6 +16,7 @@
 resolver = "2"
 members = [
     "crates/perfr-api",
+    "crates/perfr-build-info",
     "crates/perfr-capture",
     "crates/perfr-collector",
     "crates/perfr-etw",

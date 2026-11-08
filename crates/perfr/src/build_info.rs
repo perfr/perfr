@@ -2,26 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Version line shared by `--version`, `perfr version`, and `perfr update`.
+//! Version line shared by `--version`, `perfr version`, and the viewer's About window.
+//!
+//! `package_version` is the `crates/perfr` Cargo version. `perfr update` compares
+//! that. The line people read is `version_line`: a release build is
+//! `perfr 0.1.3 (abc1234def56, 2026-11-08, perfr-v0.1.3)`; a local build falls
+//! back to `dev` plus the hash, `perfr dev+abc1234def56 (abc1234def56, 2026-11-08)`.
+//! The stamp lives in `perfr-build-info`, which the viewer links too.
 
-pub fn package_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
-pub fn git_hash() -> &'static str {
-    env!("PERFR_GIT_HASH")
-}
-
-pub fn build_date() -> &'static str {
-    env!("PERFR_BUILD_DATE")
-}
-
-/// `0.1.0 (abc1234, 2026-11-04)`. The hash and date come from `build.rs`.
-pub fn long_version() -> String {
-    format!("{} ({}, {})", package_version(), git_hash(), build_date())
-}
-
-/// What `perfr --version` prints.
-pub fn version_line() -> String {
-    format!("perfr {}", long_version())
-}
+pub use perfr_build_info::{long_version, package_version, version_line};

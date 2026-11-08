@@ -253,8 +253,8 @@ pub async fn start_eframe(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsVa
     logging::install();
     install_wasm_clock();
     log::info!(
-        "viewer build {} starting; {}",
-        crate::app::VIEWER_BUILD,
+        "{} starting; {}",
+        perfr_build_info::version_line(),
         web_sys::window()
             .and_then(|w| w.navigator().user_agent().ok())
             .unwrap_or_else(|| "unknown user agent".into())

@@ -117,8 +117,11 @@ Left to right, in clusters separated by thin rules. A filled pill is on.
   is separate from the per-thread hide (right-click) and its "N hidden /
   all" count. `?tracks=physics+render` opens the viewer with it filled.
   Screenshot: `45-track-filter.png`.
-- **Viewer build.** The More menu ends with the viewer's build (UTC time
-  and commit), also `build` in `window.__perfr_sel`. The service serves
+- **About.** More → About shows the perfr version, the short commit hash
+  (linked to that commit on GitHub), the build date, and the release tag
+  when the build is a release. A local build's version is `dev` plus the
+  hash. The monospace line in the window is what `perfr --version` prints,
+  and the same string is `build` in `window.__perfr_sel`. The service serves
   the viewer with `Cache-Control: no-cache` and an ETag, so a restarted
   service is never a stale tab: a plain reload picks up the new viewer.
 - **Stats line.** Live event count, visible count, draw count, the transport

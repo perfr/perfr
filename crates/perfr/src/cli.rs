@@ -143,7 +143,7 @@ pub fn render_top_help(color: bool) -> String {
                     "update",
                     "Replace this install with the latest GitHub release",
                 ),
-                ("version", "Print the version, git hash, and build date"),
+                ("version", "Print the version, git hash, build date, and release tag"),
             ],
         ),
     ];
@@ -638,7 +638,7 @@ fn update_cmd() -> Command {
 }
 
 fn version_cmd() -> Command {
-    Command::new("version").about("Print the version, git hash, and build date")
+    Command::new("version").about("Print the version, git hash, build date, and release tag")
 }
 
 #[cfg(test)]
@@ -747,13 +747,25 @@ mod tests {
     }
 
     #[test]
-    fn version_line_carries_the_hash_and_date() {
+    fn version_line_matches_the_viewer_stamp() {
         let line = crate::build_info::version_line();
-        assert!(line.starts_with("perfr "), "{line}");
-        assert!(
-            line.contains(crate::build_info::package_version()),
-            "{line}"
+        assert_eq!(
+            line,
+            perfr_build_info::format_version_line(
+                perfr_build_info::package_version(),
+                perfr_build_info::git_hash(),
+                perfr_build_info::build_date(),
+                perfr_build_info::release_tag(),
+            )
         );
-        assert!(line.contains(crate::build_info::build_date()), "{line}");
+        assert!(line.starts_with("perfr "), "{line}");
+        assert!(line.contains(perfr_build_info::git_hash()), "{line}");
+        assert!(line.contains(perfr_build_info::build_date()), "{line}");
+        if perfr_build_info::release_tag().is_empty() {
+            assert!(line.contains(&format!("dev+{}", perfr_build_info::git_hash())), "{line}");
+        } else {
+            assert!(line.contains(perfr_build_info::package_version()), "{line}");
+            assert!(line.contains(perfr_build_info::release_tag()), "{line}");
+        }
     }
 }

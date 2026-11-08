@@ -988,6 +988,8 @@ pub struct PerfrLiveApp {
     /// The Benchmark window (More menu, F3): the service's fake-scope
     /// producer, with a rate knob that moves while it runs.
     bench_open: bool,
+    /// About (More menu): the same version line `perfr --version` prints.
+    about_open: bool,
     bench_threads: u32,
     bench_depth_min: u32,
     bench_depth_max: u32,
@@ -1453,6 +1455,8 @@ impl PerfrLiveApp {
     /// reading pixels. Written only when it changes.
     fn publish_selection(&mut self) {
         let focus = self.thread_focus();
+        // Same string `perfr --version` prints. A harness reads it as `build`.
+        let build = perfr_build_info::version_line();
         let text = format!(
             "{{\"thread\":{},\"scope\":{},\"focus\":{},\"measure\":{},\"ranges\":[{}],\"report_open\":{},\"tweaks\":{},\"tab\":\"{}\",\"hellos\":{},\"wire\":\"{}\",\"ws_bps\":{:.0},\"report_w\":{:.0},\"report_collapsed\":{},\"scope_menu\":{},\"scope_report\":{},\"view\":[{:.0},{:.0}],\"content\":{},\"events\":{},\"hooks\":[{}],\"capture_start\":{},\"report_filter\":{:?},\"track_filter\":{:?},\"prims\":{},\"flame_zoom\":{},\"selected_pid\":{},\"recording\":{},\"capture_elapsed\":{:.3},\"pointer\":{},\"build\":{:?},\"draw\":{},\"code\":{},\"rect\":{},\"rect_self\":{},\"theme\":{:?},\"renderer\":{:?},\"report_copied\":{},\"report_sel\":{}}}",
             match self.selected_thread {
@@ -1513,7 +1517,7 @@ impl PerfrLiveApp {
             self.recording || self.status.capturing,
             self.capture_timer.shown_s,
             self.pointer_readout.clone(),
-            VIEWER_BUILD,
+            build,
             if self.draw_readout.is_empty() { "null" } else { self.draw_readout.as_str() },
             format!(
                 "{{\"mode\":\"{}\",\"rows\":{},\"source\":{:?},\"disasm\":{:?},\"instructions\":{},\"error\":{:?},\"loading\":{},\"copied\":{}}}",
@@ -1788,6 +1792,7 @@ impl PerfrLiveApp {
             self_profile: crate::self_pane::SelfProfile::default(),
             self_pane_open: false,
             bench_open: false,
+            about_open: false,
             bench_threads: 16,
             bench_depth_min: 8,
             bench_depth_max: 16,
@@ -3714,12 +3719,13 @@ impl PerfrLiveApp {
             ui.ctx().open_url(egui::OpenUrl::new_tab("https://perfr.dev/"));
             ui.close();
         }
+        let about = ui.button("About").on_hover_text(perfr_build_info::version_line());
+        note_ui_rect("About", about.rect);
+        if about.clicked() {
+            self.about_open = true;
+            ui.close();
+        }
         ui.separator();
-        ui.label(
-            RichText::new(format!("viewer build {VIEWER_BUILD}"))
-                .font(FontId::monospace(10.5))
-                .color(theme::MUTED()),
-        );
         if let Some(path) = &self.status.log_path {
             ui.label(
                 RichText::new(format!("service log {path}"))
@@ -10080,6 +10086,39 @@ impl PerfrLiveApp {
         self.presets.open = open;
     }
 
+    /// Version, commit, build date and, on a release build, the tag.
+    /// The monospace line is exactly what `perfr --version` prints.
+    fn about_window(&mut self, ctx: &Context) {
+        if !self.about_open {
+            return;
+        }
+        let mut open = self.about_open;
+        egui::Window::new("About perfr")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .frame(Frame::window(&ctx.style()).fill(theme::RAIL()))
+            .show(ctx, |ui| {
+                ui.set_min_width(440.0);
+                about_row(ui, "Version", &perfr_build_info::version_label_str());
+                about_commit_row(ui, perfr_build_info::git_hash());
+                about_row(ui, "Built", perfr_build_info::build_date());
+                let tag = perfr_build_info::release_tag();
+                if !tag.is_empty() {
+                    about_row(ui, "Release", tag);
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new("perfr --version").color(theme::MUTED()).size(10.5));
+                ui.label(
+                    RichText::new(perfr_build_info::version_line())
+                        .font(FontId::monospace(11.0))
+                        .color(theme::TEXT()),
+                );
+            });
+        self.about_open = open;
+    }
+
     /// The UI knobs window: what the report rows look like, live.
     /// The settings, one window behind the gear: the process and its
     /// symbols, what to collect, unwinding, hooks and what is hooked, then
@@ -10276,6 +10315,12 @@ impl PerfrLiveApp {
     pub fn play_story(&mut self) {
         self.story.play();
         self.follow = false;
+        self.needs_repaint = true;
+    }
+
+    /// Open About. The story preview uses this for the version screenshot.
+    pub fn open_about(&mut self) {
+        self.about_open = true;
         self.needs_repaint = true;
     }
 
@@ -10660,6 +10705,7 @@ impl eframe::App for PerfrLiveApp {
                 self.sampling_panel(ctx);
             }
             self.tweaks_window(ctx);
+            self.about_window(ctx);
             self.maybe_resume_share();
             self.share_window(ctx);
             self.story.windows(ctx);
@@ -11203,10 +11249,6 @@ thread_local! {
     static UI_RECTS: std::cell::RefCell<Vec<(String, Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// What this viewer was built from: the UTC time and the commit, set by
-/// build_wasm.sh (PERFR_VIEWER_BUILD). Shown in the More menu and on the
-/// wordmark, and published as `build` in window.__perfr_sel, so a stale
-/// page or a stale pack in a service binary is one look away.
 /// A thread-state code (`perfr_live_event::thread_state`) as a short name and
 /// a one-line description, for the hover tooltip over a thread-state bar.
 fn thread_state_label(code: u8) -> (&'static str, &'static str) {
@@ -11232,10 +11274,34 @@ const INSTRUMENTATION_TYPE_LEGEND: &str = "Instrumentation type\n\
     MS — manual scope: perfr_start / perfr_stop in the code\n\
     MA — manual async: an async span drawn on its own track";
 
-pub(crate) const VIEWER_BUILD: &str = match option_env!("PERFR_VIEWER_BUILD") {
-    Some(build) => build,
-    None => "dev",
-};
+fn about_row(ui: &mut Ui, label: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.add_sized([72.0, 18.0], egui::Label::new(RichText::new(label).color(theme::MUTED()).size(12.0)));
+        ui.label(RichText::new(value).font(FontId::monospace(12.0)).color(theme::TEXT()));
+    });
+}
+
+fn about_commit_row(ui: &mut Ui, hash: &str) {
+    ui.horizontal(|ui| {
+        ui.add_sized([72.0, 18.0], egui::Label::new(RichText::new("Commit").color(theme::MUTED()).size(12.0)));
+        if let Some(url) = perfr_build_info::commit_url(hash) {
+            let link = ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(hash).font(FontId::monospace(12.0)).color(theme::ACCENT()).underline(),
+                    )
+                    .frame(false)
+                    .min_size(Vec2::ZERO),
+                )
+                .on_hover_text("Open this commit on GitHub");
+            if link.clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            }
+        } else {
+            ui.label(RichText::new(hash).font(FontId::monospace(12.0)).color(theme::TEXT()));
+        }
+    });
+}
 
 fn note_ui_rect(label: &str, rect: Rect) {
     UI_RECTS.with(|v| v.borrow_mut().push((label.to_string(), rect)));

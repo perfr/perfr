@@ -2920,6 +2920,7 @@ dependencies = [
  "miniz_oxide 0.8.9",
  "object",
  "perfr-api",
+ "perfr-build-info",
  "perfr-capture",
  "perfr-etw",
  "perfr-frida-transport",
@@ -2949,6 +2950,10 @@ dependencies = [
  "libc",
  "perfr-scope-ring",
 ]
+
+[[package]]
+name = "perfr-build-info"
+version = "0.1.1"
 
 [[package]]
 name = "perfr-capture"
@@ -3120,6 +3125,7 @@ dependencies = [
  "egui-wgpu",
  "js-sys",
  "log",
+ "perfr-build-info",
  "perfr-live-chrome",
  "perfr-live-event",
  "perfr-live-protocol",

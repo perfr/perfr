@@ -1,0 +1,13 @@
+.{
+    .name = .perfr,
+    .version = "0.1.1",
+    .fingerprint = 0xe9d170eccea274ca,
+    .minimum_zig_version = "0.17.1",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "samples",
+        "README.md",
+    },
+}

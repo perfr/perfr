@@ -271,6 +271,20 @@ pub fn query_capture_url_from_location() -> Option<String> {
     }
 }
 
+/// The page URL, fragment included, for the login `next` parameter.
+pub fn location_href() -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.location().href().ok())
+            .unwrap_or_default()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        String::new()
+    }
+}
+
 /// The page's query string, including the leading `?` when the browser has one.
 pub fn location_search() -> String {
     #[cfg(target_arch = "wasm32")]

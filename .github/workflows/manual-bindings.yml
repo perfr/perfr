@@ -1,0 +1,187 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+#
+# Linux build and test for the libperfr language bindings. One job builds
+# libperfr; the others test against that .so. The C# job also packs a nupkg
+# and uploads it. Nothing is published to NuGet. Mojo is compiled only when
+# the runner already has `mojo` on PATH, which the GitHub image does not.
+
+name: manual-bindings
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/manual-bindings.yml'
+      - 'crates/perfr-api/include/**'
+      - 'crates/perfr-api/csharp/**'
+      - 'crates/perfr-api/lua/**'
+      - 'crates/perfr-api/zig/**'
+      - 'crates/perfr-api/swift/**'
+      - 'crates/perfr-api/java/**'
+      - 'crates/perfr-api/julia/**'
+      - 'crates/perfr-api/mojo/**'
+      - 'crates/perfr-lib/**'
+      - 'crates/perfr-api/src/**'
+      - 'crates/perfr-scope-ring/**'
+
+permissions: read-all
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  libperfr:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+      - name: Build libperfr
+        run: cargo build -p perfr-lib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libperfr
+          path: target/debug/libperfr.so
+
+  csharp:
+    needs: libperfr
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            6.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          name: libperfr
+          path: dist
+      - name: Test and pack
+        run: |
+          chmod +x crates/perfr-api/csharp/test.sh
+          crates/perfr-api/csharp/test.sh "$PWD/dist/libperfr.so"
+          dotnet pack crates/perfr-api/csharp/src/Perfr/Perfr.csproj -c Release -o dist/nupkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfr-nupkg
+          path: dist/nupkg/*.nupkg
+
+  lua:
+    needs: libperfr
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lua
+        run: sudo apt-get update && sudo apt-get install -y lua5.4 liblua5.4-dev luajit pkg-config
+      - uses: actions/download-artifact@v4
+        with:
+          name: libperfr
+          path: dist
+      - name: Test
+        run: |
+          chmod +x crates/perfr-api/lua/test.sh
+          crates/perfr-api/lua/test.sh "$PWD/dist/libperfr.so"
+
+  zig:
+    needs: libperfr
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Zig 0.17.1
+        run: |
+          curl -fsSL -o /tmp/zig.tar.xz https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz
+          tar -C /tmp -xf /tmp/zig.tar.xz
+          echo /tmp/zig-x86_64-linux-0.17.1 >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v4
+        with:
+          name: libperfr
+          path: dist
+      - name: Test
+        run: |
+          chmod +x crates/perfr-api/zig/test.sh
+          crates/perfr-api/zig/test.sh "$PWD/dist/libperfr.so"
+
+  swift:
+    needs: libperfr
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift 6.1.2
+        run: |
+          curl -fL -o /tmp/swift.tar.gz https://download.swift.org/swift-6.1.2-release/ubuntu2404/swift-6.1.2-RELEASE/swift-6.1.2-RELEASE-ubuntu24.04.tar.gz
+          mkdir -p /tmp/swift
+          tar -C /tmp/swift -xzf /tmp/swift.tar.gz
+          echo /tmp/swift/swift-6.1.2-RELEASE-ubuntu24.04/usr/bin >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v4
+        with:
+          name: libperfr
+          path: dist
+      - name: Test
+        run: |
+          chmod +x crates/perfr-api/swift/test.sh
+          crates/perfr-api/swift/test.sh "$PWD/dist/libperfr.so"
+
+  java:
+    needs: libperfr
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Kotlin 2.1.10
+        run: |
+          curl -fL -o /tmp/kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.1.10/kotlin-compiler-2.1.10.zip
+          unzip -q -d /tmp /tmp/kotlin.zip
+          echo /tmp/kotlinc/bin >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v4
+        with:
+          name: libperfr
+          path: dist
+      - name: Test
+        run: |
+          chmod +x crates/perfr-api/java/test.sh
+          crates/perfr-api/java/test.sh "$PWD/dist/libperfr.so"
+
+  julia:
+    needs: libperfr
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Julia
+        run: |
+          curl -fsSL https://install.julialang.org | sh -s -- --yes --add-to-path no -p "$HOME/.juliaup"
+          echo "$HOME/.juliaup/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v4
+        with:
+          name: libperfr
+          path: dist
+      - name: Test
+        run: |
+          chmod +x crates/perfr-api/julia/test.sh
+          crates/perfr-api/julia/test.sh "$PWD/dist/libperfr.so"
+
+  mojo:
+    needs: libperfr
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build if mojo is installed
+        run: |
+          chmod +x crates/perfr-api/mojo/test.sh
+          crates/perfr-api/mojo/test.sh

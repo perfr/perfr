@@ -2,11 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Names too long for one record, split across a chain and put back together.
+//! Text too long for one record, split across a chain and put back together.
 //!
-//! Most scopes have a static name and reference it by an interned id, which
-//! costs four bytes and no copying. This is for the other kind: a name built
-//! at runtime, where there is nothing to intern against.
+//! A scope's name and a log line's text go through the same path. Most of
+//! them fit the record; this is for the rest, and for a log line there is
+//! nothing to intern against on the producer either way.
 //!
 //! Twenty bytes ride inline in the record itself, which covers most of them.
 //! Anything longer continues into [`kind::TEXT`] records carrying the same
@@ -30,10 +30,12 @@ use std::collections::HashMap;
 /// The head keeps its own kind; continuations are [`kind::TEXT`] and carry
 /// their position in `depth`, starting at 1. A name past [`MAX_NAME_BYTES`]
 /// -- the most a `u8` chain position can address -- is cut there, and the
-/// last record is flagged [`flags::CUT`] so the reader knows.
-pub fn split_name(head: &mut ScopeEvent, name: &str) -> Vec<ScopeEvent> {
+/// last record is flagged [`flags::CUT`] so the reader knows. The bytes need
+/// not be UTF-8; they are only ever sliced, and decoded once rejoined.
+pub fn split_name(head: &mut ScopeEvent, name: impl AsRef<[u8]>) -> Vec<ScopeEvent> {
+    let name = name.as_ref();
     let cut = name.len() > MAX_NAME_BYTES;
-    let bytes = &name.as_bytes()[..name.len().min(MAX_NAME_BYTES)];
+    let bytes = &name[..name.len().min(MAX_NAME_BYTES)];
     let first = bytes.len().min(INLINE_TEXT);
     head.text[..first].copy_from_slice(&bytes[..first]);
     head.text_len = first as u8;
@@ -169,21 +171,17 @@ impl TextAssembler {
         None
     }
 
-    /// Names whose continuations never arrived, at the end of a capture.
+    /// Names whose continuations never arrived, by `(tid, scope_id)`, with
+    /// the prefix that did. Every one of them is truncated.
     ///
     /// A dropped tail is silent otherwise: the head is held waiting for a
     /// chunk that was overwritten before the consumer reached it, and without
     /// this the name would simply never appear.
-    pub fn finish(&mut self) -> Vec<(String, Completeness)> {
+    pub fn finish(&mut self) -> Vec<((u32, u64), String)> {
         let mut out: Vec<((u32, u64), Partial)> = self.open.drain().collect();
         out.sort_by_key(|(key, _)| *key);
         out.into_iter()
-            .map(|(_, partial)| {
-                (
-                    String::from_utf8_lossy(&partial.bytes).into_owned(),
-                    Completeness::Truncated,
-                )
-            })
+            .map(|(key, partial)| (key, String::from_utf8_lossy(&partial.bytes).into_owned()))
             .collect()
     }
 
@@ -297,8 +295,8 @@ mod tests {
         assert_eq!(assembler.open_chains(), 1);
         let leftover = assembler.finish();
         assert_eq!(leftover.len(), 1);
-        assert_eq!(leftover[0].1, Completeness::Truncated);
-        assert!(leftover[0].0.starts_with("dddd"), "the prefix that did arrive is kept");
+        assert_eq!(leftover[0].0, (7, 9), "keyed so the head can be found");
+        assert!(leftover[0].1.starts_with("dddd"), "the prefix that did arrive is kept");
     }
 
     #[test]

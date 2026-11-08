@@ -28,8 +28,7 @@
 
 use crate::visible::VisibleProcesses;
 use perfr_live_event::{event_flags, kind, LiveEvent};
-use perfr_scope_ring::event::{flags, kind as rk};
-use perfr_scope_ring::logmsg::{LogAssembler, LogMessage};
+use perfr_scope_ring::event::{flags, kind as rk, level};
 use perfr_scope_ring::merge::{drain_from, Cursors, Producer};
 use perfr_scope_ring::text::{Completeness, TextAssembler};
 use perfr_scope_ring::{DropTally, NameInterner, ScopeEvent, ScopeRingReader};
@@ -92,7 +91,6 @@ struct Segment {
     reader: ScopeRingReader,
     cursors: Cursors,
     text: TextAssembler,
-    logs: LogAssembler,
     /// What the producer's drop table has said so far, and what of it is
     /// still unmatched by a loss of ours.
     drops: DropLedger,
@@ -129,7 +127,6 @@ impl Segment {
             reader,
             cursors,
             text: TextAssembler::new(),
-            logs: LogAssembler::new(),
             drops,
             awaiting_name: HashMap::new(),
             open: HashMap::new(),
@@ -389,14 +386,12 @@ impl ScopeSource {
             // a lie. Their STOPs, if they do arrive, are ignored as
             // stop-without-start.
             if pass.dropped > 0 {
-                let pending = self.segments[index].logs.finish();
-                for msg in pending {
-                    self.emit_log(index, msg, batch);
-                }
+                // Half-received text first: a log line whose tail was in the
+                // lost slots is still a line, and is reported as truncated.
+                self.flush_awaiting(index, batch);
                 let segment = &mut self.segments[index];
-                let discarded = segment.open.len() + segment.awaiting_name.len();
+                let discarded = segment.open.len();
                 segment.open.clear();
-                segment.awaiting_name.clear();
                 segment.sync_depth.clear();
                 self.scopes_discarded_on_loss = self.scopes_discarded_on_loss.saturating_add(discarded as u64);
             }
@@ -450,11 +445,6 @@ impl ScopeSource {
                 // there is nothing to draw and nothing to complain about.
             }
             rk::LINK => self.links_seen += 1,
-            rk::LOG => {
-                if let Some(msg) = self.segments[index].logs.accept(&event) {
-                    self.emit_log(index, msg, batch);
-                }
-            }
             rk::TEXT => {
                 // Continuation: feed the assembler; on completion, the head
                 // it belongs to can finally be named and processed.
@@ -462,13 +452,13 @@ impl ScopeSource {
                 if let Some((name, completeness)) = done {
                     let key = (event.tid, event.scope_id);
                     if let Some(head) = self.segments[index].awaiting_name.remove(&key) {
-                        let owned = mark_cut(name.as_bytes(), completeness == Completeness::Truncated);
-                        self.named(index, head, &owned, batch);
+                        let cut = completeness == Completeness::Truncated;
+                        self.named(index, head, name.as_bytes(), cut, batch);
                     }
                 }
             }
             _ => {
-                // START, INSTANT, VALUE: named by inline text, possibly
+                // START, INSTANT, VALUE, LOG: named by inline text, possibly
                 // continued. Feed the assembler first; it answers now for a
                 // name that fits, or later via a TEXT record.
                 if event.has_more_text() {
@@ -477,15 +467,28 @@ impl ScopeSource {
                     self.segments[index].awaiting_name.insert(key, event);
                 } else {
                     let cut = event.flags & flags::CUT != 0;
-                    let name = mark_cut(event.text_bytes(), cut);
-                    self.named(index, event, &name, batch);
+                    self.named(index, event, event.text_bytes(), cut, batch);
                 }
             }
         }
         let _ = pid;
     }
 
-    fn named(&mut self, index: usize, event: ScopeEvent, name: &[u8], batch: &mut Vec<LiveEvent>) {
+    /// Processes a record whose text is all in. `cut` says `text` is only a
+    /// prefix: the chain hit the cap or lost a continuation.
+    fn named(&mut self, index: usize, event: ScopeEvent, text: &[u8], cut: bool, batch: &mut Vec<LiveEvent>) {
+        if event.kind == rk::LOG {
+            self.log_line(index, event, text, cut, batch);
+            return;
+        }
+        // A cut name keeps its prefix and says so.
+        let marked;
+        let name: &[u8] = if cut {
+            marked = mark_cut(text);
+            &marked
+        } else {
+            text
+        };
         // A hooked function's START names itself by a service-interned id
         // rather than its text (`\x01` + 8 hex digits, see frida.rs), so a
         // 200-character Unreal name costs one record instead of eight; a
@@ -595,10 +598,11 @@ impl ScopeSource {
         parts.join(", ")
     }
 
-    fn emit_log(&mut self, index: usize, msg: LogMessage, batch: &mut Vec<LiveEvent>) {
+    /// A log line whose text is all in: one instant on its thread.
+    fn log_line(&mut self, index: usize, head: ScopeEvent, text: &[u8], cut: bool, batch: &mut Vec<LiveEvent>) {
         let pid = self.segments[index].pid;
-        let mut truncated = msg.completeness == Completeness::Truncated;
-        let name_id = match self.log_text_id(msg.message.as_bytes()) {
+        let mut truncated = cut;
+        let name_id = match self.log_text_id(text) {
             Some(id) => id,
             None => {
                 // The line happened, and when, where and how loudly are
@@ -615,17 +619,36 @@ impl ScopeSource {
             }
         };
         batch.push(LiveEvent {
-            start_ns: msg.timestamp_ns,
+            start_ns: head.timestamp_ns,
             duration_ns: 0,
-            tid: msg.tid,
+            tid: head.tid,
             pid,
             kind: kind::LOG,
             depth: 0,
-            extra: msg.level,
+            extra: level::from_flags(head.flags),
             _pad: if truncated { event_flags::TRUNCATED } else { 0 },
             name_id,
         });
         self.events_pushed += 1;
+    }
+
+    /// Finishes every record still waiting for text continuations with the
+    /// prefix that did arrive, marked cut. A log line that was mid-write when
+    /// the capture stopped, or whose tail a lap destroyed, is still a line.
+    fn flush_awaiting(&mut self, index: usize, batch: &mut Vec<LiveEvent>) {
+        let segment = &mut self.segments[index];
+        let mut pending: Vec<(ScopeEvent, Vec<u8>)> = segment
+            .text
+            .finish()
+            .into_iter()
+            .filter_map(|(key, text)| segment.awaiting_name.remove(&key).map(|head| (head, text.into_bytes())))
+            .collect();
+        // A head the assembler holds no chain for keeps its inline bytes.
+        pending.extend(segment.awaiting_name.drain().map(|(_, head)| (head, head.text_bytes().to_vec())));
+        pending.sort_by_key(|(head, _)| (head.timestamp_ns, head.tid));
+        for (head, text) in pending {
+            self.named(index, head, &text, true, batch);
+        }
     }
 
     /// The id of a log line's text, or `None` when the line is new and the
@@ -655,8 +678,12 @@ impl ScopeSource {
         let table = segment.reader.rings().snapshot_drops();
         let split = segment.drops.split(lost, &table);
         let pid = segment.pid;
-        let unnamed = (split.unnamed > 0).then_some((UNATTRIBUTED, split.unnamed));
-        for ((tid, kind_id), count) in split.named.into_iter().chain(unnamed) {
+        // A loss the table could not place has no thread to draw it on. It
+        // is in the status line (`loss_summary`) and nowhere else.
+        if split.unnamed > 0 {
+            *self.drop_totals.entry(UNATTRIBUTED).or_insert(0) += split.unnamed;
+        }
+        for ((tid, kind_id), count) in split.named {
             *self.drop_totals.entry((tid, kind_id)).or_insert(0) += count;
             batch.push(LiveEvent {
                 start_ns: now_ns,
@@ -684,14 +711,11 @@ impl ScopeSource {
             segment.reader.set_capturing(false);
         }
         self.drain(end_ns, batch);
-        // Lines whose last chunk never arrived. Their text is new, so it has
+        // Text whose tail never arrived. It is new to the interner, so it has
         // to be announced like any other name: the drain above announced
         // only what it had interned itself.
         for index in 0..self.segments.len() {
-            let pending = self.segments[index].logs.finish();
-            for msg in pending {
-                self.emit_log(index, msg, batch);
-            }
+            self.flush_awaiting(index, batch);
         }
         self.announce_new_names();
         for segment in &mut self.segments {
@@ -840,11 +864,9 @@ fn attribute_drops(lost: u64, carried: &[(DropKey, u64)], fresh: &[(DropKey, u64
     out
 }
 
-fn mark_cut(name: &[u8], cut: bool) -> Vec<u8> {
+fn mark_cut(name: &[u8]) -> Vec<u8> {
     let mut out = name.to_vec();
-    if cut {
-        out.extend_from_slice("…".as_bytes());
-    }
+    out.extend_from_slice("…".as_bytes());
     out
 }
 
@@ -1007,7 +1029,18 @@ mod drop_tests {
 #[cfg(test)]
 mod log_tests {
     use super::*;
-    use perfr_scope_ring::logmsg::{level, write_log};
+    use perfr_scope_ring::text::split_name;
+
+    fn log_head(timestamp_ns: u64, tid: u32, id: u64, lvl: u8) -> ScopeEvent {
+        ScopeEvent {
+            timestamp_ns,
+            scope_id: id,
+            tid,
+            kind: rk::LOG,
+            flags: level::to_flags(lvl),
+            ..ScopeEvent::default()
+        }
+    }
 
     /// The tests share this process's one segment; one at a time.
     static SEGMENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1036,13 +1069,15 @@ mod log_tests {
         // A three-chunk line whose last chunk never arrives: the producer
         // was mid-write when the capture stopped.
         let message = format!("stopped-mid-line-{}", "x".repeat(70));
-        let mut chunks = Vec::new();
-        write_log(1, 77, 9, level::WARN, message.as_bytes(), |e| chunks.push(e));
-        assert!(chunks.len() >= 3);
-        for chunk in &chunks[..chunks.len() - 1] {
-            assert!(source.segments[0].logs.accept(chunk).is_none());
-        }
+        let mut head = log_head(1, 77, 9, level::WARN);
+        let rest = split_name(&mut head, &message);
+        assert!(rest.len() >= 2);
         let mut batch = Vec::new();
+        source.accept(0, head, &mut batch);
+        for chunk in &rest[..rest.len() - 1] {
+            source.accept(0, *chunk, &mut batch);
+        }
+        assert!(batch.iter().all(|e| e.kind != kind::LOG), "not a line until its text is in");
         source.finish(u64::MAX, &mut batch);
         let line = batch
             .iter()
@@ -1059,22 +1094,15 @@ mod log_tests {
     #[test]
     fn past_the_text_budget_a_new_line_keeps_everything_but_its_text() {
         let (_serial, service, mut source) = source();
-        let line = |text: &str| LogMessage {
-            timestamp_ns: 5,
-            tid: 78,
-            message_id: 1,
-            level: level::ERROR,
-            message: text.to_string(),
-            completeness: Completeness::Complete,
-        };
+        let head = log_head(5, 78, 1, level::ERROR);
         let mut batch = Vec::new();
-        source.emit_log(0, line("kept before the budget ran out"), &mut batch);
+        source.log_line(0, head, b"kept before the budget ran out", false, &mut batch);
         assert_eq!(source.log_text_bytes, "kept before the budget ran out".len());
         // Spend the budget.
         source.log_text_bytes = LOG_TEXT_BUDGET_BYTES;
-        source.emit_log(0, line("a brand new line"), &mut batch);
-        source.emit_log(0, line("another brand new line"), &mut batch);
-        source.emit_log(0, line("kept before the budget ran out"), &mut batch);
+        source.log_line(0, head, b"a brand new line", false, &mut batch);
+        source.log_line(0, head, b"another brand new line", false, &mut batch);
+        source.log_line(0, head, b"kept before the budget ran out", false, &mut batch);
         source.announce_new_names();
 
         assert_eq!(batch.len(), 4, "every line is still an event");

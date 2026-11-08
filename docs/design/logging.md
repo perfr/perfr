@@ -33,18 +33,24 @@ still `perfr-capture/1`: no table changed shape.
 
 What changed inside the same 56 bytes:
 
-* `kind = 6` (`LOG`) is one chunk of a log line.
-* Log `scope_id`: bits 0..16 chunk index, bits 16..32 total chunks, bits
-  32..64 message id. Flags bit 0 is cleared on the last chunk, bit 1 (`CUT`)
-  is set when the line was longer than `MAX_LOG_BYTES` (~32 KiB), bits 4..6
-  are the level. Chunk 0's first four text bytes are the original length,
-  little-endian. The rest of the text is the message, split on bytes.
-* Chunks of one line share `timestamp_ns` and `tid`. The consumer sorts by
-  `(timestamp_ns, tid)` and the sort is stable, so one thread's chunks stay
-  in the order that thread wrote them. Thread id is the tiebreak when two
+* `kind = 6` (`LOG`) is a log line, and it is written exactly the way a
+  scope's name is: up to 32 bytes of text in the record, the rest as
+  `kind = TEXT` continuations carrying the same `(tid, scope_id)`, where
+  `scope_id` is the thread's next handle. `MORE_TEXT`, `CUT`, the 8 KiB cap
+  and the consumer's `TextAssembler` are the same ones names use; there is
+  no second chunk format and no second assembler. A line of 32 bytes or
+  less is one record.
+* Bits 4..6 of a `LOG` record's `flags` are the level (`event::level`).
+  A level past fatal is stored as fatal.
+* A line's records share `timestamp_ns` and `tid`. The consumer sorts a
+  pass by `(timestamp_ns, tid)` with a stable sort, so one thread's records
+  stay in the order it wrote them, and thread id is the tiebreak when two
   threads stamp the same nanosecond.
-* A missing chunk inserts U+FFFD and the live event is flagged truncated.
-  The line is never presented as complete.
+* A continuation that was overwritten before it was read is a gap the
+  assembler sees: the line keeps the prefix that arrived and the live event
+  is flagged truncated. A line whose tail never arrives at all is reported
+  the same way when the capture ends, or when its ring laps. It is never
+  presented as complete.
 * The control page, in bytes that used to be zero (after the reader leases,
   still inside the first 4 KiB), holds published read cursors and a
   per-thread per-kind drop table. An older producer leaves them zero.
@@ -104,15 +110,22 @@ own:
   they stand when it adopts a segment and only looks at what is added.
 
 Each pass the consumer spends the table's new counts against its own loss.
-If the table names less than was lost, the rest is one unattributed marker.
+If the table names less than was lost, the rest is counted as unattributed.
 If it names more, each `(tid, kind)` gets its proportional share and the
 surplus waits one pass, because a producer counts an overwrite the moment it
 happens and the reader sees that lap on its next drain. A count still
 unmatched after that was never this reader's loss and is dropped. A pass
 that lost nothing writes no marker.
 
-The CLI prints the breakdown. The log window shows the total in red, and
-each thread grows a drops lane.
+The CLI prints the breakdown. Each thread the table names grows a drops
+lane, and the log window shows their total in red. An unattributed loss has
+no thread to draw it on; it is in the status line only.
+
+The cost on the producer is one acquire load of the published cursor per
+record, and on a ring that is already lapping one slot read and one atomic
+add per record. Measured with the same program on `main` and this branch
+(2 M scope start+stop pairs per thread, best of five): 57.0 ns against
+58.5 ns per pair on one thread, 24.4 against 21.8 ns on four.
 
 ## Log text
 

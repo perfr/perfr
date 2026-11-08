@@ -53,7 +53,6 @@
 
 pub mod event;
 pub mod intern;
-pub mod logmsg;
 pub mod merge;
 pub mod meta;
 pub mod platform;
@@ -76,6 +75,5 @@ pub use shm::{
     segment_version, sweep_dead_segments, unlink_segment, ScopeRingReader, ScopeRingWriter,
     DEFAULT_BUDGET_BYTES, DEFAULT_SLOTS_PER_RING,
 };
-pub use logmsg::{write_log, LogAssembler, LogMessage, MAX_LOG_BYTES};
 pub use meta::DropTally;
 pub use text::{split_name, Completeness, TextAssembler};

@@ -19,14 +19,13 @@
 //! stopped costs nothing but itself instead of skewing everything after it.
 
 use perfr_scope_ring::event::{flags, kind};
-use perfr_scope_ring::logmsg::{self, write_log};
 use perfr_scope_ring::shm::now_monotonic_ns;
 use perfr_scope_ring::text::split_name;
 use perfr_scope_ring::{ring_for_thread, ScopeEvent, ScopeRingWriter};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
-pub use logmsg::level;
+pub use perfr_scope_ring::event::level;
 
 static FORK_CHILD: AtomicBool = AtomicBool::new(false);
 #[cfg(unix)]
@@ -168,10 +167,7 @@ fn next_handle(state: &mut ThreadState) -> Handle {
 }
 
 fn push_named(writer: &ScopeRingWriter, state: &ThreadState, mut head: ScopeEvent, name: &[u8]) {
-    // split_name takes &str; the bytes may not be UTF-8 (C callers), and it
-    // only ever slices by byte, so lossless round-tripping is fine here.
-    let text = unsafe { std::str::from_utf8_unchecked(name) };
-    let rest = split_name(&mut head, text);
+    let rest = split_name(&mut head, name);
     let rings = writer.rings();
     rings.push(state.ring, head);
     for chunk in rest {
@@ -348,24 +344,24 @@ pub fn scope_async(name: impl AsRef<[u8]>) -> Scope {
 
 /// Records a log line on the calling thread.
 ///
-/// A no-op, one branch, when nobody is capturing. The line is chunked into
-/// the same ring as scopes. It carries the level, the thread and the
-/// timestamp, and nothing that names a scope: the viewer decides which
-/// scopes a line fell inside from the thread and the time. A scope is
-/// therefore the way to group lines.
+/// A no-op, one branch, when nobody is capturing. The line goes into the
+/// same ring as scopes and is written exactly like a scope's name: the
+/// first 32 bytes in the record, the rest as continuations, cut at 8 KiB
+/// with the cut marked. It carries the level, the thread and the timestamp,
+/// and nothing that names a scope: the viewer files it under the scopes
+/// open on this thread at that time, so a scope is the way to group lines.
 pub fn log(level: u8, message: impl AsRef<[u8]>) {
     let Some(writer) = active_segment() else { return };
-    let message = message.as_ref();
     with_thread(writer.rings().ring_count(), |state| {
-        state.counter = state.counter.wrapping_add(1).max(1);
-        let message_id = state.counter;
-        let timestamp_ns = now_monotonic_ns();
-        let ring = state.ring;
-        let tid = state.tid;
-        let rings = writer.rings();
-        write_log(timestamp_ns, tid, message_id, level, message, |event| {
-            rings.push(ring, event);
-        });
+        let head = ScopeEvent {
+            timestamp_ns: now_monotonic_ns(),
+            scope_id: next_handle(state),
+            tid: state.tid,
+            kind: kind::LOG,
+            flags: level::to_flags(level),
+            ..ScopeEvent::default()
+        };
+        push_named(writer, state, head, message.as_ref());
     });
 }
 

@@ -466,6 +466,43 @@ in the URL opens a tab on load.
 - **Python** is the pure-Python package at `crates/perfr-api/python`
   (`pip install perfr-api`, module `perfr_api`): the same search order,
   ctypes over the same library, `with perfr.scope(...)` and `@perfr.scope`.
+- **C#** is `crates/perfr-api/csharp`, package id `Perfr`, targets
+  `net6.0`, `net8.0`, and `netstandard2.1`. It `dlopen`s / `LoadLibrary`s
+  `libperfr` (the netstandard2.1 contract has no `NativeLibrary`) and
+  checks `perfr_api_table_v1`. `using (Perfr.Scope("name"))` stops the
+  scope. Tested on Linux x86-64 with the .NET 8 SDK: a missing `PERFR_LIB`
+  is a no-op, and with `libperfr.so` a scope is written into the process
+  segment only while the capturing word is set. `dotnet pack` builds a
+  nupkg and nothing is pushed to NuGet. macOS and Windows were not run.
+- **Lua** is `crates/perfr-api/lua`. LuaJIT uses FFI. Lua 5.4 loads
+  `perfr_native.so`, which includes `perfr.h`. `with_scope` works on both;
+  `local _ <close> = perfr.scope("name")` is Lua 5.4. Tested on Linux with
+  Lua 5.4.6 and LuaJIT 2.1 against `libperfr.so`.
+- **Zig** is `crates/perfr-api/zig` (Zig 0.17.1). `defer scope.end()` is
+  the scope. Tested on Linux with `zig test` against `libperfr.so`.
+  `zig build test` caches its run step and does not see a new `PERFR_LIB`.
+- **Swift** is `crates/perfr-api/swift` (tools version 5.10). `withScope`
+  and a class `deinit` stop the scope. Tested on Linux with Swift 6.1.2
+  against `libperfr.so`.
+- **Java and Kotlin** are `crates/perfr-api/java`. `libperfr_jni.so`
+  includes `perfr.h`. Java uses try-with-resources. Kotlin adds
+  `scope(name) { }`. Tested on Linux with OpenJDK 21 and Kotlin 2.1.10
+  against `libperfr.so`. No Gradle or Maven project, and no NuGet-style
+  publish.
+- **Julia** is `crates/perfr-api/julia`. `ccall` through Libdl, and
+  `scope("frame") do ... end`. Tested on Linux with Julia 1.13.3 against
+  `libperfr.so`. The package is not registered.
+- **Mojo** is `crates/perfr-api/mojo`. It calls `OwnedDLHandle` and
+  `external_call`. It was not compiled: the Mojo toolchain was not
+  available. CI runs `mojo build` only when `mojo` is on `PATH`.
+- **GDScript** is not a binding. `crates/perfr-api/gdscript/README.md`
+  says why a GDExtension does not fit this tree and what one would look
+  like. JavaScript, TypeScript, and WASM are not in this tree.
+- **Thread names** in these bindings are the operating-system name
+  (`pthread_setname_np` / `SetThreadDescription`). `libperfr` has no
+  thread-name entry. On Linux the name is 15 bytes and perfr reads it
+  from `/proc/<pid>/task/<tid>/comm`. The Linux tests check
+  `/proc/thread-self/comm`.
 - **Distribution.** Prebuilt wheels, never source-to-compile, so no toolchain
   is needed to install. `tools/release/build_wheels.sh <platform>` cuts two
   platform wheels from one build (so their ring protocol matches): `perfr-api`

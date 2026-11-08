@@ -24,6 +24,12 @@ This crate is also the one implementation behind every other language:
   `libperfr` beside `perfr` on `PATH`.
 - **Python** uses the `perfr-api` package on PyPI, pure Python over the same
   library.
+- **C#** is `csharp/`, package id `Perfr`. **Lua** is `lua/` (LuaJIT FFI and
+  a Lua 5.4 module). **Zig** is `zig/`. **Swift** is `swift/`. **Java and
+  Kotlin** are `java/` (JNI plus a Kotlin `scope` block). **Julia** is
+  `julia/`. **Mojo** is `mojo/` and was not compiled here. **GDScript** is
+  a design note in `gdscript/`, not an extension. Each directory's README
+  says what was run on Linux.
 
 See the header for the C API and its search order, and the project manual
 for what reaches the timeline.

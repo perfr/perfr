@@ -1,0 +1,7 @@
+name = "Perfr"
+uuid = "b7e2c4a1-6d58-4f0e-9a33-2c8f1e5d7b90"
+version = "0.1.1"
+authors = ["The perfr Authors"]
+
+[compat]
+julia = "1.10"

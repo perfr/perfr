@@ -156,8 +156,9 @@ the Rust.
 
 One Cargo workspace at the repository root; every crate is a directory here.
 The `perfr-live-*` crates are the browser viewer and its server
-(`perfr-live-viewer/README.md`); the rest is the capture service and what
-it is built from, one crate per concern. The `ffi/` adapters, the C++
+(`perfr-live-viewer/README.md`). `perfr-story` is the versioned story
+document those two share with the MCP server. The rest is the capture
+service and what it is built from, one crate per concern. The `ffi/` adapters, the C++
 `shims/` and the differential `tools/` of the port are on the `cpp` branch of the Orbit repository.
 `https://perfr.dev/blog/26-where-everything-lives.html` draws the tree and the crate
 graph.

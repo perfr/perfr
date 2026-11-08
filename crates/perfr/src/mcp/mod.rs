@@ -456,6 +456,9 @@ mod tests {
         if method == "GET" && path == "/api/sampling/callstacks" {
             return (200, r#"{"order":"outermost_first","samples":4,"total_stacks":1,"offset":0,"limit":8,"stacks":[{"tid":7,"count":4,"percent":100.0,"frame_count":2,"truncated":false,"frames":["main","inner"]}]}"#.into());
         }
+        if method == "GET" && path == "/api/capture/targets" {
+            return (200, r#"{"t0_ns":0,"t1_ns":1000,"threads":[{"pid":9,"tid":3,"name":"Worker","process":"box3d"}],"thread_total":1,"scopes":[{"scope_id":9,"name":"SolveContacts","pid":9,"tid":3,"count":4,"total_ns":400}],"scope_total":1,"cores":[{"core":0,"busy":0.5},{"core":1,"busy":0.0}],"core_count":2,"cores_busy":1,"busy_at":0.05,"note":"readings of the capture"}"#.into());
+        }
         if method == "GET" && path == "/api/functions/stats" {
             return (200, r#"{"events_scanned":10,"total":1,"offset":0,"limit":15,"order":"total","rows":[{"pid":9,"name":"perfr_frida_test_inner","kind":"hook","count":180,"total_ns":180000,"avg_ns":1000,"min_ns":800,"max_ns":1200,"stddev_ns":50}]}"#.into());
         }
@@ -490,13 +493,136 @@ mod tests {
         assert!(mcp.handle(&json!({"jsonrpc":"2.0","method":"notifications/initialized"})).is_none());
         let listed = call(&mcp, 2, "tools/list", json!({}));
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 29);
         assert!(tools.iter().any(|spec| spec["name"] == "perfr_logs"));
         for spec in tools {
             assert!(spec["description"].as_str().unwrap().len() > 40, "{spec}");
             assert_eq!(spec["inputSchema"]["type"], "object");
             assert!(spec["inputSchema"].get("properties").is_some(), "{spec}");
         }
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"perfr_story_create"), "{names:?}");
+        assert!(names.contains(&"perfr_story_cpu"), "{names:?}");
+    }
+
+    #[test]
+    fn a_story_is_authored_and_checked_against_the_capture() {
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let url = spawn_service(hits.clone());
+        let mcp = mcp(&url);
+        let created = tool(
+            &mcp,
+            1,
+            "perfr_story_create",
+            json!({
+                "title": "box3d",
+                "summary": "A tour. It does not state a core count.",
+                "capture": "captures/box3d.perfr.stream"
+            }),
+        );
+        assert_eq!(created["format"], "perfr.story");
+        assert_eq!(created["version"], 1);
+        tool(
+            &mcp,
+            2,
+            "perfr_story_add_step",
+            json!({
+                "step": {
+                    "id": "cores",
+                    "kind": "evidence",
+                    "title": "Scheduler",
+                    "body": "Count the busy lanes.",
+                    "duration_ms": 4000,
+                    "view": { "fit": "content", "focused": [{ "kind": "scheduler" }] }
+                }
+            }),
+        );
+        tool(
+            &mcp,
+            3,
+            "perfr_story_set_view",
+            json!({
+                "id": "cores",
+                "view": {
+                    "t0_frac": 0.2,
+                    "t1_frac": 0.8,
+                    "fit": "span",
+                    "focused": [{ "kind": "scheduler" }]
+                }
+            }),
+        );
+        tool(
+            &mcp,
+            4,
+            "perfr_story_add_overlay",
+            json!({
+                "step_id": "cores",
+                "overlay": {
+                    "kind": "callout",
+                    "id": "note",
+                    "text": "One lane per core.",
+                    "anchor": { "time_frac": 0.5, "track": { "kind": "scheduler" }, "y": 0.2 }
+                }
+            }),
+        );
+        let checked = tool(&mcp, 5, "perfr_story_validate", json!({}));
+        assert_eq!(checked["ok"], true);
+        let exported = tool(&mcp, 6, "perfr_story_export", json!({}));
+        let again = tool(
+            &mcp,
+            7,
+            "perfr_story_load",
+            json!({"json": exported["json"]}),
+        );
+        assert_eq!(again["steps"][0]["id"], "cores");
+        let threads = tool(
+            &mcp,
+            8,
+            "perfr_story_find_threads",
+            json!({"query": "work"}),
+        );
+        assert_eq!(threads["threads"][0]["tid"], 3);
+        let scopes = tool(
+            &mcp,
+            9,
+            "perfr_story_find_scopes",
+            json!({"query": "solve", "t0_ns": 0, "t1_ns": 1000}),
+        );
+        assert_eq!(scopes["scopes"][0]["scope_id"], 9);
+        let cpu = tool(
+            &mcp,
+            10,
+            "perfr_story_cpu",
+            json!({"t0_ns": 0, "t1_ns": 1000}),
+        );
+        assert_eq!(cpu["cores_busy"], 1);
+        assert_eq!(cpu["core_count"], 2);
+        let hot = tool(
+            &mcp,
+            11,
+            "perfr_story_hotspots",
+            json!({"t0_ns": 10, "t1_ns": 20, "limit": 1}),
+        );
+        assert_eq!(hot["supported"], true);
+        assert_eq!(hot["hotspots"][0]["name"], "fn0");
+        let paths: Vec<String> = hits
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|h| h.path.clone())
+            .collect();
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.starts_with("/api/capture/targets?") && p.contains("q=work")),
+            "{paths:?}"
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.contains("start_ns=10") && p.contains("end_ns=20")),
+            "{paths:?}"
+        );
     }
 
     #[test]

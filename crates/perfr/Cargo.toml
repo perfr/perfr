@@ -30,6 +30,7 @@ iced-x86 = { version = "1.21", default-features = false, features = ["std", "dec
 perfr-api = { path = "../perfr-api" }
 perfr-capture = { path = "../perfr-capture" }
 perfr-live-event = { path = "../perfr-live-event" }
+perfr-story = { path = "../perfr-story" }
 perfr-live-server = { path = "../perfr-live-server" }
 # Rust's own demangler: std-only, one crate, no deps. C++ names stay mangled here (blog post 02).
 rustc-demangle = "0.1"

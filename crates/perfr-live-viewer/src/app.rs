@@ -815,6 +815,9 @@ pub struct PerfrLiveApp {
     /// service: nothing is polled, and the pills that need one are not
     /// shown. The static web site's mode.
     static_capture: Option<String>,
+    /// Capture story: steps, camera, overlays. Empty until a `?story=`
+    /// URL loads one or the reader opens Story from More.
+    story: crate::story::StorySession,
     /// Bytes of a `.perfr.stream` loaded from a file or URL. Share posts
     /// these. A live session leaves this empty and exports from the service.
     stream_bytes: Option<Vec<u8>>,
@@ -1642,6 +1645,13 @@ impl PerfrLiveApp {
             Some(url) => Net::from_capture_url(url),
             None => Net::connect(),
         };
+        let mut story = crate::story::StorySession::from_query(
+            crate::dev::query_story_url_from_location().as_deref(),
+            crate::dev::query_chrome_compact_from_location(),
+        );
+        if let Some(url) = story.take_fetch() {
+            net.fetch_story(&url);
+        }
         let mut has_gpu = false;
         let mut gpu_backend = "none";
         if let Some(rs) = &cc.wgpu_render_state {
@@ -1864,6 +1874,7 @@ impl PerfrLiveApp {
             user_set_view: false,
             in_self_pane: false,
             static_capture: static_capture.clone(),
+            story,
             stream_bytes: None,
             loading_stream: false,
             local_stream: false,
@@ -2004,6 +2015,7 @@ impl PerfrLiveApp {
             self.tracks.any_dragging(),
             self.selected.is_some(),
         ) || self.vscroll.is_coasting()
+            || self.story.needs_frames()
     }
 
     fn start_record(&mut self) {
@@ -2284,6 +2296,7 @@ impl PerfrLiveApp {
     }
 
     fn apply_zoom_window(&mut self, t0: f64, t1: f64) {
+        self.story.release_camera();
         let (t0, t1) = match self.content_span() {
             Some((c0, c1)) => clamp_window_contain(t0, t1, c0, c1),
             None => (t0, t1),
@@ -2295,6 +2308,7 @@ impl PerfrLiveApp {
     }
 
     fn apply_pan_window(&mut self, t0: f64, t1: f64) {
+        self.story.release_camera();
         let (t0, t1) = match self.content_span() {
             Some((c0, c1)) => clamp_window_contain(t0, t1, c0, c1),
             None => (t0.max(0.0), t0.max(0.0) + (t1 - t0).max(1.0)),
@@ -2361,6 +2375,7 @@ impl PerfrLiveApp {
         }
         self.needs_repaint = true;
         self.settle_frames = 6;
+        self.story.note_capture_replaced();
     }
 
     fn can_share(&self) -> bool {
@@ -2771,6 +2786,33 @@ impl PerfrLiveApp {
         } else {
             f.name.clone()
         };
+        if perfr_story::is_story_filename(&name) {
+            if let Some(bytes) = &f.bytes {
+                match String::from_utf8(bytes.to_vec()) {
+                    Ok(text) => {
+                        if let Err(message) = self.story.load_text(&text) {
+                            self.story.error = message;
+                            self.story.open = true;
+                        }
+                    }
+                    Err(_) => self.error = format!("{name}: a story is UTF-8 JSON"),
+                }
+                return;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(path) = &f.path {
+                match std::fs::read_to_string(path) {
+                    Ok(text) => {
+                        if let Err(message) = self.story.load_text(&text) {
+                            self.story.error = message;
+                            self.story.open = true;
+                        }
+                    }
+                    Err(e) => self.error = format!("{name}: {e}"),
+                }
+                return;
+            }
+        }
         if crate::share::is_stream_file(&name) {
             if let Some(bytes) = &f.bytes {
                 self.accept_stream(bytes.to_vec());
@@ -3086,6 +3128,13 @@ impl PerfrLiveApp {
         if let Some(bytes) = inbox.loaded_stream {
             self.accept_stream(bytes);
         }
+        if let Some(text) = inbox.loaded_story {
+            if let Err(message) = self.story.load_text(&text) {
+                self.story.error = message;
+                self.story.open = true;
+            }
+        }
+        self.story_maybe_fetch_capture();
         if let Some(token) = inbox.share_token {
             self.share_token = Some(token);
         }
@@ -3703,6 +3752,18 @@ impl PerfrLiveApp {
         note_ui_rect("Inspector", inspector.rect);
         if inspector.clicked() { self.open_right_tab(ReportTab::Inspector); ui.close(); }
         if ui.button("Rectangle selection report").clicked() { self.open_right_tab(ReportTab::Selection); ui.close(); }
+        if ui.button("Story").on_hover_text("Steps over this capture. Edit adds a step from the current view.").clicked() {
+            self.story.open = true;
+            if self.story.doc.is_none() {
+                self.story.ensure_blank();
+            }
+            self.story.begin_edit();
+            ui.close();
+        }
+        if ui.button("Demo story").on_hover_text("The story for captures/box3d.perfr.stream").clicked() {
+            self.story.load_demo();
+            ui.close();
+        }
         if ui
             .selectable_label(self.compact, "Compact tracks")
             .on_hover_text("Track density")
@@ -5143,13 +5204,14 @@ impl PerfrLiveApp {
                 // tweak; once a second by default) the busiest tracks move
                 // to the top of their section.
                 let every = self.ui_tweaks.track_sort_every_s as f64;
-                if every > 0.0 && self.now_s - self.last_activity_sort_s >= every {
+                if !self.story.locks_layout() && every > 0.0 && self.now_s - self.last_activity_sort_s >= every {
                     self.last_activity_sort_s = self.now_s;
                     self.tracks.sort_by_activity(&self.index);
                 }
             }
             self.tracks.tick(dt, &self.index, filter);
         }
+        self.story_drive();
 
         let timebar_h = 26.0;
         let (time_rect, _) =
@@ -5313,7 +5375,13 @@ impl PerfrLiveApp {
                 // draw a rectangle over the scopes (marquee). On a thread's
                 // sample bar: select those samples -- the white ticks are the
                 // thing you drag across. Anywhere else: pan.
-                if body_resp.drag_started_by(PointerButton::Primary)
+                if self.story.captures_pointer() {
+                    let hit = ui.input(|i| i.pointer.interact_pos()).and_then(|p| self.story_hit_at(p, body));
+                    let (down, released) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released()));
+                    if let Some(crate::story::StoryCmd::AddStep) = self.story.pointer(hit, down, released) {
+                        self.story_add_step();
+                    }
+                } else if body_resp.drag_started_by(PointerButton::Primary)
                     && self.report_splitter_grab.is_none()
                 {
                     let ctrl = body_resp.ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
@@ -5366,6 +5434,7 @@ impl PerfrLiveApp {
             if empty {
                 paint_empty(ui, body, dropping);
                 paint_selection_overlay(ui, body, self.t0, self.t1, &self.sample_sels, self.measure, true, &|_| None);
+                self.paint_story_overlays(ui, body);
                 self.refresh_scope_stats(t0, t1, Some(y_cull));
                 return;
             }
@@ -5518,6 +5587,7 @@ impl PerfrLiveApp {
                     &self.trace_flows,
                     self.tracks.scale,
                 );
+                self.paint_story_overlays(ui, body);
                 if self.rect_drag.is_some() || self.rect_result.is_some() {
                     self.paint_rect_select(ui, body, self.t0, self.t1);
                 }
@@ -6964,7 +7034,7 @@ impl PerfrLiveApp {
             if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::F2)) { self.self_pane_open = !self.self_pane_open; }
             if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::F3)) { self.bench_open = !self.bench_open; }
         }
-        if ctx.input(|i| i.key_pressed(Key::Space)) {
+        if !self.story.on_key(ctx) && ctx.input(|i| i.key_pressed(Key::Space) && !i.modifiers.alt) {
             self.follow = !self.follow;
         }
         // X starts and stops a capture, as the Record button does.
@@ -6976,6 +7046,7 @@ impl PerfrLiveApp {
             }
         }
         if ctx.input(|i| i.key_pressed(Key::Home)) {
+            self.story.release_camera();
             self.fit_to_content();
             self.needs_repaint = true;
         }
@@ -10095,6 +10166,260 @@ impl PerfrLiveApp {
             self.t1 = t1;
         }
     }
+
+    fn story_name_lists(&self) -> (Vec<((u32, u32), String)>, Vec<(u32, String)>) {
+        let mut threads = Vec::new();
+        let mut pids = Vec::new();
+        for row in self.tracks.rows() {
+            match row.id {
+                RowId::Thread(t) | RowId::Async(t) => {
+                    threads.push(((t.pid, t.tid), self.thread_display_name(t.pid, t.tid)));
+                    if !pids.contains(&t.pid) {
+                        pids.push(t.pid);
+                    }
+                }
+                RowId::Process(pid) if !pids.contains(&pid) => pids.push(pid),
+                _ => {}
+            }
+        }
+        let processes = pids.into_iter().map(|pid| (pid, self.process_display_name(pid))).collect();
+        (threads, processes)
+    }
+
+    fn content_ns(&self) -> Option<(u64, u64)> {
+        self.content_span().map(|(a, b)| (a.max(0.0) as u64, b.max(0.0) as u64))
+    }
+
+    /// The story's `capture` URL, when the page did not already pass
+    /// `?capture=`, a file is not already open, and nothing is recording.
+    fn story_maybe_fetch_capture(&mut self) {
+        if self.static_capture.is_some() || self.local_stream || self.recording || self.status.capturing {
+            let _ = self.story.take_capture_url();
+            return;
+        }
+        if let Some(url) = self.story.take_capture_url() {
+            self.net.fetch_capture(&url);
+        }
+    }
+
+    fn story_drive(&mut self) {
+        let content = self.content_ns();
+        let current = perfr_story::Camera { t0_ns: self.t0, t1_ns: self.t1, scroll_y: self.lane_scroll };
+        let (threads, processes) = self.story_name_lists();
+        let drive = self.story.drive(
+            &self.tracks,
+            content,
+            current,
+            |pid, tid| {
+                threads
+                    .iter()
+                    .find(|((p, t), _)| *p == pid && *t == tid)
+                    .map(|(_, name)| name.clone())
+                    .unwrap_or_else(|| tid.to_string())
+            },
+            |pid| {
+                processes
+                    .iter()
+                    .find(|(p, _)| *p == pid)
+                    .map(|(_, name)| name.clone())
+                    .unwrap_or_else(|| "process".into())
+            },
+        );
+        if let Some(ops) = drive.tracks {
+            for (track, collapsed) in ops {
+                if let Some(id) = crate::story::resolve_row(
+                    &self.tracks,
+                    &track,
+                    |pid, tid| {
+                        threads
+                            .iter()
+                            .find(|((p, t), _)| *p == pid && *t == tid)
+                            .map(|(_, name)| name.clone())
+                            .unwrap_or_else(|| tid.to_string())
+                    },
+                    |pid| {
+                        processes
+                            .iter()
+                            .find(|(p, _)| *p == pid)
+                            .map(|(_, name)| name.clone())
+                            .unwrap_or_else(|| "process".into())
+                    },
+                ) {
+                    self.tracks.set_collapsed(id, collapsed);
+                }
+            }
+        }
+        if let Some(cam) = drive.camera {
+            self.t0 = cam.t0_ns;
+            self.t1 = cam.t1_ns.max(cam.t0_ns + 1.0);
+            if let Some((a, b)) = self.content_span() {
+                let (t0, t1) = clamp_window_contain(self.t0, self.t1, a, b);
+                self.t0 = t0;
+                self.t1 = t1;
+            }
+            self.follow = false;
+            self.user_set_view = true;
+            self.vscroll.cancel();
+            self.pending_vscroll = Some(cam.scroll_y.max(0.0));
+            self.needs_repaint = true;
+        }
+    }
+
+    /// Load a story document. Used by the story preview example.
+    pub fn load_story(&mut self, text: &str) -> Result<(), String> {
+        self.story.load_text(text)?;
+        self.follow = false;
+        Ok(())
+    }
+
+    /// Start Play. The camera eases between steps.
+    pub fn play_story(&mut self) {
+        self.story.play();
+        self.follow = false;
+        self.needs_repaint = true;
+    }
+
+    /// Open the step list and the edit row.
+    pub fn open_story_editor(&mut self) {
+        self.story.open_editor();
+        self.needs_repaint = true;
+    }
+
+    /// A handful of scheduler lanes and one thread, so a story has tracks to
+    /// land on. This is not a recording of box3d.
+    pub fn seed_story_preview(&mut self) {
+        use perfr_live_event::{kind, LiveEvent};
+        let origin = 1_000_000_000u64;
+        let window = 1_000_000_000u64;
+        let slice = |core: u8, dur: u64| LiveEvent {
+            start_ns: origin,
+            duration_ns: dur,
+            tid: 0,
+            pid: 0,
+            kind: kind::SCHEDULING_SLICE,
+            depth: 0,
+            extra: core,
+            _pad: 0,
+            name_id: 0,
+        };
+        for core in 0..8u8 {
+            let dur = if core < 4 { window * 8 / 10 } else { window / 50 };
+            self.index.insert(slice(core, dur));
+        }
+        self.intern.insert_id(42, "Step");
+        self.index.insert(LiveEvent {
+            start_ns: origin + window / 3,
+            duration_ns: window / 5,
+            tid: 1,
+            pid: 7,
+            kind: kind::API_SCOPE,
+            depth: 0,
+            extra: 0,
+            _pad: 0,
+            name_id: 42,
+        });
+        self.thread_names.insert((7, 1), "box3d".into());
+        self.trace_processes.push(crate::net::ProcessJson {
+            pid: 7,
+            name: "box3d".into(),
+            cpu: 0.0,
+            path: String::new(),
+        });
+        self.live_edge_ns = origin + window;
+        self.refresh_content_bounds();
+        self.follow = false;
+        self.user_set_view = true;
+        self.needs_repaint = true;
+    }
+
+    fn story_add_step(&mut self) {
+        if self.story.doc.is_none() {
+            self.story.ensure_blank();
+        }
+        let id = self.story.doc.as_ref().map(crate::story::next_step_id).unwrap_or_else(|| "step-1".into());
+        let n = self.story.doc.as_ref().map(|d| d.steps.len() + 1).unwrap_or(1);
+        let view = self.story_view_now();
+        let mut step = crate::story::step_from_view(&id, view);
+        step.title = format!("Step {n}");
+        self.story.push_step(step);
+        self.story.open = true;
+    }
+
+    fn story_view_now(&self) -> perfr_story::View {
+        use perfr_story::{Fit, Scroll, TrackRef, View};
+        let mut expanded = Vec::new();
+        let mut collapsed = Vec::new();
+        for row in self.tracks.rows() {
+            let track = match row.id {
+                RowId::Scheduler => TrackRef::Scheduler,
+                RowId::Process(pid) => TrackRef::Process { pid },
+                RowId::Thread(t) => TrackRef::Thread { pid: t.pid, tid: t.tid },
+                RowId::Async(t) => TrackRef::Async { pid: t.pid, tid: t.tid },
+                RowId::Lane(_) | RowId::Machine(_) => continue,
+            };
+            if self.tracks.collapsed(row.id) {
+                collapsed.push(track);
+            } else {
+                expanded.push(track);
+            }
+        }
+        let mut focused = Vec::new();
+        if let Some((pid, tid)) = self.selected_thread {
+            focused.push(TrackRef::Thread { pid, tid });
+        }
+        View {
+            t0_ns: Some(self.t0.max(0.0) as u64),
+            t1_ns: Some((self.t1.max(self.t0 + 1.0)) as u64),
+            fit: Some(Fit::Span),
+            scroll: Some(Scroll::Y { y: self.lane_scroll }),
+            expanded,
+            collapsed,
+            focused,
+            ..View::default()
+        }
+    }
+
+    fn story_hit_at(&self, pos: Pos2, body: Rect) -> Option<crate::story::Hit> {
+        use perfr_story::TrackRef;
+        if !body.contains(pos) {
+            return None;
+        }
+        let y = pos.y - body.top();
+        let row = self.tracks.hit_at_y(y)?;
+        let track = match row {
+            RowId::Scheduler => TrackRef::Scheduler,
+            RowId::Process(pid) => TrackRef::Process { pid },
+            RowId::Thread(t) => TrackRef::Thread { pid: t.pid, tid: t.tid },
+            RowId::Async(t) => TrackRef::Async { pid: t.pid, tid: t.tid },
+            RowId::Lane(k) if k.is_scheduler() => TrackRef::Scheduler,
+            RowId::Lane(k) => TrackRef::Thread { pid: k.pid, tid: k.tid },
+            RowId::Machine(_) => return None,
+        };
+        let placed = self.tracks.rows().iter().find(|r| r.id == row);
+        let (row_y, row_h) = placed.map(|r| (r.y, r.height)).unwrap_or((y, 1.0));
+        let frac = ((y - row_y) / row_h.max(1.0)).clamp(0.0, 1.0);
+        Some(crate::story::Hit {
+            time_ns: time_at_x(pos.x, body, self.t0, self.t1),
+            track,
+            y: frac,
+        })
+    }
+
+    fn paint_story_overlays(&self, ui: &Ui, body: Rect) {
+        let content = self.content_ns();
+        self.story.paint(
+            ui,
+            body,
+            &self.tracks,
+            &self.index,
+            &self.intern,
+            content,
+            self.t0,
+            self.t1,
+            |pid, tid| self.thread_display_name(pid, tid),
+            |pid| self.process_display_name(pid),
+        );
+    }
 }
 
 impl eframe::App for PerfrLiveApp {
@@ -10261,6 +10586,10 @@ impl eframe::App for PerfrLiveApp {
                 }
             }
 
+            self.story.tick(dt * 1000.0);
+            if self.story.needs_frames() {
+                ctx.request_repaint();
+            }
             let sat = safe_area_insets();
             {
                 let _chrome = devf.scope(TID_UI, NAME_CHROME);
@@ -10269,26 +10598,52 @@ impl eframe::App for PerfrLiveApp {
                 } else {
                     36.0
                 };
-                egui::TopBottomPanel::top("perfr_transport")
-                    .exact_height(bar_h + sat[0])
-                    .frame(
-                        Frame::new()
-                            .fill(theme::PANEL())
-                            .inner_margin(Margin {
-                                left: 4 + sat_i8(sat[3]),
-                                right: 4 + sat_i8(sat[1]),
-                                top: 4 + sat_i8(sat[0]),
-                                bottom: 4,
-                            })
-                            .stroke(Stroke::NONE)
-                            .shadow(egui::Shadow {
-                                offset: [0, 2],
-                                blur: 10,
-                                spread: 0,
-                                color: Color32::from_black_alpha(80),
-                            }),
-                    )
-                    .show(ctx, |ui| self.transport(ui));
+                // `?chrome=compact` (an iframe) drops the transport bar; the
+                // story bar below carries Share instead.
+                if !self.story.compact {
+                    egui::TopBottomPanel::top("perfr_transport")
+                        .exact_height(bar_h + sat[0])
+                        .frame(
+                            Frame::new()
+                                .fill(theme::PANEL())
+                                .inner_margin(Margin {
+                                    left: 4 + sat_i8(sat[3]),
+                                    right: 4 + sat_i8(sat[1]),
+                                    top: 4 + sat_i8(sat[0]),
+                                    bottom: 4,
+                                })
+                                .stroke(Stroke::NONE)
+                                .shadow(egui::Shadow {
+                                    offset: [0, 2],
+                                    blur: 10,
+                                    spread: 0,
+                                    color: Color32::from_black_alpha(80),
+                                }),
+                        )
+                        .show(ctx, |ui| self.transport(ui));
+                }
+                if self.story.visible() {
+                    let story_h = self.story.bar_height() + if self.story.compact { 28.0 } else { 0.0 };
+                    egui::TopBottomPanel::top("perfr_story")
+                        .exact_height(story_h)
+                        .frame(
+                            Frame::new()
+                                .fill(theme::PANEL())
+                                .inner_margin(Margin { left: 6, right: 6, top: 4, bottom: 2 })
+                                .stroke(Stroke::NONE),
+                        )
+                        .show(ctx, |ui| {
+                            let cmds = self.story.bar(ui);
+                            if self.story.compact {
+                                ui.horizontal(|ui| self.transport_share(ui));
+                            }
+                            for cmd in cmds {
+                                match cmd {
+                                    crate::story::StoryCmd::AddStep => self.story_add_step(),
+                                }
+                            }
+                        });
+                }
             }
 
             if sat[2] > 0.5 {
@@ -10307,6 +10662,7 @@ impl eframe::App for PerfrLiveApp {
             self.tweaks_window(ctx);
             self.maybe_resume_share();
             self.share_window(ctx);
+            self.story.windows(ctx);
             self.presets_window(ctx);
             self.bench_window(ctx);
             self.paint_scope_menu(ctx);

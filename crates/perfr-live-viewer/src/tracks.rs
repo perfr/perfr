@@ -614,6 +614,23 @@ impl TrackStrip {
         self.collapsed.contains(&id)
     }
 
+    /// Set a row's collapsed state. Lane rows have none. A change is marked
+    /// as the user's, so a later auto-fold does not undo a story step.
+    pub fn set_collapsed(&mut self, id: RowId, collapsed: bool) {
+        if matches!(id, RowId::Lane(_)) {
+            return;
+        }
+        let changed = if collapsed {
+            self.collapsed.insert(id)
+        } else {
+            self.collapsed.remove(&id)
+        };
+        if changed {
+            self.user_toggled.insert(id);
+            self.layout_gen = self.layout_gen.wrapping_add(1);
+        }
+    }
+
     pub fn hidden_count(&self) -> usize {
         self.hidden.len()
     }

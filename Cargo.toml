@@ -31,6 +31,7 @@ members = [
     "crates/perfr-live-ring",
     "crates/perfr-live-server",
     "crates/perfr-live-viewer",
+    "crates/perfr-story",
     "crates/perfr-maps",
     "crates/perfr-object",
     "crates/perfr-perf-merge",

@@ -75,6 +75,7 @@ pub fn router(service: Arc<LiveService>) -> Router {
         .route("/api/logs", get(capture_logs))
         .route("/api/symbols/modules", get(symbols_modules))
         .route("/api/capture/export", get(capture_export))
+        .route("/api/capture/targets", get(capture_targets))
         .route("/api/capture/share", post(capture_share))
         .route("/api/capture/open", post(capture_open))
         .route("/api/capture/clear", post(capture_clear))
@@ -460,6 +461,32 @@ async fn sampling_tree(
 /// The largest capture bundle an import accepts. A slice is rarely more than
 /// a few hundred megabytes; the ring itself is 256 MiB by default.
 const IMPORT_BODY_LIMIT: usize = 4 << 30;
+
+#[derive(Deserialize)]
+struct TargetsQuery {
+    #[serde(default)]
+    q: String,
+    t0: Option<u64>,
+    t1: Option<u64>,
+}
+
+/// `GET /api/capture/targets?q=&t0=&t1=` -- threads, scopes and per-core
+/// busy fraction in a window. A missing `t0` is the start of the capture;
+/// a `t1` that is absent, 0, or not after `t0` is its end.
+/// The busy fraction is scheduling-slice coverage, not a claim about the program.
+async fn capture_targets(State(svc): State<Arc<LiveService>>, Query(q): Query<TargetsQuery>) -> Json<serde_json::Value> {
+    let index = svc.cached_index();
+    let (start, end) = index.time_bounds().unwrap_or((0, 1));
+    let (t0, t1) = match (q.t0, q.t1) {
+        (Some(a), Some(b)) if b > a => (a, b),
+        (Some(a), _) => (a, end.max(a.saturating_add(1))),
+        (None, Some(b)) if b > start => (start, b),
+        (None, _) => (start, end),
+    };
+    let intern = svc.intern.lock();
+    let (threads, processes) = svc.capture_names();
+    Json(super::targets::summarize(&index, &intern, &threads, &processes, t0, t1, &q.q))
+}
 
 /// `GET /api/capture/export?format=ipc|parquet|bundle|stream&t0=..&t1=..` --
 /// the capture as one file, offered as a download. `ipc` (the default) is an

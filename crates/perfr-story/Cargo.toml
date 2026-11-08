@@ -1,0 +1,16 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+[package]
+name = "perfr-story"
+version = "0.1.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Versioned capture stories: view targets and overlays for the perfr viewer"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

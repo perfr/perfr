@@ -113,6 +113,8 @@ struct Session {
 pub struct Mcp {
     http: HttpClient,
     session: Mutex<Session>,
+    /// The story being written. It lives in this process, not in the service.
+    story: Mutex<Option<perfr_story::Story>>,
     platform: Platform,
 }
 
@@ -121,6 +123,7 @@ impl Mcp {
         Ok(Self {
             http: HttpClient::parse(url, allow_remote)?,
             session: Mutex::new(Session { pid: None, hooks: Vec::new(), known: HashMap::new() }),
+            story: Mutex::new(None),
             platform,
         })
     }
@@ -187,6 +190,22 @@ impl Mcp {
             "perfr_sampling_report" => self.sampling_report(args),
             "perfr_callstacks" => self.callstacks(args),
             "perfr_function_stats" => self.function_stats(args),
+            "perfr_story_create" => self.story_create(args),
+            "perfr_story_load" => self.story_load(args),
+            "perfr_story_get" => self.story_get(),
+            "perfr_story_add_step" => self.story_add_step(args),
+            "perfr_story_update_step" => self.story_update_step(args),
+            "perfr_story_remove_step" => self.story_remove_step(args),
+            "perfr_story_set_view" => self.story_set_view(args),
+            "perfr_story_add_overlay" => self.story_add_overlay(args),
+            "perfr_story_remove_overlay" => self.story_remove_overlay(args),
+            "perfr_story_reorder" => self.story_reorder(args),
+            "perfr_story_validate" => self.story_validate(),
+            "perfr_story_export" => self.story_export(args),
+            "perfr_story_find_threads" => self.story_find(args, false),
+            "perfr_story_find_scopes" => self.story_find(args, true),
+            "perfr_story_hotspots" => self.story_hotspots(args),
+            "perfr_story_cpu" => self.story_cpu(args),
             "perfr_logs" => self.logs(args),
             _ => Err(format!("unknown tool {name}")),
         }
@@ -751,6 +770,11 @@ Change the hook set with perfr_unhook and start again; a running capture \
 keeps the hooks it started with. Sampling and the scheduler are Linux-only; \
 on macOS those tools say so and do not invent an empty profile. \
 This server does not edit source, rebuild, kill processes, or delete files. \
+A capture story is a separate JSON document. perfr_story_create or \
+perfr_story_load starts one; perfr_story_find_threads, perfr_story_find_scopes, \
+perfr_story_hotspots and perfr_story_cpu read the capture so a step can name \
+a real track, scope or time range. Numbers from those tools are readings of \
+this capture. perfr_story_export writes the document; it does not change the capture. \
 The HTTP API has no authentication.";
 
 fn tool_ok(payload: &Value) -> Value {
@@ -931,7 +955,566 @@ pub fn tool_specs() -> Vec<Value> {
                 "additionalProperties": false,
             }),
         ),
+        tool(
+            "perfr_story_create",
+            "Start a new capture story in this MCP process, replacing any story already loaded. The document is perfr.story version 1. capture is the URL the viewer should open when the page did not pass ?capture=. Nothing is written until perfr_story_export.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "summary": { "type": "string", "description": "What the story is willing to claim. Do not put numbers here that the capture did not measure." },
+                    "capture": { "type": "string", "description": "Capture URL, for example captures/box3d.perfr.stream. Empty if the page already loaded one." }
+                },
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_story_load",
+            "Replace the in-memory story with a perfr.story JSON document, either the json string or a file at path. The file is read, not modified.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "json": { "type": "string", "description": "The document." },
+                    "path": { "type": "string", "description": "A UTF-8 file to read." }
+                },
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_story_get",
+            "Return the story loaded in this process: the document and a short list of steps (id, kind, title, overlay count).",
+            json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+        ),
+        tool(
+            "perfr_story_add_step",
+            "Append a step, or insert it at index. kind is context, problem, evidence, root_cause, proposed_fix, applied_fix, or before_after. view uses capture nanoseconds or fractions of the capture span. Overlays are optional here; perfr_story_add_overlay adds them later.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "index": { "type": "integer", "description": "Insert position. Default is the end." },
+                    "step": { "type": "object", "description": "id, kind, title, body, duration_ms, view, overlays." }
+                },
+                "required": ["step"],
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_story_update_step",
+            "Replace fields of one step. Pass id and any of title, body, kind, duration_ms, view, overlays. A present view or overlays replaces the whole value.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "title": { "type": "string" },
+                    "body": { "type": "string" },
+                    "kind": { "type": "string" },
+                    "duration_ms": { "type": "integer" },
+                    "view": { "type": "object" },
+                    "overlays": { "type": "array" }
+                },
+                "required": ["id"],
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_story_remove_step",
+            "Remove the step with this id. Later steps keep their ids and move up to close the gap.",
+            json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"],
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_story_set_view",
+            "Set the camera for one step. t0_ns/t1_ns are capture nanoseconds. t0_frac/t1_frac are fractions of the capture span. fit is content or span. expanded, collapsed and focused are track objects: {kind:scheduler}, {kind:thread,pid,tid}, {kind:process,pid}, {kind:async,pid,tid}, or {kind:name,name}. scroll is {kind:y,y} or {kind:track,track}.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "view": { "type": "object" }
+                },
+                "required": ["id", "view"],
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_story_add_overlay",
+            "Add an overlay to a step. kind is arrow, rect, highlight, callout, or code. Anchors use time_ns or time_frac plus a track, not screen pixels. A code overlay is a file and a 1-based line; it is a pointer, not a measurement.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "step_id": { "type": "string" },
+                    "overlay": { "type": "object" }
+                },
+                "required": ["step_id", "overlay"],
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_story_remove_overlay",
+            "Remove one overlay from a step by step id and overlay id. The other overlays stay.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "step_id": { "type": "string" },
+                    "overlay_id": { "type": "string" }
+                },
+                "required": ["step_id", "overlay_id"],
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_story_reorder",
+            "Move a step to a new index. Later steps shift up.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "index": { "type": "integer" }
+                },
+                "required": ["id", "index"],
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_story_validate",
+            "Check the loaded story. ok is false with errors when a step or overlay is not usable. An empty step list is a draft and is ok.",
+            json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+        ),
+        tool(
+            "perfr_story_export",
+            "Return the story as JSON. path, when set, also writes that file. The capture is not modified. perfr-web can store this document beside a capture as captures/<id>.perfr.story and open the viewer with ?capture=<stream>&story=<story url>.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Where to write the JSON. Omit to only return it." }
+                },
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_story_find_threads",
+            "Threads in the current capture whose name, process, pid or tid contains query. Use pid and tid in a story track. This does not start a capture.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "t0_ns": { "type": "integer" },
+                    "t1_ns": { "type": "integer" }
+                },
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_story_find_scopes",
+            "Scopes in a time window whose name contains query, hottest total time first. scope_id is the capture's name id, for a scope highlight. Times are nanoseconds inside the window.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "t0_ns": { "type": "integer" },
+                    "t1_ns": { "type": "integer" }
+                },
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_story_hotspots",
+            "Hottest sampled functions in a window. self and inclusive are sample counts. Use them as what this capture measured. On a machine without sampling the result is supported:false.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "t0_ns": { "type": "integer", "description": "Window start. Omit for the whole capture." },
+                    "t1_ns": { "type": "integer", "description": "Window end." },
+                    "limit": { "type": "integer" },
+                    "offset": { "type": "integer" }
+                },
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_story_cpu",
+            "Per-core busy fraction in a window, from scheduling slices. busy is 0 to 1. cores_busy counts cores at or above 0.05. This is a reading of the capture. It does not say how many threads the program meant to run.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "t0_ns": { "type": "integer" },
+                    "t1_ns": { "type": "integer" }
+                },
+                "additionalProperties": false,
+            }),
+        ),
     ]
+}
+
+impl Mcp {
+    fn story_mut(&self) -> Result<std::sync::MutexGuard<'_, Option<perfr_story::Story>>, String> {
+        self.story
+            .lock()
+            .map_err(|_| "session poisoned".to_string())
+    }
+
+    fn story_create(&self, args: &Value) -> Result<Value, String> {
+        let mut story = perfr_story::Story::default();
+        if let Some(title) = arg_str(args, "title") {
+            story.title = title.to_string();
+        }
+        if let Some(summary) = arg_str(args, "summary") {
+            story.summary = summary.to_string();
+        }
+        if let Some(capture) = arg_str(args, "capture") {
+            story.capture = capture.to_string();
+        }
+        let errors = perfr_story::validate(&story);
+        if !errors.is_empty() {
+            return Err(errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; "));
+        }
+        *self.story_mut()? = Some(story.clone());
+        Ok(story_payload(&story))
+    }
+
+    fn story_load(&self, args: &Value) -> Result<Value, String> {
+        let text = if let Some(path) = arg_str(args, "path") {
+            std::fs::read_to_string(path).map_err(|e| format!("could not read {path}: {e}"))?
+        } else if let Some(json) = arg_str(args, "json") {
+            json.to_string()
+        } else {
+            return Err("pass json or path".into());
+        };
+        let story = perfr_story::parse_story(&text)?;
+        *self.story_mut()? = Some(story.clone());
+        Ok(story_payload(&story))
+    }
+
+    fn story_get(&self) -> Result<Value, String> {
+        let slot = self.story_mut()?;
+        let story = slot
+            .as_ref()
+            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
+        Ok(story_payload(story))
+    }
+
+    fn story_add_step(&self, args: &Value) -> Result<Value, String> {
+        let step_json = args.get("step").cloned().ok_or("step is required")?;
+        let step: perfr_story::Step =
+            serde_json::from_value(step_json).map_err(|e| format!("step: {e}"))?;
+        let added = step.id.clone();
+        let at = arg_usize(args, "index");
+        let mut slot = self.story_mut()?;
+        let story = slot
+            .as_mut()
+            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
+        story.add_step(step, at)?;
+        let errors = perfr_story::validate(story);
+        if !errors.is_empty() {
+            let _ = story.remove_step(&added);
+            return Err(errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; "));
+        }
+        Ok(story_payload(story))
+    }
+
+    fn story_update_step(&self, args: &Value) -> Result<Value, String> {
+        let id = arg_str(args, "id").ok_or("id is required")?;
+        let mut slot = self.story_mut()?;
+        let story = slot
+            .as_mut()
+            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
+        let backup = story.clone();
+        story.update_step(id, args)?;
+        let errors = perfr_story::validate(story);
+        if !errors.is_empty() {
+            *story = backup;
+            return Err(errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; "));
+        }
+        Ok(story_payload(story))
+    }
+
+    fn story_remove_step(&self, args: &Value) -> Result<Value, String> {
+        let id = arg_str(args, "id").ok_or("id is required")?;
+        let mut slot = self.story_mut()?;
+        let story = slot
+            .as_mut()
+            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
+        story.remove_step(id)?;
+        Ok(story_payload(story))
+    }
+
+    fn story_set_view(&self, args: &Value) -> Result<Value, String> {
+        let id = arg_str(args, "id").ok_or("id is required")?;
+        let view = args.get("view").cloned().ok_or("view is required")?;
+        let view: perfr_story::View =
+            serde_json::from_value(view).map_err(|e| format!("view: {e}"))?;
+        let mut slot = self.story_mut()?;
+        let story = slot
+            .as_mut()
+            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
+        let backup = story.clone();
+        story.set_view(id, view)?;
+        let errors = perfr_story::validate(story);
+        if !errors.is_empty() {
+            *story = backup;
+            return Err(errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; "));
+        }
+        Ok(story_payload(story))
+    }
+
+    fn story_add_overlay(&self, args: &Value) -> Result<Value, String> {
+        let step_id = arg_str(args, "step_id").ok_or("step_id is required")?;
+        let overlay = args.get("overlay").cloned().ok_or("overlay is required")?;
+        let overlay: perfr_story::Overlay =
+            serde_json::from_value(overlay).map_err(|e| format!("overlay: {e}"))?;
+        let mut slot = self.story_mut()?;
+        let story = slot
+            .as_mut()
+            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
+        let backup = story.clone();
+        story.add_overlay(step_id, overlay)?;
+        let errors = perfr_story::validate(story);
+        if !errors.is_empty() {
+            *story = backup;
+            return Err(errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; "));
+        }
+        Ok(story_payload(story))
+    }
+
+    fn story_remove_overlay(&self, args: &Value) -> Result<Value, String> {
+        let step_id = arg_str(args, "step_id").ok_or("step_id is required")?;
+        let overlay_id = arg_str(args, "overlay_id").ok_or("overlay_id is required")?;
+        let mut slot = self.story_mut()?;
+        let story = slot
+            .as_mut()
+            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
+        story.remove_overlay(step_id, overlay_id)?;
+        Ok(story_payload(story))
+    }
+
+    fn story_reorder(&self, args: &Value) -> Result<Value, String> {
+        let id = arg_str(args, "id").ok_or("id is required")?;
+        let index = arg_usize(args, "index").ok_or("index is required")?;
+        let mut slot = self.story_mut()?;
+        let story = slot
+            .as_mut()
+            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
+        story.reorder(id, index)?;
+        Ok(story_payload(story))
+    }
+
+    fn story_validate(&self) -> Result<Value, String> {
+        let slot = self.story_mut()?;
+        let story = slot
+            .as_ref()
+            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
+        let errors = perfr_story::validate(story);
+        Ok(json!({
+            "ok": errors.is_empty(),
+            "errors": errors.iter().map(|e| json!({"path": e.path, "message": e.message})).collect::<Vec<_>>(),
+        }))
+    }
+
+    fn story_export(&self, args: &Value) -> Result<Value, String> {
+        let slot = self.story_mut()?;
+        let story = slot
+            .as_ref()
+            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
+        let errors = perfr_story::validate(story);
+        if !errors.is_empty() {
+            return Err(errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; "));
+        }
+        let text = story.to_json_pretty()?;
+        let mut path_out = Value::Null;
+        if let Some(path) = arg_str(args, "path") {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+            }
+            std::fs::write(path, &text).map_err(|e| format!("could not write {path}: {e}"))?;
+            path_out = json!(path);
+        }
+        Ok(json!({
+            "json": text,
+            "bytes": text.len(),
+            "path": path_out,
+            "viewer": {
+                "query": "capture=<stream url>&story=<story url>&chrome=compact",
+                "perfr_web": "Store the JSON as captures/<id>.perfr.story next to captures/<id>.perfr.stream. A short link can resolve to those two URLs. This server does not upload it.",
+            },
+        }))
+    }
+
+    fn story_find(&self, args: &Value, scopes: bool) -> Result<Value, String> {
+        let body = self.targets(args)?;
+        if scopes {
+            Ok(json!({
+                "t0_ns": body.get("t0_ns").cloned().unwrap_or(Value::Null),
+                "t1_ns": body.get("t1_ns").cloned().unwrap_or(Value::Null),
+                "scopes": body.get("scopes").cloned().unwrap_or(json!([])),
+                "total": body.get("scope_total").cloned().unwrap_or(json!(0)),
+                "note": body.get("note").cloned().unwrap_or(Value::Null),
+            }))
+        } else {
+            Ok(json!({
+                "threads": body.get("threads").cloned().unwrap_or(json!([])),
+                "total": body.get("thread_total").cloned().unwrap_or(json!(0)),
+                "note": "pid and tid are the ids a story track uses.",
+            }))
+        }
+    }
+
+    fn story_hotspots(&self, args: &Value) -> Result<Value, String> {
+        if !self.platform.sampling {
+            return Ok(unsupported_feature("sampling"));
+        }
+        let mut qs = Vec::new();
+        if let Some(t0) = arg_u64(args, "t0_ns") {
+            qs.push(format!("start_ns={t0}"));
+        }
+        if let Some(t1) = arg_u64(args, "t1_ns") {
+            qs.push(format!("end_ns={t1}"));
+        }
+        let path = if qs.is_empty() {
+            "/api/sampling/report".to_string()
+        } else {
+            format!("/api/sampling/report?{}", qs.join("&"))
+        };
+        match self.http.get_raw(&path, Duration::from_secs(60)) {
+            Ok(raw) if raw.status == 501 => Ok(unsupported_feature("sampling")),
+            Ok(raw) => {
+                let body = parse_body(&raw)?;
+                let mut shaped = shape_hotspots(&body, args);
+                if let Some(obj) = shaped.as_object_mut() {
+                    obj.insert(
+                        "note".into(),
+                        json!(
+                            "self and inclusive are sample counts in this window of this capture."
+                        ),
+                    );
+                }
+                Ok(shaped)
+            }
+            Err(message) => Err(message),
+        }
+    }
+
+    fn story_cpu(&self, args: &Value) -> Result<Value, String> {
+        let body = self.targets(args)?;
+        Ok(json!({
+            "t0_ns": body.get("t0_ns").cloned().unwrap_or(Value::Null),
+            "t1_ns": body.get("t1_ns").cloned().unwrap_or(Value::Null),
+            "cores": body.get("cores").cloned().unwrap_or(json!([])),
+            "core_count": body.get("core_count").cloned().unwrap_or(json!(0)),
+            "cores_busy": body.get("cores_busy").cloned().unwrap_or(json!(0)),
+            "busy_at": body.get("busy_at").cloned().unwrap_or(json!(0.05)),
+            "note": body.get("note").cloned().unwrap_or(Value::Null),
+        }))
+    }
+
+    fn targets(&self, args: &Value) -> Result<Value, String> {
+        let mut qs = Vec::new();
+        if let Some(q) = arg_str(args, "query") {
+            if !q.is_empty() {
+                qs.push(format!("q={}", urlencode(q)));
+            }
+        }
+        if let Some(t0) = arg_u64(args, "t0_ns") {
+            qs.push(format!("t0={t0}"));
+        }
+        if let Some(t1) = arg_u64(args, "t1_ns") {
+            qs.push(format!("t1={t1}"));
+        }
+        let path = if qs.is_empty() {
+            "/api/capture/targets".to_string()
+        } else {
+            format!("/api/capture/targets?{}", qs.join("&"))
+        };
+        match self.http.get_raw(&path, Duration::from_secs(30)) {
+            Ok(raw) if raw.status == 404 => {
+                Err("this perfr has no /api/capture/targets. Update the service that is serving the capture.".into())
+            }
+            Ok(raw) => parse_body(&raw),
+            Err(message) => Err(message),
+        }
+    }
+}
+
+fn story_payload(story: &perfr_story::Story) -> Value {
+    json!({
+        "format": story.format,
+        "version": story.version,
+        "title": story.title,
+        "summary": story.summary,
+        "capture": story.capture,
+        "steps": story.steps.iter().map(|step| json!({
+            "id": step.id,
+            "kind": step.kind,
+            "title": step.title,
+            "duration_ms": step.duration_ms,
+            "overlays": step.overlays.len(),
+        })).collect::<Vec<_>>(),
+        "story": serde_json::to_value(story).unwrap_or(Value::Null),
+    })
+}
+
+fn shape_hotspots(body: &Value, args: &Value) -> Value {
+    let limit = page_limit(args, 15, 40);
+    let offset = page_offset(args);
+    let functions = body
+        .get("functions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let total = functions.len();
+    let hotspots: Vec<Value> = functions
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|row| {
+            let id = row.get("function_id").and_then(json_u64).unwrap_or(0);
+            json!({
+                "name": clip(row.get("name").and_then(|v| v.as_str()).unwrap_or("")),
+                "module": basename(row.get("module").and_then(|v| v.as_str()).unwrap_or("")),
+                "function_id": if id == 0 { Value::Null } else { json!(id) },
+                "self": row.get("self").and_then(|v| v.as_u64()).unwrap_or(0),
+                "inclusive": row.get("inclusive").and_then(|v| v.as_u64()).unwrap_or(0),
+                "self_percent": round1(row.get("self_percent").and_then(|v| v.as_f64()).unwrap_or(0.0)),
+                "inclusive_percent": round1(row.get("inclusive_percent").and_then(|v| v.as_f64()).unwrap_or(0.0)),
+            })
+        })
+        .collect();
+    json!({
+        "supported": true,
+        "samples": body.get("samples").and_then(|v| v.as_u64()).unwrap_or(0),
+        "total_functions": total,
+        "offset": offset,
+        "limit": limit,
+        "hotspots": hotspots,
+    })
 }
 
 fn tool(name: &str, description: &str, schema: Value) -> Value {

@@ -308,6 +308,8 @@ pub struct Inbox {
     /// A `.perfr.stream` just loaded from a file or `?capture=` URL. The
     /// app ingests it and keeps the bytes for Share.
     pub loaded_stream: Option<Vec<u8>>,
+    /// A story document fetched from `?story=`.
+    pub loaded_story: Option<String>,
     pub status: Option<StatusJson>,
     /// The service's persisted user settings (`/api/settings`), as the raw
     /// object so keys this viewer does not know survive a round trip.
@@ -625,6 +627,38 @@ mod wasm_impl {
             }
         }
 
+        /// Fetch a story document. The bytes land in `loaded_story`.
+        pub fn fetch_story(&self, url: &str) {
+            let url = url.to_string();
+            let inbox = self.inbox.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = get_text(&url).await;
+                let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
+                match result {
+                    Ok(text) => g.loaded_story = Some(text),
+                    Err(e) => g.error = Some(format!("story: {e}")),
+                }
+            });
+        }
+
+        /// Fetch a `.perfr.stream` into the same inbox a `?capture=` load uses.
+        pub fn fetch_capture(&self, url: &str) {
+            let url = url.to_string();
+            let inbox = self.inbox.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = get_bytes(&url).await;
+                let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
+                match result {
+                    Ok(bytes) => {
+                        g.bytes_in += bytes.len() as u64;
+                        g.loaded_stream = Some(bytes);
+                        g.http_ok = true;
+                    }
+                    Err(e) => g.error = Some(format!("capture file: {e}")),
+                }
+            });
+        }
+
         /// Reads a `.perfr.stream` from the service so the dialog can show
         /// its size. Does not post it.
         pub fn stored_share_auth() -> (Option<String>, bool) {
@@ -832,6 +866,7 @@ mod wasm_impl {
                 share_login_signalled: std::mem::take(&mut inbox.share_login_signalled),
                 share_token: inbox.share_token.take(),
                 loaded_stream: inbox.loaded_stream.take(),
+                loaded_story: inbox.loaded_story.take(),
                 status: inbox.status.take(),
                 settings: inbox.settings.take(),
                 bench: inbox.bench.take(),
@@ -1844,6 +1879,8 @@ mod native_impl {
         pub fn from_capture_url(_url: &str) -> Self {
             Self
         }
+        pub fn fetch_story(&self, _url: &str) {}
+        pub fn fetch_capture(&self, _url: &str) {}
         pub fn take(&self) -> Inbox {
             Inbox::default()
         }

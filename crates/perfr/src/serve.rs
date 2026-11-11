@@ -48,7 +48,7 @@ use perfr_live_server::{http, ControlHooks, LiveService, ServerConfig};
 #[cfg(target_os = "linux")]
 use perfr_perf_records::reader::parse_context_switch;
 #[cfg(target_os = "linux")]
-use perfr_perf_records::{record_type, ForkExit};
+use perfr_perf_records::{record_type, ForkExit, Lost};
 #[cfg(target_os = "linux")]
 use perfr_tracing_state::context_switches::{ContextSwitchManager, SwitchOut};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -734,7 +734,14 @@ struct SampleCounters {
     parsed: u64,
     short_regs: u64,
     failed_drains: u64,
+    /// Samples the kernel could not write because a thread's ring was full.
+    lost: u64,
 }
+
+/// `extra` of a `DROP` marker for a loss that is not of a scope-ring record
+/// kind: here, stack samples the kernel dropped.
+#[cfg(target_os = "linux")]
+const DROP_KIND_UNKNOWN: u8 = 0xFF;
 
 /// Counts the drains of one kind of perf ring that ended in a read error,
 /// and logs the first. The ring skips what it could not walk and reads on,
@@ -803,7 +810,28 @@ fn drain_samples(
         unwinder, symbolizer, pc_ids, names, store, target_pid, period_ns, batch, horizon_ns, returns, scratch,
     );
     for thread in threads.iter_mut() {
+        let tid = thread.tid;
         let read = thread.sample.drain(|kind, record| {
+            if kind == record_type::LOST {
+                // The ring was full and the kernel dropped samples of this
+                // thread. Without a mark the gap reads as the thread having
+                // been idle; the record is stamped when writing resumed,
+                // which is where the gap ends.
+                if let Some(lost) = Lost::parse(record) {
+                    batch.push(LiveEvent {
+                        start_ns: lost.sample_id.time,
+                        duration_ns: lost.lost,
+                        tid: tid as u32,
+                        pid: target_pid as u32,
+                        kind: kind::DROP,
+                        depth: 0,
+                        extra: DROP_KIND_UNKNOWN,
+                        _pad: 0,
+                        name_id: 0,
+                    });
+                }
+                return;
+            }
             if kind != record_type::SAMPLE {
                 return;
             }
@@ -842,8 +870,17 @@ fn drain_samples(
                 scratch.held.push(HeldSample { time: sample.time, tid: sample.tid, regs, stack: owned });
             }
         });
-        if let Err(error) = read {
-            note_ring_error(&mut counters.failed_drains, "sampling", &error);
+        match read {
+            Ok(drained) => {
+                if drained.lost > 0 && counters.lost == 0 {
+                    log::warn!(
+                        "the kernel dropped {} sample(s) of thread {tid}: its sampling ring was full",
+                        drained.lost
+                    );
+                }
+                counters.lost += drained.lost;
+            }
+            Err(error) => note_ring_error(&mut counters.failed_drains, "sampling", &error),
         }
     }
 }
@@ -1589,6 +1626,11 @@ fn capture_loop(
     let mut switches = ContextSwitchManager::new();
     let mut switch_failed_drains: u64 = 0;
     let mut task_failed_drains: u64 = 0;
+    // Records the kernel dropped because a ring was full, by kind of ring.
+    // The sampling rings' count is in `samples`, the tracepoints' in the
+    // thread-state tracer.
+    let mut switches_lost: u64 = 0;
+    let mut task_events_lost: u64 = 0;
     let mut instrumented_calls: u64 = 0;
     let mut samples = SampleCounters::default();
     let mut batch: Vec<LiveEvent> = Vec::with_capacity(256);
@@ -1743,6 +1785,14 @@ fn capture_loop(
         let _switches = perfr_api::scope("read context switches");
         for ring in switch_rings.iter_mut() {
             let read = ring.drain(|kind, record| {
+                if kind == record_type::LOST {
+                    // Among what was dropped may be the switch-out of the
+                    // thread this core last switched in.
+                    if let Some(lost) = Lost::parse(record) {
+                        switches.forget_core(lost.sample_id.cpu as u16);
+                    }
+                    return;
+                }
                 if kind != record_type::SWITCH && kind != record_type::SWITCH_CPU_WIDE {
                     return;
                 }
@@ -1790,8 +1840,17 @@ fn capture_loop(
                     );
                 }
             });
-            if let Err(error) = read {
-                note_ring_error(&mut switch_failed_drains, "context-switch", &error);
+            match read {
+                Ok(drained) => {
+                    if drained.lost > 0 && switches_lost == 0 {
+                        log::warn!(
+                            "the kernel dropped {} context switch(es): a scheduler ring was full",
+                            drained.lost
+                        );
+                    }
+                    switches_lost += drained.lost;
+                }
+                Err(error) => note_ring_error(&mut switch_failed_drains, "context-switch", &error),
             }
         }
         drop(_switches);
@@ -1801,6 +1860,7 @@ fn capture_loop(
             // rings once the sample drain below has read them.
             let _task = perfr_api::scope("read task events");
             let mut born: Vec<i32> = Vec::new();
+            let mut lost_now: u64 = 0;
             for thread in threads.iter_mut() {
                 let Some(task) = thread.task.as_mut() else { continue };
                 let (own_tid, dead) = (thread.tid, &mut thread.dead);
@@ -1819,8 +1879,29 @@ fn capture_loop(
                         *dead = true;
                     }
                 });
-                if let Err(error) = read {
-                    note_ring_error(&mut task_failed_drains, "task-event", &error);
+                match read {
+                    Ok(drained) => lost_now += drained.lost,
+                    Err(error) => note_ring_error(&mut task_failed_drains, "task-event", &error),
+                }
+            }
+            if lost_now > 0 {
+                if task_events_lost == 0 {
+                    log::warn!("the kernel dropped {lost_now} task event(s): a thread's task ring was full");
+                }
+                task_events_lost += lost_now;
+                // A dropped fork is a thread nobody announced: the scan
+                // below finds it, so it runs now instead of on its timer. A
+                // dropped exit is a thread that would keep its rings to the
+                // end of the capture: /proc says which are gone.
+                last_thread_scan_ns = 0;
+                if let Ok(tasks) = std::fs::read_dir(format!("/proc/{target_pid}/task")) {
+                    let alive: std::collections::HashSet<i32> = tasks
+                        .flatten()
+                        .filter_map(|entry| entry.file_name().to_str().and_then(|s| s.parse().ok()))
+                        .collect();
+                    for thread in threads.iter_mut().filter(|t| !alive.contains(&t.tid)) {
+                        thread.dead = true;
+                    }
                 }
             }
             for tid in born {
@@ -2039,6 +2120,15 @@ fn capture_loop(
             // lost to a lap, and how many scopes are open (started, not yet
             // stopped). Either climbing steadily means STOPs are going missing.
             perfr_api::value("scope records lost", scopes.events_lost as f64);
+            // And what the kernel dropped from the perf rings, all kinds
+            // together; the end-of-capture line splits it up.
+            perfr_api::value(
+                "perf records lost",
+                (samples.lost
+                    + switches_lost
+                    + task_events_lost
+                    + thread_states.as_ref().map_or(0, |tracer| tracer.records_lost())) as f64,
+            );
             perfr_api::value("scope open scopes", scopes.open_scopes() as f64);
             let stats = service.stats();
             let viewer_fill = if stats.events_capacity > 0 {
@@ -2325,6 +2415,17 @@ fn capture_loop(
         log::warn!(
             "{unparsed} sample(s) failed to parse, {} had too few registers",
             samples.short_regs
+        );
+    }
+    // Loss on the perf rings, said as plainly as the scope rings' is: a
+    // capture with samples missing otherwise reads as threads that were idle.
+    let states_lost = thread_states.as_ref().map_or(0, |tracer| tracer.records_lost());
+    if samples.lost + switches_lost + task_events_lost + states_lost > 0 {
+        log::warn!(
+            "the kernel dropped records because perf rings were full: {} sample(s), \
+             {switches_lost} context switch(es), {task_events_lost} task event(s), \
+             {states_lost} scheduler tracepoint record(s)",
+            samples.lost
         );
     }
     let failed_drains = samples.failed_drains + switch_failed_drains + task_failed_drains;
@@ -3230,6 +3331,170 @@ mod tests {
         let kept: Vec<i32> = threads.iter().map(|t| t.tid).collect();
         assert_eq!(kept[..3], [1, 4, 5]);
         assert_eq!(kept.len(), MAX_DEAD_THREADS_HELD + 1);
+    }
+
+    /// What `drain_samples` needs around it, with nothing of the kernel in
+    /// it: sampled threads whose rings the test fills, an unwinder that
+    /// knows no module (so a frame is whatever the registers said), and a
+    /// service and store to receive the result.
+    #[cfg(target_os = "linux")]
+    struct SampleRig {
+        threads: Vec<SampledThread>,
+        unwinder: ProcessUnwinder,
+        symbolizer: Symbolizer,
+        pc_ids: crate::report::FastMap<u64, u32>,
+        names: FrameNames,
+        store: Arc<SampleStore>,
+        counters: SampleCounters,
+        scratch: SampleScratch,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl SampleRig {
+        const TARGET_PID: i32 = 4000;
+
+        fn new(tids: &[i32]) -> SampleRig {
+            let service = LiveService::new(ServerConfig { ring_buffer_bytes: 1 << 20, ..Default::default() }).unwrap();
+            let store = Arc::new(SampleStore::new());
+            SampleRig {
+                threads: tids
+                    .iter()
+                    .map(|tid| SampledThread {
+                        tid: *tid,
+                        sample: perfr_perf_ring::ring::synthetic(1 << 16).unwrap(),
+                        task: None,
+                        dead: false,
+                    })
+                    .collect(),
+                unwinder: ProcessUnwinder::from_maps_content(b""),
+                symbolizer: Symbolizer::empty(),
+                pc_ids: Default::default(),
+                names: FrameNames::new(service, store.clone()),
+                store,
+                counters: SampleCounters::default(),
+                scratch: SampleScratch { stack: Vec::new(), held: Vec::new(), pool: Vec::new() },
+            }
+        }
+
+        fn ring(&self, tid: i32) -> &perfr_perf_ring::RingBuffer {
+            &self.threads.iter().find(|t| t.tid == tid).unwrap().sample
+        }
+
+        /// One pass of the sample drain, returning the events it pushed.
+        fn drain(&mut self, horizon_ns: u64) -> Vec<LiveEvent> {
+            let mut batch = Vec::new();
+            drain_samples(
+                &mut self.threads,
+                &mut self.unwinder,
+                &self.symbolizer,
+                &mut self.pc_ids,
+                &mut self.names,
+                &self.store,
+                Self::TARGET_PID,
+                1_000_000,
+                SampleFlags::stack_sample(),
+                &mut self.counters,
+                &mut batch,
+                horizon_ns,
+                None,
+                &mut self.scratch,
+            );
+            batch
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn perf_header(kind: u32, size: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(size);
+        bytes.extend_from_slice(&kind.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&(size as u16).to_le_bytes());
+        bytes
+    }
+
+    /// The id block `sample_id_all` puts in every record.
+    #[cfg(target_os = "linux")]
+    fn sample_id(bytes: &mut Vec<u8>, tid: u32, time: u64, cpu: u32) {
+        bytes.extend_from_slice(&(SampleRig::TARGET_PID as u32).to_le_bytes());
+        bytes.extend_from_slice(&tid.to_le_bytes());
+        bytes.extend_from_slice(&time.to_le_bytes());
+        bytes.extend_from_slice(&7u64.to_le_bytes());
+        bytes.extend_from_slice(&cpu.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+    }
+
+    /// A stack sample as the kernel writes one for `attr::stack_sample`:
+    /// every user register, then a stack area of which `stack` is in use.
+    #[cfg(target_os = "linux")]
+    fn stack_sample_record(tid: u32, time: u64, ip: u64, stack: &[u8]) -> Vec<u8> {
+        const STACK_AREA: usize = 256;
+        let size = 8 + 32 + 8 + 8 * REGS_USER_ALL_COUNT + 8 + STACK_AREA + 8;
+        let mut bytes = perf_header(record_type::SAMPLE, size);
+        sample_id(&mut bytes, tid, time, 0);
+        bytes.extend_from_slice(&2u64.to_le_bytes()); // PERF_SAMPLE_REGS_ABI_64
+        let mut regs = [0u64; REGS_USER_ALL_COUNT];
+        #[cfg(target_arch = "x86_64")]
+        {
+            regs[8] = ip;
+            regs[7] = 0x7fff_0000_1000;
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            regs[32] = ip;
+            regs[31] = 0x7fff_0000_1000;
+        }
+        for reg in regs {
+            bytes.extend_from_slice(&reg.to_le_bytes());
+        }
+        bytes.extend_from_slice(&(STACK_AREA as u64).to_le_bytes());
+        let mut area = [0u8; STACK_AREA];
+        area[..stack.len()].copy_from_slice(stack);
+        bytes.extend_from_slice(&area);
+        bytes.extend_from_slice(&(stack.len() as u64).to_le_bytes());
+        assert_eq!(bytes.len(), size);
+        bytes
+    }
+
+    /// `PERF_RECORD_LOST`: `count` records did not fit, noticed at `time`.
+    #[cfg(target_os = "linux")]
+    fn lost_record(tid: u32, time: u64, cpu: u32, count: u64) -> Vec<u8> {
+        let mut bytes = perf_header(record_type::LOST, perfr_perf_records::Lost::SIZE);
+        bytes.extend_from_slice(&7u64.to_le_bytes());
+        bytes.extend_from_slice(&count.to_le_bytes());
+        sample_id(&mut bytes, tid, time, cpu);
+        bytes
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_sample_becomes_a_tick_and_its_frames() {
+        let mut rig = SampleRig::new(&[4001]);
+        assert!(rig.ring(4001).publish(&stack_sample_record(4001, 5_000, 0x401000, &[0u8; 64])));
+        let batch = rig.drain(u64::MAX);
+        let ticks: Vec<&LiveEvent> = batch.iter().filter(|e| e.kind == kind::SAMPLE).collect();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!((ticks[0].start_ns, ticks[0].tid, ticks[0].pid), (5_000, 4001, 4000));
+        assert!(batch.iter().any(|e| e.kind == kind::FUNCTION_CALL && e.name_id == ticks[0].name_id));
+        assert_eq!(rig.counters.parsed, 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn samples_the_kernel_dropped_are_marked_on_the_thread_that_lost_them() {
+        let mut rig = SampleRig::new(&[4001, 4002]);
+        assert!(rig.ring(4002).publish(&stack_sample_record(4002, 5_000, 0x401000, &[0u8; 64])));
+        // The ring was full for a while; the kernel says so with the first
+        // record it could write again.
+        assert!(rig.ring(4002).publish(&lost_record(4002, 9_000, 3, 37)));
+        assert!(rig.ring(4002).publish(&stack_sample_record(4002, 9_000, 0x401000, &[0u8; 64])));
+        let batch = rig.drain(u64::MAX);
+        let drops: Vec<&LiveEvent> = batch.iter().filter(|e| e.kind == kind::DROP).collect();
+        assert_eq!(drops.len(), 1, "37 lost samples left no mark on the timeline");
+        assert_eq!((drops[0].tid, drops[0].pid, drops[0].start_ns), (4002, 4000, 9_000));
+        assert_eq!(drops[0].drop_count(), Some(37));
+        assert_eq!(batch.iter().filter(|e| e.kind == kind::SAMPLE).count(), 2, "the samples around the gap are kept");
+        assert_eq!(rig.counters.lost, 37);
+        assert_eq!(rig.counters.parsed, 2, "a lost record is not a sample that failed to parse");
     }
 
     #[cfg(target_os = "linux")]

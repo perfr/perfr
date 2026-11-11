@@ -67,6 +67,14 @@ impl ContextSwitchManager {
         );
     }
 
+    /// The kernel dropped records of `core`: whatever switch-in was open
+    /// there may have been switched out, and back in, in the gap. Pairing it
+    /// with the next switch-out of the same thread would draw one slice
+    /// across time the thread spent off the core, so the open entry goes.
+    pub fn forget_core(&mut self, core: u16) {
+        self.open_switches_by_core.remove(&core);
+    }
+
     pub fn process_context_switch_out(
         &mut self,
         pid: i32,
@@ -112,6 +120,19 @@ impl ContextSwitchManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn records_lost_on_a_core_end_the_slice_open_on_it() {
+        let mut manager = ContextSwitchManager::new();
+        manager.process_context_switch_in(Some(10), 11, 3, 100);
+        manager.process_context_switch_in(Some(10), 12, 4, 100);
+        // Core 3's ring overflowed here: thread 11 may have left and come
+        // back any number of times before the next record that was kept.
+        manager.forget_core(3);
+        assert_eq!(manager.process_context_switch_out(10, 11, 3, 900), SwitchOut::NoSlice);
+        // The other core lost nothing.
+        assert!(matches!(manager.process_context_switch_out(10, 12, 4, 900), SwitchOut::Slice(_)));
+    }
 
     #[test]
     fn matches_in_and_out_into_a_slice() {

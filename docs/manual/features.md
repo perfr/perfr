@@ -384,9 +384,11 @@ in the URL opens a tab on load.
   the service disassembles the function out of the process's module
   (Intel syntax, call and branch targets named), walks the module's line
   table for it, and the tab opens with the function's source file when
-  the line table names one and the file is under a root the service is
-  allowed to serve (`PERFR_SOURCE_ROOTS`, the current directory by
-  default; nothing outside those roots is ever read). Three ways to read
+  the line table names one and the file is on this machine. The service
+  reads a source file only if a disassembly named it or it is under a
+  root listed in `PERFR_SOURCE_ROOTS` (colon-separated). Both tests are
+  made on the file the path resolves to, so `..` and symlinks do not
+  reach outside, and only regular files are read. Three ways to read
   it, in the segmented control: **Source** alone, **Disassembly** alone,
   and **Both**, the C++ perfr `AnnotatingLine` layout: the instructions
   are the text, and each source line is inserted, on a raised row, above

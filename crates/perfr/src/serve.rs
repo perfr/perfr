@@ -686,6 +686,42 @@ struct SampledThread {
     tid: i32,
     sample: perfr_perf_ring::RingBuffer,
     task: Option<perfr_perf_ring::RingBuffer>,
+    /// Its exit record has been read. The sampling ring still holds what the
+    /// thread took since the last drain, so the thread stays in the list
+    /// until `retire_dead_threads` lets it go.
+    dead: bool,
+}
+
+/// How many exited threads may wait, rings open, for a drain the symbol load
+/// is holding back. Each costs a 4 MiB ring and two descriptors, and a target
+/// that starts a thread per task can retire hundreds of them a second.
+#[cfg(target_os = "linux")]
+const MAX_DEAD_THREADS_HELD: usize = 64;
+
+/// Lets go of the threads whose exit record has been read, once their
+/// sampling rings have been too: `drained` says a drain ran after they were
+/// marked. Dropping a thread where its exit was noticed, ahead of the drain,
+/// lost everything it had sampled since the previous pass -- all of it, for a
+/// thread shorter-lived than a pass or one that exited during the symbol
+/// load, when the rings are not read at all.
+///
+/// While the symbol load holds the drains back the dead wait, the oldest
+/// giving way past `MAX_DEAD_THREADS_HELD`. When no drain will ever run
+/// (`will_drain` is false: no unwinder) waiting gains nothing.
+#[cfg(target_os = "linux")]
+fn retire_dead_threads(threads: &mut Vec<SampledThread>, drained: bool, will_drain: bool) {
+    if drained || !will_drain {
+        threads.retain(|t| !t.dead);
+        return;
+    }
+    let mut excess = threads.iter().filter(|t| t.dead).count().saturating_sub(MAX_DEAD_THREADS_HELD);
+    if excess > 0 {
+        threads.retain(|t| {
+            let evict = t.dead && excess > 0;
+            excess -= usize::from(evict);
+            !evict
+        });
+    }
 }
 
 /// What a capture's sampling rings yielded, for the summary at its end.
@@ -1298,7 +1334,7 @@ fn capture_loop(
     // finds anything, so a gap would show.
     let mut threads: Vec<SampledThread> = Vec::new();
     let sample_thread = |threads: &mut Vec<SampledThread>, tid: i32| -> bool {
-        if threads.iter().any(|t| t.tid == tid) {
+        if threads.iter().any(|t| t.tid == tid && !t.dead) {
             return false;
         }
         let Ok(sample) = perfr_perf_ring::ring::open_stack_sample(period_ns, 64_000, tid, -1, 4096) else {
@@ -1311,7 +1347,7 @@ fn capture_loop(
         if let Some(task) = &task {
             let _ = task.enable();
         }
-        threads.push(SampledThread { tid, sample, task });
+        threads.push(SampledThread { tid, sample, task, dead: false });
         true
     };
     let scan_threads = |threads: &mut Vec<SampledThread>| -> usize {
@@ -1744,10 +1780,9 @@ fn capture_loop(
         if sampling_works {
             // Thread births and deaths, from every sampled thread's task
             // ring: a fork is sampled from this pass, an exit frees its
-            // rings.
+            // rings once the sample drain below has read them.
             let _task = perfr_api::scope("read task events");
             let mut born: Vec<i32> = Vec::new();
-            let mut died: Vec<i32> = Vec::new();
             for thread in threads.iter_mut() {
                 let Some(task) = thread.task.as_mut() else { continue };
                 while let Ok(Some(record)) = task.read_record() {
@@ -1764,7 +1799,7 @@ fn capture_loop(
                     if kind == record_type::FORK {
                         born.push(tid);
                     } else if tid == thread.tid {
-                        died.push(tid);
+                        thread.dead = true;
                     }
                 }
             }
@@ -1772,9 +1807,6 @@ fn capture_loop(
                 if sample_thread(&mut threads, tid) {
                     log::info!("thread {tid} born, sampling it ({} threads)", threads.len());
                 }
-            }
-            if !died.is_empty() {
-                threads.retain(|t| !died.contains(&t.tid));
             }
             let now = crate::now_monotonic_ns();
             if now.saturating_sub(last_thread_scan_ns) >= THREAD_SCAN_EVERY_NS {
@@ -1826,6 +1858,7 @@ fn capture_loop(
         // Hold samples until the symbols are ready; the kernel rings buffer
         // them meanwhile, so they arrive named rather than as bare addresses.
         let _samples = perfr_api::scope("read samples");
+        let samples_drained = symbols_ready && unwinder.is_some();
         if let (true, Some(unwinder)) = (symbols_ready, unwinder.as_mut()) {
             drain_samples(
                 &mut threads,
@@ -1844,6 +1877,7 @@ fn capture_loop(
                 &mut sample_scratch,
             );
         }
+        retire_dead_threads(&mut threads, samples_drained, unwinder.is_some());
         drop(_samples);
         if let Some(session) = uprobes.as_mut() {
             session.retire_returns_before(sample_horizon);
@@ -3028,6 +3062,96 @@ mod tests {
         assert_eq!(by_name(gpu_lane::MEMORY_MIB), Some(3072.0));
         assert_eq!(by_name(gpu_lane::POWER_W), Some(220.0));
         assert_eq!(by_name(gpu_lane::TEMPERATURE_C), Some(71.0));
+    }
+
+    /// A sampling ring on a thread of this process that burns `cpu_ms` of
+    /// CPU and exits, or None where perf_event_open is not permitted.
+    #[cfg(target_os = "linux")]
+    fn ring_of_an_exited_thread(cpu_ms: i64) -> Option<perfr_perf_ring::RingBuffer> {
+        let (tid_tx, tid_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            tid_tx.send(unsafe { libc::gettid() }).unwrap();
+            if go_rx.recv().is_err() {
+                return;
+            }
+            let cpu_time_ns = || {
+                let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+                unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+                ts.tv_sec * 1_000_000_000 + ts.tv_nsec
+            };
+            let until = cpu_time_ns() + cpu_ms * 1_000_000;
+            while cpu_time_ns() < until {
+                std::hint::spin_loop();
+            }
+        });
+        let tid = tid_rx.recv().unwrap();
+        let ring = perfr_perf_ring::ring::open_stack_sample(1_000_000, 1024, tid, -1, 64)
+            .and_then(|ring| ring.enable().map(|()| ring));
+        match ring {
+            Ok(ring) => {
+                go_tx.send(()).unwrap();
+                worker.join().unwrap();
+                Some(ring)
+            }
+            Err(error) => {
+                drop(go_tx);
+                worker.join().unwrap();
+                eprintln!("skipping: perf_event_open not permitted here ({error})");
+                None
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exited_thread_keeps_its_ring_until_a_drain_has_read_it() {
+        let Some(sample) = ring_of_an_exited_thread(20) else { return };
+        let mut threads = vec![SampledThread { tid: 1, sample, task: None, dead: true }];
+        // The pass that reads the exit record has not drained yet: what the
+        // thread sampled since the previous pass is still in the ring.
+        retire_dead_threads(&mut threads, false, true);
+        assert_eq!(threads.len(), 1, "dropped with its last samples unread");
+        assert!(threads[0].sample.has_new_data());
+        // Once a drain has run there is nothing left to wait for.
+        retire_dead_threads(&mut threads, true, true);
+        assert!(threads.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dead_threads_go_at_once_when_no_drain_will_ever_read_them() {
+        let Some(sample) = ring_of_an_exited_thread(0) else { return };
+        let Some(live) = ring_of_an_exited_thread(0) else { return };
+        let mut threads = vec![
+            SampledThread { tid: 1, sample, task: None, dead: true },
+            SampledThread { tid: 2, sample: live, task: None, dead: false },
+        ];
+        // No unwinder: holding the rings open would be for nothing.
+        retire_dead_threads(&mut threads, false, false);
+        assert_eq!(threads.iter().map(|t| t.tid).collect::<Vec<_>>(), [2]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dead_threads_waiting_for_a_drain_are_bounded() {
+        // Rings on this thread: only the bookkeeping is under test.
+        let tid = unsafe { libc::gettid() };
+        let mut threads = Vec::new();
+        for label in 0..MAX_DEAD_THREADS_HELD as i32 + 4 {
+            let Ok(sample) = perfr_perf_ring::ring::open_stack_sample(1_000_000, 1024, tid, -1, 4) else {
+                eprintln!("skipping: perf_event_open not permitted here");
+                return;
+            };
+            // One thread near the front is still alive.
+            threads.push(SampledThread { tid: label, sample, task: None, dead: label != 1 });
+        }
+        retire_dead_threads(&mut threads, false, true);
+        assert_eq!(threads.iter().filter(|t| t.dead).count(), MAX_DEAD_THREADS_HELD);
+        // The oldest go first, and the living are not touched.
+        let kept: Vec<i32> = threads.iter().map(|t| t.tid).collect();
+        assert_eq!(kept[..3], [1, 4, 5]);
+        assert_eq!(kept.len(), MAX_DEAD_THREADS_HELD + 1);
     }
 
     #[cfg(target_os = "linux")]

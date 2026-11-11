@@ -679,6 +679,11 @@ struct ShareDraft {
     range: Option<ShareRange>,
     /// `slice_stream` failed. The dialog must not offer a time range.
     range_unslicable: bool,
+    /// The selection that failure was for: not cut again until it changes.
+    /// With only `range` to compare against, a failed cut looked like no
+    /// cut yet, and the whole stream was copied and walked every frame the
+    /// dialog stayed open.
+    range_failed: Option<(u64, u64)>,
     error: Option<String>,
 }
 
@@ -688,6 +693,7 @@ impl ShareDraft {
             source: ShareSource::Loaded,
             range: None,
             range_unslicable: false,
+            range_failed: None,
             error: None,
         }
     }
@@ -697,6 +703,7 @@ impl ShareDraft {
             source: ShareSource::Fetched(bytes),
             range: None,
             range_unslicable: false,
+            range_failed: None,
             error: None,
         }
     }
@@ -2726,36 +2733,30 @@ impl PerfrLiveApp {
             return;
         }
         let span = span.unwrap();
-        let loaded = matches!(
-            self.share_draft.as_ref().map(|d| matches!(&d.source, ShareSource::Loaded)),
-            Some(true)
-        );
-        let whole = if loaded {
-            self.held_stream.bytes().cloned()
-        } else {
-            match &self.share_draft {
-                Some(ShareDraft { source: ShareSource::Fetched(bytes), .. }) => Some(bytes.clone()),
-                _ => None,
-            }
-        };
-        let Some(whole) = whole else {
-            if let Some(draft) = &mut self.share_draft {
-                draft.range = None;
-                draft.range_unslicable = true;
-            }
+        if self.share_draft.as_ref().is_some_and(|d| d.range_failed == Some(span)) {
             return;
+        }
+        // Cut from where the bytes are: the stream is the whole capture,
+        // and a copy of it only to read it is a second capture in memory.
+        let cut = {
+            let whole: Option<&[u8]> = match self.share_draft.as_ref().map(|d| &d.source) {
+                Some(ShareSource::Loaded) => self.held_stream.bytes().map(Vec::as_slice),
+                Some(ShareSource::Fetched(bytes)) => Some(bytes.as_slice()),
+                None => None,
+            };
+            whole.and_then(|whole| crate::share::slice_stream(whole, span.0, span.1).ok())
         };
-        match crate::share::slice_stream(&whole, span.0, span.1) {
-            Ok(bytes) => {
-                if let Some(draft) = &mut self.share_draft {
+        if let Some(draft) = &mut self.share_draft {
+            match cut {
+                Some(bytes) => {
                     draft.range_unslicable = false;
+                    draft.range_failed = None;
                     draft.range = Some(ShareRange { span, bytes });
                 }
-            }
-            Err(_) => {
-                if let Some(draft) = &mut self.share_draft {
+                None => {
                     draft.range = None;
                     draft.range_unslicable = true;
+                    draft.range_failed = Some(span);
                 }
             }
         }

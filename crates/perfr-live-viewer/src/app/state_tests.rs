@@ -1683,3 +1683,77 @@ fn a_capture_that_stops_asks_for_its_report_once() {
     assert_eq!(page.app.report_tab, ReportTab::TopDown);
     assert!(page.app.sample_sels.is_empty() && page.app.sampling_ranges.is_empty(), "the report is over the whole capture");
 }
+
+/// A page holding a stream, with a time range selected and the Share
+/// dialog at its confirm step over the held bytes.
+fn share_confirm_app(stream_bytes: Vec<u8>) -> PerfrLiveApp {
+    let mut app = static_app();
+    app.accept_stream(stream_bytes);
+    app.sample_sels = vec![TimeMeasure { start_ns: 5_000_000_000, stop_ns: 5_500_000_000, label_y: 0.0, sample_tid: None }];
+    app.share_open = true;
+    app.share_ui = ShareUi::Confirm;
+    app.share_draft = Some(ShareDraft::loaded());
+    app
+}
+
+fn whole_stream() -> Vec<u8> {
+    capture_stream(
+        status_frame(false, false),
+        (0..2_000).map(|i| scope(100, 101, 5_000_000_000 + i * 1_000_000, 500_000, 7)).collect(),
+    )
+}
+
+#[test]
+fn the_share_dialog_cuts_the_selected_range_once() {
+    let mut app = share_confirm_app(whole_stream());
+    app.refresh_share_range();
+    let draft = app.share_draft.as_ref().unwrap();
+    let range = draft.range.as_ref().expect("the selection is cut out of the stream");
+    assert_eq!(range.span, (5_000_000_000, 5_500_000_000));
+    assert!(!range.bytes.is_empty() && range.bytes.len() < app.held_stream.bytes().unwrap().len());
+    assert!(!draft.range_unslicable);
+}
+
+#[test]
+fn a_range_that_could_not_be_cut_is_not_cut_again_every_frame() {
+    let mut cut_short = whole_stream();
+    cut_short.truncate(cut_short.len() - 3);
+    let mut app = share_confirm_app(cut_short);
+    app.refresh_share_range();
+    assert!(app.share_draft.as_ref().unwrap().range_unslicable);
+    assert!(app.share_draft.as_ref().unwrap().range.is_none());
+    // Whether the cut is tried again shows when it would now succeed.
+    app.held_stream.loaded(whole_stream());
+    app.refresh_share_range();
+    assert!(
+        app.share_draft.as_ref().unwrap().range.is_none(),
+        "the same span was cut again on the next frame"
+    );
+    // Another span is another attempt.
+    app.sample_sels[0].stop_ns = 5_600_000_000;
+    app.refresh_share_range();
+    assert!(app.share_draft.as_ref().unwrap().range.is_some());
+}
+
+/// Not a check: what the Share dialog costs per frame while it shows a
+/// range it could not cut. `cargo test --release -- --ignored --nocapture share_range_times`.
+#[test]
+#[ignore]
+fn share_range_times() {
+    let mut big = capture_stream(
+        status_frame(false, false),
+        (0..2_000_000u64).map(|i| scope(100, 101, 5_000_000_000 + i * 1_000, 500, 7)).collect(),
+    );
+    big.truncate(big.len() - 3);
+    let size = big.len();
+    let mut app = share_confirm_app(big);
+    let start = std::time::Instant::now();
+    for _ in 0..20 {
+        app.refresh_share_range();
+    }
+    println!(
+        "uncuttable range over a {:.0} MB stream: {:8.3} ms/frame",
+        size as f64 / 1e6,
+        start.elapsed().as_secs_f64() * 1000.0 / 20.0
+    );
+}

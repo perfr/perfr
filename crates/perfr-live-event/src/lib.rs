@@ -292,16 +292,6 @@ impl LaneKey {
     }
 }
 
-/// Kept for call sites that still pass `(kind, extra, name_id)`.
-/// Thread/CPU scopes need tid+depth — prefer [`LiveEvent::color_rgba`].
-pub fn palette_color(kind: u8, extra: u8, name_id: u32) -> u32 {
-    match kind {
-        kind::SAMPLE => crate::color::sample_tick(),
-        kind::THREAD_STATE => thread_state_color(extra),
-        kind::API_SCOPE | kind::API_TRACK => named_scope_color(&name_id.to_le_bytes(), extra),
-        _ => thread_scope_color(name_id, extra),
-    }
-}
 
 /// Pairs `ApiScopeStart` / `ApiScopeStop` (and async variants) into duration events.
 ///

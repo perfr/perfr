@@ -38,6 +38,8 @@ mod logs;
 mod track_order;
 mod rect_select;
 #[cfg(feature = "egui")]
+mod url_params;
+#[cfg(feature = "egui")]
 mod util;
 mod report_copy;
 #[cfg(feature = "egui")]
@@ -265,7 +267,7 @@ pub async fn start_eframe(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsVa
     // _FAILED" -- and once picked, wgpu cannot fall back mid-run; WebGL2 draws
     // the instanced timeline fine. `?webgpu` opts back in where it works.
     let mut web_options = eframe::WebOptions::default();
-    if !crate::dev::query_prefers_webgpu_from_location() {
+    if !crate::url_params::query_prefers_webgpu_from_location() {
         if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) =
             &mut web_options.wgpu_options.wgpu_setup
         {

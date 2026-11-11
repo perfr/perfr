@@ -452,6 +452,54 @@ mod tests {
         );
     }
 
+    /// Every fixture of this crate was linked by GNU ld, which pads the
+    /// file so that all segments sit the same distance from their offsets.
+    /// lld does not pad, it moves the next segment a page up, and that is
+    /// the layout of most of what gets profiled (Rust, Chromium, Unreal).
+    /// The two files are the symbolizer's (`crates/perfr/testdata`, with
+    /// their source and the link line): what is pinned here is that this
+    /// crate reports each segment's own offset and address, so a caller
+    /// that assumes one distance for the whole file has the numbers to
+    /// know better.
+    #[test]
+    fn lld_linked_files_report_segments_at_different_distances_from_their_offsets() {
+        let lld = |name: &str| {
+            let path = format!("{}/../perfr/testdata/{name}", env!("CARGO_MANIFEST_DIR"));
+            let data = std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
+            let symbols = load_symbols(&data, SymbolTable::Debug).expect("a .symtab");
+            let marker = symbols.iter().find(|s| s.mangled_name == "marker").expect("marker").address;
+            (parse_elf_metadata(&data, name).expect("should parse"), marker)
+        };
+        let segment = |offset_in_file, size_in_file, address, size_in_memory| ObjectSegment {
+            offset_in_file,
+            size_in_file,
+            address,
+            size_in_memory,
+        };
+
+        let (pie, marker) = lld("lld_layout_pie");
+        assert_eq!(
+            pie.loadable_segments,
+            vec![
+                segment(0, 0x26b, 0, 0x26b),
+                segment(0x270, 0x45, 0x1270, 0x45),
+                segment(0x2b8, 0x90, 0x22b8, 0xd48),
+            ]
+        );
+        assert_eq!(marker, 0x12b0);
+        // The executable segment is a page further from its offset than
+        // the first one: the field named load_bias is the text's distance.
+        assert_eq!((pie.load_bias, pie.executable_segment_offset), (0x1000, 0x270));
+
+        let (fixed, marker) = lld("lld_layout_image_base");
+        assert_eq!(
+            fixed.loadable_segments,
+            vec![segment(0, 0x17e, 0x200000, 0x17e), segment(0x180, 0x45, 0x201180, 0x45)]
+        );
+        assert_eq!(marker, 0x2011c0);
+        assert_eq!((fixed.load_bias, fixed.executable_segment_offset), (0x201000, 0x180));
+    }
+
     /// TEST(ElfFile, CalculateLoadBiasNoProgramHeaders) -- the error string is
     /// matched verbatim by the C++ suite, so it is matched verbatim here.
     #[test]

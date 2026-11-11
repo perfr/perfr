@@ -528,6 +528,7 @@ impl ChromeStream {
                             self.error = Some(format!("chrome event: {e}"));
                             return Step::Done;
                         }
+                        ing.stats.malformed += 1;
                     }
                 }
                 Step::Event
@@ -1094,6 +1095,14 @@ mod tests {
         let text = r#"{"samples":[],"traceEvents":[{"name":"t","ph":"i","ts":1,"pid":1,"tid":1}]}"#;
         let (_, events) = load_like_the_viewer(text.as_bytes()).expect("finishes");
         assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn an_element_that_is_not_an_event_is_passed_over_and_counted() {
+        let text = r#"[{"name":"a","ph":"i","ts":1,"pid":1,"tid":1},{"ts":"soon"},17,{"name":"b","ph":"i","ts":2,"pid":1,"tid":1}]"#;
+        let (ing, events) = load_like_the_viewer(text.as_bytes()).expect("finishes");
+        assert_eq!(events.len(), 2);
+        assert_eq!(ing.stats.malformed, 2);
     }
 
     #[test]

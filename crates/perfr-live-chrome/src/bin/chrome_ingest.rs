@@ -85,6 +85,8 @@ fn main() {
     println!("system_trace\t{}", ing.stats.system_trace);
     println!("unmatched_end\t{}", ing.stats.unmatched_end);
     println!("skipped_other\t{}", ing.stats.skipped_other);
+    println!("malformed\t{}", ing.stats.malformed);
+    println!("dropped_tail_bytes\t{}", stream.dropped_tail_bytes);
     println!("packets\t{}", ing.stats.packets);
     println!("skipped_packets\t{}", ing.stats.skipped_packets);
     println!("track_event\t{}", ing.stats.track_event);

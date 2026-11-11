@@ -73,6 +73,9 @@ pub struct IngestStats {
     pub system_trace: u64,
     pub skipped_other: u64,
     pub unmatched_end: u64,
+    /// JSON only: elements of an event array that did not parse as an event
+    /// and were passed over.
+    pub malformed: u64,
     /// Perfetto proto only: packets walked, packets of a kind nothing maps.
     pub packets: u64,
     pub skipped_packets: u64,

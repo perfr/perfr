@@ -23,6 +23,7 @@
 //! | `ftrace_events` `print` (`B\|pid\|name` atrace marks) | scopes on the writing thread |
 //! | `chrome_events` (`trace_events`, `legacy_json_trace`, `legacy_ftrace_output`) | the JSON path, embedded |
 //! | `perf_sample` with an interned callstack | sampled call frames |
+//! | `compressed_packets` (zlib, from `compression_type: DEFLATE`) | the packets inside, as if written plain |
 //!
 //! Everything else (`trace_config`, `sys_stats`, GPU, memory snapshots,
 //! ETW, ...) is counted in `stats.skipped_packets` and dropped.
@@ -54,6 +55,14 @@ const P_TIMESTAMP_CLOCK_ID: u32 = 58;
 const P_PACKET_DEFAULTS: u32 = 59;
 const P_TRACK_DESCRIPTOR: u32 = 60;
 const P_PERF_SAMPLE: u32 = 66;
+const P_COMPRESSED_PACKETS: u32 = 50;
+/// `Trace.packet`, the field a `compressed_packets` blob inflates to a run of.
+const T_PACKET: u32 = 1;
+/// The most one `compressed_packets` field may inflate to. The tracing
+/// service compresses its buffer a few hundred kilobytes at a time; deflate
+/// can pack a thousand to one, so without a bound a megabyte of crafted
+/// input is a gigabyte allocated.
+const MAX_INFLATED_PACKETS: usize = 64 << 20;
 /// Trace-level packets that carry no event data; not "skipped", just
 /// structure. (`trusted_uid` and friends ride on every packet and say
 /// nothing about what it holds.)
@@ -372,6 +381,7 @@ pub struct PerfettoState {
 }
 
 struct Packet<'a> {
+    compressed: Vec<&'a [u8]>,
     seq: u32,
     ts: Option<u64>,
     clock: Option<u32>,
@@ -391,8 +401,15 @@ impl PerfettoState {
     /// applied before the packet's own events so a packet that carries both
     /// reads its own names.
     pub fn on_packet(&mut self, buf: &[u8], ing: &mut ChromeIngestor) -> Vec<LiveEvent> {
+        self.packet(buf, ing, false)
+    }
+
+    /// `inflated`: the packet came out of a `compressed_packets` field. One
+    /// found in there is not opened in turn.
+    fn packet(&mut self, buf: &[u8], ing: &mut ChromeIngestor, inflated: bool) -> Vec<LiveEvent> {
         ing.stats.packets += 1;
         let mut pk = Packet {
+            compressed: Vec::new(),
             seq: 0,
             ts: None,
             clock: None,
@@ -425,6 +442,7 @@ impl PerfettoState {
                 P_PROCESS_DESCRIPTOR => pk.process_desc = Some(val.bytes()),
                 P_TRACK_EVENT | P_FTRACE_EVENTS | P_PROCESS_TREE | P_CHROME_EVENTS
                 | P_PERF_SAMPLE => pk.payloads.push((num, val.bytes())),
+                P_COMPRESSED_PACKETS if !inflated => pk.compressed.push(val.bytes()),
                 n if P_STRUCTURAL.contains(&n) => pk.structural = true,
                 _ => {}
             }
@@ -453,7 +471,16 @@ impl PerfettoState {
         }
 
         let mut out = Vec::new();
-        let had_payload = !pk.payloads.is_empty();
+        let mut had_payload = !pk.payloads.is_empty();
+        for b in std::mem::take(&mut pk.compressed) {
+            let packets = inflate_packets(b);
+            for (num, val) in fields(&packets) {
+                if num == T_PACKET {
+                    had_payload = true;
+                    out.extend(self.packet(val.bytes(), ing, true));
+                }
+            }
+        }
         for (num, b) in std::mem::take(&mut pk.payloads) {
             match num {
                 P_TRACK_EVENT => out.extend(self.on_track_event(&pk, b, ing)),
@@ -1918,6 +1945,19 @@ fn chrome_trace_event(buf: &[u8], table: &HashMap<u32, String>) -> Option<Chrome
     Some(ev)
 }
 
+/// The packets of a `compressed_packets` field: a zlib stream of what the
+/// file would otherwise hold, `Trace.packet` after `Trace.packet`. A stream
+/// that is corrupt or cut short gives the packets that came out before it
+/// broke; one that inflates past the bound is cut there.
+fn inflate_packets(zlib: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    let _ = flate2::read::ZlibDecoder::new(zlib)
+        .take(MAX_INFLATED_PACKETS as u64)
+        .read_to_end(&mut out);
+    out
+}
+
 /// A JSON trace embedded in a proto packet: run it through the JSON path
 /// in µs, then put the ingestor back in ns. Through the JSON path only: a
 /// payload that is something else is not a trace to open in turn.
@@ -2630,6 +2670,81 @@ mod tests {
         let gz = enc.finish().unwrap();
         let (_ing, evs) = collect(&gz);
         assert_eq!(evs.len(), 1);
+    }
+
+    fn zlib(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(bytes).unwrap();
+        enc.finish().unwrap()
+    }
+
+    fn compressed(packets: &[u8]) -> Vec<u8> {
+        let mut p = Encoder::new();
+        p.bytes(P_COMPRESSED_PACKETS, &zlib(packets));
+        packet(&p)
+    }
+
+    /// With `compression_type: COMPRESSION_TYPE_DEFLATE` in the trace config
+    /// every data packet arrives inside a `compressed_packets` field. Not
+    /// read, such a trace loaded as an empty timeline with no message.
+    #[test]
+    fn compressed_packets_are_inflated_and_read() {
+        let mut inner = thread_track(11, 7, 70, "Main");
+        inner.extend(te(5, 1, |e| {
+            e.varint(TE_TYPE, TYPE_INSTANT).varint(TE_TRACK_UUID, 11).string(TE_NAME, "first");
+        }));
+        let mut more = te(9, 1, |e| {
+            e.varint(TE_TYPE, TYPE_INSTANT).varint(TE_TRACK_UUID, 11).string(TE_NAME, "second");
+        });
+        let mut trace = compressed(&inner);
+        trace.extend(compressed(&more));
+        let (ing, evs) = collect(&trace);
+        let names: Vec<_> = evs.iter().map(|e| ing.intern.get(e.name_id).unwrap()).collect();
+        assert_eq!(names, ["first", "second"]);
+        assert_eq!(ing.thread_names.get(&(7, 70)).map(String::as_str), Some("Main"));
+        assert_eq!(ing.stats.skipped_packets, 0);
+
+        // Compressed packets inside compressed packets are not a thing the
+        // format has; they are not followed.
+        more = compressed(&more);
+        let (ing, evs) = collect(&compressed(&more));
+        assert!(evs.is_empty());
+        assert_eq!(ing.stats.skipped_packets, 1);
+
+        // A stream that is not zlib, or stops short, yields what it yields.
+        let mut p = Encoder::new();
+        p.bytes(P_COMPRESSED_PACKETS, b"not zlib at all");
+        let (ing, evs) = collect(&packet(&p));
+        assert!(evs.is_empty());
+        assert_eq!(ing.stats.skipped_packets, 1);
+        let mut cut = zlib(&inner);
+        cut.truncate(cut.len() - 6);
+        let mut p = Encoder::new();
+        p.bytes(P_COMPRESSED_PACKETS, &cut);
+        let _ = collect(&packet(&p));
+    }
+
+    #[test]
+    fn a_compressed_packet_cannot_inflate_without_bound() {
+        // 96 MiB of zeros in about a hundred KiB of zlib. Zeros are not
+        // packets, so nothing is read, but nothing like that much may be
+        // allocated to find it out.
+        let bomb = {
+            use std::io::Write;
+            let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            let zeros = vec![0u8; 1 << 20];
+            for _ in 0..96 {
+                enc.write_all(&zeros).unwrap();
+            }
+            enc.finish().unwrap()
+        };
+        assert!(bomb.len() < 1 << 20, "{}", bomb.len());
+        assert_eq!(inflate_packets(&bomb).len(), MAX_INFLATED_PACKETS);
+        let mut p = Encoder::new();
+        p.bytes(P_COMPRESSED_PACKETS, &bomb);
+        let (_ing, evs) = collect(&packet(&p));
+        assert!(evs.is_empty());
     }
 
     #[test]

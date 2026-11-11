@@ -64,10 +64,10 @@ struct KnownFile {
     /// Where its text was mapped: with the span, what tells one mapping of
     /// the file from a later one somewhere else.
     text_start: u64,
-    /// Whether it parsed as an object and became a module. A file that did
-    /// not (deleted, not an ELF) is remembered all the same, so that it is
-    /// not read again at every refresh.
-    is_module: bool,
+    /// The address range of the module it became. None for a file that did
+    /// not parse as an object (deleted, not an ELF), which is remembered all
+    /// the same so that it is not read again at every refresh.
+    module: Option<std::ops::Range<u64>>,
 }
 
 /// What a refresh from a newer maps snapshot changed.
@@ -158,9 +158,11 @@ impl ProcessUnwinder {
                     known.span == (span.start..span.end) && known.text_start == text.start_address
                 })
             });
-            if !still_there && known.is_module {
-                unwinder.remove_module(known.span.start);
-                change.removed += 1;
+            if !still_there {
+                if let Some(module) = &known.module {
+                    unwinder.remove_module(module.start);
+                    change.removed += 1;
+                }
             }
             still_there
         });
@@ -170,17 +172,15 @@ impl ProcessUnwinder {
             if self.files.contains_key(*path) {
                 continue;
             }
-            let module = std::str::from_utf8(path)
-                .ok()
-                .and_then(|path| load_module(path, span.start..span.end, &mappings, text));
-            let is_module = module.is_some();
-            if let Some(module) = module {
+            let loaded = std::str::from_utf8(path).ok().and_then(|path| load_module(path, &mappings, text));
+            let module = loaded.map(|(module, range)| {
                 self.unwinder.add_module(module);
                 change.added += 1;
-            }
+                range
+            });
             self.files.insert(
                 path.to_vec(),
-                KnownFile { span: span.start..span.end, text_start: text.start_address, is_module },
+                KnownFile { span: span.start..span.end, text_start: text.start_address, module },
             );
         }
         self.modules_loaded = self.modules_loaded + change.added - change.removed;
@@ -198,6 +198,11 @@ impl ProcessUnwinder {
 
     pub fn modules_loaded(&self) -> usize {
         self.modules_loaded
+    }
+
+    /// The address range of the module loaded for `path`, if it is one.
+    pub fn module_range(&self, path: &[u8]) -> Option<std::ops::Range<u64>> {
+        self.files.get(path).and_then(|known| known.module.clone())
     }
 
     /// Unwinds from `regs` over the copied stack slice starting at
@@ -365,6 +370,67 @@ mod tests {
         std::fs::copy(std::env::current_exe().unwrap(), &path).unwrap();
         assert_eq!(unwinder.refresh_from_maps_content(maps.as_bytes()), ModulesChange::default());
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_module_spans_its_image_not_every_mapping_of_its_file() {
+        // The test executable, and one page of its text mapped a second
+        // time far below it, the way libffi maps a page of itself per
+        // table of trampolines.
+        let (_, own, _) = own_maps();
+        let exe = std::env::current_exe().unwrap();
+        let exe = exe.to_str().unwrap();
+        let image_start = parse_maps(&own).iter().map(|m| m.start_address).min().unwrap();
+        let image_end = parse_maps(&own).iter().map(|m| m.end_address).max().unwrap();
+        let mut maps = format!("10000000-10001000 r-xp 00001000 00:00 42 {exe}\n").into_bytes();
+        maps.extend_from_slice(&own);
+        let unwinder = ProcessUnwinder::from_maps_content(&maps);
+        let module = unwinder.module_range(exe.as_bytes()).expect("the executable is a module");
+        // A module that began at the stray page would cover everything the
+        // process maps between the two, and the unwinder looks an address up
+        // by the nearest module start below it: any library in between hid
+        // the image's own text from its own unwind tables.
+        assert_eq!(module.start, image_start, "the module starts where the image does");
+        // Its end is the end of the last segment: inside the last page the
+        // file is mapped on, or beyond it by the size of the bss.
+        assert!(
+            module.end > image_end - 4096 && module.end < image_end + (64 << 20),
+            "{module:x?} against mappings that end at {image_end:x}"
+        );
+    }
+
+    #[test]
+    fn a_mapping_of_something_that_is_not_a_regular_file_is_not_read() {
+        // Read to its end, /dev/zero has none.
+        let unwinder = ProcessUnwinder::from_maps_content(b"7f0000000000-7f0000001000 r-xp 00000000 00:05 5 /dev/zero\n");
+        assert_eq!(unwinder.modules_loaded(), 0);
+    }
+
+    /// What building the unwinder of a live process costs:
+    /// `PERFR_UNWIND_BENCH_PID=<pid> cargo test --release -p perfr-unwind -- --ignored --nocapture building_cost`
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn building_cost_for_a_live_process() {
+        let Some(pid) = std::env::var("PERFR_UNWIND_BENCH_PID").ok().and_then(|pid| pid.parse::<i32>().ok()) else {
+            eprintln!("set PERFR_UNWIND_BENCH_PID");
+            return;
+        };
+        let file_bytes: u64 = file_spans(&parse_maps(&std::fs::read(format!("/proc/{pid}/maps")).unwrap()))
+            .iter()
+            .filter(|(_, span)| span.text.is_some())
+            .filter_map(|(path, _)| std::fs::metadata(std::str::from_utf8(path).ok()?).ok())
+            .map(|meta| meta.len())
+            .sum();
+        for round in 0..3 {
+            let start = std::time::Instant::now();
+            let unwinder = ProcessUnwinder::for_pid(pid).unwrap();
+            eprintln!(
+                "round {round}: {} modules ({} MB of files) in {:.1} ms",
+                unwinder.modules_loaded(),
+                file_bytes >> 20,
+                start.elapsed().as_secs_f64() * 1e3
+            );
+        }
     }
 
     // Deep, non-inlinable recursion so samples land under a real call chain.

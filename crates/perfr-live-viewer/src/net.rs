@@ -487,6 +487,67 @@ pub fn ranges_query(ranges: &[(u64, u64, Option<u32>)]) -> String {
     format!("?ranges={}", parts.join(","))
 }
 
+/// The query of `GET /api/sampling/tree`: the selection's ranges, if any,
+/// then the tree's mode.
+pub fn sampling_tree_query(ranges: &[(u64, u64, Option<u32>)], mode: &str) -> String {
+    let rq = ranges_query(ranges);
+    let sep = if rq.is_empty() { '?' } else { '&' };
+    format!("{rq}{sep}mode={mode}")
+}
+
+/// The body of `POST /api/capture/start`.
+pub fn capture_start_body(req: &CaptureStart) -> String {
+    let fns: String = req
+        .instrumented_function_ids
+        .iter()
+        .map(|id| format!(r#"{{"function_id":{id}}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"{{"pid":{},"enable_api":{},"context_switches":{},"thread_states":{},"sampling":{},"samples_per_second":{},"unwinding":"{}","dynamic_instrumentation_method":"{}","instrumented_functions":[{fns}],"show_all_processes":{},"uprobe_duplicate_filter":{},"auto_profile":{}}}"#,
+        req.pid,
+        req.enable_api,
+        req.context_switches,
+        req.thread_states,
+        req.sampling,
+        req.samples_per_second,
+        json_escape(&req.unwinding),
+        json_escape(&req.dynamic_instrumentation_method),
+        req.show_all_processes,
+        req.uprobe_duplicate_filter,
+        req.auto_profile,
+    )
+}
+
+/// The body of `PUT /api/config`. An empty spill path means no spill file.
+pub fn config_body(ring_bytes: u64, spill: &str) -> String {
+    let spill_json = if spill.is_empty() {
+        "null".to_string()
+    } else {
+        format!("\"{}\"", json_escape(spill))
+    };
+    format!(r#"{{"ring_buffer_bytes":{ring_bytes},"spill_path":{spill_json}}}"#)
+}
+
+/// The inside of a JSON string, for the bodies built with `format!` above.
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// A query value with everything but unreserved characters percent-encoded.
+pub fn urlencoding_lite(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.as_bytes() {
+        match *b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// Parses the sampling report. Hand-rolled for the same reason the other
 /// responses are: the wasm bundle does not carry a JSON library.
 pub fn parse_sampling_report_json(text: &str) -> Result<SamplingReport, String> {
@@ -1196,27 +1257,7 @@ mod wasm_impl {
             if self.offline {
                 return;
             }
-            let fns: String = req
-                .instrumented_function_ids
-                .iter()
-                .map(|id| format!(r#"{{"function_id":{id}}}"#))
-                .collect::<Vec<_>>()
-                .join(",");
-            let body = format!(
-                r#"{{"pid":{},"enable_api":{},"context_switches":{},"thread_states":{},"sampling":{},"samples_per_second":{},"unwinding":"{}","dynamic_instrumentation_method":"{}","instrumented_functions":[{fns}],"show_all_processes":{},"uprobe_duplicate_filter":{},"auto_profile":{}}}"#,
-                req.pid,
-                req.enable_api,
-                req.context_switches,
-                req.thread_states,
-                req.sampling,
-                req.samples_per_second,
-                json_escape(&req.unwinding),
-                json_escape(&req.dynamic_instrumentation_method),
-                req.show_all_processes,
-                req.uprobe_duplicate_filter,
-                req.auto_profile,
-            );
-            self.send("POST", "/api/capture/start", body);
+            self.send("POST", "/api/capture/start", capture_start_body(req));
         }
 
         pub fn load_symbols(&self, pid: u32) {
@@ -1306,9 +1347,7 @@ mod wasm_impl {
             if self.offline {
                 return;
             }
-            let rq = ranges_query(ranges);
-            let sep = if rq.is_empty() { '?' } else { '&' };
-            let query = format!("{rq}{sep}mode={mode}");
+            let query = sampling_tree_query(ranges, mode);
             let inbox = self.inbox.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let result = get_text(&format!("/api/sampling/tree{query}"))
@@ -1543,16 +1582,7 @@ mod wasm_impl {
             if self.offline {
                 return;
             }
-            let spill_json = if spill.is_empty() {
-                "null".to_string()
-            } else {
-                format!("\"{}\"", spill.replace('\\', "\\\\").replace('"', "\\\""))
-            };
-            self.send(
-                "PUT",
-                "/api/config",
-                format!(r#"{{"ring_buffer_bytes":{ring_bytes},"spill_path":{spill_json}}}"#),
-            );
+            self.send("PUT", "/api/config", config_body(ring_bytes, spill));
         }
 
         fn send(&self, method: &'static str, path: &'static str, body: String) {
@@ -2058,23 +2088,6 @@ mod wasm_impl {
         log::error!(target: "perfr_live_viewer::net", "{msg}");
     }
 
-    fn json_escape(s: &str) -> String {
-        s.replace('\\', "\\\\").replace('"', "\\\"")
-    }
-
-    fn urlencoding_lite(s: &str) -> String {
-        let mut out = String::new();
-        for b in s.as_bytes() {
-            match *b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    out.push(*b as char);
-                }
-                _ => out.push_str(&format!("%{b:02X}")),
-            }
-        }
-        out
-    }
-
     fn js_err(v: JsValue) -> String {
         if let Some(s) = v.as_string() {
             return s;
@@ -2399,6 +2412,69 @@ mod tests {
         assert!(upload.sending(5, "next"));
         upload.finish(4);
         assert_eq!(upload.stop(), Some("next"));
+    }
+
+    fn capture_start() -> CaptureStart {
+        CaptureStart {
+            pid: 4242,
+            enable_api: true,
+            context_switches: true,
+            thread_states: false,
+            sampling: true,
+            samples_per_second: 1000.0,
+            unwinding: "dwarf".into(),
+            dynamic_instrumentation_method: "uprobes".into(),
+            instrumented_function_ids: vec![7, 281474976710655],
+            show_all_processes: false,
+            uprobe_duplicate_filter: true,
+            auto_profile: false,
+        }
+    }
+
+    #[test]
+    fn the_capture_start_body_is_the_json_the_service_reads() {
+        let body = capture_start_body(&capture_start());
+        // Byte for byte: the service's parser is serde, which would take
+        // other spellings, but the body is also what the log line shows.
+        assert_eq!(
+            body,
+            r#"{"pid":4242,"enable_api":true,"context_switches":true,"thread_states":false,"sampling":true,"samples_per_second":1000,"unwinding":"dwarf","dynamic_instrumentation_method":"uprobes","instrumented_functions":[{"function_id":7},{"function_id":281474976710655}],"show_all_processes":false,"uprobe_duplicate_filter":true,"auto_profile":false}"#
+        );
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["instrumented_functions"][1]["function_id"], 281474976710655u64);
+        // No hooks: an empty array, not a missing key.
+        let none = CaptureStart { instrumented_function_ids: Vec::new(), ..capture_start() };
+        let v: serde_json::Value = serde_json::from_str(&capture_start_body(&none)).unwrap();
+        assert_eq!(v["instrumented_functions"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_quote_or_backslash_in_a_request_string_stays_inside_its_string() {
+        let odd = CaptureStart { unwinding: r#"a"b\c"#.into(), ..capture_start() };
+        let v: serde_json::Value = serde_json::from_str(&capture_start_body(&odd)).unwrap();
+        assert_eq!(v["unwinding"], r#"a"b\c"#);
+        assert_eq!(v["dynamic_instrumentation_method"], "uprobes");
+        let v: serde_json::Value = serde_json::from_str(&config_body(1 << 26, r#"C:\spill\"x""#)).unwrap();
+        assert_eq!(v["spill_path"], r#"C:\spill\"x""#);
+        assert_eq!(v["ring_buffer_bytes"], 1u64 << 26);
+    }
+
+    #[test]
+    fn an_empty_spill_path_is_sent_as_null() {
+        assert_eq!(config_body(1024, ""), r#"{"ring_buffer_bytes":1024,"spill_path":null}"#);
+        assert_eq!(config_body(1024, "/tmp/spill"), r#"{"ring_buffer_bytes":1024,"spill_path":"/tmp/spill"}"#);
+    }
+
+    #[test]
+    fn the_tree_query_puts_the_mode_after_the_ranges_or_alone() {
+        assert_eq!(sampling_tree_query(&[], "top_down"), "?mode=top_down");
+        assert_eq!(sampling_tree_query(&[(1, 2, Some(3))], "bottom_up"), "?ranges=1-2:3&mode=bottom_up");
+    }
+
+    #[test]
+    fn a_search_string_is_encoded_down_to_unreserved_characters() {
+        assert_eq!(urlencoding_lite("Abc-_.~09"), "Abc-_.~09");
+        assert_eq!(urlencoding_lite("std::map<int, T>&x=1/é"), "std%3A%3Amap%3Cint%2C%20T%3E%26x%3D1%2F%C3%A9");
     }
 
     #[test]

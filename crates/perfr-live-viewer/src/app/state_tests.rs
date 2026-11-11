@@ -313,3 +313,91 @@ fn a_narrow_page_with_a_service_keeps_record_and_benchmark() {
     assert!(labels.iter().any(|l| l == "Benchmark"), "{labels:?}");
     assert!(page.shows("Demo"), "{:?}", page.texts);
 }
+
+/// A page whose service has answered and is idle.
+fn connected_app() -> PerfrLiveApp {
+    let mut app = app();
+    app.apply_status(service_status(false));
+    app
+}
+
+#[test]
+fn record_stays_pressed_while_the_service_is_still_starting_the_capture() {
+    let mut app = connected_app();
+    app.start_record();
+    // Attaching can take seconds, and the status says "not capturing"
+    // for all of them.
+    for _ in 0..40 {
+        app.apply_status(service_status(false));
+    }
+    assert!(app.recording);
+    app.apply_status(service_status(true));
+    assert!(app.recording);
+}
+
+#[test]
+fn a_capture_ended_by_someone_else_releases_record() {
+    let mut app = connected_app();
+    app.start_record();
+    app.apply_status(service_status(true));
+    // Another viewer, the HTTP API or an agent stopped it.
+    app.apply_status(service_status(false));
+    assert!(!app.recording, "Record stays pressed with nothing capturing");
+    assert!(!app.wants_live_repaint());
+}
+
+#[test]
+fn a_demo_ended_by_someone_else_releases_record() {
+    let mut app = app();
+    app.apply_status(StatusJson::default());
+    app.start_record();
+    app.apply_status(StatusJson { demo: true, capturing: true, ..StatusJson::default() });
+    assert!(app.recording);
+    app.apply_status(StatusJson::default());
+    assert!(!app.recording);
+}
+
+#[test]
+fn a_capture_ended_by_someone_else_opens_the_report_like_any_finished_capture() {
+    let mut page = Page::with(|app| app.apply_status(service_status(false)));
+    page.frames(2);
+    let record = page.rect_of("Record").expect("the wide bar has Record");
+    page.click(record.center());
+    assert!(page.app.recording);
+    page.app.apply_status(service_status(true));
+    page.frames(2);
+    assert!(!page.app.report_open);
+    page.app.apply_status(service_status(false));
+    page.frames(2);
+    assert!(!page.app.recording);
+    assert!(page.app.report_open, "the capture ended and the report did not open");
+    assert_eq!(page.app.report_tab, ReportTab::TopDown);
+}
+
+#[test]
+fn a_refused_start_releases_record_and_is_not_a_finished_capture() {
+    let mut page = Page::with(|app| app.apply_status(service_status(false)));
+    page.frames(2);
+    page.app.start_record();
+    page.frames(2);
+    assert!(page.app.capture_timer.running);
+    page.app.apply_net_error("/api/capture/start: 409 cannot attach to pid 4242: Operation not permitted".into());
+    assert!(!page.app.recording, "the service refused and Record stays pressed");
+    page.frames(2);
+    assert!(!page.app.report_open, "a capture that never started has no report to open");
+    assert!(!page.app.capture_timer.running);
+    assert_eq!(page.app.capture_timer.shown_s, 0.0);
+    assert!(page.app.error.contains("Operation not permitted"));
+}
+
+#[test]
+fn an_error_of_another_request_leaves_a_starting_capture_alone() {
+    let mut app = connected_app();
+    app.start_record();
+    app.apply_net_error("/api/processes: 500 busy".into());
+    assert!(app.recording);
+    // And once the capture runs, a refused benchmark is not its end.
+    app.apply_status(service_status(true));
+    app.apply_net_error("/api/bench/start: 409 the demo is running; stop it first".into());
+    assert!(app.recording);
+}

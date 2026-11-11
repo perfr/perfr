@@ -899,7 +899,14 @@ pub struct PerfrLiveApp {
     needs_repaint: bool,
     compact: bool,
     light_canvas: bool,
+    /// This page asked for a capture (Record, Demo, the benchmark) and has
+    /// not stopped it. Only a request until `recording_confirmed`.
     recording: bool,
+    /// A status has said the capture asked for is running. From then on a
+    /// status saying nothing runs means it ended somewhere else, and
+    /// `recording` goes with it; before, it only means the service is
+    /// still starting (attaching can take seconds).
+    recording_confirmed: bool,
     /// Whether a capture was active last frame, to catch the moment it ends
     /// (falling edge of capturing/recording) and land on the top-down tree.
     capture_was_active: bool,
@@ -1748,6 +1755,7 @@ impl PerfrLiveApp {
             compact: false,
             light_canvas: false,
             recording: false,
+            recording_confirmed: false,
             capture_was_active: false,
             visible_count: 0,
             draw_label: String::new(),
@@ -2049,13 +2057,13 @@ impl PerfrLiveApp {
             // No selection is a capture without a target: the scheduler, the
             // service, and every instrumented process.
             let pid = self.selected_pid.unwrap_or(0);
-            self.recording = true;
+            self.begin_recording();
             // The capture clock is the target's, and nothing here knows it
             // yet -- `CaptureStarted` brings it.
             self.live_edge_ns = DEMO_ORIGIN_NS;
             self.net.start_capture(&self.capture_start(pid));
         } else {
-            self.recording = true;
+            self.begin_recording();
             self.live_edge_ns = DEMO_ORIGIN_NS;
             self.net.start_demo();
         }
@@ -2069,7 +2077,7 @@ impl PerfrLiveApp {
         }
         self.clear_file_trace();
         self.error.clear();
-        self.recording = true;
+        self.begin_recording();
         self.live_edge_ns = DEMO_ORIGIN_NS;
         self.capture_timer = CaptureTimer::default();
         self.net.start_demo();
@@ -2101,8 +2109,42 @@ impl PerfrLiveApp {
         self.needs_repaint = true;
     }
 
+    fn begin_recording(&mut self) {
+        self.recording = true;
+        self.recording_confirmed = false;
+    }
+
+    /// Settles `recording` against what the service says is running.
+    /// Nothing else ended it but Stop on this page: a capture stopped by
+    /// another viewer, the HTTP API or an agent left the button on Stop,
+    /// the page repainting at display rate, and the finished capture's
+    /// report unopened, because the end was never seen.
+    fn resolve_recording(&mut self, running: bool) {
+        if !self.recording {
+            return;
+        }
+        if running {
+            self.recording_confirmed = true;
+        } else if self.recording_confirmed {
+            self.recording = false;
+            self.recording_confirmed = false;
+        }
+    }
+
+    /// The service refused the start this page asked for: there is no
+    /// capture, and none ended either, so the report is not opened and the
+    /// timer goes back to nothing.
+    fn recording_refused(&mut self) {
+        self.recording = false;
+        self.recording_confirmed = false;
+        self.capture_was_active = false;
+        self.capture_timer = CaptureTimer::default();
+        self.needs_repaint = true;
+    }
+
     fn stop_record(&mut self) {
         self.recording = false;
+        self.recording_confirmed = false;
         self.net.stop_capture();
         self.net.stop_demo();
         self.net.stop_bench();
@@ -2117,7 +2159,7 @@ impl PerfrLiveApp {
         self.error.clear();
         if !self.recording && !self.status.capturing && !self.status.demo {
             self.clear_file_trace();
-            self.recording = true;
+            self.begin_recording();
             self.live_edge_ns = DEMO_ORIGIN_NS;
             self.capture_timer = CaptureTimer::default();
             self.follow = true;
@@ -3105,6 +3147,7 @@ impl PerfrLiveApp {
         if capturing {
             self.auto_profile = s.auto_profile;
         }
+        self.resolve_recording(capturing || s.demo);
         self.status = s;
         // A deep-linked report has no capture-stop transition to ride on, so
         // it asks once, as soon as the service is talking -- and opens the
@@ -3360,13 +3403,7 @@ impl PerfrLiveApp {
             self.service_frame = Some(fr);
         }
         if let Some(e) = inbox.error {
-            // Once per distinct error: a status poll failing every second
-            // while the service is down would otherwise fill the log with
-            // the same line.
-            if e != self.error {
-                log::warn!(target: "perfr_live_viewer::net", "{e}");
-            }
-            self.error = e;
+            self.apply_net_error(e);
         }
         if self.held_stream.is_local() {
             // The file is the capture. Frames still arriving from a service
@@ -3397,6 +3434,20 @@ impl PerfrLiveApp {
                 self.error = message.clone();
             }
         }
+    }
+
+    /// A request failed, or the service answered it with an error.
+    fn apply_net_error(&mut self, e: String) {
+        // Once per distinct error: a status poll failing every second
+        // while the service is down would otherwise fill the log with
+        // the same line.
+        if e != self.error {
+            log::warn!(target: "perfr_live_viewer::net", "{e}");
+        }
+        if self.recording && !self.recording_confirmed && is_refused_start(&e) {
+            self.recording_refused();
+        }
+        self.error = e;
     }
 
     /// Feeds stream bytes through the frame buffer. A fault is the caller's
@@ -10949,6 +11000,15 @@ impl eframe::App for PerfrLiveApp {
             }
         }
     }
+}
+
+/// Whether `error` is the service's answer to a start it refused. A
+/// request's error is all a refusal sends back: the line `Net` makes of
+/// the path, the HTTP status and the reason.
+fn is_refused_start(error: &str) -> bool {
+    ["/api/capture/start: ", "/api/demo/start: ", "/api/bench/start: "]
+        .iter()
+        .any(|path| error.starts_with(path))
 }
 
 fn section(ui: &mut Ui, label: &str) {

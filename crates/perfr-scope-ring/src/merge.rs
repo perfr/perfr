@@ -175,6 +175,10 @@ pub fn drain_from(
             read = write - capacity;
         }
 
+        // Loaded before any claim is looked at, so a claim found pending
+        // below it was found so after the mark was there to see.
+        let abandoned = rings.abandoned(ring);
+
         let mut events = Vec::new();
         while read < write {
             match rings.read_claim(ring, read) {
@@ -197,6 +201,19 @@ pub fn drain_from(
                     let resume = resume_after_lap(read, rings.write_cursor(ring), capacity);
                     out.dropped += resume - read;
                     read = resume;
+                    cursors.stalled_at[ring] = u64::MAX;
+                }
+                Claimed::Pending if read < abandoned => {
+                    // A producer gave up a claim at or past this one, having
+                    // found its slot held by a writer that stopped a lap
+                    // ago. If it was this claim, it will never commit, and
+                    // waiting for it held back the rest of the ring until
+                    // the producers lapped the reader or the backstop ran
+                    // out. If it was a later one, this claim has been in
+                    // flight since before that one was handed out and given
+                    // up, and is let go with it: one record, and counted.
+                    read += 1;
+                    out.dropped += 1;
                     cursors.stalled_at[ring] = u64::MAX;
                 }
                 Claimed::Pending => {

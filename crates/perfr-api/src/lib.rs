@@ -8,8 +8,9 @@
 //! natively for Rust. Every one is safe from any thread at any time; before
 //! [`init`] each is a single predictable branch.
 //!
-//! What a call costs is set by [`perfr_scope_ring`]: one `fetch_add`, plain
-//! stores, one release store, about fifteen nanoseconds with the clock. What
+//! What a call costs is set by [`perfr_scope_ring`]: one `fetch_add`, one
+//! compare-exchange, plain stores, one release store, about twenty
+//! nanoseconds with the clock. What
 //! this crate adds on top is the per-thread state -- the thread id read once
 //! and cached, since `gettid` is a 60 ns syscall and would otherwise be four
 //! times the cost of the scope it stamps -- and the handle arithmetic.

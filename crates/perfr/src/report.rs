@@ -296,6 +296,48 @@ fn fold_selection<'a>(
     (stacks, total, first, last)
 }
 
+/// A selection folded and copied out of the store: the distinct stacks with
+/// their counts, and the rows of the frame table those stacks name.
+///
+/// Every report starts from one of these and the store's lock is released
+/// before it is used. `push` takes that lock for every sample, on the capture
+/// thread, so a report that aggregated and formatted while holding it stalled
+/// sample ingestion for its whole run, and a stalled drain is how the perf
+/// rings overflow. The fold has to read the samples and stays under the lock;
+/// the copy is a few thousand short vectors, where the samples behind them
+/// are hundreds of thousands.
+struct Folded {
+    stacks: Vec<((u32, Vec<u32>), u64)>,
+    total: u64,
+    first_sample_ns: u64,
+    last_sample_ns: u64,
+    names: FastMap<u32, FrameInfo>,
+}
+
+impl Folded {
+    fn name_of(&self, id: u32) -> String {
+        self.names.get(&id).map(|f| f.name.clone()).unwrap_or_else(|| format!("<{id}>"))
+    }
+}
+
+/// One row of the flat report. The fields are in the order `serde_json`
+/// gives the keys of a JSON object, so writing rows directly produces the
+/// text that building each row as a `serde_json::Value` did, without the
+/// tree of maps: that tree was most of the cost of a report of a few
+/// thousand functions, and auto-profiling asks for one every step, on the
+/// capture thread.
+#[derive(serde::Serialize)]
+struct FunctionRow<'a> {
+    function_id: u64,
+    inclusive: u64,
+    inclusive_percent: f64,
+    module: &'a str,
+    name: std::borrow::Cow<'a, str>,
+    #[serde(rename = "self")]
+    self_count: u64,
+    self_percent: f64,
+}
+
 /// The time windows to scan for a range set: every range's span, merged where
 /// they overlap so a sample is visited once. The per-range thread filter is
 /// applied afterwards with `in_any`, which keeps the exact semantics of the
@@ -449,20 +491,41 @@ impl SampleStore {
         )
     }
 
-    fn report_json_for_selection(&self, selection: Selection<'_>, mut meta: serde_json::Value) -> String {
+    /// Folds `selection` under the lock and copies the result out of it.
+    fn fold(&self, selection: Selection<'_>) -> Folded {
         let mut inner = self.inner.lock().unwrap();
         inner.ensure_sorted();
         let inner = &*inner;
+        let (stacks, total, first_sample_ns, last_sample_ns) = fold_selection(inner, selection);
+        let mut names: FastMap<u32, FrameInfo> = FastMap::default();
+        let stacks = stacks
+            .into_iter()
+            .map(|((tid, frames), count)| {
+                for id in frames {
+                    if let std::collections::hash_map::Entry::Vacant(slot) = names.entry(*id) {
+                        if let Some(info) = inner.names.get(id) {
+                            slot.insert(info.clone());
+                        }
+                    }
+                }
+                ((tid, frames.to_vec()), count)
+            })
+            .collect();
+        Folded { stacks, total, first_sample_ns, last_sample_ns, names }
+    }
+
+    fn report_json_for_selection(&self, selection: Selection<'_>, mut meta: serde_json::Value) -> String {
+        let folded = self.fold(selection);
         let mut self_counts: FastMap<u32, u64> = FastMap::default();
         let mut inclusive_counts: FastMap<u32, u64> = FastMap::default();
         // The span the counted samples actually occupy, which is not the span
         // that was asked for: a request for the whole capture gets 0..u64::MAX
         // back otherwise, and the ring's own range covers every capture the
         // service has run, not this one.
-        let (stacks, total, first_sample_ns, last_sample_ns) = fold_selection(inner, selection);
+        let (total, first_sample_ns, last_sample_ns) = (folded.total, folded.first_sample_ns, folded.last_sample_ns);
         // Scratch for the per-stack de-duplication, reused across stacks.
         let mut seen: Vec<u32> = Vec::with_capacity(64);
-        for ((_, frames), count) in &stacks {
+        for ((_, frames), count) in &folded.stacks {
             if let Some(leaf) = frames.first() {
                 *self_counts.entry(*leaf).or_insert(0) += count;
             }
@@ -492,39 +555,54 @@ impl SampleStore {
                 100.0 * count as f64 / total as f64
             }
         };
-        let functions: Vec<serde_json::Value> = rows
+        let functions: Vec<FunctionRow<'_>> = rows
             .iter()
             .map(|(id, self_count, inclusive)| {
-                serde_json::json!({
-                    "name": inner.name_of(*id),
-                    "module": inner.names.get(id).map(|f| f.module.clone()).unwrap_or_default(),
-                    "function_id": inner.names.get(id).map(|f| f.function_id).unwrap_or(0),
-                    "self": self_count,
-                    "inclusive": inclusive,
-                    "self_percent": percent(*self_count),
-                    "inclusive_percent": percent(*inclusive),
-                })
+                let info = folded.names.get(id);
+                FunctionRow {
+                    function_id: info.map(|f| f.function_id).unwrap_or(0),
+                    inclusive: *inclusive,
+                    inclusive_percent: percent(*inclusive),
+                    module: info.map(|f| f.module.as_str()).unwrap_or(""),
+                    name: match info {
+                        Some(f) => f.name.as_str().into(),
+                        None => format!("<{id}>").into(),
+                    },
+                    self_count: *self_count,
+                    self_percent: percent(*self_count),
+                }
             })
             .collect();
+        let functions = serde_json::to_string(&functions).unwrap_or_else(|_| "[]".into());
         let extra = serde_json::json!({
             "samples": total,
             "first_sample_ns": if total == 0 { 0 } else { first_sample_ns },
             "last_sample_ns": last_sample_ns,
-            "functions": functions,
+            // Its place among the keys; the rows are written in below.
+            "functions": null,
         });
         if let (Some(m), Some(e)) = (meta.as_object_mut(), extra.as_object()) {
             for (k, v) in e {
                 m.insert(k.clone(), v.clone());
             }
         }
-        meta.to_string()
-    }
-}
-
-
-impl StoreInner {
-    fn name_of(&self, id: u32) -> String {
-        self.names.get(&id).map(|f| f.name.clone()).unwrap_or_else(|| format!("<{id}>"))
+        let Some(fields) = meta.as_object() else { return meta.to_string() };
+        let mut out = String::with_capacity(functions.len() + 256);
+        out.push('{');
+        for (i, (key, value)) in fields.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&serde_json::to_string(key).unwrap_or_else(|_| "\"\"".into()));
+            out.push(':');
+            if key == "functions" {
+                out.push_str(&functions);
+            } else {
+                out.push_str(&value.to_string());
+            }
+        }
+        out.push('}');
+        out
     }
 }
 
@@ -622,15 +700,13 @@ impl SampleStore {
     }
 
     fn tree_json_for_selection(&self, selection: Selection<'_>, mode: TreeMode) -> String {
-        let mut inner = self.inner.lock().unwrap();
-        inner.ensure_sorted();
-        let inner = &*inner;
+        let folded = self.fold(selection);
         let mut threads: FastMap<u32, ThreadNode> = FastMap::default();
         // Bottom-up has a single root; top-down has one per thread.
         let mut merged = ThreadNode::default();
 
-        let (stacks, mut total, _, _) = fold_selection(inner, selection);
-        for ((tid, frames), count) in &stacks {
+        let mut total = folded.total;
+        for ((tid, frames), count) in &folded.stacks {
             if frames.is_empty() {
                 // Frameless samples are counted in the total by the fold but
                 // build no path; the old walk skipped them before counting.
@@ -718,12 +794,12 @@ impl SampleStore {
                     }
                     write_thread_node(&mut out, *tid, thread.sample_count, 0, total, total);
                     out.push_str(",\"children\":[");
-                    write_children(&mut out, &thread.root, thread.sample_count, total, inner, 0);
+                    write_children(&mut out, &thread.root, thread.sample_count, total, &folded, 0);
                     out.push_str("]}");
                 }
             }
             TreeMode::BottomUp => {
-                write_children(&mut out, &merged.root, merged.sample_count, total, inner, 0)
+                write_children(&mut out, &merged.root, merged.sample_count, total, &folded, 0)
             }
         }
         out.push_str("]}");
@@ -737,11 +813,15 @@ impl SampleStore {
     /// and each stack at 24 frames; a longer stack sets `truncated`.
     pub fn callstacks_json_for_ranges(&self, ranges: &[SampleRange], offset: usize, limit: usize) -> String {
         let limit = limit.clamp(1, 32);
-        let mut inner = self.inner.lock().unwrap();
-        inner.ensure_sorted();
-        let inner = &*inner;
-        let (stacks, total, _, _) = fold_selection(inner, Selection::Ranges(ranges));
-        let mut ordered: Vec<((u32, &[u32]), u64)> = stacks.into_iter().filter(|((_, frames), _)| !frames.is_empty()).collect();
+        let folded = self.fold(Selection::Ranges(ranges));
+        let inner = &folded;
+        let total = folded.total;
+        let mut ordered: Vec<((u32, &[u32]), u64)> = folded
+            .stacks
+            .iter()
+            .filter(|((_, frames), _)| !frames.is_empty())
+            .map(|((tid, frames), count)| ((*tid, frames.as_slice()), *count))
+            .collect();
         ordered.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.0.cmp(&b.0.0)).then(a.0.1.cmp(b.0.1)));
         let distinct = ordered.len();
         let percent = |count: u64| {
@@ -835,7 +915,7 @@ fn write_children(
     node: &TreeNode,
     parent_count: u64,
     total: u64,
-    inner: &StoreInner,
+    inner: &Folded,
     depth: usize,
 ) {
     if depth >= MAX_TREE_DEPTH {
@@ -902,6 +982,110 @@ mod tests {
 
     fn report(store: &SampleStore, start: u64, end: u64) -> serde_json::Value {
         serde_json::from_str(&store.report_json(start, end)).unwrap()
+    }
+
+    /// Timing, not a check: `cargo test --release -p perfr report_lock_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn report_lock_timing() {
+        use std::time::Instant;
+        // A full live store: about 64 MiB of callstacks, a few thousand
+        // distinct stacks over a few thousand functions, eight threads.
+        let store = SampleStore::new();
+        let functions = 4000u32;
+        for id in 1..=functions {
+            store.record_frame(
+                id,
+                FrameInfo { name: format!("namespace::Class{id}::method_{id}(int, char const*)"), module: "/usr/lib/libexample.so".into(), function_id: u64::from(id) + 1, ..FrameInfo::default() },
+            );
+        }
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let distinct: Vec<Vec<u32>> = (0..3000)
+            .map(|_| {
+                let depth = 12 + (next() % 28) as usize;
+                (0..depth).map(|_| 1 + (next() % u64::from(functions)) as u32).collect()
+            })
+            .collect();
+        let mut samples = 0u64;
+        while store.retained_bytes() < 64 << 20 {
+            let stack = &distinct[(next() % 3000) as usize];
+            store.push(StoredSample { timestamp_ns: samples * 1000, tid: 1 + (samples % 8) as u32, frames: stack.clone() });
+            samples += 1;
+        }
+        let all = [SampleRange::new(0, u64::MAX, None)];
+        let last = samples * 1000;
+        // 5 s of a 1 kHz, 8-thread capture: what one auto-profile step reads.
+        let recent = [SampleRange::new(last.saturating_sub(40_000 * 1000), u64::MAX, None)];
+        let best = |f: &mut dyn FnMut()| {
+            (0..7).map(|_| { let t = Instant::now(); f(); t.elapsed() }).min().unwrap()
+        };
+        // The lock is held for exactly this: the fold and the copy out.
+        let fold = best(&mut || {
+            std::hint::black_box(store.fold(Selection::Ranges(&all)).total);
+        });
+        let report = best(&mut || { std::hint::black_box(store.report_json_for_ranges(&all).len()); });
+        let top_down = best(&mut || { std::hint::black_box(store.tree_json_for_ranges(&all, TreeMode::TopDown).len()); });
+        let bottom_up = best(&mut || { std::hint::black_box(store.tree_json_for_ranges(&all, TreeMode::BottomUp).len()); });
+        let step_json = best(&mut || { std::hint::black_box(store.report_json_for_ranges(&recent).len()); });
+        let json = store.report_json_for_ranges(&recent);
+        let step_parse = best(&mut || { std::hint::black_box(crate::auto_profile::candidates_from_report(&json, |_| true).len()); });
+        eprintln!("{samples} samples; whole capture: lock held {fold:?}; report {report:?}, top-down {top_down:?}, bottom-up {bottom_up:?}");
+        eprintln!("auto-profile step (40k samples, {} bytes of JSON): build {step_json:?}, parse {step_parse:?}", json.len());
+    }
+
+    #[test]
+    fn the_flat_report_is_written_as_serde_json_writes_a_value() {
+        // The rows are written without building a `Value` for each. Reading
+        // the text back into one and printing that must give the same bytes:
+        // same key order, same number and string forms as before.
+        let store = store();
+        store.record_frame(9, FrameInfo { name: "quote\"and\\slash \u{e9}".into(), module: "/lib/x.so".into(), address: 16, function_id: 77 });
+        store.push(StoredSample { timestamp_ns: 500, tid: 8, frames: vec![9, 44, 1] });
+        for _ in 0..2 {
+            store.push(StoredSample { timestamp_ns: 600, tid: 8, frames: vec![] });
+        }
+        let scope = ScopeRanges::from_instances(vec![(7, 100, 250), (8, 400, 700)]);
+        for text in [
+            store.report_json(0, u64::MAX),
+            store.report_json_for(150, 450, Some(7)),
+            store.report_json(5000, 6000),
+            store.report_json_for_scope(&scope, "a \"scope\""),
+        ] {
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(text, value.to_string());
+            assert!(value["functions"].is_array(), "{text}");
+        }
+        let all = report(&store, 0, u64::MAX);
+        assert_eq!(all["samples"], 7);
+        let unnamed = all["functions"].as_array().unwrap().iter().find(|f| f["name"] == "<44>").unwrap();
+        assert_eq!(unnamed["module"], "");
+        assert_eq!(unnamed["function_id"], 0);
+        assert_eq!(unnamed["inclusive"], 1);
+        let quoted = all["functions"].as_array().unwrap().iter().find(|f| f["function_id"] == 77).unwrap();
+        assert_eq!(quoted["name"], "quote\"and\\slash \u{e9}");
+        assert_eq!(quoted["self"], 1);
+    }
+
+    #[test]
+    fn a_report_does_not_hold_the_store_while_it_is_formatted() {
+        // What every report is built from owns its data: nothing in it
+        // borrows the store, so the lock is free once `fold` returns and the
+        // capture thread's `push` is not behind the formatting.
+        let store = store();
+        let folded = store.fold(Selection::Ranges(&[SampleRange::new(0, u64::MAX, None)]));
+        store.push(StoredSample { timestamp_ns: 900, tid: 7, frames: vec![4, 1] });
+        store.clear();
+        assert_eq!(folded.total, 4);
+        assert_eq!(folded.stacks.iter().map(|(_, count)| count).sum::<u64>(), 4);
+        assert_eq!(folded.name_of(3), "inner");
+        assert_eq!(folded.name_of(99), "<99>");
+        assert_eq!((folded.first_sample_ns, folded.last_sample_ns), (100, 400));
     }
 
     #[test]

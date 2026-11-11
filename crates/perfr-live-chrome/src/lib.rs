@@ -777,6 +777,56 @@ mod tests {
         assert_eq!(evs.len(), whole.len());
     }
 
+    /// `cargo test --release -p perfr-live-chrome ingest_throughput_bench -- --ignored --nocapture`
+    ///
+    /// The event kinds whose lane is looked up by name on every event
+    /// (counters, async slices, object snapshots), and plain slices for
+    /// comparison.
+    #[test]
+    #[ignore]
+    fn ingest_throughput_bench() {
+        use std::fmt::Write;
+        const N: usize = 200_000;
+        let build = |f: &dyn Fn(&mut String, usize)| {
+            let mut json = String::with_capacity(N * 96);
+            json.push('[');
+            for i in 0..N {
+                if i > 0 {
+                    json.push(',');
+                }
+                f(&mut json, i);
+            }
+            json.push(']');
+            json
+        };
+        let cases: [(&str, String); 4] = [
+            ("counters", build(&|j, i| {
+                write!(j, r#"{{"name":"memory::usage::{}","ph":"C","ts":{i},"pid":{},"args":{{"value":{i}}}}}"#, i % 12, i % 3).unwrap()
+            })),
+            ("async", build(&|j, i| {
+                let ph = if i % 2 == 0 { "b" } else { "e" };
+                write!(j, r#"{{"name":"request::pipeline::{}","ph":"{ph}","ts":{i},"pid":{},"id":{}}}"#, i / 2 % 12, i % 3, i / 2).unwrap()
+            })),
+            ("objects", build(&|j, i| {
+                write!(j, r#"{{"name":"cc::LayerTreeHostImpl::{}","ph":"O","ts":{i},"pid":{},"id":"0x{:x}"}}"#, i % 12, i % 3, i % 500).unwrap()
+            })),
+            ("slices", build(&|j, i| {
+                let ph = if i % 2 == 0 { "B" } else { "E" };
+                write!(j, r#"{{"name":"ThreadControllerImpl::RunTask","ph":"{ph}","ts":{i},"pid":1,"tid":{}}}"#, i / 2 % 8).unwrap()
+            })),
+        ];
+        for (label, json) in &cases {
+            let mut best = f64::MAX;
+            for _ in 0..7 {
+                let t = std::time::Instant::now();
+                let (ing, _evs) = ingest_collect(json.as_bytes()).expect("ingest");
+                best = best.min(t.elapsed().as_secs_f64());
+                assert_eq!(ing.stats.events_in as usize, N);
+            }
+            println!("ingest_throughput_bench {label:>8}: {:6.1} ns/event (best of 7, {N} events)", best * 1e9 / N as f64);
+        }
+    }
+
     #[test]
     fn stream_hundreds_of_thousands() {
         const N: usize = 250_000;

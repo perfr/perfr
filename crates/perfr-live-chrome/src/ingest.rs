@@ -262,6 +262,29 @@ impl OpenRows {
     }
 }
 
+/// Lanes that are named rather than numbered (counters, async slices,
+/// object snapshots): one synthetic tid per process and name.
+///
+/// Every such event looks its lane up. Under a `(pid, String)` key each
+/// lookup built the key, an allocation and a copy of the name per event;
+/// by process and then by name it borrows the event's own.
+#[derive(Default)]
+struct NamedLanes(HashMap<u32, HashMap<String, u32>>);
+
+impl NamedLanes {
+    /// The lane's tid, and whether this call minted it from `next`.
+    fn tid(&mut self, pid: u32, name: &str, next: &mut u32) -> (u32, bool) {
+        let lanes = self.0.entry(pid).or_default();
+        if let Some(&tid) = lanes.get(name) {
+            return (tid, false);
+        }
+        let tid = *next;
+        *next = next.wrapping_add(1);
+        lanes.insert(name.to_string(), tid);
+        (tid, true)
+    }
+}
+
 /// Pairing key for async begins / ends. `id2.global` ids are trace-wide by
 /// definition, so they pair across processes.
 const PID_ANY: u32 = u32::MAX;
@@ -290,10 +313,10 @@ pub struct ChromeIngestor {
     thread_slices: HashMap<(u32, u32), ThreadSlices>,
     async_open: HashMap<(u32, u64), Vec<OpenAsync>>,
     /// Lane key is `(pid, name)` — chrome://tracing does not mint a row per id.
-    async_tids: HashMap<(u32, String), u32>,
+    async_tids: NamedLanes,
     async_lane_open: HashMap<u32, OpenRows>,
-    counter_tids: HashMap<(u32, String), u32>,
-    object_tids: HashMap<(u32, String), u32>,
+    counter_tids: NamedLanes,
+    object_tids: NamedLanes,
     next_async_tid: u32,
     next_counter_tid: u32,
     next_object_tid: u32,
@@ -321,10 +344,10 @@ impl Default for ChromeIngestor {
             duration_stacks: HashMap::new(),
             thread_slices: HashMap::new(),
             async_open: HashMap::new(),
-            async_tids: HashMap::new(),
+            async_tids: NamedLanes::default(),
             async_lane_open: HashMap::new(),
-            counter_tids: HashMap::new(),
-            object_tids: HashMap::new(),
+            counter_tids: NamedLanes::default(),
+            object_tids: NamedLanes::default(),
             next_async_tid: TID_ASYNC_BASE,
             next_counter_tid: TID_COUNTER_BASE,
             next_object_tid: TID_OBJECT_BASE,
@@ -586,8 +609,7 @@ impl ChromeIngestor {
         self.stats.duration += 1;
         let (pid, tid) = self.pid_tid(&ev);
         let start_ns = self.ts_ns(ev.ts);
-        let name = ev.name.clone().unwrap_or_default();
-        let name_id = self.intern.intern(&name);
+        let name_id = self.intern_name(&ev);
         let id = self.event_id(&ev);
         let args_id = self.intern_args(&ev);
         let flow = FlowBind::of(&ev);
@@ -597,7 +619,7 @@ impl ChromeIngestor {
             .or_default()
             .push(OpenDuration {
                 start_ns,
-                name,
+                name: ev.name.unwrap_or_default(),
                 name_id,
                 id,
                 args_id,
@@ -733,26 +755,15 @@ impl ChromeIngestor {
         let mut out = Vec::new();
         let series = counter_series(base, ev.args.as_ref());
         for (label, value) in series {
-            let tid = self.alloc_counter_tid(pid, &label);
+            let (tid, minted) = self.counter_tids.tid(pid, &label, &mut self.next_counter_tid);
             let name_id = self.intern.intern(&label);
-            self.thread_names
-                .entry((pid, tid))
-                .or_insert_with(|| label.clone());
+            if minted {
+                self.thread_names.entry((pid, tid)).or_insert(label);
+            }
             self.note_thread(pid, tid);
             out.push(LiveEvent::from_value(start_ns, pid, tid, name_id, value));
         }
         out
-    }
-
-    fn alloc_counter_tid(&mut self, pid: u32, series: &str) -> u32 {
-        *self
-            .counter_tids
-            .entry((pid, series.to_string()))
-            .or_insert_with(|| {
-                let t = self.next_counter_tid;
-                self.next_counter_tid = self.next_counter_tid.wrapping_add(1);
-                t
-            })
     }
 
     fn async_key(&self, ev: &ChromeEvent) -> (u32, u64) {
@@ -765,20 +776,11 @@ impl ChromeIngestor {
     }
 
     fn async_tid(&mut self, pid: u32, name: &str) -> u32 {
-        let key = if name.is_empty() {
-            "async".to_string()
-        } else {
-            name.to_string()
-        };
-        let tid = *self
-            .async_tids
-            .entry((pid, key.clone()))
-            .or_insert_with(|| {
-                let t = self.next_async_tid;
-                self.next_async_tid = self.next_async_tid.wrapping_add(1);
-                t
-            });
-        self.thread_names.entry((pid, tid)).or_insert(key);
+        let key = if name.is_empty() { "async" } else { name };
+        let (tid, minted) = self.async_tids.tid(pid, key, &mut self.next_async_tid);
+        if minted {
+            self.thread_names.entry((pid, tid)).or_insert_with(|| key.to_string());
+        }
         tid
     }
 
@@ -791,9 +793,9 @@ impl ChromeIngestor {
         let (key_pid, id) = self.async_key(&ev);
         let pid = ev.pid.as_ref().map(FlexId::as_u32).unwrap_or(0);
         let start_ns = self.ts_ns(ev.ts);
-        let name = ev.name.clone().unwrap_or_default();
-        let name_id = self.intern.intern(&name);
-        let tid = self.async_tid(pid, Self::async_lane(&ev, &name));
+        let name = ev.name.as_deref().unwrap_or("");
+        let name_id = self.intern.intern(name);
+        let tid = self.async_tid(pid, Self::async_lane(&ev, name));
         self.note_thread(pid, tid);
         let args_id = self.intern_args(&ev);
         let stack = self.async_open.entry((key_pid, id)).or_default();
@@ -814,11 +816,11 @@ impl ChromeIngestor {
         let (key_pid, id) = self.async_key(&ev);
         let own_pid = ev.pid.as_ref().map(FlexId::as_u32).unwrap_or(0);
         let start_ns = self.ts_ns(ev.ts);
-        let name = ev.name.clone().unwrap_or_default();
-        let name_id = self.intern.intern(&name);
+        let name = ev.name.as_deref().unwrap_or("");
+        let name_id = self.intern.intern(name);
         let (pid, tid) = match self.async_open.get(&(key_pid, id)).and_then(|s| s.last()) {
             Some(o) => (o.pid, o.tid),
-            None => (own_pid, self.async_tid(own_pid, Self::async_lane(&ev, &name))),
+            None => (own_pid, self.async_tid(own_pid, Self::async_lane(&ev, name))),
         };
         let depth = self.async_lane_open.get(&tid).map_or(0, OpenRows::below_all);
         let args_id = self.intern_args(&ev);
@@ -833,21 +835,21 @@ impl ChromeIngestor {
         let (key_pid, id) = self.async_key(&ev);
         let own_pid = ev.pid.as_ref().map(FlexId::as_u32).unwrap_or(0);
         let end_ns = self.ts_ns(ev.ts);
-        let name = ev.name.clone().unwrap_or_default();
+        let name = ev.name.as_deref().unwrap_or("");
         let stack = self.async_open.entry((key_pid, id)).or_default();
         let open = stack.pop();
         // The lane the begin was drawn on; a nameless Perfetto `SLICE_END`
         // must not mint an "async" row of its own.
         let (pid, tid) = match &open {
             Some(o) => (o.pid, o.tid),
-            None => (own_pid, self.async_tid(own_pid, Self::async_lane(&ev, &name))),
+            None => (own_pid, self.async_tid(own_pid, Self::async_lane(&ev, name))),
         };
         if let (Some(open), Some(rows)) = (&open, self.async_lane_open.get_mut(&tid)) {
             rows.release(open.depth);
         }
         let Some(open) = open else {
             self.stats.unmatched_end += 1;
-            let name_id = self.intern.intern(&name);
+            let name_id = self.intern.intern(name);
             let out = self.scope_event(end_ns, 1, pid, tid, name_id, 0, kind::API_TRACK);
             return vec![out];
         };
@@ -869,8 +871,8 @@ impl ChromeIngestor {
         self.stats.flow += 1;
         let (pid, tid) = self.pid_tid(&ev);
         let start_ns = self.ts_ns(ev.ts);
-        let name = ev.name.clone().unwrap_or_else(|| "flow".into());
-        let name_id = self.intern.intern(&name);
+        let name = ev.name.as_deref().unwrap_or("flow");
+        let name_id = self.intern.intern(name);
         let args_id = self.intern_args(&ev);
         self.note_thread(pid, tid);
         let out = self.scope_event(start_ns, 1, pid, tid, name_id, 0, kind::API_SCOPE);
@@ -1084,18 +1086,20 @@ impl ChromeIngestor {
     fn on_object(&mut self, ev: ChromeEvent, ch: char) -> Vec<LiveEvent> {
         self.stats.object += 1;
         let pid = ev.pid.as_ref().map(FlexId::as_u32).unwrap_or(0);
-        let name = ev.name.clone().unwrap_or_else(|| format!("object {ch}"));
-        let lane = ev.lane.clone().unwrap_or_else(|| name.clone());
-        let tid = *self
-            .object_tids
-            .entry((pid, lane.clone()))
-            .or_insert_with(|| {
-                let t = self.next_object_tid;
-                self.next_object_tid = self.next_object_tid.wrapping_add(1);
-                t
-            });
-        self.thread_names.entry((pid, tid)).or_insert(lane);
-        let name_id = self.intern.intern(&name);
+        let fallback;
+        let name = match ev.name.as_deref() {
+            Some(n) => n,
+            None => {
+                fallback = format!("object {ch}");
+                &fallback
+            }
+        };
+        let lane = ev.lane.as_deref().unwrap_or(name);
+        let (tid, minted) = self.object_tids.tid(pid, lane, &mut self.next_object_tid);
+        if minted {
+            self.thread_names.entry((pid, tid)).or_insert_with(|| lane.to_string());
+        }
+        let name_id = self.intern.intern(name);
         let start_ns = self.ts_ns(ev.ts);
         let args_id = self.intern_args(&ev);
         self.note_thread(pid, tid);

@@ -3072,6 +3072,13 @@ impl PerfrLiveApp {
         // the start" readout count from it.
         if s.capture_start_ns > 0 {
             self.capture_start_ns = s.capture_start_ns;
+            // And the floor of its bounds, when what is held is the
+            // service's capture and not a file or the demo, whose times are
+            // on another clock altogether.
+            if !s.demo && self.static_capture.is_none() && !self.held_stream.is_local() && self.trace_name.is_none() {
+                self.index.set_extent_floor(s.capture_start_ns);
+                self.refresh_content_bounds();
+            }
         }
         let capturing = s.capturing;
         // While a capture runs the service is the truth (another viewer, or
@@ -3422,7 +3429,12 @@ impl PerfrLiveApp {
                     return;
                 }
                 for ev in events {
-                    if !is_self_pid(ev.pid) {
+                    // An event that was already running when the capture
+                    // began comes only from a stored capture cut to a
+                    // window, and may end long after the window does: it is
+                    // drawn, and does not move the edge (nor the bounds, see
+                    // `set_extent_floor`).
+                    if !is_self_pid(ev.pid) && ev.start_ns >= self.capture_start_ns {
                         self.live_edge_ns = self.live_edge_ns.max(ev.end_ns());
                     }
                     self.live_all.push(&ev);
@@ -3458,6 +3470,7 @@ impl PerfrLiveApp {
                 // not known yet": the real CLOCK_MONOTONIC origin comes with
                 // the service's own `CaptureStarted`.
                 self.capture_start_ns = start_ns;
+                self.index.set_extent_floor(start_ns);
                 self.live_edge_ns = if start_ns > 0 { start_ns } else { DEMO_ORIGIN_NS };
                 // A new capture, a new timer: it restarts on the next frame
                 // from the capture's own clock.

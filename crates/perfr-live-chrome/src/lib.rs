@@ -9,7 +9,9 @@
 //! `traceEvents[]`, plus `displayTimeUnit`, `stackFrames`, and `samples`.
 //! Proto: Perfetto `.pftrace` / `.perfetto-trace` / `.pb` (see
 //! [`perfetto`](crate::perfetto) for what maps). gzip and a single-file zip
-//! are decoded into the parser — the file is never materialized whole.
+//! are decoded into the parser a slice at a time: the decoded text is never
+//! in memory whole. What a caller pushes ahead of the parser is (compressed,
+//! when the file is).
 //!
 //! [`LiveEvent`] stays 32 bytes. Args are interned as a compact hover string
 //! and looked up with [`ArgKey`]. Memory-dump (`ph: v`) payloads are skipped.

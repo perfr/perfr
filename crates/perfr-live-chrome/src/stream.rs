@@ -6,10 +6,11 @@
 //! or a Perfetto proto trace (length-delimited `TracePacket`s).
 //!
 //! Bytes are pushed as they arrive. Complete events / packets are decoded one
-//! at a time — never a `Vec<Value>` of the whole file. gzip is **write-decoded
-//! as chunks arrive** (not buffered then inflated); zip is accepted when it
-//! holds a single deflated/stored file. The format is sniffed from the first
-//! decoded bytes: `[` / `{` is JSON, a `0x0a` packet tag is Perfetto.
+//! at a time — never a `Vec<Value>` of the whole file. gzip is inflated a
+//! slice at a time, as the parser asks for more: what is pushed ahead of the
+//! parser waits compressed. zip is accepted when it holds a single
+//! deflated/stored file. The format is sniffed from the first decoded bytes:
+//! `[` / `{` is JSON, a `0x0a` packet tag is Perfetto.
 
 use std::io::Write;
 
@@ -21,6 +22,15 @@ use crate::perfetto::PerfettoState;
 use crate::proto::varint;
 
 const COMPACT_EVERY: usize = 1 << 20;
+/// Compressed input is inflated this much at a time, and only while fewer
+/// decoded bytes than [`BACKLOG_TARGET`] wait for the parser. Inflating
+/// every chunk as it was pushed ran far ahead of the parser (a frame takes
+/// 2 MiB of gzip, which is 20-30 MB of JSON, and parses a quarter of that),
+/// so most of a large `.json.gz` ended up decoded in one buffer; and a
+/// single call inflated whatever a chunk held, up to a thousand times its
+/// size. A slice bounds that to about 16 MB.
+const INFLATE_SLICE: usize = 16 << 10;
+const BACKLOG_TARGET: usize = 4 << 20;
 /// Skip `args` for memory-dump events so a heap snapshot cannot explode RAM.
 const DUMP_SCAN: &[u8] = br#""ph""#;
 
@@ -59,9 +69,8 @@ enum PendingKey {
 
 enum Decode {
     Identity,
-    /// Streaming gzip (concatenated members). Inflated JSON is appended to
-    /// `raw` on each `push` so a multi-GB `.json.gz` never sits decompressed
-    /// in one buffer.
+    /// Streaming gzip (concatenated members), inflated into `raw` as the
+    /// parser asks for it; see [`INFLATE_SLICE`].
     Gzip(Box<MultiGzDecoder<Vec<u8>>>),
     ZipPending,
     ZipDeflate {
@@ -71,6 +80,11 @@ enum Decode {
     ZipStored {
         remain: u64,
     },
+    /// The compressed stream or the zip entry has ended. What follows (a
+    /// zip's central directory) is not trace data and is discarded: read as
+    /// such, it raised "expected a packet tag" at the end of a Perfetto
+    /// trace that had parsed in full.
+    Ended,
 }
 
 /// Incremental Chrome-trace reader. Feed compressed or raw bytes with
@@ -81,6 +95,9 @@ pub struct ChromeStream {
     phase: Phase,
     pending: PendingKey,
     decode: Decode,
+    /// Compressed input not inflated yet, from `packed_pos` on.
+    packed: Vec<u8>,
+    packed_pos: usize,
     magic_buf: Vec<u8>,
     format: Format,
     perfetto: Option<Box<PerfettoState>>,
@@ -105,6 +122,8 @@ impl Default for ChromeStream {
             phase: Phase::Start,
             pending: PendingKey::None,
             decode: Decode::Identity,
+            packed: Vec::new(),
+            packed_pos: 0,
             magic_buf: Vec::new(),
             format: Format::Unknown,
             perfetto: None,
@@ -138,7 +157,7 @@ impl ChromeStream {
     /// The input has ended and all of it has been parsed or given up on:
     /// no later [`Self::pump`] returns anything. Also true after an error.
     pub fn is_done(&self) -> bool {
-        self.error.is_some() || (self.eof && self.phase == Phase::Done)
+        self.error.is_some() || (self.input_ended() && self.phase == Phase::Done)
     }
 
     /// Sniffed from the first decoded bytes; `Unknown` until they arrive.
@@ -146,8 +165,18 @@ impl ChromeStream {
         self.format
     }
 
+    /// Bytes pushed and not parsed yet, decoded or still compressed.
     pub fn pending_bytes(&self) -> usize {
+        self.decoded_backlog() + (self.packed.len() - self.packed_pos)
+    }
+
+    fn decoded_backlog(&self) -> usize {
         self.raw.len().saturating_sub(self.pos)
+    }
+
+    /// Every byte the caller will ever push has been decoded into `raw`.
+    fn input_ended(&self) -> bool {
+        self.eof && self.packed_pos == self.packed.len() && !matches!(self.decode, Decode::Gzip(_))
     }
 
     /// Append a file chunk. Detects gzip / zip from the first bytes.
@@ -156,189 +185,198 @@ impl ChromeStream {
             return;
         }
         self.bytes_in += chunk.len() as u64;
+        match self.decode {
+            Decode::Identity => {}
+            Decode::Ended => return,
+            _ => {
+                self.packed.extend_from_slice(chunk);
+                self.inflate(false);
+                return;
+            }
+        }
+        if !self.plain_json && self.bytes_in == chunk.len() as u64 {
+            self.magic_buf.extend_from_slice(chunk);
+            if self.magic_buf.len() < 4 && !looks_like_json(&self.magic_buf) {
+                return;
+            }
+            let held = std::mem::take(&mut self.magic_buf);
+            if held.len() >= 2 && held[0] == 0x1f && held[1] == 0x8b {
+                self.decode = Decode::Gzip(Box::new(MultiGzDecoder::new(Vec::new())));
+                self.packed = held;
+                self.inflate(false);
+                return;
+            }
+            if held.starts_with(b"PK\x03\x04") {
+                self.decode = Decode::ZipPending;
+                self.packed = held;
+                self.inflate(false);
+                return;
+            }
+            self.bytes_decoded += held.len() as u64;
+            self.raw.extend_from_slice(&held);
+            return;
+        }
+        self.raw.extend_from_slice(chunk);
+        self.bytes_decoded += chunk.len() as u64;
+    }
+
+    /// Decode more of the compressed input into `raw`: while the decoded
+    /// backlog is under its target, or, when the parser is `starved` (it
+    /// cannot go on without bytes, however many it already holds: one value
+    /// larger than the target), until it has been given some. Returns
+    /// whether `raw` grew.
+    fn inflate(&mut self, mut starved: bool) -> bool {
+        self.compact();
+        let before = self.bytes_decoded;
+        while self.error.is_none() && (starved || self.decoded_backlog() < BACKLOG_TARGET) {
+            let grown = self.bytes_decoded;
+            if !self.inflate_slice() {
+                break;
+            }
+            if self.bytes_decoded > grown {
+                starved = false;
+            }
+        }
+        if self.packed_pos == self.packed.len() {
+            self.packed.clear();
+            self.packed_pos = 0;
+        } else if self.packed_pos >= self.packed.len() / 2 {
+            self.packed.drain(..self.packed_pos);
+            self.packed_pos = 0;
+        }
+        self.bytes_decoded > before
+    }
+
+    /// One step of the decoder: a slice of compressed input, a zip header,
+    /// or the final flush once the input has ended. False when there is
+    /// nothing it can do until more is pushed.
+    fn inflate_slice(&mut self) -> bool {
+        let input = &self.packed[self.packed_pos..];
         match &mut self.decode {
-            Decode::Identity => {
-                if !self.plain_json && self.bytes_in == chunk.len() as u64 {
-                    self.magic_buf.extend_from_slice(chunk);
-                    if self.magic_buf.len() < 4 && !looks_like_json(&self.magic_buf) {
-                        return;
-                    }
-                    let magic = self.magic_buf.clone();
-                    if magic.len() >= 2 && magic[0] == 0x1f && magic[1] == 0x8b {
-                        let held = std::mem::take(&mut self.magic_buf);
-                        self.decode = Decode::Gzip(Box::new(MultiGzDecoder::new(Vec::new())));
-                        self.push_gzip(&held);
-                        return;
-                    }
-                    if magic.len() >= 4 && magic.starts_with(b"PK\x03\x04") {
-                        self.decode = Decode::ZipPending;
-                        let held = std::mem::take(&mut self.magic_buf);
-                        self.push_zip(&held);
-                        return;
-                    }
-                    self.raw.extend_from_slice(&magic);
-                    self.bytes_decoded += magic.len() as u64;
-                    self.magic_buf.clear();
-                    return;
-                }
-                self.raw.extend_from_slice(chunk);
-                self.bytes_decoded += chunk.len() as u64;
+            Decode::Identity | Decode::Ended => {
+                self.packed_pos = self.packed.len();
+                false
             }
-            Decode::Gzip(_) => self.push_gzip(chunk),
-            Decode::ZipPending | Decode::ZipDeflate { .. } | Decode::ZipStored { .. } => {
-                self.push_zip(chunk);
+            Decode::Gzip(dec) => {
+                let n = input.len().min(INFLATE_SLICE);
+                let result = if n > 0 {
+                    dec.write_all(&input[..n])
+                } else if self.eof {
+                    dec.try_finish()
+                } else {
+                    return false;
+                };
+                if let Err(e) = result {
+                    self.error = Some(format!("gzip: {e}"));
+                    return false;
+                }
+                self.packed_pos += n;
+                let out = dec.get_mut();
+                self.bytes_decoded += out.len() as u64;
+                self.raw.extend_from_slice(out);
+                out.clear();
+                if n == 0 {
+                    self.decode = Decode::Ended;
+                }
+                true
             }
-        }
-    }
-
-    fn push_gzip(&mut self, chunk: &[u8]) {
-        let Decode::Gzip(dec) = &mut self.decode else {
-            return;
-        };
-        if let Err(e) = dec.write_all(chunk) {
-            self.error = Some(format!("gzip: {e}"));
-            return;
-        }
-        self.drain_gzip();
-    }
-
-    fn drain_gzip(&mut self) {
-        let Decode::Gzip(dec) = &mut self.decode else {
-            return;
-        };
-        let out = dec.get_mut();
-        if !out.is_empty() {
-            self.bytes_decoded += out.len() as u64;
-            self.raw.extend_from_slice(out);
-            out.clear();
-        }
-    }
-
-    fn finish_gzip(&mut self) {
-        if !matches!(self.decode, Decode::Gzip(_)) {
-            return;
-        }
-        let result = match &mut self.decode {
-            Decode::Gzip(dec) => dec.try_finish(),
-            _ => return,
-        };
-        if let Err(e) = result {
-            self.error = Some(format!("gzip: {e}"));
-            return;
-        }
-        self.drain_gzip();
-        self.decode = Decode::Identity;
-    }
-
-    fn push_zip(&mut self, chunk: &[u8]) {
-        self.magic_buf.extend_from_slice(chunk);
-        loop {
-            match &mut self.decode {
-                Decode::ZipPending => {
-                    if self.magic_buf.len() < 30 {
-                        return;
+            Decode::ZipPending => {
+                if input.len() < 30 {
+                    return self.drop_unusable_input();
+                }
+                if !input.starts_with(b"PK\x03\x04") {
+                    self.error = Some("zip: expected local file header".into());
+                    return false;
+                }
+                let u16_at = |i: usize| u16::from_le_bytes([input[i], input[i + 1]]);
+                let method = u16_at(8);
+                let comp =
+                    u32::from_le_bytes([input[18], input[19], input[20], input[21]]) as u64;
+                let header = 30 + u16_at(26) as usize + u16_at(28) as usize;
+                if input.len() < header {
+                    return self.drop_unusable_input();
+                }
+                let flags = u16_at(6);
+                if flags & 0x8 != 0 && comp == 0 {
+                    self.error = Some("zip: data-descriptor sizes not supported".into());
+                    return false;
+                }
+                self.packed_pos += header;
+                match method {
+                    // An empty entry has nothing to wait for; left in a
+                    // state that waits, the bytes after it are never read.
+                    0 | 8 if comp == 0 => self.decode = Decode::Ended,
+                    0 => self.decode = Decode::ZipStored { remain: comp },
+                    8 => {
+                        self.decode = Decode::ZipDeflate {
+                            dec: Box::new(flate2::write::DeflateDecoder::new(Vec::new())),
+                            remain: comp,
+                        };
                     }
-                    if !self.magic_buf.starts_with(b"PK\x03\x04") {
-                        self.error = Some("zip: expected local file header".into());
-                        return;
-                    }
-                    let method = u16::from_le_bytes(self.magic_buf[8..10].try_into().unwrap());
-                    let comp = u32::from_le_bytes(self.magic_buf[18..22].try_into().unwrap()) as u64;
-                    let name_len =
-                        u16::from_le_bytes(self.magic_buf[26..28].try_into().unwrap()) as usize;
-                    let extra_len =
-                        u16::from_le_bytes(self.magic_buf[28..30].try_into().unwrap()) as usize;
-                    let header = 30 + name_len + extra_len;
-                    if self.magic_buf.len() < header {
-                        return;
-                    }
-                    let flags = u16::from_le_bytes(self.magic_buf[6..8].try_into().unwrap());
-                    if flags & 0x8 != 0 && comp == 0 {
-                        self.error = Some("zip: data-descriptor sizes not supported".into());
-                        return;
-                    }
-                    self.magic_buf.drain(..header);
-                    match method {
-                        0 => self.decode = Decode::ZipStored { remain: comp },
-                        8 => {
-                            self.decode = Decode::ZipDeflate {
-                                dec: Box::new(flate2::write::DeflateDecoder::new(Vec::new())),
-                                remain: comp,
-                            };
-                        }
-                        other => {
-                            self.error = Some(format!("zip: unsupported method {other}"));
-                            return;
-                        }
+                    other => {
+                        self.error = Some(format!("zip: unsupported method {other}"));
+                        return false;
                     }
                 }
-                Decode::ZipStored { remain } => {
-                    let n = (*remain as usize).min(self.magic_buf.len());
-                    if n == 0 {
-                        return;
-                    }
-                    let take: Vec<u8> = self.magic_buf.drain(..n).collect();
-                    *remain -= n as u64;
-                    self.raw.extend_from_slice(&take);
-                    self.bytes_decoded += take.len() as u64;
-                    if *remain == 0 {
-                        self.decode = Decode::Identity;
+                true
+            }
+            Decode::ZipStored { remain } => {
+                let n = input.len().min(INFLATE_SLICE).min(usize::try_from(*remain).unwrap_or(usize::MAX));
+                if n == 0 {
+                    return false;
+                }
+                *remain -= n as u64;
+                self.bytes_decoded += n as u64;
+                self.raw.extend_from_slice(&input[..n]);
+                self.packed_pos += n;
+                if *remain == 0 {
+                    self.decode = Decode::Ended;
+                }
+                true
+            }
+            Decode::ZipDeflate { dec, remain } => {
+                let n = input.len().min(INFLATE_SLICE).min(usize::try_from(*remain).unwrap_or(usize::MAX));
+                if n == 0 {
+                    return false;
+                }
+                *remain -= n as u64;
+                if let Err(e) = dec.write_all(&input[..n]) {
+                    self.error = Some(format!("zip deflate: {e}"));
+                    return false;
+                }
+                self.packed_pos += n;
+                if *remain == 0 {
+                    if let Err(e) = dec.try_finish() {
+                        self.error = Some(format!("zip deflate finish: {e}"));
+                        return false;
                     }
                 }
-                Decode::ZipDeflate { dec, remain } => {
-                    let n = (*remain as usize).min(self.magic_buf.len());
-                    if n == 0 {
-                        return;
-                    }
-                    let take: Vec<u8> = self.magic_buf.drain(..n).collect();
-                    *remain -= n as u64;
-                    if let Err(e) = dec.write_all(&take) {
-                        self.error = Some(format!("zip deflate: {e}"));
-                        return;
-                    }
-                    if *remain == 0 {
-                        if let Err(e) = dec.try_finish() {
-                            self.error = Some(format!("zip deflate finish: {e}"));
-                            return;
-                        }
-                    }
-                    let out = dec.get_mut();
-                    if !out.is_empty() {
-                        self.bytes_decoded += out.len() as u64;
-                        self.raw.extend_from_slice(out);
-                        out.clear();
-                    }
-                    if *remain == 0 {
-                        self.decode = Decode::Identity;
-                    }
+                let out = dec.get_mut();
+                self.bytes_decoded += out.len() as u64;
+                self.raw.extend_from_slice(out);
+                out.clear();
+                if *remain == 0 {
+                    self.decode = Decode::Ended;
                 }
-                _ => return,
+                true
             }
         }
+    }
+
+    /// A zip header the file ends inside of. Nothing can be made of those
+    /// bytes; held, they would keep the load from ever finishing.
+    fn drop_unusable_input(&mut self) -> bool {
+        if self.eof {
+            self.packed_pos = self.packed.len();
+        }
+        false
     }
 
     /// Signal end-of-file so gzip/zip can flush, and so a proto stream
     /// knows its last packet has arrived.
     pub fn finish_input(&mut self) {
         self.eof = true;
-        if matches!(self.decode, Decode::Gzip(_)) {
-            self.finish_gzip();
-            return;
-        }
-        match &mut self.decode {
-            Decode::ZipDeflate { dec, remain } => {
-                if *remain == 0 {
-                    let _ = dec.try_finish();
-                    let out = dec.get_mut();
-                    if !out.is_empty() {
-                        self.bytes_decoded += out.len() as u64;
-                        self.raw.extend_from_slice(out);
-                        out.clear();
-                    }
-                }
-            }
-            _ => {}
-        }
+        self.inflate(false);
     }
 
     /// Deserialize up to `budget` events into `ing`.
@@ -352,13 +390,16 @@ impl ChromeStream {
                 Step::Event => {}
                 Step::Done => break,
                 Step::NeedBytes => {
+                    if self.inflate(true) {
+                        continue;
+                    }
                     // No more bytes are coming. What is left is a value the
                     // file ends inside of (the writer crashed or was killed)
                     // or one the scanner cannot read. Left in the buffer it
                     // kept the load unfinished for good: the open scopes,
                     // which are what such a trace is for, were never closed
                     // and drawn. The Perfetto path drops its own tail.
-                    if self.eof {
+                    if self.input_ended() {
                         self.drop_tail();
                     }
                     break;
@@ -370,13 +411,16 @@ impl ChromeStream {
     }
 
     fn drop_tail(&mut self) {
-        self.dropped_tail_bytes += self.pending_bytes() as u64;
+        self.dropped_tail_bytes += self.decoded_backlog() as u64;
         self.pos = self.raw.len();
         self.phase = Phase::Done;
     }
 
+    /// Drop the parsed prefix of `raw`, once it is at least as long as what
+    /// is left: the drain moves the remainder, and moving a backlog of
+    /// hundreds of megabytes after every megabyte parsed was quadratic.
     fn compact(&mut self) {
-        if self.pos < COMPACT_EVERY {
+        if self.pos < COMPACT_EVERY || self.pos < self.raw.len() - self.pos {
             return;
         }
         self.raw.drain(..self.pos);
@@ -645,7 +689,7 @@ impl ChromeStream {
     fn sniff(&self) -> Option<Format> {
         let b = &self.raw[self.pos..];
         if b.is_empty() {
-            return if self.eof { Some(Format::Json) } else { None };
+            return if self.input_ended() { Some(Format::Json) } else { None };
         }
         let i = skip_ws(b, 0);
         if i < b.len() && (b[i] == b'[' || b[i] == b'{') {
@@ -654,7 +698,7 @@ impl ChromeStream {
         if b[0] == PACKET_TAG {
             return Some(Format::Perfetto);
         }
-        if i >= b.len() && !self.eof && b.len() < 64 {
+        if i >= b.len() && !self.input_ended() && b.len() < 64 {
             return None;
         }
         Some(Format::Json)
@@ -684,7 +728,7 @@ impl ChromeStream {
             })
         };
         let Some((start, end)) = header else {
-            if self.eof {
+            if self.input_ended() {
                 self.pos = self.raw.len();
                 if let Some(p) = self.perfetto.as_mut() {
                     out.extend(p.finish(ing));
@@ -846,6 +890,7 @@ pub fn ingest_collect(bytes: &[u8]) -> Result<(ChromeIngestor, Vec<perfr_live_ev
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     /// Drive a stream the way the viewer does: push, signal the end, pump,
     /// and call the load finished when the input is at its end and nothing
@@ -898,6 +943,133 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(bytes).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// Push `input` the way the viewer does (all of it here: it is under
+    /// the 2 MiB a frame takes), pump a frame's budget at a time, and report
+    /// the most decoded bytes that ever sat in the buffer.
+    fn peak_decoded_backlog(input: &[u8]) -> (usize, u64) {
+        let mut stream = ChromeStream::default();
+        let mut ing = ChromeIngestor::default();
+        stream.push(input);
+        stream.finish_input();
+        let mut peak = stream.raw.len();
+        for _ in 0..100_000 {
+            let _ = stream.pump(&mut ing, 48_000);
+            peak = peak.max(stream.raw.len());
+            assert_eq!(stream.error(), None);
+            if stream.pending_bytes() == 0 && stream.pump(&mut ing, 48_000).is_empty() {
+                return (peak, stream.events_seen);
+            }
+        }
+        panic!("the load never finishes");
+    }
+
+    /// A zip archive of one entry, with the central directory after it.
+    fn zip_of(payload: &[u8], deflate: bool) -> Vec<u8> {
+        let name = b"trace.json";
+        let data = if deflate {
+            let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+            enc.write_all(payload).unwrap();
+            enc.finish().unwrap()
+        } else {
+            payload.to_vec()
+        };
+        let mut z = Vec::new();
+        z.extend_from_slice(b"PK\x03\x04");
+        z.extend_from_slice(&[20, 0, 0, 0]); // version, flags
+        z.extend_from_slice(&(if deflate { 8u16 } else { 0 }).to_le_bytes());
+        z.extend_from_slice(&[0; 8]); // time, date, crc (not checked)
+        z.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        z.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        z.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        z.extend_from_slice(&[0, 0]); // extra length
+        z.extend_from_slice(name);
+        z.extend_from_slice(&data);
+        z.extend_from_slice(b"PK\x01\x02");
+        z.extend_from_slice(&[0; 42]);
+        z.extend_from_slice(name);
+        z.extend_from_slice(b"PK\x05\x06");
+        z.extend_from_slice(&[0; 18]);
+        z
+    }
+
+    #[test]
+    fn a_single_entry_zip_loads_stored_or_deflated() {
+        let json = br#"[{"name":"a","ph":"i","ts":1,"pid":1,"tid":1},{"name":"b","ph":"i","ts":2,"pid":1,"tid":1}]"#;
+        for deflate in [false, true] {
+            let zip = zip_of(json, deflate);
+            let (_, events) = crate::ingest_collect(&zip).unwrap_or_else(|e| panic!("deflate {deflate}: {e}"));
+            assert_eq!(events.len(), 2, "deflate {deflate}");
+            // An archive cut inside its header or its entry still ends.
+            for cut in [3, 20, 35, zip.len() / 2] {
+                let mut stream = ChromeStream::default();
+                let mut ing = ChromeIngestor::default();
+                stream.push(&zip[..cut]);
+                stream.finish_input();
+                let _ = stream.pump(&mut ing, 1024);
+                assert_eq!(stream.pending_bytes(), 0, "deflate {deflate}, cut at {cut}");
+            }
+            // The directory arriving in a push of its own is still not
+            // trace data.
+            let entry_end = zip.len() - (4 + 42 + 10 + 4 + 18);
+            let mut stream = ChromeStream::default();
+            let mut ing = ChromeIngestor::default();
+            stream.push(&zip[..entry_end]);
+            let mut n = stream.pump(&mut ing, 1024).len();
+            stream.push(&zip[entry_end..]);
+            stream.finish_input();
+            n += stream.pump(&mut ing, 1024).len();
+            assert_eq!((n, stream.error(), stream.pending_bytes()), (2, None, 0), "deflate {deflate}");
+            assert_eq!(stream.dropped_tail_bytes, 0, "deflate {deflate}: the directory was read as JSON");
+        }
+        let empty = zip_of(b"", false);
+        let (_, events) = crate::ingest_collect(&empty).expect("an empty entry is an empty trace");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn a_compressed_trace_is_not_inflated_ahead_of_the_parser() {
+        const N: usize = 300_000;
+        let mut json = String::with_capacity(N * 70);
+        json.push('[');
+        for i in 0..N {
+            use std::fmt::Write as _;
+            let comma = if i > 0 { "," } else { "" };
+            write!(json, r#"{comma}{{"name":"scope","ph":"i","ts":{i},"pid":1,"tid":{}}}"#, i % 8).unwrap();
+        }
+        json.push(']');
+        let gz = gzip(json.as_bytes());
+        assert!(gz.len() < 2 << 20, "fixture must fit one frame's input budget: {}", gz.len());
+        let t = std::time::Instant::now();
+        let (peak, events) = peak_decoded_backlog(&gz);
+        eprintln!(
+            "{} MiB of JSON from {} KiB of gzip: peak decoded buffer {} KiB, {:?}",
+            json.len() >> 20,
+            gz.len() >> 10,
+            peak >> 10,
+            t.elapsed()
+        );
+        assert_eq!(events, N as u64);
+        assert!(peak < 8 << 20, "{} MiB decoded and waiting", peak >> 20);
+    }
+
+    #[test]
+    fn a_decompression_bomb_is_inflated_a_slice_at_a_time() {
+        // 128 MiB of JSON whitespace in about 128 KiB of gzip.
+        let mut text = vec![b' '; 128 << 20];
+        text[0] = b'[';
+        *text.last_mut().unwrap() = b']';
+        let gz = gzip(&text);
+        drop(text);
+        let (peak, _) = peak_decoded_backlog(&gz);
+        assert!(peak < 40 << 20, "{} MiB materialised at once", peak >> 20);
     }
 
     #[test]

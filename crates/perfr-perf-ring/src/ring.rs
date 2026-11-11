@@ -56,10 +56,18 @@ impl RingBuffer {
             }
         };
 
+        RingBuffer::from_mapping(mmap, ring_size, fd, page_size)
+    }
+
+    /// Wraps an open perf fd and its mapping, checking that the kernel laid
+    /// the ring out as asked. Takes ownership of both, on failure too.
+    fn from_mapping(mmap: sys::Mmap, ring_size: u64, fd: i32, page_size: u64) -> io::Result<RingBuffer> {
         let ring = RingBuffer { mmap, ring_size, fd };
         let metadata = ring.metadata();
         if metadata.data_offset != page_size || metadata.data_size != ring_size {
-            sys::close(fd);
+            // No close here: `ring` owns the descriptor and its drop closes
+            // it. A second close could land on a number another thread had
+            // been handed in between.
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "perf_event_mmap_page layout mismatch",
@@ -324,5 +332,66 @@ mod tests {
         }
         assert!(records > 0, "the kernel produced no records");
         assert!(named_mmaps > 0, "no named mmap record seen");
+    }
+
+    /// A descriptor closed twice is only visible when another thread is
+    /// handed the number between the two closes -- then the second close
+    /// takes that thread's file. So one thread keeps opening descriptors and
+    /// checking that they are still its own, while this one fails opens over
+    /// a mapping whose metadata page does not match (a zero-filled memfd
+    /// stands in for the pre-4.1 kernel that leaves `data_offset` unset).
+    /// The window is narrow, hence the repetitions; a correct `open` cannot
+    /// fail this however the threads interleave.
+    #[test]
+    fn a_layout_mismatch_closes_the_descriptor_once_and_nobody_elses() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let page_size = sys::page_size();
+        let ring_size = page_size;
+        let length = (page_size + ring_size) as usize;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stolen = Arc::new(AtomicU64::new(0));
+        let opener = {
+            let (stop, stolen) = (stop.clone(), stolen.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
+                    assert!(fd >= 0);
+                    // Long enough for a stray close that is already on its
+                    // way to land.
+                    for _ in 0..8 {
+                        std::hint::spin_loop();
+                    }
+                    if unsafe { libc::fcntl(fd, libc::F_GETFD) } == -1 {
+                        // Closed under us. The number may already be someone
+                        // else's again, so it is not ours to close.
+                        stolen.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        unsafe { libc::close(fd) };
+                    }
+                }
+            })
+        };
+
+        for _ in 0..20_000 {
+            let fd = unsafe { libc::memfd_create(c"perfr-ring-test".as_ptr(), libc::MFD_CLOEXEC) };
+            assert!(fd >= 0);
+            assert_eq!(unsafe { libc::ftruncate(fd, length as libc::off_t) }, 0);
+            let mmap = sys::Mmap::ring(fd, length).unwrap();
+            let error = RingBuffer::from_mapping(mmap, ring_size, fd, page_size).err().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            if stolen.load(Ordering::Relaxed) > 0 {
+                break;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        opener.join().unwrap();
+        assert_eq!(
+            stolen.load(Ordering::Relaxed),
+            0,
+            "a failed open closed a descriptor that another thread had been given"
+        );
     }
 }

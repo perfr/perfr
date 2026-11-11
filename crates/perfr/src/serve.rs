@@ -269,6 +269,20 @@ impl SymbolState {
     }
 }
 
+/// The index loaded for `pid`, if there is one, and the load's status word.
+///
+/// Handed out as a clone so the caller works on it with the lock released: a
+/// search over a large binary builds tens of megabytes of JSON and a
+/// disassembly reads the module from disk, and under the lock either one
+/// stalled every status poll, a starting capture and, with auto-profiling
+/// on, the capture thread itself, which then drains nothing.
+fn index_for(state: &Mutex<SymbolState>, pid: u32) -> Result<(Option<Arc<FunctionIndex>>, String), String> {
+    let state = state.lock().map_err(|_| "symbol state poisoned".to_string())?;
+    let index = if state.pid == pid { state.index.clone() } else { None };
+    let status = if state.status.is_empty() { "idle" } else { state.status.as_str() };
+    Ok((index, status.to_string()))
+}
+
 /// A capture owns one symbol index, the target's. Loading another pid
 /// replaces that index and makes auto-profiling reload symbols mid-capture.
 /// Viewers ask for whatever they have selected; that selection is not
@@ -2970,16 +2984,19 @@ pub fn run_on(
     let export_service = service.clone();
     let modules_state = symbols.clone();
     service.set_modules_json(Arc::new(move |pid| {
-        let state = modules_state.lock().map_err(|_| "symbol state poisoned".to_string())?;
         // pid 0 means "whatever symbols are loaded", which is what a reloaded
         // page asking for the modules view has: a deep link carries no
         // process selection.
-        let pid = if pid == 0 { state.pid } else { pid };
-        match (&state.index, state.pid == pid && pid != 0) {
-            (Some(index), true) => Ok(index.modules_json(pid)),
-            _ => Ok(serde_json::json!({
+        let pid = if pid == 0 {
+            modules_state.lock().map_err(|_| "symbol state poisoned".to_string())?.pid
+        } else {
+            pid
+        };
+        match index_for(&modules_state, pid)? {
+            (Some(index), _) if pid != 0 => Ok(index.modules_json(pid)),
+            (_, status) => Ok(serde_json::json!({
                 "pid": pid,
-                "status": if state.status.is_empty() { "idle" } else { state.status.as_str() },
+                "status": status,
                 "modules": [],
             })
             .to_string()),
@@ -3367,28 +3384,25 @@ pub fn run_on(
             Ok(state.status_json())
         }),
         disassemble_json: Arc::new(move |pid, function_id| {
-            let state = code_state.lock().map_err(|_| "symbol state poisoned".to_string())?;
-            match (&state.index, state.pid == pid) {
-                (Some(index), true) => crate::code::disassemble_json(index, function_id, &code_allow),
-                _ => Err(format!("symbols for pid {pid} are not loaded")),
+            match index_for(&code_state, pid)?.0 {
+                Some(index) => crate::code::disassemble_json(&index, function_id, &code_allow),
+                None => Err(format!("symbols for pid {pid} are not loaded")),
             }
         }),
         source_json: Arc::new(move |path| crate::code::source_json(path, &source_allow)),
         example_disassembly_json: Arc::new(move || crate::code::example_disassembly_json(&example_allow)),
         resolve_functions_json: Arc::new(move |pid, keys| {
-            let state = resolve_state.lock().map_err(|_| "symbol state poisoned".to_string())?;
-            match (&state.index, state.pid == pid) {
-                (Some(index), true) => index.resolve_json(pid, keys),
-                _ => Err("Load symbols for the selected process before applying presets".into()),
+            match index_for(&resolve_state, pid)?.0 {
+                Some(index) => index.resolve_json(pid, keys),
+                None => Err("Load symbols for the selected process before applying presets".into()),
             }
         }),
         search_functions_json: Arc::new(move |pid, query, limit| {
-            let state = search_state.lock().map_err(|_| "symbol state poisoned".to_string())?;
-            match (&state.index, state.pid == pid) {
-                (Some(index), true) => Ok(index.search_json(pid, query, limit as usize)),
-                _ => Ok(serde_json::json!({
+            match index_for(&search_state, pid)? {
+                (Some(index), _) => Ok(index.search_json(pid, query, limit as usize)),
+                (None, status) => Ok(serde_json::json!({
                     "pid": pid,
-                    "status": if state.status.is_empty() { "idle" } else { state.status.as_str() },
+                    "status": status,
                     "functions": [],
                 })
                 .to_string()),
@@ -3464,6 +3478,31 @@ mod tests {
     use perfr_tracing_state::context_switches::SchedulingSlice;
 
     const S: u64 = 1_000_000_000;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_index_is_handed_out_with_the_symbol_lock_released() {
+        use std::sync::{Arc, Mutex};
+        // No such process: an empty index, which is all this needs.
+        let index = Arc::new(crate::functions::FunctionIndex::for_pid(-1));
+        let state = Mutex::new(super::SymbolState {
+            pid: 42,
+            status: "ready".into(),
+            index: Some(index.clone()),
+            ..Default::default()
+        });
+        let (held, status) = super::index_for(&state, 42).unwrap();
+        assert!(Arc::ptr_eq(&held.expect("the index of the pid that was loaded"), &index));
+        assert_eq!(status, "ready");
+        // Whatever the caller now does with it, a status poll gets the lock.
+        assert!(state.try_lock().is_ok());
+        // Another process's question is answered with the status alone.
+        let (other, status) = super::index_for(&state, 7).unwrap();
+        assert!(other.is_none());
+        assert_eq!(status, "ready");
+        let idle = Mutex::new(super::SymbolState::default());
+        assert_eq!(super::index_for(&idle, 7).unwrap().1, "idle");
+    }
 
     #[test]
     fn symbol_status_reports_progress_and_freezes_completion_time() {

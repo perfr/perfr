@@ -414,9 +414,8 @@ pub struct ScopeRingReader {
     control: Mapping,
     rings: Rings,
     pid: u32,
-    /// This reader's count in `capturing`: `NO_LEASE`, a 1-based slot in
-    /// the lease table, or `UNSLOTTED_LEASE` when the table was full.
-    lease: std::sync::atomic::AtomicU32,
+    /// This reader's count in `capturing`, if it holds one.
+    lease: ring::ReaderLease,
 }
 
 // SAFETY: as for the writer.
@@ -524,7 +523,7 @@ impl ScopeRingReader {
 
         // SAFETY: dimensions validated against the mapped length above.
         let rings = unsafe { Rings::from_raw(base, ring_count, slots_per_ring) };
-        Ok(ScopeRingReader { owner_fd: fd_owner, mapping, control, rings, pid, lease: std::sync::atomic::AtomicU32::new(NO_LEASE) })
+        Ok(ScopeRingReader { owner_fd: fd_owner, mapping, control, rings, pid, lease: ring::ReaderLease::new() })
     }
 
     /// Address in the producer's address space, not the reader's. Consumers
@@ -588,43 +587,11 @@ impl ScopeRingReader {
     }
 
     fn take_lease(&self) {
-        if self.lease.load(Ordering::Acquire) != NO_LEASE {
-            return;
-        }
-        self.free_dead_leases();
-        let me = std::process::id();
-        let mut lease = UNSLOTTED_LEASE;
-        for (slot, pid) in self.leases().pids.iter().enumerate() {
-            if pid.compare_exchange(0, me, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-                lease = slot as u32 + 1;
-                break;
-            }
-        }
-        self.header().capturing.fetch_add(1, Ordering::Release);
-        self.lease.store(lease, Ordering::Release);
+        self.lease.take(self.header(), self.leases());
     }
 
     fn return_lease(&self) {
-        match self.lease.swap(NO_LEASE, Ordering::AcqRel) {
-            NO_LEASE => {}
-            UNSLOTTED_LEASE => self.drop_count(),
-            slot => {
-                let pid = &self.leases().pids[slot as usize - 1];
-                // Only the slot's holder returns its count: if another reader
-                // already freed it as dead (a recycled pid), it took the count.
-                if pid.compare_exchange(std::process::id(), 0, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-                    self.drop_count();
-                }
-            }
-        }
-    }
-
-    fn free_dead_leases(&self) {
-        self.leases().free_dead(&self.header().capturing);
-    }
-
-    fn drop_count(&self) {
-        ring::drop_count(&self.header().capturing);
+        self.lease.give_back(self.header(), self.leases());
     }
 
     pub fn rings(&self) -> &Rings {
@@ -685,10 +652,6 @@ fn process_owner(pid: u32) -> Option<u32> {
         None
     }
 }
-
-/// `ScopeRingReader::lease` values other than a slot number (1-based).
-const NO_LEASE: u32 = 0;
-const UNSLOTTED_LEASE: u32 = u32::MAX;
 
 /// CLOCK_MONOTONIC in nanoseconds.
 ///
@@ -824,6 +787,32 @@ mod tests {
         drop(other_service);
         assert_eq!(mine.capturing_readers(), 1, "and a stopped reader's drop returns nothing twice");
         mine.set_capturing(false);
+        assert!(!writer.is_capturing());
+    }
+
+    #[test]
+    fn a_reader_started_from_several_threads_at_once_takes_one_count() {
+        let _guard = exclusive();
+        let writer = ScopeRingWriter::create(1, 8).unwrap();
+        let reader = ScopeRingReader::open(writer.pid()).unwrap();
+        // The reader is shared, and starting it checked "have I a lease?"
+        // and then took one, in two steps. Two threads could both be told
+        // no: two counts taken, one remembered, one returned, and a
+        // producer left writing for a capture that had ended.
+        for round in 0..2000 {
+            let line_up = std::sync::Barrier::new(4);
+            std::thread::scope(|scope| {
+                for _ in 0..4 {
+                    scope.spawn(|| {
+                        line_up.wait();
+                        reader.set_capturing(true);
+                    });
+                }
+            });
+            assert_eq!(reader.capturing_readers(), 1, "round {round}");
+            reader.set_capturing(false);
+            assert_eq!(reader.capturing_readers(), 0, "round {round}");
+        }
         assert!(!writer.is_capturing());
     }
 

@@ -478,9 +478,8 @@ pub struct ScopeRingReader {
     control: Mapping,
     rings: Rings,
     pid: u32,
-    /// This reader's count in `capturing`: `NO_LEASE`, a 1-based slot in
-    /// the lease table, or `UNSLOTTED_LEASE` when the table was full.
-    lease: std::sync::atomic::AtomicU32,
+    /// This reader's count in `capturing`, if it holds one.
+    lease: ring::ReaderLease,
 }
 
 // SAFETY: as for the writer.
@@ -554,7 +553,7 @@ impl ScopeRingReader {
             control,
             rings,
             pid,
-            lease: std::sync::atomic::AtomicU32::new(NO_LEASE),
+            lease: ring::ReaderLease::new(),
         })
     }
 
@@ -616,43 +615,11 @@ impl ScopeRingReader {
     }
 
     fn take_lease(&self) {
-        if self.lease.load(Ordering::Acquire) != NO_LEASE {
-            return;
-        }
-        self.free_dead_leases();
-        let me = std::process::id();
-        let mut lease = UNSLOTTED_LEASE;
-        for (slot, pid) in self.leases().pids.iter().enumerate() {
-            if pid.compare_exchange(0, me, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-                lease = slot as u32 + 1;
-                break;
-            }
-        }
-        self.header().capturing.fetch_add(1, Ordering::Release);
-        self.lease.store(lease, Ordering::Release);
+        self.lease.take(self.header(), self.leases());
     }
 
     fn return_lease(&self) {
-        match self.lease.swap(NO_LEASE, Ordering::AcqRel) {
-            NO_LEASE => {}
-            UNSLOTTED_LEASE => self.drop_count(),
-            slot => {
-                let pid = &self.leases().pids[slot as usize - 1];
-                // Only the slot's holder returns its count: if another reader
-                // already freed it as dead (a recycled pid), it took the count.
-                if pid.compare_exchange(std::process::id(), 0, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-                    self.drop_count();
-                }
-            }
-        }
-    }
-
-    fn free_dead_leases(&self) {
-        self.leases().free_dead(&self.header().capturing);
-    }
-
-    fn drop_count(&self) {
-        ring::drop_count(&self.header().capturing);
+        self.lease.give_back(self.header(), self.leases());
     }
 
     pub fn rings(&self) -> &Rings {
@@ -680,10 +647,6 @@ impl Drop for ScopeRingReader {
         let _ = &self.mapping;
     }
 }
-
-/// `ScopeRingReader::lease` values other than a slot number (1-based).
-const NO_LEASE: u32 = 0;
-const UNSLOTTED_LEASE: u32 = u32::MAX;
 
 /// QueryPerformanceCounter in nanoseconds: the clock ETW timestamps are
 /// derived from, so scopes interleave with scheduling slices and samples on

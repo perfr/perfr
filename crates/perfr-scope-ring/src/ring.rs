@@ -153,6 +153,72 @@ impl ReaderLeases {
     }
 }
 
+/// One reader's count in a segment's [`Header::capturing`], and where in
+/// the lease table it is written down.
+///
+/// Here, and not in the two files that open a segment, because none of it
+/// is an operating-system call: both had their own copy, and a fix to one
+/// was a fix to remember for the other.
+pub(crate) struct ReaderLease {
+    /// `NO_LEASE`, a 1-based slot in the table, or `UNSLOTTED_LEASE` when
+    /// the table was full. Behind a lock, because a reader is shared and
+    /// taking a lease is several steps: two threads starting one reader at
+    /// once both found it without a lease, both took a count, and one of
+    /// the two was never returned.
+    held: std::sync::Mutex<u32>,
+}
+
+const NO_LEASE: u32 = 0;
+const UNSLOTTED_LEASE: u32 = u32::MAX;
+
+impl ReaderLease {
+    pub(crate) fn new() -> ReaderLease {
+        ReaderLease { held: std::sync::Mutex::new(NO_LEASE) }
+    }
+
+    /// Takes this reader's count, if it has none. `header` and `leases`
+    /// are the reader's writable view of the control page.
+    pub(crate) fn take(&self, header: &Header, leases: &ReaderLeases) {
+        let mut held = self.held.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *held != NO_LEASE {
+            return;
+        }
+        leases.free_dead(&header.capturing);
+        // The count before the slot. A reader that dies between the two
+        // then leaves a count nobody takes back, and a producer writing for
+        // no one, which is what a reader with no slot risks anyway. The
+        // other order left a slot with no count behind it: the next sweep
+        // took a count away for it, which was some live reader's, and that
+        // reader's producer could go quiet under it.
+        header.capturing.fetch_add(1, Ordering::Release);
+        let me = std::process::id();
+        *held = UNSLOTTED_LEASE;
+        for (slot, pid) in leases.pids.iter().enumerate() {
+            if pid.compare_exchange(0, me, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                *held = slot as u32 + 1;
+                break;
+            }
+        }
+    }
+
+    /// Returns this reader's count, if it holds one.
+    pub(crate) fn give_back(&self, header: &Header, leases: &ReaderLeases) {
+        let mut held = self.held.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match std::mem::replace(&mut *held, NO_LEASE) {
+            NO_LEASE => {}
+            UNSLOTTED_LEASE => drop_count(&header.capturing),
+            slot => {
+                let pid = &leases.pids[slot as usize - 1];
+                // Only the slot's holder returns its count: if another reader
+                // already freed it as dead (a recycled pid), it took the count.
+                if pid.compare_exchange(std::process::id(), 0, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                    drop_count(&header.capturing);
+                }
+            }
+        }
+    }
+}
+
 /// Takes one reader's count out of `capturing`. Never below zero: a reader
 /// built before the count (a plain store of 0 or 1) may have reset it under
 /// the leases.

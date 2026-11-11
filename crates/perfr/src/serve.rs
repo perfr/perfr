@@ -481,10 +481,11 @@ pub(crate) fn scheduling_events(slice: &perfr_tracing_state::context_switches::S
 /// Returns `None` for threads outside the visible set, which is the same rule
 /// the scheduling projection follows: the trace is machine-wide, the rows are
 /// not. The service's own pid is always allowed, so its threads get state bars
-/// like any other process's -- introspection into the capture loop. The pid
-/// comes from `/proc` because a state slice carries only a tid -- a thread that
-/// has already exited resolves to nothing and is dropped, which is correct:
-/// there is no row to draw it on.
+/// like any other process's -- introspection into the capture loop. A state
+/// slice carries only a tid; its pid comes from the focus, which keeps a
+/// thread that has exited until its last slices are out, and from `/proc`
+/// only for a capture that tracks everything -- there a thread that has
+/// already exited resolves to nothing and its slice is dropped.
 #[cfg(target_os = "linux")]
 fn thread_state_event(
     slice: &Slice,

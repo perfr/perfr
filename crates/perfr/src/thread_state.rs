@@ -87,6 +87,13 @@ pub struct Focus {
     /// tid -> pid of every focused thread.
     tids: HashMap<i32, u32>,
     pids: HashSet<u32>,
+    /// Threads the last rebuild no longer found in `/proc`: tid -> (pid, when
+    /// that was noticed, on the capture clock). They have exited, but their
+    /// last transitions are still on their way -- unread in a ring, or
+    /// waiting out the reorder window -- and the slices those close name
+    /// only a tid. Forgotten at once, a thread's final run (all of its
+    /// slices, for one shorter-lived than the window) had no row to go to.
+    departed: HashMap<i32, (u32, u64)>,
 }
 
 impl Focus {
@@ -115,7 +122,7 @@ impl Focus {
     }
 
     pub fn contains_tid(&self, tid: i32) -> bool {
-        self.all || self.tids.contains_key(&tid)
+        self.all || self.tids.contains_key(&tid) || self.departed.contains_key(&tid)
     }
 
     pub fn contains_pid(&self, pid: u32) -> bool {
@@ -125,7 +132,7 @@ impl Focus {
     /// The process a focused thread belongs to. `None` outside the focus, or
     /// when everything is tracked and the caller must resolve it itself.
     pub fn pid_of(&self, tid: i32) -> Option<u32> {
-        self.tids.get(&tid).copied()
+        self.tids.get(&tid).copied().or_else(|| self.departed.get(&tid).map(|(pid, _)| *pid))
     }
 
     pub fn thread_count(&self) -> usize {
@@ -276,8 +283,38 @@ impl ThreadStateTracer {
 
     /// Narrows tracking to `focus`. Threads created afterwards inside a
     /// focused process are picked up from `task_newtask` as they appear.
+    ///
+    /// Threads of the previous focus that `focus` no longer has are kept on
+    /// as departed (see [`Focus`]) until their last slices have come out.
     pub fn set_focus(&mut self, focus: Focus) {
+        self.set_focus_at(focus, crate::now_monotonic_ns());
+    }
+
+    fn set_focus_at(&mut self, mut focus: Focus, now_ns: u64) {
+        let previous = std::mem::take(&mut self.focus);
+        for (tid, departed) in previous.departed {
+            if !focus.tids.contains_key(&tid) {
+                focus.departed.insert(tid, departed);
+            }
+        }
+        for (tid, pid) in previous.tids {
+            if !focus.tids.contains_key(&tid) {
+                focus.departed.entry(tid).or_insert((pid, now_ns));
+            }
+        }
         self.focus = focus;
+    }
+
+    /// Forgets the departed threads whose transitions have all been fed: a
+    /// record of a thread gone at `noticed` is older than that, and the
+    /// reorder window has moved a full delay beyond it once the newest
+    /// record seen is two delays past. Run before a poll reads anything, so
+    /// the slices the previous poll returned could still be resolved.
+    fn forget_departed(&mut self) {
+        let newest_seen_ns = self.newest_seen_ns;
+        self.focus
+            .departed
+            .retain(|_, (_, noticed_ns)| newest_seen_ns < noticed_ns.saturating_add(2 * REORDER_DELAY_NS));
     }
 
     pub fn focus(&self) -> &Focus {
@@ -291,6 +328,7 @@ impl ThreadStateTracer {
 
     /// Drains the rings and returns the state slices that can now be closed.
     pub fn poll(&mut self) -> Vec<Slice> {
+        self.forget_departed();
         for (ring, kind) in self.rings.iter_mut() {
             let read = ring.drain(|record_kind, record| {
                 if record_kind != record_type::SAMPLE {
@@ -322,6 +360,9 @@ impl ThreadStateTracer {
                             return None;
                         }
                         if !self.focus.all {
+                            // A tid the kernel hands out again is the new
+                            // thread's from here on.
+                            self.focus.departed.remove(&t.tid);
                             if t.clone_flags & perfr_perf_records::tracepoints::CLONE_THREAD != 0 {
                                 self.focus.tids.insert(t.tid, parent);
                             } else {
@@ -524,6 +565,77 @@ mod tests {
         assert!(slices.iter().all(|s| s.tid == 70), "{slices:?}");
         assert_eq!(t.focus().pid_of(70), Some(7));
         assert_eq!(t.focus().pid_of(99), None);
+    }
+
+    #[test]
+    fn a_thread_that_exited_stays_resolvable_until_its_last_slices_are_out() {
+        let mut t = tracer();
+        let mut focus = Focus::default();
+        focus.pids.insert(7);
+        focus.tids.insert(70, 7);
+        focus.tids.insert(71, 7);
+        t.set_focus(focus);
+        t.manager.on_initial_state(0, 71, thread_state::RUNNING).unwrap();
+        // Thread 71 runs its last and exits at 1000. The record is read and
+        // waits out the reorder window.
+        t.pending.push(switch(1_000, 71, thread_state::DEAD, 70));
+        // The once-a-second rebuild of the focus from /proc comes first, and
+        // /proc no longer lists the thread.
+        let mut rebuilt = Focus::default();
+        rebuilt.pids.insert(7);
+        rebuilt.tids.insert(70, 7);
+        t.set_focus(rebuilt);
+
+        let slices = t.drain_up_to(u64::MAX);
+        let last_run = slices.iter().find(|s| s.tid == 71 && s.thread_state == thread_state::RUNNING);
+        assert_eq!(last_run.map(|s| s.duration_ns), Some(1_000));
+        // The slice names only a tid; its row is found through the focus.
+        assert_eq!(t.focus().pid_of(71), Some(7), "the last slice of an exited thread has no row to go to");
+        // And a record of it still to be read is still one to keep.
+        assert!(t.focus().contains_tid(71));
+    }
+
+    #[test]
+    fn an_exited_thread_is_forgotten_once_the_reorder_window_has_passed_it() {
+        let mut t = tracer();
+        let mut focus = Focus::default();
+        focus.pids.insert(7);
+        focus.tids.insert(71, 7);
+        t.set_focus(focus);
+        let mut rebuilt = Focus::default();
+        rebuilt.pids.insert(7);
+        t.set_focus_at(rebuilt.clone(), 10_000);
+        assert_eq!(t.focus().pid_of(71), Some(7));
+
+        // Later rebuilds carry it along; they do not restart its clock.
+        t.set_focus_at(rebuilt.clone(), 10_000 + REORDER_DELAY_NS);
+        t.newest_seen_ns = 10_000 + 2 * REORDER_DELAY_NS - 1;
+        t.forget_departed();
+        assert_eq!(t.focus().pid_of(71), Some(7), "its last record may still be inside the window");
+
+        t.newest_seen_ns = 10_000 + 2 * REORDER_DELAY_NS;
+        t.forget_departed();
+        assert_eq!(t.focus().pid_of(71), None);
+        assert!(!t.focus().contains_tid(71), "a tid is reused; it must not stay another thread's forever");
+    }
+
+    #[test]
+    fn a_thread_back_in_the_focus_is_not_departed() {
+        let mut t = tracer();
+        let mut with = Focus::default();
+        with.pids.insert(7);
+        with.tids.insert(71, 7);
+        let mut without = Focus::default();
+        without.pids.insert(7);
+        t.set_focus(with.clone());
+        t.set_focus_at(without, 10_000);
+        // The same tid, in another process now.
+        let mut reused = Focus::default();
+        reused.pids.insert(9);
+        reused.tids.insert(71, 9);
+        t.set_focus_at(reused, 20_000);
+        assert_eq!(t.focus().pid_of(71), Some(9));
+        assert!(t.focus().departed.is_empty());
     }
 
     #[test]

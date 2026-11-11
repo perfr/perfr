@@ -293,10 +293,12 @@ mod tests {
     use super::*;
 
     /// `src/a.c`, `src/sub/`, `include/x.h`, `src-private/secret.c` and
-    /// `secret.txt`, in a directory whose path has no symlink in it.
+    /// `secret.txt`. The directory's path is used as the system gave it:
+    /// canonical, it is a verbatim path on Windows, where the `/` and `..`
+    /// these tests put in a request are not resolved.
     fn tree() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().canonicalize().unwrap();
+        let base = dir.path().to_path_buf();
         for sub in ["src/sub", "include", "src-private"] {
             std::fs::create_dir_all(base.join(sub)).unwrap();
         }

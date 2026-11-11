@@ -7156,7 +7156,14 @@ impl PerfrLiveApp {
                 self.vscroll.begin_drag();
             }
         }
-        if response.dragged_by(PointerButton::Primary) && self.rect_drag.is_none() {
+        // The splitter's handle reaches a few points over the timeline, and
+        // a press there is also this widget's drag: the pan stands down for
+        // it like the other drags do, or the view slid under the panel
+        // edge while it was being moved.
+        if response.dragged_by(PointerButton::Primary)
+            && self.rect_drag.is_none()
+            && self.report_splitter_grab.is_none()
+        {
             let drag = response.drag_delta();
             let span = (self.t1 - self.t0).max(1.0);
             let dt = -(drag.x as f64) / rect.width().max(1.0) as f64 * span;
@@ -7362,7 +7369,9 @@ impl PerfrLiveApp {
         ui.painter()
             .line_segment([track.left_top(), track.right_top()], hairline());
         let pos = resp.interact_pointer_pos();
-        if resp.drag_started() {
+        // Not for a press that grabbed the report splitter over the
+        // slider's last few points: it jumped the view to the end.
+        if resp.drag_started() && self.report_splitter_grab.is_none() {
             self.follow = false;
             if let Some(p) = pos {
                 if thumb.contains(p) {

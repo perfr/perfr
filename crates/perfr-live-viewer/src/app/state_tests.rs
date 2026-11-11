@@ -1484,3 +1484,58 @@ fn what_each_way_of_replacing_the_capture_resets() {
     app.apply_frame(hello());
     assert_eq!(what_was_reset(&app), ["index", "live_all", "thread_names", "trace_processes", "hover"]);
 }
+
+/// The three-thread capture, zoomed into its middle, with the report panel open.
+fn page_with_report_panel() -> Page {
+    let mut page = three_thread_page();
+    page.app.open_right_tab(ReportTab::Inspector);
+    page.app.apply_zoom_window(3_000_000.0, 5_000_000.0);
+    page.frames(4);
+    assert!(page.rect_of("report_splitter").is_some());
+    page
+}
+
+#[test]
+fn a_splitter_grab_on_the_timeline_side_resizes_the_panel_and_pans_nothing() {
+    let mut page = page_with_report_panel();
+    let view = (page.app.t0, page.app.t1);
+    let width = page.app.report_w_last;
+    let handle = page.rect_of("report_splitter").expect("the splitter");
+    let lanes = page.rect_of("row:thread:100:101").expect("a lane row");
+    // The handle reaches a few points into the timeline: grab it there, at
+    // the height of the lanes, and pull left.
+    let grab = Pos2::new(handle.left() + 1.5, lanes.center().y);
+    let to = grab - Vec2::new(120.0, 0.0);
+    page.drag(grab, to);
+    page.release(to);
+    page.frames(2);
+    assert!(page.app.report_w_last > width + 100.0, "the panel follows the pointer: {width} -> {}", page.app.report_w_last);
+    assert_eq!((page.app.t0, page.app.t1), view, "the same drag panned the timeline under it");
+}
+
+#[test]
+fn a_splitter_grab_over_the_time_slider_does_not_jump_the_view() {
+    let mut page = page_with_report_panel();
+    let view = (page.app.t0, page.app.t1);
+    let handle = page.rect_of("report_splitter").expect("the splitter");
+    // The time slider is the strip along the bottom of the timeline.
+    let grab = Pos2::new(handle.left() + 1.5, page.size.y - TIME_SLIDER_H * 0.5);
+    let to = grab - Vec2::new(60.0, 0.0);
+    page.drag(grab, to);
+    page.release(to);
+    page.frames(2);
+    assert_eq!((page.app.t0, page.app.t1), view, "the press on the splitter also moved the time slider");
+}
+
+#[test]
+fn a_drag_on_the_lanes_still_pans() {
+    let mut page = page_with_report_panel();
+    let view = (page.app.t0, page.app.t1);
+    let lanes = page.rect_of("row:thread:100:101").expect("a lane row");
+    let grab = Pos2::new(lanes.right() + 300.0, lanes.center().y);
+    let to = grab - Vec2::new(120.0, 0.0);
+    page.drag(grab, to);
+    page.release(to);
+    page.frames(2);
+    assert!(page.app.t0 > view.0, "dragging the lanes left moves the view later");
+}

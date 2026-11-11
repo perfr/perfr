@@ -84,10 +84,20 @@ pub fn read_comm(pid: i32) -> String {
     std::fs::read_to_string(format!("/proc/{pid}/comm")).map(|s| s.trim().to_string()).unwrap_or_default()
 }
 
-/// Write the pre-arming journal: the intended hooks, the engine, and a maps
-/// snapshot (the process is alive now; after a crash it is gone). Returns the
-/// path, or None if it could not be written (diagnostics are best-effort and
-/// never block a capture).
+/// The ids of the process's threads, from `/proc/<pid>/task`. Empty once it
+/// is gone.
+fn thread_ids(pid: i32) -> Vec<i32> {
+    let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return Vec::new();
+    };
+    entries.flatten().filter_map(|entry| entry.file_name().to_str()?.parse().ok()).collect()
+}
+
+/// Write the pre-arming journal: the intended hooks, the engine, and a
+/// snapshot of the target's maps and threads (the process is alive now; after
+/// a crash it is gone, and the kernel names the thread that crashed, not the
+/// process). Returns the path, or None if it could not be written
+/// (diagnostics are best-effort and never block a capture).
 pub fn write_journal(target_pid: i32, engine: &str, hooks: &[ArmedHook]) -> Option<PathBuf> {
     let maps = std::fs::read_to_string(format!("/proc/{target_pid}/maps")).unwrap_or_default();
     let doc = serde_json::json!({
@@ -95,6 +105,7 @@ pub fn write_journal(target_pid: i32, engine: &str, hooks: &[ArmedHook]) -> Opti
         "comm": read_comm(target_pid),
         "engine": engine,
         "armed": hooks.iter().map(ArmedHook::to_json).collect::<Vec<_>>(),
+        "tids": thread_ids(target_pid),
         "maps": maps,
     });
     let path = journal_path(target_pid);
@@ -110,10 +121,15 @@ pub struct KernelCrash {
     /// The faulting instruction pointer, 0 if the line had none.
     pub ip: u64,
     pub sp: u64,
-    /// The module the ip was in, from `... in <module>[base+size]`.
+    /// The module the ip was in, from the `in <module>[...]` clause.
     pub module: String,
-    /// The module's load base from the same clause, for ip -> offset.
+    /// Where the mapping the ip was in starts, from the same clause. Not the
+    /// module's load base: a text mapping rarely begins at file offset 0.
     pub module_base: u64,
+    /// The ip as an offset into the module's file, which is what a hook's
+    /// placement is: printed by current kernels, else worked out from the
+    /// journal's maps snapshot. `None` when neither was to be had.
+    pub file_offset: Option<u64>,
     /// The whole line, verbatim.
     pub raw: String,
 }
@@ -129,12 +145,31 @@ fn parse_int(token: &str) -> Option<u64> {
     }
 }
 
-/// Extract the crash facts from one kernel line for our pid. The x86 forms:
-///   `comm[pid]: segfault at ADDR ip IP sp SP error N in MOD[BASE+SIZE]`
-///   `traps: comm[pid] trap invalid opcode ip:IP sp:SP ...`
-///   `comm[pid]: segfault ... ` / `general protection fault ...`
-pub fn parse_kernel_line(pid: i32, line: &str) -> Option<KernelCrash> {
-    if !line.contains(&format!("[{pid}]")) {
+/// Whether the line is about one of `tids`. It carries `comm[tid]:` or, on
+/// a `traps:` line, `comm[tid] trap ...`; a comm may itself hold spaces and
+/// brackets, and the module clause ends in a bracket too, so only a number
+/// followed the way the kernel follows the thread id counts.
+fn names_a_thread(line: &str, tids: &[i32]) -> bool {
+    line.match_indices('[').any(|(open, _)| {
+        let rest = &line[open + 1..];
+        let Some(close) = rest.find(']') else { return false };
+        let after = &rest[close + 1..];
+        (after.starts_with(':') || after.starts_with(" trap ") || after.starts_with(" general protection"))
+            && rest[..close].parse::<i32>().is_ok_and(|tid| tids.contains(&tid))
+    })
+}
+
+/// Extract the crash facts from one kernel line about one of the target's
+/// threads. The number in brackets is the id of the thread that faulted, and
+/// its comm, so a crash on a worker thread carries neither the process's pid
+/// nor its name. The x86 forms:
+///   `comm[tid]: segfault at ADDR ip IP sp SP error N in MOD[OFFSET,START+SIZE] likely on CPU ...`
+///   `comm[tid]: segfault at ADDR ip IP sp SP error N in MOD[START+SIZE]` (older kernels)
+///   `traps: comm[tid] trap invalid opcode ip:IP sp:SP error:N in MOD[...]`
+///   `comm[tid]: segfault ... ` / `general protection fault ...`
+/// The `in` clause is absent when the ip was not in a file mapping.
+pub fn parse_kernel_line(tids: &[i32], line: &str) -> Option<KernelCrash> {
+    if !names_a_thread(line, tids) {
         return None;
     }
     let lower = line.to_ascii_lowercase();
@@ -157,15 +192,22 @@ pub fn parse_kernel_line(pid: i32, line: &str) -> Option<KernelCrash> {
         tokens.iter().position(|t| *t == key).and_then(|i| tokens.get(i + 1)).and_then(|t| parse_int(t))
             .or_else(|| tokens.iter().find_map(|t| t.strip_prefix(&format!("{key}:")).and_then(parse_int)))
     };
-    let (module, module_base) = tokens
+    let (module, module_base, file_offset) = tokens
         .iter()
         .position(|t| *t == "in")
         .and_then(|i| tokens.get(i + 1))
         .and_then(|clause| {
-            // `libfoo.so[7f1234560000+2000]`
+            // `libfoo.so[1234,7f1234560000+2000]`: the ip's offset in the
+            // file, then the mapping. Older kernels print the mapping alone,
+            // `libfoo.so[7f1234560000+2000]`.
             let (name, rest) = clause.split_once('[')?;
-            let base = rest.split(['+', ']']).next().and_then(parse_int).unwrap_or(0);
-            Some((name.to_string(), base))
+            let inside = rest.split(']').next().unwrap_or("");
+            let (offset, mapping) = match inside.split_once(',') {
+                Some((offset, mapping)) => (u64::from_str_radix(offset, 16).ok(), mapping),
+                None => (None, inside),
+            };
+            let start = mapping.split('+').next().and_then(|t| u64::from_str_radix(t, 16).ok()).unwrap_or(0);
+            Some((name.to_string(), start, offset))
         })
         .unwrap_or_default();
     Some(KernelCrash {
@@ -174,16 +216,63 @@ pub fn parse_kernel_line(pid: i32, line: &str) -> Option<KernelCrash> {
         sp: after("sp").unwrap_or(0),
         module,
         module_base,
+        file_offset,
         raw: line.trim().to_string(),
     })
 }
 
+/// The file offset of `ip`, given the mapping it was in starts at
+/// `mapping_start`: the offset into that mapping plus the mapping's own
+/// offset in the file, from a `/proc/<pid>/maps` snapshot.
+fn file_offset_from_maps(maps: &str, mapping_start: u64, ip: u64) -> Option<u64> {
+    maps.lines().find_map(|line| {
+        // `start-end perms offset dev inode path`
+        let mut fields = line.split_whitespace();
+        let (start, _end) = fields.next()?.split_once('-')?;
+        if u64::from_str_radix(start, 16).ok()? != mapping_start {
+            return None;
+        }
+        let offset = u64::from_str_radix(fields.nth(1)?, 16).ok()?;
+        ip.checked_sub(mapping_start)?.checked_add(offset)
+    })
+}
+
+/// The last crash line among `lines` about one of `tids`, with the ip's
+/// file offset filled in from `maps` when the kernel did not print it.
+fn last_crash_in<'a>(lines: impl Iterator<Item = &'a str>, tids: &[i32], maps: &str) -> Option<KernelCrash> {
+    let mut crash = lines.filter_map(|line| parse_kernel_line(tids, line)).last()?;
+    if crash.file_offset.is_none() && crash.ip != 0 && !crash.module.is_empty() {
+        crash.file_offset = file_offset_from_maps(maps, crash.module_base, crash.ip);
+    }
+    Some(crash)
+}
+
+/// The threads a crash line may name and the maps to place its ip in: what
+/// the journal recorded while the target was alive, plus whatever `/proc`
+/// still has. By the time a crash is noticed the process is gone or a
+/// zombie, and neither can be asked.
+fn threads_and_maps(pid: i32) -> (Vec<i32>, String) {
+    let journal: serde_json::Value = std::fs::read(journal_path(pid))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let mut tids = vec![pid];
+    if journal["target_pid"].as_i64() == Some(pid as i64) {
+        tids.extend(journal["tids"].as_array().into_iter().flatten().filter_map(|t| t.as_i64()).map(|t| t as i32));
+    }
+    tids.extend(thread_ids(pid));
+    tids.sort_unstable();
+    tids.dedup();
+    (tids, journal["maps"].as_str().unwrap_or_default().to_string())
+}
+
 /// Read what `/dev/kmsg` currently holds and return the last crash line for
-/// `pid`. Non-blocking: it drains the buffer and stops at the end rather than
-/// waiting for new messages. None when the device is unreadable (no
-/// privilege) or holds no matching line.
+/// a thread of `pid`. Non-blocking: it drains the buffer and stops at the end
+/// rather than waiting for new messages. None when the device is unreadable
+/// (no privilege) or holds no matching line.
 pub fn scan_kernel_crash(pid: i32) -> Option<KernelCrash> {
-    match read_kmsg_crash(pid) {
+    let (tids, maps) = threads_and_maps(pid);
+    match read_kmsg_crash(&tids, &maps) {
         Ok(found) => found,
         Err(errno) => {
             // Once: reading the kernel log is how the faulting instruction is
@@ -203,10 +292,10 @@ pub fn scan_kernel_crash(pid: i32) -> Option<KernelCrash> {
 }
 
 /// Reads what `/dev/kmsg` currently holds and returns the last crash line for
-/// `pid`. `Err(errno)` when the device could not be opened (so the caller can
-/// tell "no crash line" from "not allowed to look").
+/// one of `tids`. `Err(errno)` when the device could not be opened (so the
+/// caller can tell "no crash line" from "not allowed to look").
 #[cfg(target_os = "linux")]
-fn read_kmsg_crash(pid: i32) -> Result<Option<KernelCrash>, i32> {
+fn read_kmsg_crash(tids: &[i32], maps: &str) -> Result<Option<KernelCrash>, i32> {
     // O_NONBLOCK so a read past the end returns EAGAIN instead of blocking for
     // the next kernel message.
     let fd = unsafe { libc::open(c"/dev/kmsg".as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
@@ -225,7 +314,9 @@ fn read_kmsg_crash(pid: i32) -> Result<Option<KernelCrash>, i32> {
                 // Each record is `prio,seq,ts,flags;message`.
                 if let Ok(text) = std::str::from_utf8(&buf[..n]) {
                     if let Some(msg) = text.split_once(';').map(|(_, m)| m) {
-                        if let Some(crash) = parse_kernel_line(pid, msg) {
+                        // The message is the record's first line; what
+                        // follows are its `KEY=value` continuation lines.
+                        if let Some(crash) = last_crash_in(msg.lines().take(1), tids, maps) {
                             found = Some(crash);
                         }
                     }
@@ -241,7 +332,7 @@ fn read_kmsg_crash(pid: i32) -> Result<Option<KernelCrash>, i32> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn read_kmsg_crash(_pid: i32) -> Result<Option<KernelCrash>, i32> {
+fn read_kmsg_crash(_tids: &[i32], _maps: &str) -> Result<Option<KernelCrash>, i32> {
     Ok(None)
 }
 
@@ -290,13 +381,13 @@ pub struct CrashReport {
 /// faulting ip lands in (module + offset match); else the most dangerous
 /// armed hook by verdict (unsafe before risky); else the last hook armed.
 pub fn build_and_write(target_pid: i32, engine: &str, hooks: &[ArmedHook], kernel: Option<KernelCrash>) -> CrashReport {
-    // By kernel ip: the offset within the faulting module, matched to a hook
-    // in that module whose [offset, offset+size) covers it.
+    // By kernel ip: its offset in the faulting module's file, matched to a
+    // hook in that module whose [offset, offset+size) covers it.
     let by_ip = kernel.as_ref().and_then(|k| {
         if k.ip == 0 || k.module.is_empty() {
             return None;
         }
-        let module_offset = k.ip.checked_sub(k.module_base)?;
+        let module_offset = k.file_offset?;
         hooks.iter().find(|h| {
             h.spec.module_path.rsplit('/').next().unwrap_or("") == k.module
                 && module_offset >= h.spec.file_offset
@@ -342,7 +433,7 @@ pub fn build_and_write(target_pid: i32, engine: &str, hooks: &[ArmedHook], kerne
         "signal": signal,
         "kernel": kernel.as_ref().map(|k| serde_json::json!({
             "kind": k.kind, "ip": k.ip, "sp": k.sp,
-            "module": k.module, "module_base": k.module_base, "raw": k.raw,
+            "module": k.module, "module_base": k.module_base, "file_offset": k.file_offset, "raw": k.raw,
         })),
         "kernel_log_readable": kernel.is_some(),
         "suspect": suspect.map(|h| serde_json::json!({
@@ -429,41 +520,118 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    // Two lines as this kernel (7.0) logged them for a program whose worker
+    // thread faulted: process 672042 and thread 672043, then 672058 and
+    // 672059. The text mapping is at file offset 0x1000.
+    const SEGFAULT: &str = "crashprog[672043]: segfault at 0 ip 00005eda761e51e9 sp 000073ab54ffee70 error 6 in crashprog[11e9,5eda761e5000+1000] likely on CPU 17 (core 33, socket 0)";
+    const INVALID_OPCODE: &str = "traps: crashprog[672059] trap invalid opcode ip:5ae48dbc21db sp:7bf47a5fee70 error:0 in crashprog[11db,5ae48dbc2000+1000]";
+    // The first of them as older kernels print the clause, without the
+    // offset, and the maps the journal would have held.
+    const SEGFAULT_OLD: &str = "crashprog[672043]: segfault at 0 ip 00005eda761e51e9 sp 000073ab54ffee70 error 6 in crashprog[5eda761e5000+1000]";
+    const MAPS: &str = "\
+5eda761e4000-5eda761e5000 r--p 00000000 103:02 1234 /tmp/crashprog
+5eda761e5000-5eda761e6000 r-xp 00001000 103:02 1234 /tmp/crashprog
+5eda761e6000-5eda761e7000 r--p 00002000 103:02 1234 /tmp/crashprog
+73ab54800000-73ab55000000 rw-p 00000000 00:00 0
+";
+
+    fn hook_in(module_path: &str, name: &str, offset: u64, size: u64, level: SafetyLevel) -> ArmedHook {
+        let mut hook = hook(name, offset, size, level);
+        hook.spec.module_path = module_path.into();
+        hook
+    }
+
     #[test]
     fn a_segfault_line_is_parsed() {
-        let line = "perfr-e2e-box3[4242]: segfault at 0 ip 00007f1234561234 sp 00007ffde0 error 4 in libfoo.so[7f1234560000+2000]";
-        let c = parse_kernel_line(4242, line).expect("parsed");
+        let c = parse_kernel_line(&[672043], SEGFAULT).expect("parsed");
         assert_eq!(c.kind, "segfault");
-        assert_eq!(c.ip, 0x7f1234561234);
-        assert_eq!(c.module, "libfoo.so");
-        assert_eq!(c.module_base, 0x7f1234560000);
-        // A line for another pid is ignored.
-        assert!(parse_kernel_line(9999, line).is_none());
+        assert_eq!(c.ip, 0x5eda761e51e9);
+        assert_eq!(c.sp, 0x73ab54ffee70);
+        assert_eq!(c.module, "crashprog");
+        assert_eq!(c.module_base, 0x5eda761e5000);
+        assert_eq!(c.file_offset, Some(0x11e9));
+        // A line for another process's threads is ignored.
+        assert!(parse_kernel_line(&[9999], SEGFAULT).is_none());
     }
 
     #[test]
     fn a_traps_invalid_opcode_line_is_parsed() {
-        let line = "traps: prog[777] trap invalid opcode ip:55f000401234 sp:7ffd00 error:0 in prog[55f000400000+5000]";
-        let c = parse_kernel_line(777, line).expect("parsed");
+        let c = parse_kernel_line(&[672059], INVALID_OPCODE).expect("parsed");
         assert_eq!(c.kind, "trap invalid opcode");
-        assert_eq!(c.ip, 0x55f000401234);
-        assert_eq!(c.module, "prog");
+        assert_eq!(c.ip, 0x5ae48dbc21db);
+        assert_eq!(c.module, "crashprog");
+        assert_eq!(c.file_offset, Some(0x11db));
+    }
+
+    #[test]
+    fn a_crash_on_a_worker_thread_is_found_by_the_threads_the_process_had() {
+        // The kernel names the thread; the capture knows the process.
+        assert!(parse_kernel_line(&[672042], SEGFAULT).is_none(), "the pid alone does not match");
+        assert!(parse_kernel_line(&[672042, 672043, 672044], SEGFAULT).is_some());
+        // A comm with spaces and a line with no module clause, as logged
+        // here for a fault in anonymous memory.
+        let anonymous = "Async Compute T[3513688]: segfault at 77996e002510 ip 000077996e002510 sp 0000779996bf9e28 error 15 likely on CPU 7 (core 12, socket 0)";
+        let c = parse_kernel_line(&[3513600, 3513688], anonymous).expect("parsed");
+        assert_eq!((c.ip, c.module.as_str(), c.file_offset), (0x77996e002510, "", None));
+        // The mapping's numbers are not thread ids.
+        assert!(parse_kernel_line(&[1000], "x[7]: segfault at 0 ip 1 sp 2 error 4 in x[1000]").is_none());
     }
 
     #[test]
     fn the_ip_names_the_hook_it_lands_in() {
-        // Two hooks in libfoo.so; the fault ip is inside the second.
+        // Two hooks in the program; the fault is inside the second. A file
+        // offset, not an offset into the mapping: the mapping starts 0x1000
+        // into the file, and ip - start (0x1e9) is in neither hook.
         let hooks = vec![
-            hook("safe_fn", 0x1000, 0x40, SafetyLevel::Safe),
-            hook("bad_fn", 0x1200, 0x40, SafetyLevel::Unsafe),
+            hook_in("/tmp/crashprog", "safe_fn", 0x1100, 0x40, SafetyLevel::Safe),
+            hook_in("/tmp/crashprog", "bad_fn", 0x11c0, 0x40, SafetyLevel::Safe),
+            hook_in("/lib/libfoo.so", "elsewhere", 0x11e0, 0x40, SafetyLevel::Unsafe),
         ];
-        // Simulate the kernel scan result by parsing a synthetic line via the
-        // public path: build_and_write reads /dev/kmsg, which we cannot inject
-        // here, so exercise the matching directly.
-        let kernel = KernelCrash { kind: "segfault".into(), ip: 0x7f0000001210, sp: 0, module: "libfoo.so".into(), module_base: 0x7f0000000000, raw: String::new() };
-        let module_offset = kernel.ip - kernel.module_base;
-        let hit = hooks.iter().find(|h| module_offset >= h.spec.file_offset && module_offset < h.spec.file_offset + h.size).unwrap();
-        assert_eq!(hit.spec.name, "bad_fn");
+        for (line, maps) in [(SEGFAULT, ""), (SEGFAULT_OLD, MAPS)] {
+            let kernel = last_crash_in([line].into_iter(), &[672042, 672043], maps).expect("found");
+            assert_eq!(kernel.file_offset, Some(0x11e9), "{line}");
+            let report = build_and_write(-2, "kernel_uprobes", &hooks, Some(kernel));
+            assert_eq!(report.json["suspect"]["name"], "bad_fn", "{line}");
+            assert_eq!(report.json["suspect"]["basis"], "the kernel's faulting instruction points into it");
+            assert_eq!(report.json["kernel"]["file_offset"], 0x11e9);
+        }
+        // An old-form line and no maps to place it with: no guess by address,
+        // the verdicts decide.
+        let kernel = last_crash_in([SEGFAULT_OLD].into_iter(), &[672043], "").expect("found");
+        assert_eq!(kernel.file_offset, None);
+        let report = build_and_write(-2, "kernel_uprobes", &hooks, Some(kernel));
+        assert_eq!(report.json["suspect"]["name"], "elsewhere");
+        let _ = std::fs::remove_file(crash_path(-2));
+    }
+
+    #[test]
+    fn the_last_crash_line_of_the_process_wins_and_other_lines_are_skipped() {
+        let lines = [
+            "usb 1-2: new high-speed USB device number 5 using xhci_hcd",
+            SEGFAULT,
+            "other[672043]: something that is not a crash",
+            INVALID_OPCODE,
+        ];
+        let c = last_crash_in(lines.into_iter(), &[672043, 672059], "").expect("found");
+        assert_eq!(c.kind, "trap invalid opcode");
+        assert!(last_crash_in(lines.into_iter(), &[1], "").is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_journal_records_the_threads_a_crash_line_may_name() {
+        // This process, journalled while it runs: the thread running this
+        // test is not its main thread, and is what a crash line would name.
+        let pid = std::process::id() as i32;
+        let tid = unsafe { libc::gettid() };
+        assert_ne!(pid, tid);
+        let path = write_journal(pid, "kernel_uprobes", &[]).expect("journal writes");
+        let (tids, maps) = threads_and_maps(pid);
+        let _ = std::fs::remove_file(path);
+        assert!(tids.contains(&tid) && tids.contains(&pid), "{tids:?}");
+        assert!(maps.contains("r-xp"), "the maps snapshot comes back with them");
+        // With no journal there is still the pid itself to look for.
+        assert_eq!(threads_and_maps(-3).0, vec![-3]);
     }
 
     #[test]

@@ -28,6 +28,11 @@
 //! rule the service uses for `capture_stream`. The cut is the whole
 //! window, on every thread.
 
+// What talks to the share server is the wasm client in net.rs. The native
+// build, which exists for the tests, has no caller for the half of this
+// module that client uses, and said so in two dozen warnings.
+#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+
 use perfr_live_protocol::{
     decode_frame, encode_event_batch_with, LiveFrame, WireFormat, FRAME_EVENT_BATCH,
     FRAME_EVENT_BATCH_DEFLATE, FRAME_EVENT_BATCH_PACKED,
@@ -35,7 +40,6 @@ use perfr_live_protocol::{
 use serde::Deserialize;
 
 /// `POST` target for a live capture: the service's stream export.
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub const STREAM_EXPORT_PATH: &str = "/api/capture/export?format=stream";
 
 /// Body type of `POST /api/share`.
@@ -213,7 +217,6 @@ impl ShareSession {
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub enum ShareNoteKind {
     Reading,
     /// The bytes are in hand. Nothing has been posted yet.
@@ -515,9 +518,6 @@ pub fn parse_session_response(status: u16, body: &str) -> SessionCheck {
 
 #[derive(Deserialize)]
 struct LoginRequiredBody {
-    #[serde(default)]
-    #[allow(dead_code)]
-    error: String,
     #[serde(default)]
     login_url: String,
 }

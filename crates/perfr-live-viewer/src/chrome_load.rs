@@ -346,47 +346,6 @@ fn spawn_wasm_file(file: web_sys::File, tx: mpsc::Sender<ByteMsg>) {
     });
 }
 
-/// Fetch a same-origin URL as a ReadableStream (no 54 MB slurp / blob()).
-#[cfg(target_arch = "wasm32")]
-fn start_wasm_same_origin_url(url: &str, name: &str) -> TraceLoad {
-    let (tx, rx) = mpsc::channel();
-    let url = url.to_string();
-    wasm_bindgen_futures::spawn_local(async move {
-        use wasm_bindgen::JsCast;
-        use wasm_bindgen_futures::JsFuture;
-        use web_sys::ReadableStreamDefaultReader;
-        let Some(window) = web_sys::window() else {
-            let _ = tx.send(ByteMsg::Error("window".into()));
-            return;
-        };
-        let fetch = match JsFuture::from(window.fetch_with_str(&url)).await {
-            Ok(v) => v,
-            Err(_) => {
-                let _ = tx.send(ByteMsg::Error(format!("fetch {url}")));
-                return;
-            }
-        };
-        let Ok(resp) = fetch.dyn_into::<web_sys::Response>() else {
-            let _ = tx.send(ByteMsg::Error("response".into()));
-            return;
-        };
-        if !resp.ok() {
-            let _ = tx.send(ByteMsg::Error(format!("{url} HTTP {}", resp.status())));
-            return;
-        }
-        let Some(body) = resp.body() else {
-            let _ = tx.send(ByteMsg::Error("empty body".into()));
-            return;
-        };
-        let Ok(reader) = body.get_reader().dyn_into::<ReadableStreamDefaultReader>() else {
-            let _ = tx.send(ByteMsg::Error("readable stream".into()));
-            return;
-        };
-        pump_readable_stream(reader, tx).await;
-    });
-    TraceLoad::new(name.to_string(), None, rx)
-}
-
 #[cfg(target_arch = "wasm32")]
 pub fn start_wasm_file(file: web_sys::File) -> TraceLoad {
     let name = file.name();

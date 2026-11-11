@@ -49,6 +49,7 @@ pub fn query_report_tab_from_location() -> Option<String> {
 /// drivers ("vkGetSemaphoreFdKHR ... VK_ERROR_INITIALIZATION_FAILED"), and
 /// WebGL2 renders the instanced timeline fine. This is the escape hatch for a
 /// machine where WebGPU works and its extra headroom is wanted.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub fn query_prefers_webgpu_from_location() -> bool {
     #[cfg(target_arch = "wasm32")]
     {

@@ -48,11 +48,6 @@ pub fn RAIL() -> Color32 {
 pub fn TRACK() -> Color32 {
     c(active().track)
 }
-/// Neutral alt before per-process washes. Kept as the graphite baseline.
-#[allow(dead_code)]
-pub fn TRACK_ALT() -> Color32 {
-    c(active().track_alt)
-}
 pub fn INPUT() -> Color32 {
     c(active().input)
 }

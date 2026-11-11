@@ -488,17 +488,14 @@ impl<H> ShareUpload<H> {
     }
 }
 
-#[allow(dead_code)] // used from the wasm Net impl
 pub fn parse_status_json(text: &str) -> Result<StatusJson, String> {
     serde_json::from_str(text).map_err(|e| format!("/api/status: {e}"))
 }
 
-#[allow(dead_code)] // used from the wasm Net impl
 pub fn parse_processes_json(text: &str) -> Result<Vec<ProcessJson>, String> {
     serde_json::from_str(text).map_err(|e| format!("/api/processes: {e}"))
 }
 
-#[allow(dead_code)]
 /// Builds the `?ranges=` (or empty) query for a set of `(start, end, tid)`
 /// windows. `end` of 0 is left as 0, which the server reads as "to the end".
 /// An empty selection returns an empty string -- the whole capture.
@@ -574,18 +571,15 @@ pub fn parse_symbols_status_json(text: &str) -> Result<SymbolsStatusJson, String
     serde_json::from_str(text).map_err(|e| format!("/api/symbols/status: {e}"))
 }
 
-#[allow(dead_code)]
 pub fn parse_function_search_json(text: &str) -> Result<FunctionSearchJson, String> {
     serde_json::from_str(text).map_err(|e| format!("/api/functions/search: {e}"))
 }
 
-#[allow(dead_code)] // used from the wasm Net impl
 pub fn parse_timeline_json(text: &str) -> Result<TimelineJson, String> {
     serde_json::from_str(text).map_err(|e| format!("/api/timeline: {e}"))
 }
 
 /// `/api/frame` body: 16-byte header + `width * lanes * 4` RGBA.
-#[allow(dead_code)] // used from the wasm Net impl
 pub fn parse_frame_body(bytes: &[u8]) -> Result<ServiceFrame, String> {
     if bytes.len() < 16 {
         return Err(format!("/api/frame: short header ({})", bytes.len()));
@@ -687,9 +681,7 @@ mod wasm_impl {
         inbox: Arc<Mutex<Inbox>>,
         http_busy: Arc<AtomicBool>,
         view_busy: Arc<AtomicBool>,
-        self_busy: Arc<AtomicBool>,
         /// Held so the JS WebSocket is not GC'd.
-        #[allow(dead_code)]
         ws: Arc<Mutex<Option<WebSocket>>>,
         /// A capture file was opened instead of a service: no socket, and
         /// every request that would go to the service is dropped.
@@ -716,7 +708,6 @@ mod wasm_impl {
                 inbox,
                 http_busy: Arc::new(AtomicBool::new(false)),
                 view_busy: Arc::new(AtomicBool::new(false)),
-                self_busy: Arc::new(AtomicBool::new(false)),
                 ws,
                 offline: false,
                 upload: Arc::default(),
@@ -752,7 +743,6 @@ mod wasm_impl {
                 inbox,
                 http_busy: Arc::new(AtomicBool::new(false)),
                 view_busy: Arc::new(AtomicBool::new(false)),
-                self_busy: Arc::new(AtomicBool::new(false)),
                 ws: Arc::new(Mutex::new(None)),
                 offline: true,
                 upload: Arc::default(),
@@ -2145,11 +2135,8 @@ mod native_impl {
         pub fn start_demo(&self) {}
         pub fn stop_demo(&self) {}
         pub fn apply_config(&self, _ring_bytes: u64, _spill: &str) {}
-        pub fn start_self(&self) {}
-        pub fn stop_self(&self) {}
         pub fn import_capture(&self, _bytes: Vec<u8>) {}
         pub fn clear_capture(&self) {}
-        pub fn push_self_scopes(&self, _scopes: &[perfr_live_event::dev::RelScope]) {}
     }
 }
 
@@ -2559,7 +2546,6 @@ mod tests {
 }
 
 /// A query value, percent-encoded: paths carry `/`, spaces and worse.
-#[allow(dead_code)]
 fn percent_encode(text: &str) -> String {
     let mut out = String::with_capacity(text.len() * 3);
     for b in text.bytes() {

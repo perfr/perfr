@@ -1630,7 +1630,6 @@ mod tests {
 
 #[cfg(test)]
 mod blit_align_tests {
-    #[allow(unused_imports)]
     use perfr_live_render::ThreadFocus;
     use super::*;
     use perfr_live_event::{kind, LiveEvent};
@@ -1764,7 +1763,6 @@ fn upload_clock_ns() -> u64 {
 
 #[cfg(test)]
 mod worker_span_tests {
-    #[allow(unused_imports)]
     use perfr_live_render::ThreadFocus;
     use super::*;
     use perfr_live_event::{kind, LiveEvent};
@@ -1822,7 +1820,6 @@ mod worker_span_tests {
 
 #[cfg(test)]
 mod span_pipeline_tests {
-    #[allow(unused_imports)]
     use perfr_live_render::ThreadFocus;
     use super::*;
     use perfr_live_event::{dev::is_render_worker_tid, kind, LiveEvent};

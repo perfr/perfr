@@ -209,6 +209,30 @@ struct OpenAsync {
     args_id: Option<u32>,
 }
 
+/// Completed duration slices of one thread (`X`, and `B`/`E` pairs) on their
+/// way to a row.
+///
+/// A `B`/`E` pair knows its depth when it closes: the `B`s still open. An
+/// `X` does not. Writers emit it when the scope ends, children before their
+/// parent, so the slices that contain it have not been read yet, and the
+/// last event of the file can be the one that contains everything. Counting
+/// open `B`s for it instead put every `X` of an `X`-only trace on row 0,
+/// where the longest covered the rest. So a thread that has an `X` keeps its
+/// slices until the end of the file and is laid out then, by time.
+enum ThreadSlices {
+    /// No `X` yet, and few enough pairs that holding them costs nothing:
+    /// if an `X` does come, the pairs it contains can still move under it.
+    Undecided(Vec<LiveEvent>),
+    /// More pairs than that and still no `X`: a `B`/`E` thread. Its slices
+    /// go out as they close, at their stack depth.
+    Streamed,
+    /// Has an `X`: every slice waits for [`ChromeIngestor::finish`].
+    Held(Vec<LiveEvent>),
+}
+
+/// Pairs a thread may hold while it is not yet known to be a `B`/`E` thread.
+const UNDECIDED_SLICES: usize = 4096;
+
 /// Pairing key for async begins / ends. `id2.global` ids are trace-wide by
 /// definition, so they pair across processes.
 const PID_ANY: u32 = u32::MAX;
@@ -234,6 +258,7 @@ pub struct ChromeIngestor {
     pub unit: TimeUnit,
     pub stats: IngestStats,
     duration_stacks: HashMap<(u32, u32), Vec<OpenDuration>>,
+    thread_slices: HashMap<(u32, u32), ThreadSlices>,
     async_open: HashMap<(u32, u64), Vec<OpenAsync>>,
     /// Lane key is `(pid, name)` — chrome://tracing does not mint a row per id.
     async_tids: HashMap<(u32, String), u32>,
@@ -265,6 +290,7 @@ impl Default for ChromeIngestor {
             unit: TimeUnit::Micros,
             stats: IngestStats::default(),
             duration_stacks: HashMap::new(),
+            thread_slices: HashMap::new(),
             async_open: HashMap::new(),
             async_tids: HashMap::new(),
             async_lane_open: HashMap::new(),
@@ -583,7 +609,40 @@ impl ChromeIngestor {
         if let Some(flow) = FlowBind::of(&ev).or(open.flow) {
             self.bind_flow(flow, out);
         }
-        vec![out]
+        self.route_slice(out, false)
+    }
+
+    /// Emit a completed slice now, or keep it for the layout at the end;
+    /// see [`ThreadSlices`]. `complete` is an `X`.
+    fn route_slice(&mut self, ev: LiveEvent, complete: bool) -> Vec<LiveEvent> {
+        let slices = self
+            .thread_slices
+            .entry((ev.pid, ev.tid))
+            .or_insert_with(|| ThreadSlices::Undecided(Vec::new()));
+        match slices {
+            ThreadSlices::Held(held) => {
+                held.push(ev);
+                Vec::new()
+            }
+            ThreadSlices::Undecided(held) => {
+                held.push(ev);
+                if complete {
+                    *slices = ThreadSlices::Held(std::mem::take(held));
+                    Vec::new()
+                } else if held.len() > UNDECIDED_SLICES {
+                    let out = std::mem::take(held);
+                    *slices = ThreadSlices::Streamed;
+                    out
+                } else {
+                    Vec::new()
+                }
+            }
+            ThreadSlices::Streamed if complete => {
+                *slices = ThreadSlices::Held(vec![ev]);
+                Vec::new()
+            }
+            ThreadSlices::Streamed => vec![ev],
+        }
     }
 
     fn on_complete(&mut self, ev: ChromeEvent) -> Vec<LiveEvent> {
@@ -602,7 +661,7 @@ impl ChromeIngestor {
         let out = self.scope_event(start_ns, dur, pid, tid, name_id, depth, kind::API_SCOPE);
         self.remember_args(out, args_id);
         self.maybe_bind_flow(&ev, out);
-        vec![out]
+        self.route_slice(out, true)
     }
 
     fn on_instant(&mut self, ev: ChromeEvent, is_mark: bool) -> Vec<LiveEvent> {
@@ -1089,10 +1148,12 @@ impl ChromeIngestor {
     }
 
     /// Close any still-open B / async slices at `end_ns` so a truncated file
-    /// still shows the stack.
+    /// still shows the stack, and hand out the slices that waited for their
+    /// row (see [`ThreadSlices`]).
     pub fn finish(&mut self, end_ns: u64) -> Vec<LiveEvent> {
         let mut out = Vec::new();
         let stacks = std::mem::take(&mut self.duration_stacks);
+        let mut waiting = std::mem::take(&mut self.thread_slices);
         for ((pid, tid), stack) in stacks {
             for (i, open) in stack.into_iter().enumerate() {
                 let ev = self.scope_event(
@@ -1105,7 +1166,20 @@ impl ChromeIngestor {
                     kind::API_SCOPE,
                 );
                 self.remember_args(ev, open.args_id);
-                out.push(ev);
+                match waiting.get_mut(&(pid, tid)) {
+                    Some(ThreadSlices::Held(held)) => held.push(ev),
+                    _ => out.push(ev),
+                }
+            }
+        }
+        for (_, slices) in waiting {
+            match slices {
+                ThreadSlices::Undecided(held) => out.extend(held),
+                ThreadSlices::Held(mut held) => {
+                    assign_rows(&mut held);
+                    out.extend(held);
+                }
+                ThreadSlices::Streamed => {}
             }
         }
         let asyncs = std::mem::take(&mut self.async_open);
@@ -1131,6 +1205,33 @@ impl ChromeIngestor {
         }
         self.stats.events_out += out.len() as u64;
         out
+    }
+}
+
+/// Give each slice of one thread the first row that is free when it starts.
+///
+/// Taken parents first (earlier start, then the longer), that is the number
+/// of slices containing it when they nest properly, and it still never puts
+/// two overlapping slices on one row when they do not. On entry `depth` is
+/// the number of `B`s that were open around the slice, which only orders
+/// slices with the same start and end.
+fn assign_rows(slices: &mut [LiveEvent]) {
+    slices.sort_by_key(|e| (e.start_ns, std::cmp::Reverse(e.end_ns()), e.depth));
+    // End of the last slice on each row. `depth` is a byte: past row 255
+    // slices share it, as they did before.
+    let mut row_end: Vec<u64> = Vec::new();
+    for e in slices {
+        let row = row_end
+            .iter()
+            .position(|&end| end <= e.start_ns)
+            .unwrap_or(row_end.len())
+            .min(255);
+        if row == row_end.len() {
+            row_end.push(e.end_ns());
+        } else {
+            row_end[row] = row_end[row].max(e.end_ns());
+        }
+        e.depth = row as u8;
     }
 }
 

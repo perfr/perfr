@@ -539,9 +539,11 @@ mod tests {
         let mid = gz.len() / 2;
         stream.push(&gz[..mid.max(64)]);
         evs += stream.pump(&mut ing, 64 * 1024).len();
+        // Parsed, not emitted: an `X` waits for the end of the file to
+        // learn its row.
         assert!(
-            evs > 0,
-            "streaming gzip must emit events before the last compressed byte (got {evs})"
+            stream.events_seen > 0,
+            "streaming gzip must parse events before the last compressed byte"
         );
         stream.push(&gz[mid.max(64)..]);
         stream.finish_input();
@@ -618,6 +620,150 @@ mod tests {
                 assert!(kept.len() <= 512 && kept.len() > 512 - ch.len_utf8(), "{ch:?} at {offset}: kept {}", kept.len());
             }
         }
+    }
+
+    /// Depth of each named scope on thread (1, 1), and a check that no row
+    /// holds two slices that overlap.
+    fn rows_of(json: &str) -> std::collections::HashMap<String, u8> {
+        let (ing, evs) = collect(json);
+        let scopes: Vec<_> = evs
+            .iter()
+            .filter(|e| e.kind == kind::API_SCOPE && e.pid == 1 && e.tid == 1)
+            .collect();
+        for a in &scopes {
+            for b in &scopes {
+                let same = a.start_ns == b.start_ns && a.name_id == b.name_id;
+                assert!(
+                    same || a.depth != b.depth || a.end_ns() <= b.start_ns || b.end_ns() <= a.start_ns,
+                    "{:?} and {:?} overlap on row {}",
+                    ing.intern.get(a.name_id),
+                    ing.intern.get(b.name_id),
+                    a.depth
+                );
+            }
+        }
+        scopes
+            .iter()
+            .map(|e| (ing.intern.get(e.name_id).unwrap_or("").to_string(), e.depth))
+            .collect()
+    }
+
+    #[test]
+    fn nested_complete_events_get_a_row_each_whichever_is_written_first() {
+        // Start order, as a sorted export writes them.
+        let rows = rows_of(
+            r#"[
+          {"name":"outer","ph":"X","ts":0,"dur":100,"pid":1,"tid":1},
+          {"name":"inner","ph":"X","ts":10,"dur":20,"pid":1,"tid":1},
+          {"name":"leaf","ph":"X","ts":12,"dur":5,"pid":1,"tid":1},
+          {"name":"sibling","ph":"X","ts":40,"dur":20,"pid":1,"tid":1},
+          {"name":"next","ph":"X","ts":100,"dur":50,"pid":1,"tid":1}
+        ]"#,
+        );
+        assert_eq!(rows["outer"], 0);
+        assert_eq!(rows["inner"], 1);
+        assert_eq!(rows["leaf"], 2);
+        assert_eq!(rows["sibling"], 1, "a row is reused once its slice has ended");
+        assert_eq!(rows["next"], 0);
+        // End order, as a tracer that writes a scope when it closes does:
+        // every child comes before its parent.
+        let rows = rows_of(
+            r#"[
+          {"name":"leaf","ph":"X","ts":12,"dur":5,"pid":1,"tid":1},
+          {"name":"inner","ph":"X","ts":10,"dur":20,"pid":1,"tid":1},
+          {"name":"sibling","ph":"X","ts":40,"dur":20,"pid":1,"tid":1},
+          {"name":"outer","ph":"X","ts":0,"dur":100,"pid":1,"tid":1},
+          {"name":"next","ph":"X","ts":100,"dur":50,"pid":1,"tid":1}
+        ]"#,
+        );
+        assert_eq!(
+            (rows["outer"], rows["inner"], rows["leaf"], rows["sibling"], rows["next"]),
+            (0, 1, 2, 1, 0)
+        );
+    }
+
+    #[test]
+    fn complete_events_and_begin_end_pairs_nest_in_each_other() {
+        // X inside an open B.
+        let rows = rows_of(
+            r#"[
+          {"name":"b","ph":"B","ts":0,"pid":1,"tid":1},
+          {"name":"x","ph":"X","ts":10,"dur":20,"pid":1,"tid":1},
+          {"name":"x2","ph":"X","ts":12,"dur":5,"pid":1,"tid":1},
+          {"name":"b","ph":"E","ts":100,"pid":1,"tid":1}
+        ]"#,
+        );
+        assert_eq!((rows["b"], rows["x"], rows["x2"]), (0, 1, 2));
+        // A B/E pair inside an X that is written after it, when it ends.
+        let rows = rows_of(
+            r#"[
+          {"name":"b","ph":"B","ts":10,"pid":1,"tid":1},
+          {"name":"deep","ph":"B","ts":12,"pid":1,"tid":1},
+          {"name":"deep","ph":"E","ts":15,"pid":1,"tid":1},
+          {"name":"b","ph":"E","ts":30,"pid":1,"tid":1},
+          {"name":"x","ph":"X","ts":0,"dur":100,"pid":1,"tid":1}
+        ]"#,
+        );
+        assert_eq!((rows["x"], rows["b"], rows["deep"]), (0, 1, 2));
+        // A B still open at the end of the file contains the X written in it.
+        let rows = rows_of(
+            r#"[
+          {"name":"open","ph":"B","ts":0,"pid":1,"tid":1},
+          {"name":"x","ph":"X","ts":10,"dur":20,"pid":1,"tid":1}
+        ]"#,
+        );
+        assert_eq!((rows["open"], rows["x"]), (0, 1));
+    }
+
+    #[test]
+    fn overlapping_complete_events_that_do_not_nest_still_get_separate_rows() {
+        let rows = rows_of(
+            r#"[
+          {"name":"a","ph":"X","ts":0,"dur":50,"pid":1,"tid":1},
+          {"name":"b","ph":"X","ts":30,"dur":50,"pid":1,"tid":1},
+          {"name":"c","ph":"X","ts":60,"dur":10,"pid":1,"tid":1}
+        ]"#,
+        );
+        assert_eq!((rows["a"], rows["b"], rows["c"]), (0, 1, 0));
+    }
+
+    #[test]
+    fn a_thread_of_begin_end_pairs_still_streams_and_keeps_its_stack_depths() {
+        // Far more pairs than a thread may hold while it is undecided: the
+        // slices must come out of `pump`, before `finish`.
+        const N: usize = 10_000;
+        let mut json = String::from("[");
+        for i in 0..N {
+            use std::fmt::Write;
+            let t = i * 10;
+            write!(
+                json,
+                r#"{{"name":"o","ph":"B","ts":{t},"pid":1,"tid":1}},{{"name":"i","ph":"B","ts":{},"pid":1,"tid":1}},{{"name":"i","ph":"E","ts":{},"pid":1,"tid":1}},{{"name":"o","ph":"E","ts":{},"pid":1,"tid":1}},"#,
+                t + 1,
+                t + 2,
+                t + 3
+            )
+            .unwrap();
+        }
+        json.push_str(r#"{"name":"last","ph":"i","ts":1,"pid":2,"tid":2}]"#);
+        let mut stream = ChromeStream::default();
+        let mut ing = ChromeIngestor::default();
+        stream.push(json.as_bytes());
+        stream.finish_input();
+        let mut pumped = Vec::new();
+        loop {
+            let before = stream.events_seen;
+            pumped.extend(stream.pump(&mut ing, 64 * 1024));
+            if stream.events_seen == before {
+                break;
+            }
+        }
+        let slices = pumped.iter().filter(|e| e.pid == 1).count();
+        assert!(slices > N, "only {slices} of {} slices before the end of the file", 2 * N);
+        pumped.extend(ing.finish(1));
+        let name = |e: &perfr_live_event::LiveEvent| ing.intern.get(e.name_id).unwrap_or("");
+        assert_eq!(pumped.iter().filter(|e| e.pid == 1).count(), 2 * N);
+        assert!(pumped.iter().filter(|e| e.pid == 1).all(|e| e.depth == u8::from(name(e) == "i")));
     }
 
     #[test]

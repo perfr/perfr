@@ -789,10 +789,10 @@ pub fn ingest_collect(bytes: &[u8]) -> Result<(ChromeIngestor, Vec<perfr_live_ev
         }
         events.extend(batch);
     }
-    let mut max_end = events.iter().map(|e| e.end_ns()).max().unwrap_or(0);
-    if max_end == 0 {
-        max_end = 1;
-    }
+    // The slices a thread holds back until `finish` are not in `events`
+    // yet, so the end of the trace is asked of the ingestor as well.
+    let seen_end = ing.content_time_bounds().map_or(0, |(_, end)| end);
+    let max_end = events.iter().map(|e| e.end_ns()).max().unwrap_or(0).max(seen_end).max(1);
     events.extend(ing.finish(max_end));
     Ok((ing, events))
 }

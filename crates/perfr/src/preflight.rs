@@ -28,6 +28,11 @@ use std::process::Command;
 
 pub const SETUP_HINT: &str =
     "Run `perfr setup` or ask your agent to use the perfr-setup skill to fix this.";
+/// The closing line when the degraded row is uprobes: `perfr setup` leaves
+/// them alone unless asked by name, so sending the reader to it would change
+/// nothing.
+pub const UPROBES_SETUP_HINT: &str =
+    "Kernel uprobes need `perfr setup --uprobes`; `perfr setup` alone leaves them as they are.";
 const SYSCTL_FILE: &str = "/etc/sysctl.d/99-perfr-perf.conf";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -677,6 +682,31 @@ fn sysctl_fix(key: &str, value: i32) -> String {
     format!("sudo sysctl -w {key}={value}\npersist: echo '{key}={value}' | sudo tee {SYSCTL_FILE}")
 }
 
+/// The closing lines of the warning and of the doctor table: which
+/// `perfr setup` run changes the rows that warn. Not always the plain one.
+/// It never grants CAP_SYS_ADMIN, so a degraded uprobes row needs
+/// `--uprobes`; and no run adds an uprobe PMU to the kernel or opens a
+/// root-only tracefs, so those rows are left to their own fix lines.
+fn setup_hints(report: &Report) -> Vec<&'static str> {
+    let mut plain = false;
+    let mut uprobes = false;
+    for check in report.checks.iter().filter(|check| check.warn) {
+        match (report.os, check.label.as_str(), check.status) {
+            (OsKind::Linux, "uprobes", Status::Degraded) => uprobes = true,
+            (OsKind::Linux, "uprobes" | "tracefs", _) => {}
+            _ => plain = true,
+        }
+    }
+    let mut hints = Vec::new();
+    if plain {
+        hints.push(SETUP_HINT);
+    }
+    if uprobes {
+        hints.push(UPROBES_SETUP_HINT);
+    }
+    hints
+}
+
 pub fn render_warning(report: &Report, color: bool) -> Option<String> {
     let items: Vec<&Check> = report.checks.iter().filter(|check| check.warn).collect();
     if items.is_empty() {
@@ -700,7 +730,7 @@ pub fn render_warning(report: &Report, color: bool) -> Option<String> {
         }
     }
     body.push(String::new());
-    body.push(SETUP_HINT.to_string());
+    body.extend(setup_hints(report).into_iter().map(String::from));
     if !report.blocks() {
         body.push("The viewer and manual scopes still work.".into());
     }
@@ -737,9 +767,10 @@ pub fn render_doctor(report: &Report, color: bool, title: &str) -> String {
             }
         }
     }
-    if report.checks.iter().any(|check| check.warn) {
+    let hints = setup_hints(report);
+    if !hints.is_empty() {
         lines.push(String::new());
-        lines.push(SETUP_HINT.to_string());
+        lines.extend(hints.into_iter().map(String::from));
     }
     lines.push(String::new());
     lines.join("\n")
@@ -1461,6 +1492,40 @@ mod tests {
         assert_eq!(tracefs.status, Status::Degraded);
         assert!(tracefs.fix.as_deref().unwrap().contains("mount -t tracefs"), "{tracefs:?}");
         assert!(!plan_for(&snap, false).notes.iter().any(|note| note.contains("tracefs")));
+    }
+
+    #[test]
+    fn the_closing_hint_names_the_setup_run_that_changes_the_rows_above_it() {
+        // After `perfr setup`: everything open but uprobes, which plain
+        // setup leaves alone by design.
+        let mut snap = locked();
+        snap.paranoid = Some(0);
+        snap.kptr_restrict = Some(0);
+        snap.ptrace_scope = Some(0);
+        snap.tracefs = Some("/sys/kernel/tracing".into());
+        let report = evaluate(&snap);
+        for text in [render_warning(&report, false).unwrap(), render_doctor(&report, false, "perfr doctor")] {
+            assert!(text.contains(UPROBES_SETUP_HINT), "{text}");
+            assert!(!text.contains(SETUP_HINT), "plain setup does not arm uprobes: {text}");
+        }
+        // Sysctls closed as well: both runs are named, the plain one first.
+        let report = evaluate(&locked());
+        for text in [render_warning(&report, false).unwrap(), render_doctor(&report, false, "perfr doctor")] {
+            let plain = text.find(SETUP_HINT).unwrap_or_else(|| panic!("{text}"));
+            let uprobes = text.find(UPROBES_SETUP_HINT).unwrap_or_else(|| panic!("{text}"));
+            assert!(plain < uprobes, "{text}");
+        }
+        // No uprobe PMU in the kernel: no setup run adds one, so none is named.
+        snap.uprobe_pmu = false;
+        let text = render_warning(&evaluate(&snap), false).unwrap();
+        assert!(!text.contains("perfr setup"), "{text}");
+        assert!(text.contains("Switch hooks to Frida"), "{text}");
+        // Sysctls only.
+        let mut snap = locked();
+        snap.cap_sys_admin = true;
+        snap.kptr_restrict = Some(2);
+        let text = render_warning(&evaluate(&snap), false).unwrap();
+        assert!(text.contains(SETUP_HINT) && !text.contains(UPROBES_SETUP_HINT), "{text}");
     }
 
     #[test]

@@ -210,21 +210,38 @@
   </script>
 <script>
     // Shared captures carry a separately downloadable, complete archive.
-    const archive = new URLSearchParams(location.search).get('download');
-    if (archive) {
+    // The link is only offered for the archive of the capture on screen:
+    // the service publishes the two side by side, `<id>.perfr.stream` and
+    // `<id>.perfr.zip` under one https origin. Any https URL used to be
+    // accepted, so a link to this page could put a "Download complete
+    // capture" button for a file of someone else's choosing on it.
+    function archiveUrlFor(search, pageHref) {
+      const params = new URLSearchParams(search);
+      const archive = params.get('download');
+      const capture = params.get('capture');
+      if (!archive || !capture) return null;
       try {
         const url = new URL(archive);
-        if (url.protocol === 'https:') {
-          const link = document.createElement('a');
-          link.href = url.href;
-          link.textContent = 'Download complete capture';
-          link.download = 'capture.perfr.zip';
-          link.target = '_blank';
-          link.rel = 'noopener noreferrer';
-          link.style.cssText = 'position:fixed;bottom:8px;left:8px;z-index:20;color:#64B5F6;background:#14181e;padding:6px 10px;border-radius:5px;font:12px system-ui';
-          document.body.append(link);
-        }
-      } catch (_) { /* Invalid download URLs do not affect the viewer. */ }
+        const shown = new URL(capture, pageHref);
+        const suffix = '.perfr.stream';
+        if (url.protocol !== 'https:' || url.origin !== shown.origin) return null;
+        if (!shown.pathname.endsWith(suffix)) return null;
+        const sibling = shown.pathname.slice(0, -suffix.length) + '.perfr.zip';
+        return url.pathname === sibling ? url.href : null;
+      } catch (_) {
+        return null; // Invalid URLs do not affect the viewer.
+      }
+    }
+    const archiveHref = archiveUrlFor(location.search, location.href);
+    if (archiveHref) {
+      const link = document.createElement('a');
+      link.href = archiveHref;
+      link.textContent = 'Download complete capture';
+      link.download = 'capture.perfr.zip';
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.style.cssText = 'position:fixed;bottom:8px;left:8px;z-index:20;color:#64B5F6;background:#14181e;padding:6px 10px;border-radius:5px;font:12px system-ui';
+      document.body.append(link);
     }
   </script>
 </body>

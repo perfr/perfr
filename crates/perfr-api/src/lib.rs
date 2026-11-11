@@ -668,6 +668,73 @@ mod tests {
         assert!(perfr_api_table_v1(0).is_null());
     }
 
+    /// `perfr.h` declares the table by hand, and a C program reads the
+    /// library's through that declaration. The one assertion above pins the
+    /// offset of one field as arithmetic; this asks a C compiler what the
+    /// header really says, for every field.
+    #[cfg(unix)]
+    #[test]
+    fn the_c_header_lays_the_table_out_as_the_library_does() {
+        use std::mem::{offset_of, size_of};
+        let dir = std::env::temp_dir().join(format!("perfr-api-table-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fields = [
+            "abi_version", "size", "init", "shutdown", "start", "start_dynamic", "start_async", "stop",
+            "instant", "link", "value", "now_ns", "span", "span_async", "log",
+        ];
+        let mut program = String::from("#include <stdio.h>\n#include \"perfr.h\"\nint main(void) {\n");
+        for field in fields {
+            program += &format!(
+                "  printf(\"{field} %zu\\n\", offsetof(struct perfr_api_table_v1, {field}));\n"
+            );
+        }
+        program += "  printf(\"sizeof %zu\\n\", sizeof(struct perfr_api_table_v1));\n";
+        program += "  printf(\"base %zu\\n\", (size_t)PERFR_API_TABLE_BASE_SIZE_);\n";
+        program += "  printf(\"abi %u\\n\", PERFR_API_ABI_VERSION);\n  return 0;\n}\n";
+        let source = dir.join("table.c");
+        let binary = dir.join("table");
+        std::fs::write(&source, program).unwrap();
+        let include = concat!(env!("CARGO_MANIFEST_DIR"), "/include");
+        let compiled = std::process::Command::new("cc")
+            .args(["-std=c11", "-Wall", "-Werror", "-I", include, "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .output();
+        let compiled = match compiled {
+            Ok(output) => output,
+            Err(error) => {
+                // A machine with no C compiler cannot ask the question.
+                eprintln!("skipped: cc did not run ({error})");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+        };
+        assert!(compiled.status.success(), "perfr.h did not compile: {}", String::from_utf8_lossy(&compiled.stderr));
+        let printed = std::process::Command::new(&binary).output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let in_c: std::collections::HashMap<String, usize> = String::from_utf8(printed.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let (name, number) = line.split_once(' ').unwrap();
+                (name.to_string(), number.parse().unwrap())
+            })
+            .collect();
+        let in_rust = [
+            offset_of!(ApiTableV1, abi_version), offset_of!(ApiTableV1, size), offset_of!(ApiTableV1, init),
+            offset_of!(ApiTableV1, shutdown), offset_of!(ApiTableV1, start), offset_of!(ApiTableV1, start_dynamic),
+            offset_of!(ApiTableV1, start_async), offset_of!(ApiTableV1, stop), offset_of!(ApiTableV1, instant),
+            offset_of!(ApiTableV1, link), offset_of!(ApiTableV1, value), offset_of!(ApiTableV1, now_ns),
+            offset_of!(ApiTableV1, span), offset_of!(ApiTableV1, span_async), offset_of!(ApiTableV1, log),
+        ];
+        for (field, offset) in fields.iter().zip(in_rust) {
+            assert_eq!(in_c[*field], offset, "perfr.h puts `{field}` somewhere else");
+        }
+        assert_eq!(in_c["sizeof"], size_of::<ApiTableV1>());
+        assert_eq!(in_c["base"], offset_of!(ApiTableV1, log), "the size every library is required to have");
+        assert_eq!(in_c["abi"], API_ABI_VERSION as usize);
+    }
+
     fn all_events() -> Vec<ScopeEvent> {
         let reader = ScopeRingReader::open(std::process::id()).expect("segment exists");
         let rings = reader.rings();

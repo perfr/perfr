@@ -28,13 +28,32 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 pub use perfr_scope_ring::event::level;
 
-static FORK_CHILD: AtomicBool = AtomicBool::new(false);
+/// Runs in the child of a `fork`, on its one thread.
+///
+/// The child inherits the parent's segment, mapped and looking ready, and
+/// must not write to it: its records would appear under the parent's pid
+/// and the forking thread's cached id. So it starts as a process that has
+/// never called [`init`], every call a no-op, and is given a segment of its
+/// own when it does call it. An earlier version switched the child off for
+/// good instead, and a server that initialised and then daemonised, a
+/// prefork worker and a Python `multiprocessing` child all ran
+/// uninstrumented with nothing to say why.
+///
+/// Only what a child of a threaded process may do here: stores, a `close`,
+/// and a thread-local that needs no initialising.
 #[cfg(unix)]
 unsafe extern "C" fn after_fork() {
-    FORK_CHILD.store(true, Ordering::Relaxed);
-    if let Some(writer) = SEGMENT.load(Ordering::Acquire).as_ref() {
+    if let Some(writer) = SEGMENT.swap(std::ptr::null_mut(), Ordering::AcqRel).as_ref() {
+        // The lease descriptor came across the fork, and holds the
+        // parent's lock for as long as it stays open here.
         writer.abandon_in_fork_child();
     }
+    UNLINKED.store(false, Ordering::Release);
+    // A thread that held the lock in the parent does not exist here.
+    INIT_BUSY.store(false, Ordering::Release);
+    // The forking thread has a new id, and its counter belongs to handles
+    // that were given out in the parent.
+    let _ = THREAD.try_with(|cell| cell.set(None));
 }
 
 /// Process-local ABI for an injected caller. Published by init, so even
@@ -74,7 +93,6 @@ fn segment() -> Option<&'static ScopeRingWriter> {
 /// until the moment someone captures it.
 #[inline]
 fn active_segment() -> Option<&'static ScopeRingWriter> {
-    if FORK_CHILD.load(Ordering::Relaxed) { return None; }
     let writer = segment()?;
     writer.is_capturing().then_some(writer)
 }
@@ -93,7 +111,35 @@ pub fn capturing() -> bool {
 /// threads initialising at once would have the loser destroy the winner's
 /// segment on the way in and unlink it again on the way out. The lock is
 /// taken only on the init path, never on the hot one.
-static INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+///
+/// A flag and not a `Mutex`, because a forked child has to be able to take
+/// it: a mutex another thread held at the moment of the fork stays locked in
+/// the child for ever, and nothing can be done to it from there. A flag the
+/// child's fork handler simply clears.
+static INIT_BUSY: AtomicBool = AtomicBool::new(false);
+
+struct InitLock;
+
+impl InitLock {
+    fn take() -> InitLock {
+        while INIT_BUSY.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            std::thread::yield_now();
+        }
+        InitLock
+    }
+}
+
+impl Drop for InitLock {
+    fn drop(&mut self) {
+        INIT_BUSY.store(false, Ordering::Release);
+    }
+}
+
+/// Whether the fork and exit handlers are registered: once per process,
+/// under the init lock, and inherited by a forked child along with the
+/// registrations themselves.
+#[cfg(unix)]
+static HANDLERS: AtomicBool = AtomicBool::new(false);
 
 /// Set by [`shutdown`]: the segment's name is gone, so no capture that
 /// starts from here on can find this process, though the segment is still
@@ -113,20 +159,26 @@ fn findable() -> bool {
 /// call, marked as superseded for a capture still reading it, and is
 /// written to no more.
 pub fn init() -> Result<(), i32> {
-    if FORK_CHILD.load(Ordering::Relaxed) { return Err(libc::ENOTSUP); }
     if findable() {
         return Ok(());
     }
-    let _guard = INIT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = InitLock::take();
     if findable() {
         return Ok(());
     }
-    // Windows has no fork, so there is nothing to disarm in a child there.
+    // Windows has no fork, so there is nothing to disarm in a child there,
+    // and deletes the segment's file itself when its last handle closes.
     #[cfg(unix)]
-    {
-        static ATFORK: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
-        let error = *ATFORK.get_or_init(|| unsafe { libc::pthread_atfork(None, None, Some(after_fork)) });
+    if !HANDLERS.load(Ordering::Relaxed) {
+        // SAFETY: registering handlers that only touch statics.
+        let error = unsafe { libc::pthread_atfork(None, None, Some(after_fork)) };
         if error != 0 { return Err(error); }
+        // The writer is leaked, so its `Drop`, the one place the name was
+        // removed without being asked, never runs. A refusal (the table is
+        // full) leaves the segment to the service's sweep.
+        // SAFETY: as above.
+        unsafe { libc::atexit(unlink_at_exit) };
+        HANDLERS.store(true, Ordering::Relaxed);
     }
     // A second SDK initialized after injection must not unlink the active
     // instance. Initialize the application's SDK before attaching Frida.
@@ -149,18 +201,6 @@ pub fn init() -> Result<(), i32> {
             replaced.release_lease();
         }
     }
-    // The writer is leaked, so its `Drop`, the one place the name was
-    // removed without being asked, never runs. Windows needs no help: the
-    // file there is deleted with its last handle.
-    #[cfg(unix)]
-    {
-        static AT_EXIT: std::sync::Once = std::sync::Once::new();
-        // SAFETY: registering a handler that only reads statics. A refusal
-        // (the table is full) leaves the segment to the service's sweep.
-        AT_EXIT.call_once(|| unsafe {
-            libc::atexit(unlink_at_exit);
-        });
-    }
     Ok(())
 }
 
@@ -168,13 +208,11 @@ pub fn init() -> Result<(), i32> {
 /// `main` or calling `exit`. A process that is killed, or leaves through
 /// `_exit`, still leaves its segment to the sweep a service runs.
 ///
-/// A forked child that exits runs this too, holding a copy of its parent's
-/// writer: it must not remove the name its parent is still found by.
+/// A forked child that exits runs this too. It has no writer unless it made
+/// one of its own; the pid is compared all the same, so that a child made
+/// some other way than `fork` cannot remove the name its parent is found by.
 #[cfg(unix)]
 extern "C" fn unlink_at_exit() {
-    if FORK_CHILD.load(Ordering::Relaxed) {
-        return;
-    }
     if let Some(writer) = segment() {
         if writer.pid() == std::process::id() {
             writer.unlink();
@@ -185,10 +223,9 @@ extern "C" fn unlink_at_exit() {
 /// Removes the segment's name. The mapping stays until the process exits, so
 /// a thread mid-call never dereferences a freed writer.
 pub fn shutdown() {
-    if FORK_CHILD.load(Ordering::Relaxed) { return; }
     // Under the lock, so it cannot remove the name of a segment an `init`
     // on another thread is in the middle of making.
-    let _guard = INIT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = InitLock::take();
     if let Some(writer) = segment() {
         writer.unlink();
         UNLINKED.store(true, Ordering::Release);
@@ -681,6 +718,86 @@ mod tests {
         let (pid, status) = run_as_child("tests::child_that_inits_and_returns_from_main", "exit");
         assert!(status.success(), "the child failed: {status}");
         assert!(!segment_file(pid).exists(), "{} was left behind", segment_file(pid).display());
+    }
+
+    /// The process `a_forked_child_starts_inert_and_is_instrumented_again_by_init`
+    /// runs. It forks, and its exit status is its child's verdict.
+    #[cfg(unix)]
+    #[test]
+    fn child_that_forks_a_child_of_its_own() {
+        if !child_role_is("fork") {
+            return;
+        }
+        init().expect("init");
+        let parent = std::process::id();
+        let service = ScopeRingReader::open(parent).unwrap();
+        service.set_capturing(true);
+        let in_parent = start(b"in the parent");
+        assert_ne!(in_parent, 0);
+        let written = service.rings().write_cursor(ring_for_thread(in_parent >> 32, service.rings().ring_count()));
+
+        // SAFETY: fork in a process whose other thread is the idle test
+        // harness. The child only runs the checks below and exits.
+        let forked = unsafe { libc::fork() };
+        assert!(forked >= 0, "fork failed");
+        if forked == 0 {
+            let verdict = (|| -> Result<(), &'static str> {
+                let me = std::process::id();
+                // Its parent's rings are mapped here too, with a reader
+                // capturing them: nothing may go into them from this side.
+                if start(b"in the child, before init") != 0 || capturing() {
+                    return Err("the child wrote into its parent's segment");
+                }
+                init().map_err(|_| "init failed in the child")?;
+                if !segment_file(me).exists() {
+                    return Err("the child has no segment of its own");
+                }
+                let service = ScopeRingReader::open(me).map_err(|_| "the child's segment does not open")?;
+                service.set_capturing(true);
+                let handle = start(b"in the child");
+                if handle >> 32 != u64::from(me) {
+                    return Err("the child's handle does not carry its own thread id");
+                }
+                stop(handle);
+                let events: Vec<ScopeEvent> = {
+                    let mut cursors = Cursors::for_rings(service.rings().ring_count());
+                    drain(service.rings(), &mut cursors, 0).slices.into_iter().flat_map(|s| s.events).collect()
+                };
+                if events.iter().filter(|e| e.scope_id == handle && e.tid == me).count() != 2 {
+                    return Err("the child's scope is not in the child's segment");
+                }
+                Ok(())
+            })();
+            if let Err(what) = verdict {
+                eprintln!("forked child: {what}");
+            }
+            // `exit`, not `_exit`: the handler that removes a segment at
+            // exit runs, and must take the child's and leave the parent's.
+            // SAFETY: ends this process.
+            unsafe { libc::exit(i32::from(verdict.is_err())) }
+        }
+        let mut status = 0;
+        // SAFETY: waiting for the child forked above.
+        assert_eq!(unsafe { libc::waitpid(forked, &mut status, 0) }, forked);
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "the forked child failed");
+        assert!(!segment_file(forked as u32).exists(), "the child's segment went with it");
+        assert!(segment_file(parent).exists(), "the child's exit removed its parent's segment");
+        assert_eq!(
+            service.rings().write_cursor(ring_for_thread(in_parent >> 32, service.rings().ring_count())),
+            written,
+            "the child wrote into its parent's rings"
+        );
+        stop(in_parent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_forked_child_starts_inert_and_is_instrumented_again_by_init() {
+        // A server that initialises and then daemonises, a prefork worker,
+        // Python multiprocessing with the fork start method: each ran with
+        // instrumentation off for good, init() answering ENOTSUP.
+        let (_, status) = run_as_child("tests::child_that_forks_a_child_of_its_own", "fork");
+        assert!(status.success(), "{status}");
     }
 
     /// One segment per process, and these tests share a process, so the

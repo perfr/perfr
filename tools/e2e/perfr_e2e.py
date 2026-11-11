@@ -2234,7 +2234,10 @@ def code_views(run):
     # The service's own function, disassembled live, its source interleaved.
     asm = example("code:example:asm")
     check(asm["mode"] == "Both" and asm["instructions"] > 100, f"example disassembly: {asm}")
-    check(asm["rows"] > asm["instructions"], f"Both has no source rows: {asm}")
+    # The source is a second request, made once the disassembly has named its
+    # files: its rows join the listing a moment after the instructions do.
+    asm = run.wait_for(lambda: code().get("rows", 0) > asm["instructions"] and code() or None,
+                       f"source rows between the instructions: {asm}", timeout=15)
     check(asm["source"].endswith("uprobes.rs"), f"the example's source is not uprobes.rs: {asm}")
     run.shot("26-code-both", settle=0.5)
     run.click("Disassembly")

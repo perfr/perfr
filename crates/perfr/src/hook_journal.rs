@@ -25,7 +25,7 @@
 
 #[cfg(target_os = "linux")]
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::hook_safety::{HookSafety, SafetyLevel};
 use crate::hooks::HookSpec;
@@ -71,12 +71,114 @@ fn state_dir() -> PathBuf {
     std::env::var_os("PERFR_STATE_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir)
 }
 
+const JOURNAL_PREFIX: &str = "perfr-hooks-";
+const CRASH_PREFIX: &str = "perfr-hook-crash-";
+
+/// How long a crash report (and the journal kept with it) stays before a
+/// later capture removes it; the log files' week.
+const KEEP_FOR: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
 pub fn journal_path(target_pid: i32) -> PathBuf {
-    state_dir().join(format!("perfr-hooks-{target_pid}.json"))
+    journal_path_in(&state_dir(), target_pid)
 }
 
 pub fn crash_path(target_pid: i32) -> PathBuf {
-    state_dir().join(format!("perfr-hook-crash-{target_pid}.json"))
+    crash_path_in(&state_dir(), target_pid)
+}
+
+fn journal_path_in(dir: &Path, target_pid: i32) -> PathBuf {
+    dir.join(format!("{JOURNAL_PREFIX}{target_pid}.json"))
+}
+
+fn crash_path_in(dir: &Path, target_pid: i32) -> PathBuf {
+    dir.join(format!("{CRASH_PREFIX}{target_pid}.json"))
+}
+
+/// Writes a diagnostics file so that only its owner can read it and nothing
+/// already at `path` is written through.
+///
+/// The directory is usually `/tmp` and the name is the target's pid, so
+/// another local user can have put a file or a symlink there first; and the
+/// journal holds the target's whole address-space layout, which under sudo
+/// is a root-profiled process's. So: a fresh file under a name nobody can
+/// predict, mode 0600, handed to the invoking user under sudo (they started
+/// the capture and are the one who will read the report), then renamed over
+/// whatever `path` was.
+#[cfg(unix)]
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.subsec_nanos())
+        .unwrap_or(0);
+    let temp = path.with_extension(format!("{}-{nonce:08x}.tmp", std::process::id()));
+    // `create_new` is O_CREAT|O_EXCL, which refuses a symlink as well as a
+    // file.
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp)?;
+    let written = file.write_all(bytes).and_then(|()| {
+        if let Some((uid, gid)) = sudo_owner() {
+            let _ = std::os::unix::fs::fchown(&file, Some(uid), Some(gid));
+        }
+        drop(file);
+        std::fs::rename(&temp, path)
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
+}
+
+#[cfg(not(unix))]
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
+}
+
+/// The invoking user's ids when the service runs as root under sudo.
+#[cfg(unix)]
+fn sudo_owner() -> Option<(u32, u32)> {
+    if unsafe { libc::geteuid() } != 0 {
+        return None;
+    }
+    let uid = std::env::var("SUDO_UID").ok()?.parse().ok()?;
+    let gid = std::env::var("SUDO_GID").ok()?.parse().ok()?;
+    Some((uid, gid))
+}
+
+/// The end of a capture: its journal goes, unless the capture ended in a
+/// crash report, which the journal is the evidence for (the maps snapshot is
+/// only there). Reports and kept journals older than a week go too. Without
+/// this every profiled pid left a file behind until reboot -- on a tmpfs
+/// `/tmp`, in memory.
+pub fn discard_journal(target_pid: i32) {
+    discard_journal_in(&state_dir(), target_pid, std::time::SystemTime::now());
+}
+
+fn discard_journal_in(dir: &Path, target_pid: i32, now: std::time::SystemTime) {
+    let journal = journal_path_in(dir, target_pid);
+    let modified = |path: &Path| std::fs::symlink_metadata(path).and_then(|m| m.modified()).ok();
+    if let Some(written) = modified(&journal) {
+        // A report for the same pid from an earlier run is older than this
+        // capture's journal and says nothing about it.
+        let crashed = modified(&crash_path_in(dir, target_pid)).is_some_and(|reported| reported >= written);
+        if !crashed {
+            let _ = std::fs::remove_file(&journal);
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with(JOURNAL_PREFIX) || name.starts_with(CRASH_PREFIX)) || !name.ends_with(".json") {
+            continue;
+        }
+        let old = modified(&entry.path())
+            .and_then(|at| now.duration_since(at).ok())
+            .is_some_and(|age| age > KEEP_FOR);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// The target's `comm` (short name), for matching kernel crash lines.
@@ -99,6 +201,10 @@ fn thread_ids(pid: i32) -> Vec<i32> {
 /// process). Returns the path, or None if it could not be written
 /// (diagnostics are best-effort and never block a capture).
 pub fn write_journal(target_pid: i32, engine: &str, hooks: &[ArmedHook]) -> Option<PathBuf> {
+    write_journal_in(&state_dir(), target_pid, engine, hooks)
+}
+
+fn write_journal_in(dir: &Path, target_pid: i32, engine: &str, hooks: &[ArmedHook]) -> Option<PathBuf> {
     let maps = std::fs::read_to_string(format!("/proc/{target_pid}/maps")).unwrap_or_default();
     let doc = serde_json::json!({
         "target_pid": target_pid,
@@ -108,8 +214,8 @@ pub fn write_journal(target_pid: i32, engine: &str, hooks: &[ArmedHook]) -> Opti
         "tids": thread_ids(target_pid),
         "maps": maps,
     });
-    let path = journal_path(target_pid);
-    std::fs::write(&path, serde_json::to_vec_pretty(&doc).ok()?).ok()?;
+    let path = journal_path_in(dir, target_pid);
+    write_private(&path, &serde_json::to_vec_pretty(&doc).ok()?).ok()?;
     Some(path)
 }
 
@@ -452,7 +558,7 @@ pub fn build_and_write(target_pid: i32, engine: &str, hooks: &[ArmedHook], kerne
     });
 
     let path = crash_path(target_pid);
-    let written = serde_json::to_vec_pretty(&json).ok().and_then(|b| std::fs::write(&path, b).ok()).map(|_| path);
+    let written = serde_json::to_vec_pretty(&json).ok().and_then(|b| write_private(&path, &b).ok()).map(|_| path);
     CrashReport { summary, json, path: written }
 }
 
@@ -632,6 +738,90 @@ mod tests {
         assert!(maps.contains("r-xp"), "the maps snapshot comes back with them");
         // With no journal there is still the pid itself to look for.
         assert_eq!(threads_and_maps(-3).0, vec![-3]);
+    }
+
+    /// A directory of this test's own, so nothing here races the tests
+    /// that write to the shared default.
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("perfr-journal-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_journal_is_private_and_replaces_what_was_at_its_path_without_writing_through_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("private");
+        // Someone got there first: the journal's name is a symlink to a
+        // file the service can write.
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "untouched").unwrap();
+        std::os::unix::fs::symlink(&victim, journal_path_in(&dir, 4242)).unwrap();
+        let path = write_journal_in(&dir, 4242, "kernel_uprobes", &[hook("f", 1, 8, SafetyLevel::Safe)])
+            .expect("journal writes");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert!(meta.file_type().is_file(), "the journal took the symlink's place");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600, "the target's maps are not for other users");
+        let doc: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(doc["armed"][0]["name"], "f");
+        // Rewritten in place (auto-profiling does), leaving no temp file.
+        write_journal_in(&dir, 4242, "kernel_uprobes", &[]).expect("journal rewrites");
+        let names: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_capture_that_ends_removes_its_journal_unless_it_ended_in_a_crash_report() {
+        let dir = scratch_dir("discard");
+        let now = std::time::SystemTime::now();
+        let journal = write_journal_in(&dir, 10, "kernel_uprobes", &[]).expect("journal writes");
+        discard_journal_in(&dir, 10, now);
+        assert!(!journal.exists(), "nothing happened: nothing is kept");
+        // A capture whose target crashed: the report is written after the
+        // journal, and the journal is its evidence.
+        let journal = write_journal_in(&dir, 11, "kernel_uprobes", &[]).expect("journal writes");
+        std::fs::write(crash_path_in(&dir, 11), "{}").unwrap();
+        discard_journal_in(&dir, 11, now);
+        assert!(journal.exists());
+        // A report left by an earlier process with the same pid is not this
+        // capture's.
+        let stale = crash_path_in(&dir, 12);
+        std::fs::write(&stale, "{}").unwrap();
+        let hour_ago = now - std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&stale).unwrap().set_modified(hour_ago).unwrap();
+        let journal = write_journal_in(&dir, 12, "kernel_uprobes", &[]).expect("journal writes");
+        discard_journal_in(&dir, 12, now);
+        assert!(!journal.exists());
+        assert!(stale.exists(), "an hour-old report is still worth reading");
+        // No journal at all (no hooks were armed) is not an error.
+        discard_journal_in(&dir, 13, now);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reports_and_journals_older_than_a_week_are_pruned_and_nothing_else_is() {
+        let dir = scratch_dir("prune");
+        let now = std::time::SystemTime::now();
+        let eight_days_ago = now - std::time::Duration::from_secs(8 * 24 * 3600);
+        let aged = |name: &str, at: std::time::SystemTime| {
+            let path = dir.join(name);
+            std::fs::write(&path, "{}").unwrap();
+            std::fs::File::options().write(true).open(&path).unwrap().set_modified(at).unwrap();
+            path
+        };
+        let old_report = aged("perfr-hook-crash-1.json", eight_days_ago);
+        let old_journal = aged("perfr-hooks-1.json", eight_days_ago);
+        let recent_report = aged("perfr-hook-crash-2.json", now - std::time::Duration::from_secs(3600));
+        let someone_elses = aged("unrelated.json", eight_days_ago);
+        discard_journal_in(&dir, 99, now);
+        assert!(!old_report.exists() && !old_journal.exists());
+        assert!(recent_report.exists() && someone_elses.exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -473,7 +473,7 @@ impl ScopeRingReader {
         }
         // The size the header describes must fit in the mapping actually
         // made, or every offset computed from it reads out of bounds.
-        if ring::layout_size(ring_count, slots_per_ring) > len {
+        if ring::checked_layout_size(ring_count, slots_per_ring).is_none_or(|needed| needed > len) {
             return Err(bad("scope segment is smaller than its header describes"));
         }
 

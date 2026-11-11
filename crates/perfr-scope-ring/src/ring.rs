@@ -268,6 +268,16 @@ pub fn layout_size(ring_count: usize, slots_per_ring: usize) -> usize {
     control_bytes() + ring_count * CACHE_LINE + ring_count * slots_per_ring * CACHE_LINE
 }
 
+/// As [`layout_size`], for dimensions read out of another process's header:
+/// `None` when they describe more bytes than an address can hold. Plain
+/// arithmetic wraps there, on a 32-bit reader, and a wrapped size is a small
+/// one that a small file then passes for.
+pub fn checked_layout_size(ring_count: usize, slots_per_ring: usize) -> Option<usize> {
+    let headers = ring_count.checked_mul(CACHE_LINE)?;
+    let slots = ring_count.checked_mul(slots_per_ring)?.checked_mul(CACHE_LINE)?;
+    control_bytes().checked_add(headers)?.checked_add(slots)
+}
+
 /// Byte offset of a ring's control block.
 pub fn ring_header_offset(ring: usize) -> usize {
     control_bytes() + ring * CACHE_LINE
@@ -954,6 +964,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn dimensions_too_large_to_address_have_no_layout_size() {
+        assert_eq!(checked_layout_size(16, 32768), Some(layout_size(16, 32768)));
+        assert_eq!(checked_layout_size(1, 2), Some(layout_size(1, 2)));
+        // What a 32-bit reader computes for the largest dimensions a header
+        // can state, 128 rings of 2^31 slots: 2^44 bytes, which wraps to
+        // little more than the control page.
+        assert_eq!(checked_layout_size(MAX_RINGS, usize::MAX / CACHE_LINE), None);
+        assert_eq!(checked_layout_size(usize::MAX / CACHE_LINE + 1, 2), None);
+        assert_eq!(checked_layout_size(2, usize::MAX / (2 * CACHE_LINE)), None, "the sum overflows");
     }
 
     #[test]

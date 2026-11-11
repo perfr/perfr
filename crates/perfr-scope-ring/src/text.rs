@@ -130,6 +130,11 @@ struct Partial {
     saw_gap: bool,
 }
 
+/// The most names an assembler waits on at once. A real process has one in
+/// flight per thread that is writing, plus those whose tails a lap took,
+/// which the consumer clears on the loss.
+pub const MAX_OPEN_CHAINS: usize = 1 << 16;
+
 /// Reassembles chained names out of a merged, ordered event stream.
 ///
 /// Feed it every event in timestamp order. Records that are not part of a
@@ -146,6 +151,11 @@ impl TextAssembler {
 
     /// Offers one event. Returns the finished name when this event completes
     /// a chain, along with whether anything was lost.
+    ///
+    /// What is held is bounded whatever the producer sends: a name is cut
+    /// at [`MAX_NAME_BYTES`], and no more than [`MAX_OPEN_CHAINS`] are
+    /// waited on at once. A head that arrives past that is returned at
+    /// once, truncated, though it says more is coming.
     pub fn accept(&mut self, event: &ScopeEvent) -> Option<(String, Completeness)> {
         // A link's text is the target handle, not a name. Reading it as one
         // produced eight bytes of binary per link in the first dump of a real
@@ -155,6 +165,11 @@ impl TextAssembler {
         }
         let key = (event.tid, event.scope_id);
         if event.kind == kind::TEXT {
+            // A continuation whose head was never seen still gets an entry,
+            // so that its last record ends it; with no room, it gets none.
+            if self.open.len() >= MAX_OPEN_CHAINS && !self.open.contains_key(&key) {
+                return None;
+            }
             let partial = self.open.entry(key).or_default();
             // Chain positions run 1, 2, 3. Anything else means a slot was
             // overwritten before it was read.
@@ -162,7 +177,14 @@ impl TextAssembler {
                 partial.saw_gap = true;
             }
             partial.last_index = u32::from(event.depth);
-            partial.bytes.extend_from_slice(event.text_bytes());
+            // No writer of ours sends more than this: the chain position is
+            // a byte. One that does is not believed past it.
+            let room = MAX_NAME_BYTES.saturating_sub(partial.bytes.len());
+            let bytes = event.text_bytes();
+            if bytes.len() > room {
+                partial.saw_gap = true;
+            }
+            partial.bytes.extend_from_slice(&bytes[..bytes.len().min(room)]);
             partial.expecting_more = event.has_more_text();
             if partial.expecting_more {
                 return None;
@@ -189,7 +211,11 @@ impl TextAssembler {
             };
             return Some((String::from_utf8_lossy(event.text_bytes()).into_owned(), completeness));
         }
-        // A head with continuations to come.
+        // A head with continuations to come. With no room to wait for
+        // them, it is finished as the prefix it holds.
+        if self.open.len() >= MAX_OPEN_CHAINS && !self.open.contains_key(&key) {
+            return Some((String::from_utf8_lossy(event.text_bytes()).into_owned(), Completeness::Truncated));
+        }
         self.open.insert(
             key,
             Partial {
@@ -247,6 +273,66 @@ mod tests {
         }
         let (text, completeness) = result.expect("the chain completed");
         (text, completeness, chunks.len())
+    }
+
+    fn continuation(scope_id: u64, position: u8, more: bool) -> ScopeEvent {
+        ScopeEvent {
+            scope_id,
+            tid: 7,
+            kind: kind::TEXT,
+            depth: position,
+            flags: if more { flags::MORE_TEXT } else { 0 },
+            text_len: INLINE_TEXT as u8,
+            text: [b'z'; INLINE_TEXT],
+            ..ScopeEvent::default()
+        }
+    }
+
+    #[test]
+    fn a_chain_that_never_ends_is_held_to_the_longest_name_there_is() {
+        // A producer is another process, and may be broken or hostile. One
+        // that goes on sending continuations for one name grew that name's
+        // buffer in the service for as long as it cared to.
+        let mut asm = TextAssembler::new();
+        let mut first = head(1);
+        first.text_len = INLINE_TEXT as u8;
+        first.flags |= flags::MORE_TEXT;
+        assert!(asm.accept(&first).is_none());
+        for n in 1..=100_000u32 {
+            assert!(asm.accept(&continuation(1, n as u8, true)).is_none());
+        }
+        let (text, completeness) = asm.accept(&continuation(1, 0, false)).expect("the chain ends");
+        assert!(text.len() <= MAX_NAME_BYTES, "{} bytes of one name were kept", text.len());
+        assert_eq!(completeness, Completeness::Truncated, "and it does not pass for the whole name");
+    }
+
+    #[test]
+    fn names_whose_tails_never_come_are_not_waited_for_without_limit() {
+        // Heads that promise more and never send it: each one is an entry
+        // that only a loss or the end of the capture clears.
+        let mut asm = TextAssembler::new();
+        let mut refused = 0;
+        for id in 0..(MAX_OPEN_CHAINS as u64 + 500) {
+            let mut promising = head(id + 1);
+            promising.text[..5].copy_from_slice(b"alpha");
+            promising.text_len = 5;
+            promising.flags |= flags::MORE_TEXT;
+            if let Some((text, completeness)) = asm.accept(&promising) {
+                // With no room to wait, a head is finished as what it
+                // holds, and says it is not all there.
+                assert_eq!((text.as_str(), completeness), ("alpha", Completeness::Truncated));
+                refused += 1;
+            }
+        }
+        assert_eq!(asm.open_chains(), MAX_OPEN_CHAINS);
+        assert_eq!(refused, 500);
+        // Continuations that arrive for no head at all get no entry either.
+        assert!(asm.accept(&continuation(u64::MAX, 1, true)).is_none());
+        assert_eq!(asm.open_chains(), MAX_OPEN_CHAINS);
+        // A chain already open is not affected: it still completes.
+        let (text, _) = asm.accept(&continuation(1, 1, false)).expect("an open chain still completes");
+        assert!(text.starts_with("alpha"));
+        assert_eq!(asm.open_chains(), MAX_OPEN_CHAINS - 1);
     }
 
     #[test]

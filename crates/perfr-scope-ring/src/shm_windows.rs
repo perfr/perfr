@@ -537,7 +537,7 @@ impl ScopeRingReader {
         if slots_per_ring < 2 || !slots_per_ring.is_power_of_two() {
             return Err(bad("scope segment slot count is not a power of two"));
         }
-        if ring::layout_size(ring_count, slots_per_ring) > len {
+        if ring::checked_layout_size(ring_count, slots_per_ring).is_none_or(|needed| needed > len) {
             return Err(bad("scope segment is smaller than its header describes"));
         }
 

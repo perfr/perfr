@@ -275,8 +275,27 @@ fn push_named(writer: &ScopeRingWriter, state: &ThreadState, mut head: ScopeEven
     }
 }
 
-fn start_at(flag: u8, name: &[u8], timestamp_ns: u64) -> Handle {
+/// The clock, for a record that is going to be written.
+#[inline]
+fn clock_ns() -> u64 {
+    #[cfg(test)]
+    CLOCK_READS.with(|reads| reads.set(reads.get() + 1));
+    now_monotonic_ns()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How often this thread has read the clock through [`clock_ns`].
+    static CLOCK_READS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// `timestamp_ns` is the caller's, or `None` for now. The clock is read
+/// here, behind the gate, and not by the caller on its way in: it is most of
+/// what a scope costs, and read first it was paid on every start and stop of
+/// a program nobody was capturing.
+fn start_at(flag: u8, name: &[u8], timestamp_ns: Option<u64>) -> Handle {
     let Some(writer) = active_segment() else { return 0 };
+    let timestamp_ns = timestamp_ns.unwrap_or_else(clock_ns);
     with_thread(writer.rings().ring_count(), |state| {
         let handle = next_handle(state);
         let head = ScopeEvent {
@@ -292,11 +311,12 @@ fn start_at(flag: u8, name: &[u8], timestamp_ns: u64) -> Handle {
     })
 }
 
-fn stop_at(handle: Handle, timestamp_ns: u64) {
+fn stop_at(handle: Handle, timestamp_ns: Option<u64>) {
     if handle == 0 {
         return;
     }
     let Some(writer) = active_segment() else { return };
+    let timestamp_ns = timestamp_ns.unwrap_or_else(clock_ns);
     with_thread(writer.rings().ring_count(), |state| {
         writer.rings().push(
             state.ring,
@@ -313,18 +333,18 @@ fn stop_at(handle: Handle, timestamp_ns: u64) {
 
 /// Begins a scope on the calling thread. Takes `&str` or `&[u8]`.
 pub fn start(name: impl AsRef<[u8]>) -> Handle {
-    start_at(0, name.as_ref(), now_monotonic_ns())
+    start_at(0, name.as_ref(), None)
 }
 
 /// Begins a scope attributed to dynamic instrumentation, using the same
 /// handles, segment and nesting stream as manual scopes.
 pub fn start_dynamic(name: impl AsRef<[u8]>) -> Handle {
-    start_at(flags::DYNAMIC, name.as_ref(), now_monotonic_ns())
+    start_at(flags::DYNAMIC, name.as_ref(), None)
 }
 
 /// Begins a scope that may be stopped from any thread.
 pub fn start_async(name: impl AsRef<[u8]>) -> Handle {
-    start_at(flags::ASYNC, name.as_ref(), now_monotonic_ns())
+    start_at(flags::ASYNC, name.as_ref(), None)
 }
 
 /// Records a complete scope whose timestamps the caller supplies, rather than
@@ -340,20 +360,20 @@ pub fn start_async(name: impl AsRef<[u8]>) -> Handle {
 /// imported data, emit parents around their children (outer span, then the
 /// inner spans within it). Flat data needs no such care.
 pub fn span(name: impl AsRef<[u8]>, start_ns: u64, end_ns: u64) {
-    let handle = start_at(0, name.as_ref(), start_ns);
-    stop_at(handle, end_ns);
+    let handle = start_at(0, name.as_ref(), Some(start_ns));
+    stop_at(handle, Some(end_ns));
 }
 
 /// A complete async span at supplied timestamps, drawn on its own track.
 /// The right one for GPU spans: independent of any CPU thread's nesting.
 pub fn span_async(name: impl AsRef<[u8]>, start_ns: u64, end_ns: u64) {
-    let handle = start_at(flags::ASYNC, name.as_ref(), start_ns);
-    stop_at(handle, end_ns);
+    let handle = start_at(flags::ASYNC, name.as_ref(), Some(start_ns));
+    stop_at(handle, Some(end_ns));
 }
 
 /// Ends a scope, from any thread. `0` is a no-op.
 pub fn stop(handle: Handle) {
-    stop_at(handle, now_monotonic_ns());
+    stop_at(handle, None);
 }
 
 /// `CLOCK_MONOTONIC` in nanoseconds, the clock every timestamp in the segment
@@ -370,7 +390,7 @@ pub fn instant(name: impl AsRef<[u8]>) -> Handle {
     with_thread(writer.rings().ring_count(), |state| {
         let handle = next_handle(state);
         let head = ScopeEvent {
-            timestamp_ns: now_monotonic_ns(),
+            timestamp_ns: clock_ns(),
             scope_id: handle,
             tid: state.tid,
             kind: kind::INSTANT,
@@ -389,7 +409,7 @@ pub fn link(from: Handle, to: Handle) {
     let Some(writer) = active_segment() else { return };
     with_thread(writer.rings().ring_count(), |state| {
         let mut event = ScopeEvent {
-            timestamp_ns: now_monotonic_ns(),
+            timestamp_ns: clock_ns(),
             scope_id: from,
             tid: state.tid,
             kind: kind::LINK,
@@ -407,7 +427,7 @@ pub fn value(name: impl AsRef<[u8]>, value: f64) {
     let Some(writer) = active_segment() else { return };
     with_thread(writer.rings().ring_count(), |state| {
         let head = ScopeEvent {
-            timestamp_ns: now_monotonic_ns(),
+            timestamp_ns: clock_ns(),
             scope_id: value.to_bits(),
             tid: state.tid,
             kind: kind::VALUE,
@@ -454,7 +474,7 @@ pub fn log(level: u8, message: impl AsRef<[u8]>) {
     let Some(writer) = active_segment() else { return };
     with_thread(writer.rings().ring_count(), |state| {
         let head = ScopeEvent {
-            timestamp_ns: now_monotonic_ns(),
+            timestamp_ns: clock_ns(),
             scope_id: next_handle(state),
             tid: state.tid,
             kind: kind::LOG,
@@ -1038,6 +1058,43 @@ mod tests {
         let h = start(b"recorded");
         assert_ne!(h, 0);
         stop(h);
+        reader.set_capturing(false);
+    }
+
+    #[test]
+    fn nothing_reads_the_clock_while_nobody_is_capturing() {
+        let _serial = WRITES.lock().unwrap_or_else(|p| p.into_inner());
+        init().expect("init");
+        let reader = ScopeRingReader::open(std::process::id()).unwrap();
+        if capturing() {
+            // A perfr running on this machine has found the test process.
+            eprintln!("skipped: something is capturing this process");
+            return;
+        }
+        // The clock is most of what a recorded scope costs. Read before the
+        // gate, it was most of what an unrecorded one cost too: two reads a
+        // scope, 20 ns against 2, in a program nobody was looking at.
+        let reads = || CLOCK_READS.with(|n| n.get());
+        let before = reads();
+        let handle = start(b"idle");
+        stop(handle);
+        stop(7);
+        drop(scope(b"idle"));
+        assert_eq!(start_async(b"idle"), 0);
+        assert_eq!(start_dynamic(b"idle"), 0);
+        assert_eq!(instant(b"idle"), 0);
+        link(7, 8);
+        value(b"idle", 1.0);
+        log_info(b"idle");
+        assert_eq!(reads() - before, 0, "the clock was read with nobody capturing");
+
+        // And once per record when somebody is.
+        reader.set_capturing(true);
+        let before = reads();
+        stop(start(b"recorded"));
+        assert_eq!(reads() - before, 2);
+        span(b"replayed", 1, 2);
+        assert_eq!(reads() - before, 2, "a span brings its own timestamps");
         reader.set_capturing(false);
     }
 

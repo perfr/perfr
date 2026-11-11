@@ -5,14 +5,15 @@
 //! Rectangle ("marquee") selection over the timeline.
 //!
 //! With the Select pill on, a left-drag draws a rectangle instead of panning.
-//! On release the scopes it covers are gathered from the same on-screen
-//! instances the timeline just drew (`last_instances`), summarised into
-//! [`RectStats`] for the on-screen readout, and rendered as a plain-text
-//! report copied to the clipboard -- the shape an LLM can read: counts, a
-//! per-function breakdown, the threads involved, and the individual scopes.
+//! On release the scopes it covers are read from the index, for the lanes
+//! the rectangle crosses (see [`scopes_in_rect`] for why not from what the
+//! timeline drew), summarised into [`RectStats`] for the on-screen readout,
+//! and rendered as a plain-text [`Report`] for the pane and the clipboard --
+//! the shape an LLM can read: counts, a per-function breakdown, the threads
+//! involved, and the individual scopes.
 //!
-//! The gather and the text are pure functions of the instances so they can be
-//! tested without egui: the app layer only supplies the rectangle, the intern
+//! The gather and the text are pure functions so they can be tested without
+//! egui: the app layer only supplies the rectangle, the layout, the intern
 //! table, and a way to name a thread.
 
 use perfr_live_event::{kind, InternTable, LaneKey};

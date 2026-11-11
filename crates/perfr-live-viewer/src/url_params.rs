@@ -74,7 +74,8 @@ pub fn query_prefers_webgpu(search: &str) -> bool {
 
 /// `?capture=<url>` -- open a capture stream file (the `stream` export)
 /// instead of connecting to a service: the static web page's mode. The
-/// URL is relative to the page.
+/// value is handed to `fetch` as it is once decoded: a path relative to the
+/// page, or an absolute URL such as a share's presigned link.
 pub fn query_capture_url_from_location() -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {

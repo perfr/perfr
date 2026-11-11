@@ -785,8 +785,10 @@ mod wasm_impl {
             });
         }
 
-        /// Reads a `.perfr.stream` from the service so the dialog can show
-        /// its size. Does not post it.
+        /// What an earlier page load left for Share: the bearer from a
+        /// login redirect (the URL fragment, else what `index.html` stored),
+        /// taken out of storage as it is read, and whether a same-tab login
+        /// asked for the dialog to reopen.
         pub fn stored_share_auth() -> (Option<String>, bool) {
             let Some(window) = web_sys::window() else {
                 return (None, false);

@@ -302,7 +302,9 @@ This writes `viewer-dist/perfr_live_viewer.js` and `.wasm`, which are checked
 in, and `viewer-dist/VERSION`: the commit, the date, the release tag and an id
 of the sources the pack was built from (`source_id.py`). `perfr-live-server`’s
 build script embeds whatever is in `viewer-dist/`, so rebuild `perfr`
-afterwards to pick up a new pack.
+afterwards to pick up a new pack. That build prints a cargo warning when the
+id in `VERSION` is not the id of the sources in the checkout, which is what a
+viewer change without a rebuilt pack looks like.
 
 A pack built on a branch is built from that branch. Once another viewer
 change has merged, the pack at the top of `main` no longer matches `main`'s
@@ -334,11 +336,20 @@ WebSocket `ws://<host>:<http_port>/ws`, binary frames:
 | Type | Payload |
 |---|---|
 | 1 Hello | `OLIV` + version + event size |
-| 2 EventBatch | `u32 count` + `count` packed 32-byte events |
+| 2 EventBatch | `u32 count` + `count` raw 32-byte events |
 | 3 InternedString | `u32 id` + `u32 len` + UTF-8 |
 | 4 CaptureStarted | `u32 pid` + `u64 start_ns` |
 | 5 CaptureFinished | empty |
 | 6 Status | flags + ring counters |
+| 7 ThreadName | `u32 pid` + `u32 tid` + `u32 len` + UTF-8 |
+| 8 ProcessName | `u32 pid` + `u32 len` + UTF-8 |
+| 9 EventBatchPacked | an event batch, delta-varint packed |
+| 10 EventBatchDeflate | a packed batch, deflated |
+
+The three batch types decode to the same events. Packed (9) is what the
+service sends unless told otherwise; `perfr_live_protocol::WireFormat` has the
+reasons and the sizes. A reader steps over a type it does not know, so a
+newer service can add one.
 
 Event layout matches `perfr_grpc_protos::ClientCaptureEvent` fields already
 used for API scopes, `FunctionCall`, `SchedulingSlice`, and `ThreadStateSlice`.
@@ -358,12 +369,6 @@ It is not a new capture file format.
 Callstack samples are resolved on the service and ingested as nested
 `FUNCTION_CALL` clips (duration `1/samples_per_second`). Instrumented
 `FunctionCall` events use interned pretty names, not raw function ids.
-
-## Out of scope (this change)
-
-PerfrApp / CaptureData / the Qt client, ELF/DWARF in WASM/JS, sampling
-reports, GPU/Vulkan tracks, presets, a dual end-time index, or changing
-the 32-byte `LiveEvent` layout. VALUE stays off GPU LODs.
 
 ## Instrumentation presets
 

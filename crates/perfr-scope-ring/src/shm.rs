@@ -505,15 +505,24 @@ impl ScopeRingReader {
     /// Address in the producer's address space, not the reader's. Consumers
     /// outside the producer must never dereference this value.
     pub fn api_descriptor(&self) -> u64 {
-        let fd = self.owner_fd.as_raw_fd();
-        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            unsafe { libc::flock(fd, libc::LOCK_UN) };
-            return 0;
-        }
-        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EWOULDBLOCK) {
+        if !self.writer_alive() {
             return 0;
         }
         unsafe { &*self.mapping.base.cast::<Header>() }.api_descriptor.load(Ordering::Acquire)
+    }
+
+    /// Whether the process that created this segment still holds it: its
+    /// producer lease, a lock it takes at creation and keeps until it
+    /// exits. False for a file left behind by a process that is gone,
+    /// whatever its header says and whoever has its pid now.
+    pub fn writer_alive(&self) -> bool {
+        let fd = self.owner_fd.as_raw_fd();
+        // SAFETY: plain syscalls on a descriptor this reader owns.
+        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            unsafe { libc::flock(fd, libc::LOCK_UN) };
+            return false;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
     }
 
     /// Tells the producer this reader wants it writing (true when a capture

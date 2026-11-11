@@ -15,6 +15,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "src/git_paths.rs"]
+mod git_paths;
 #[allow(dead_code)]
 #[path = "src/stamp.rs"]
 mod stamp;
@@ -22,6 +24,7 @@ mod stamp;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/stamp.rs");
+    println!("cargo:rerun-if-changed=src/git_paths.rs");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo:rerun-if-env-changed=PERFR_GIT_HASH");
     println!("cargo:rerun-if-env-changed=PERFR_RELEASE_TAG");
@@ -33,18 +36,8 @@ fn main() {
     let perfr_manifest = manifest.join("../perfr/Cargo.toml");
     println!("cargo:rerun-if-changed={}", perfr_manifest.display());
 
-    let git_dir = manifest.join("../../.git");
-    let head = git_dir.join("HEAD");
-    if head.is_file() {
-        println!("cargo:rerun-if-changed={}", head.display());
-        if let Ok(text) = std::fs::read_to_string(&head) {
-            if let Some(rest) = text.trim().strip_prefix("ref:") {
-                let ref_path = git_dir.join(rest.trim());
-                if ref_path.is_file() {
-                    println!("cargo:rerun-if-changed={}", ref_path.display());
-                }
-            }
-        }
+    for path in git_paths::head_watch_paths(&manifest) {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
 
     let version = package_version(&perfr_manifest);

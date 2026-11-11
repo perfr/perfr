@@ -8,6 +8,9 @@
 //! build date and, on a release, the `perfr-v*` tag. A build with no release
 //! tag reports `dev` plus that hash.
 
+// The build script's; compiled here only so its test runs.
+#[cfg(test)]
+mod git_paths;
 mod stamp;
 
 pub use stamp::{

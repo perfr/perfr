@@ -144,15 +144,71 @@ fn unit_covers(
     unit: &gimli::Unit<gimli::EndianSlice<'_, gimli::RunTimeEndian>>,
     address: u64,
 ) -> bool {
-    let Ok(mut ranges) = dwarf.unit_ranges(unit) else {
+    let mut cursor = unit.entries();
+    if cursor.next_dfs().is_err() {
         return false;
-    };
-    while let Ok(Some(range)) = ranges.next() {
-        if address >= range.begin && address < range.end {
-            return true;
+    }
+    cursor.current().is_some_and(|root| entry_covers(dwarf, unit, root, address))
+}
+
+/// Whether the address ranges of `entry` -- `DW_AT_low_pc` with
+/// `DW_AT_high_pc`, or `DW_AT_ranges` -- contain `address`. An entry whose
+/// attributes cannot be read covers nothing.
+///
+/// This is `gimli::Dwarf::die_ranges` asked one question, and written out
+/// because of one line of it: gimli 0.31 computes the end of a range as
+/// `low_pc + size` unchecked, where both come from the file. A debug or
+/// test build aborts on that sum; a release build wraps it. Here an end
+/// that does not fit is no range.
+fn entry_covers(
+    dwarf: &gimli::Dwarf<gimli::EndianSlice<'_, gimli::RunTimeEndian>>,
+    unit: &gimli::Unit<gimli::EndianSlice<'_, gimli::RunTimeEndian>>,
+    entry: &gimli::DebuggingInformationEntry<'_, '_, gimli::EndianSlice<'_, gimli::RunTimeEndian>>,
+    address: u64,
+) -> bool {
+    let mut low_pc = None;
+    let mut high_pc = None;
+    let mut size = None;
+    let mut attrs = entry.attrs();
+    loop {
+        let attr = match attrs.next() {
+            Ok(Some(attr)) => attr,
+            Ok(None) => break,
+            Err(_) => return false,
+        };
+        match attr.name() {
+            gimli::DW_AT_low_pc => match dwarf.attr_address(unit, attr.value()) {
+                Ok(Some(address)) => low_pc = Some(address),
+                _ => return false,
+            },
+            gimli::DW_AT_high_pc => match attr.value() {
+                gimli::AttributeValue::Udata(value) => size = Some(value),
+                other => match dwarf.attr_address(unit, other) {
+                    Ok(Some(address)) => high_pc = Some(address),
+                    _ => return false,
+                },
+            },
+            gimli::DW_AT_ranges => match dwarf.attr_ranges(unit, attr.value()) {
+                Ok(Some(mut ranges)) => {
+                    while let Ok(Some(range)) = ranges.next() {
+                        if address >= range.begin && address < range.end {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                Ok(None) => {}
+                Err(_) => return false,
+            },
+            _ => {}
         }
     }
-    false
+    let Some(begin) = low_pc else { return false };
+    let end = match size {
+        Some(size) => begin.checked_add(size),
+        None => high_pc,
+    };
+    end.is_some_and(|end| address >= begin && address < end)
 }
 
 /// Finds the line-table row covering `address` and renders its file path.
@@ -228,17 +284,7 @@ fn outermost_inlined_call_site(
         if entry.tag() != gimli::DW_TAG_inlined_subroutine {
             continue;
         }
-        let Ok(mut ranges) = dwarf.die_ranges(unit, entry) else {
-            continue;
-        };
-        let mut covers = false;
-        while let Ok(Some(range)) = ranges.next() {
-            if address >= range.begin && address < range.end {
-                covers = true;
-                break;
-            }
-        }
-        if !covers {
+        if !entry_covers(dwarf, unit, entry, address) {
             continue;
         }
 
@@ -498,17 +544,7 @@ fn subprogram_declaration(
         ) {
             continue;
         }
-        let Ok(mut ranges) = dwarf.die_ranges(unit, entry) else {
-            continue;
-        };
-        let mut covers = false;
-        while let Ok(Some(range)) = ranges.next() {
-            if address >= range.begin && address < range.end {
-                covers = true;
-                break;
-            }
-        }
-        if !covers {
+        if !entry_covers(dwarf, unit, entry, address) {
             continue;
         }
         if best.is_none_or(|(best_depth, _)| depth > best_depth) {

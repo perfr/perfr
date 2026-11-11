@@ -188,6 +188,57 @@ pub fn parse_maps(content: &[u8]) -> Vec<MemoryMapping> {
     result
 }
 
+/// The load bias of the image `mapping` is a piece of: what to subtract from
+/// a runtime address in it to get the file's virtual address, which is also
+/// where the file's virtual address 0 landed. `mappings` is the whole
+/// process, `segments` the `(file offset, virtual address)` of each of the
+/// file's loadable segments.
+///
+/// A segment's mapping has `start - offset = bias + (vaddr - offset)`, and
+/// `vaddr - offset` is not one number per file. GNU ld pads the file so that
+/// the text segment's equals the first segment's; lld does not pad, it bumps
+/// the virtual address by a page at every segment boundary, so its text sits
+/// a page or more further from its file offset than the headers do. Taking
+/// `start - offset` from the text mapping and the correction from the first
+/// segment named every sampled function of an lld-linked binary (Chrome,
+/// Unreal, Rust since 1.90) after whatever lay 4 KiB below it.
+///
+/// Which segment a mapping came from cannot be read off its offset: in an lld
+/// layout the page at a segment boundary is mapped twice, as the tail of one
+/// segment and as the head of the next. So this looks for the first
+/// segment's mapping instead: the mapping of the same file whose
+/// `start - offset` is below this one's by a step the segment table allows.
+/// When there is none (one mapping for the whole image, or a file that is not
+/// readable) the mapping is taken to be of the first segment itself.
+///
+/// The lowest `start - offset` over all of the file's mappings is not the
+/// answer either, for two reasons seen in the wild. A later segment can sit
+/// *closer* to its offset than the first (the last one of a Go binary such as
+/// snapd, 0x24000 closer). And a file can be mapped again away from its
+/// image: libffi maps a page of its own text once more per trampoline table.
+pub fn load_bias(mappings: &[MemoryMapping], mapping: &MemoryMapping, segments: &[(u64, u64)]) -> u64 {
+    let first = segments
+        .iter()
+        .min_by_key(|(offset, _)| *offset)
+        .map(|(offset, vaddr)| vaddr.wrapping_sub(*offset))
+        .unwrap_or(0);
+    let mapped_at = mapping.start_address.wrapping_sub(mapping.offset);
+    // How far above the first segment's mapping this one is. All wrapping:
+    // a mapping of a segment that sits closer to its offset than the first
+    // is "above" it by a negative step, which as a u64 is still the largest.
+    let mut step = 0;
+    for other in mappings {
+        if other.pathname != mapping.pathname {
+            continue;
+        }
+        let below = mapped_at.wrapping_sub(other.start_address.wrapping_sub(other.offset));
+        if below > step && segments.iter().any(|(offset, vaddr)| vaddr.wrapping_sub(*offset).wrapping_sub(first) == below) {
+            step = below;
+        }
+    }
+    mapped_at.wrapping_sub(step).wrapping_sub(first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +344,156 @@ mod tests {
             parse_maps(b"1-2 r-xp 0 08:02 99999999999999999999999 /x").len(),
             0
         );
+    }
+
+    /// The bias `load_bias` gives each executable mapping of `path`.
+    fn text_biases(maps: &str, path: &str, segments: &[(u64, u64)]) -> Vec<u64> {
+        let mappings = parse_maps(maps.as_bytes());
+        mappings
+            .iter()
+            .filter(|m| m.perms & PROT_EXEC != 0 && m.pathname == path.as_bytes())
+            .map(|m| load_bias(&mappings, m, segments))
+            .collect()
+    }
+
+    // The layouts below are `readelf -lW` and `/proc/<pid>/maps` of real
+    // processes: one C file linked four ways, then the binaries that broke
+    // simpler rules.
+
+    #[test]
+    fn gnu_ld_layouts_have_the_bias_of_their_text_mapping() {
+        // PIE. GNU ld pads the file, so text is as far from its offset as
+        // the headers are; only the data segment is a page further.
+        const PIE: &str = "\
+60c4121b0000-60c4121b1000 r--p 00000000 00:2f 169005                     /t/hot_bfd
+60c4121b1000-60c4121b3000 r-xp 00001000 00:2f 169005                     /t/hot_bfd
+60c4121b3000-60c4121b4000 r--p 00003000 00:2f 169005                     /t/hot_bfd
+60c4121b4000-60c4121b5000 r--p 00003000 00:2f 169005                     /t/hot_bfd
+60c4121b5000-60c4121b6000 rw-p 00004000 00:2f 169005                     /t/hot_bfd
+";
+        let segments = [(0, 0), (0x1000, 0x1000), (0x3000, 0x3000), (0x3da0, 0x4da0)];
+        assert_eq!(text_biases(PIE, "/t/hot_bfd", &segments), [0x60c4121b0000]);
+
+        // Not PIE: linked at 0x400000 and loaded there, so no bias at all.
+        const FIXED: &str = "\
+00400000-00401000 r--p 00000000 00:2f 189223                             /t/hot_bfd_nopie
+00401000-00402000 r-xp 00001000 00:2f 189223                             /t/hot_bfd_nopie
+00402000-00403000 r--p 00002000 00:2f 189223                             /t/hot_bfd_nopie
+00403000-00404000 r--p 00002000 00:2f 189223                             /t/hot_bfd_nopie
+00404000-00405000 rw-p 00003000 00:2f 189223                             /t/hot_bfd_nopie
+";
+        let segments = [(0, 0x400000), (0x1000, 0x401000), (0x2000, 0x402000), (0x2df8, 0x403df8)];
+        assert_eq!(text_biases(FIXED, "/t/hot_bfd_nopie", &segments), [0]);
+    }
+
+    #[test]
+    fn lld_layouts_have_the_bias_of_their_first_mapping_not_of_their_text() {
+        // PIE. lld does not pad: text is at file offset 0xc80 and virtual
+        // address 0x1c80, so its mapping starts a page above `bias + offset`.
+        const PIE: &str = "\
+5992b139a000-5992b139b000 r--p 00000000 00:2f 169012                     /t/hot_lld
+5992b139b000-5992b139e000 r-xp 00000000 00:2f 169012                     /t/hot_lld
+5992b139e000-5992b139f000 r--p 00002000 00:2f 169012                     /t/hot_lld
+5992b139f000-5992b13a0000 rw-p 00002000 00:2f 169012                     /t/hot_lld
+";
+        let segments = [(0, 0), (0xc80, 0x1c80), (0x2360, 0x4360), (0x2588, 0x5588)];
+        assert_eq!(text_biases(PIE, "/t/hot_lld", &segments), [0x5992b139a000]);
+
+        // Not PIE: lld's default image base, 0x200000, and the page bump.
+        const FIXED: &str = "\
+00200000-00201000 r--p 00000000 00:2f 189230                             /t/hot_lld_nopie
+00201000-00203000 r-xp 00000000 00:2f 189230                             /t/hot_lld_nopie
+00203000-00204000 r--p 00001000 00:2f 189230                             /t/hot_lld_nopie
+00204000-00205000 rw-p 00001000 00:2f 189230                             /t/hot_lld_nopie
+";
+        let segments = [(0, 0x200000), (0xb80, 0x201b80), (0x1560, 0x203560), (0x1700, 0x204700)];
+        assert_eq!(text_biases(FIXED, "/t/hot_lld_nopie", &segments), [0]);
+
+        // An Unreal Shipping binary's program headers, mapped where they
+        // ask to be (the maps are written out from the headers, not copied
+        // from a process): text is 0x201000 from its offset, the headers
+        // 0x200000.
+        const UNREAL: &str = "\
+00200000-03281000 r--p 00000000 103:02 77                                /t/Game-Linux-Shipping
+03282000-0b22a000 r-xp 03081000 103:02 77                                /t/Game-Linux-Shipping
+0b22b000-0b6f0000 rw-p 0b029000 103:02 77                                /t/Game-Linux-Shipping
+";
+        let segments = [(0, 0x200000), (0x3081000, 0x3282000), (0xb029ec0, 0xb22bec0)];
+        assert_eq!(text_biases(UNREAL, "/t/Game-Linux-Shipping", &segments), [0]);
+    }
+
+    #[test]
+    fn every_piece_of_a_split_text_mapping_has_the_same_bias() {
+        // The lld PIE above after a hook engine made its second text page
+        // writable. The first piece is now one page at file offset 0, the
+        // same page the headers' mapping has: its offset cannot say which
+        // segment it came from.
+        const SPLIT: &str = "\
+5992b139a000-5992b139b000 r--p 00000000 00:2f 169012                     /t/hot_lld
+5992b139b000-5992b139c000 r-xp 00000000 00:2f 169012                     /t/hot_lld
+5992b139c000-5992b139d000 rwxp 00001000 00:2f 169012                     /t/hot_lld
+5992b139d000-5992b139e000 r-xp 00002000 00:2f 169012                     /t/hot_lld
+5992b139e000-5992b139f000 r--p 00002000 00:2f 169012                     /t/hot_lld
+5992b139f000-5992b13a0000 rw-p 00002000 00:2f 169012                     /t/hot_lld
+";
+        let segments = [(0, 0), (0xc80, 0x1c80), (0x2360, 0x4360), (0x2588, 0x5588)];
+        assert_eq!(text_biases(SPLIT, "/t/hot_lld", &segments), [0x5992b139a000; 3]);
+    }
+
+    #[test]
+    fn a_segment_closer_to_its_offset_than_the_first_does_not_lower_the_bias() {
+        // snapd, a Go binary: the file has unloaded sections ahead of its
+        // last segment, which is therefore 0x3dc000 from its offset where
+        // every other segment is 0x400000. Its mapping has the lowest
+        // `start - offset` of the file and is not where the image starts.
+        const SNAPD: &str = "\
+62ae32757000-62ae3359b000 r-xp 00000000 07:12 256                        /snap/snapd
+62ae3359b000-62ae33c5a000 r--p 00e44000 07:12 256                        /snap/snapd
+62ae33c5a000-62ae34839000 r--p 01503000 07:12 256                        /snap/snapd
+62ae34839000-62ae348ab000 rw-p 020e2000 07:12 256                        /snap/snapd
+62ae348e0000-62ae348e1000 rw-p 021ad000 07:12 256                        /snap/snapd
+";
+        let segments =
+            [(0, 0x400000), (0xe44000, 0x1244000), (0x1503000, 0x1903000), (0x20e3000, 0x24e3000), (0x21ad000, 0x2589000)];
+        assert_eq!(text_biases(SNAPD, "/snap/snapd", &segments), [0x62ae32757000 - 0x400000]);
+        // From that last mapping the first segment's is *above*, and found.
+        let mappings = parse_maps(SNAPD.as_bytes());
+        assert_eq!(load_bias(&mappings, &mappings[4], &segments), 0x62ae32757000 - 0x400000);
+    }
+
+    #[test]
+    fn a_file_mapped_again_elsewhere_does_not_move_its_image() {
+        // libffi maps one page of its own text a second time for its
+        // trampolines, here 58 MB below the library. That page is text at
+        // its own address; the library is where the loader put it.
+        const LIBFFI: &str = "\
+7481b7178000-7481b7179000 r-xp 0000b000 103:02 100825209                 /usr/lib/libffi.so.8
+7481baaa5000-7481baaa7000 r--p 00000000 103:02 100825209                 /usr/lib/libffi.so.8
+7481baaa7000-7481baab2000 r-xp 00002000 103:02 100825209                 /usr/lib/libffi.so.8
+7481baab2000-7481baab4000 r--p 0000d000 103:02 100825209                 /usr/lib/libffi.so.8
+7481baab4000-7481baab5000 r--p 0000e000 103:02 100825209                 /usr/lib/libffi.so.8
+7481baab5000-7481baab6000 rw-p 0000f000 103:02 100825209                 /usr/lib/libffi.so.8
+";
+        let segments = [(0, 0), (0x2000, 0x2000), (0xd000, 0xd000), (0xec70, 0xfc70)];
+        assert_eq!(
+            text_biases(LIBFFI, "/usr/lib/libffi.so.8", &segments),
+            [0x7481b7178000 - 0xb000, 0x7481baaa5000]
+        );
+    }
+
+    #[test]
+    fn a_lone_mapping_is_taken_to_be_of_the_first_segment() {
+        // Nothing else of the file is mapped, and no segments are known:
+        // `start - offset` is all there is.
+        const LONE: &str = "7f0000002000-7f0000005000 r-xp 00002000 08:02 7 /lib/x.so\n";
+        assert_eq!(text_biases(LONE, "/lib/x.so", &[]), [0x7f0000000000]);
+        assert_eq!(text_biases(LONE, "/lib/x.so", &[(0, 0x10000), (0x2000, 0x13000)]), [0x7f0000000000 - 0x10000]);
+        // Another file's mapping at the right distance is not this file's.
+        const TWO: &str = "\
+7f0000000000-7f0000001000 r--p 00000000 08:02 8 /lib/y.so
+7f0000002000-7f0000005000 r-xp 00001000 08:02 7 /lib/x.so
+";
+        assert_eq!(text_biases(TWO, "/lib/x.so", &[(0, 0), (0x1000, 0x2000)]), [0x7f0000001000]);
     }
 
     #[test]

@@ -646,8 +646,10 @@ fn open_bundle(
         service.set_process_name(p.pid, &p.name);
     }
     let events: Vec<LiveEvent> = bundle.events.iter().map(|r| r.event).collect();
+    // Restored, not pushed: a slice's start is its window's, and the events
+    // that were already running there start before it.
     for chunk in events.chunks(4096) {
-        service.push_events(chunk);
+        service.restore_events(chunk);
     }
     store.replace(
         bundle
@@ -3062,6 +3064,51 @@ mod tests {
         assert_eq!(by_name(gpu_lane::MEMORY_MIB), Some(3072.0));
         assert_eq!(by_name(gpu_lane::POWER_W), Some(220.0));
         assert_eq!(by_name(gpu_lane::TEMPERATURE_C), Some(71.0));
+    }
+
+    #[test]
+    fn opening_a_sliced_bundle_restores_the_events_that_begin_before_its_window() {
+        let service = LiveService::new(ServerConfig { ring_buffer_bytes: 1 << 20, ..Default::default() }).unwrap();
+        let store = Arc::new(SampleStore::new());
+        let target = Arc::new(AtomicI32::new(0));
+        let span = |start_ns: u64, end_ns: u64| LiveEvent {
+            start_ns,
+            duration_ns: end_ns - start_ns,
+            tid: 8,
+            pid: 7,
+            kind: kind::API_SCOPE,
+            depth: 0,
+            extra: 0,
+            _pad: 0,
+            name_id: 1,
+        };
+        let row = |event| perfr_capture::EventRow { event, name: "frame".to_string() };
+        let whole = perfr_capture::CaptureBundle {
+            target_pid: 7,
+            events: vec![
+                row(span(10, 40)),
+                row(span(50, 150)),  // straddles the left edge
+                row(span(120, 130)), // inside
+                row(span(190, 260)), // straddles the right edge
+                row(span(300, 320)),
+            ],
+            ..Default::default()
+        };
+        let slice = whole.slice(100, 200);
+        let stored: Vec<LiveEvent> = slice.events.iter().map(|r| r.event).collect();
+        assert_eq!(stored, [span(50, 150), span(120, 130), span(190, 260)]);
+
+        open_bundle(&service, &store, &target, slice).unwrap();
+        assert_eq!(service.ring().snapshot().1, stored, "what the file holds is what is shown");
+        assert_eq!(service.dropped_before_start(), 0);
+        assert_eq!(service.live_end_ns(), 260);
+
+        // The window's start is still the capture's start for a live push:
+        // only the restore is exempt.
+        assert_eq!(service.capture_start_ns(), 100);
+        service.push_events(&[span(50, 150)]);
+        assert_eq!(service.ring().snapshot().1, stored);
+        assert_eq!(service.dropped_before_start(), 1);
     }
 
     /// A sampling ring on a thread of this process that burns `cpu_ms` of

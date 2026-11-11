@@ -79,6 +79,18 @@ const LOG_TEXT_BUDGET_BYTES: usize = 64 << 20;
 
 const LOG_TEXT_DROPPED: &str = "(log text not kept: this capture's log text budget is spent)";
 
+/// The same budget for the names of scopes, instants and value tracks, and
+/// for the same reason: every distinct one is kept for the life of the
+/// capture, here and in every viewer. A target that formats a number into
+/// its scope names ("request 81723") grows that table with every scope, and
+/// any process on the machine with a segment can do it to the service. Past
+/// the budget a new name reads [`NAME_DROPPED`]; the event keeps everything
+/// else, and names already kept are never affected. Counted apart from log
+/// text, so a capture that logs its budget away still names its scopes.
+const NAME_TEXT_BUDGET_BYTES: usize = 64 << 20;
+
+const NAME_DROPPED: &str = "(name not kept: this capture's name budget is spent)";
+
 /// A scope started and not yet stopped.
 #[derive(Clone, Copy)]
 struct Open {
@@ -196,6 +208,11 @@ pub struct ScopeSource {
     log_text_bytes: usize,
     /// Log lines recorded without their text because that budget was spent.
     pub log_lines_without_text: u64,
+    /// Bytes of distinct scope, instant and value names interned so far,
+    /// against [`NAME_TEXT_BUDGET_BYTES`].
+    name_text_bytes: usize,
+    /// Events recorded under [`NAME_DROPPED`] because that budget was spent.
+    pub events_without_name: u64,
     /// Name ids of hooks the Frida agent switched off for firing over its
     /// call-rate limit (a `\x02` marker record), in the order they arrived.
     pub auto_unhooked: Vec<u32>,
@@ -227,6 +244,8 @@ impl ScopeSource {
             drop_totals: HashMap::new(),
             log_text_bytes: 0,
             log_lines_without_text: 0,
+            name_text_bytes: 0,
+            events_without_name: 0,
             auto_unhooked: Vec::new(),
         }
     }
@@ -628,7 +647,7 @@ impl ScopeSource {
                 self.events_pushed += 1;
                 return;
             }
-            _ => self.names.id_for(name),
+            _ => self.name_id(name),
         };
         // Bound the open set before borrowing the segment: a START whose STOP
         // never arrives stays open forever, so an unbounded run of them would
@@ -760,6 +779,27 @@ impl ScopeSource {
         for (head, text) in pending {
             self.named(index, head, &text, true, batch);
         }
+    }
+
+    /// The id of a scope, instant or value name: its own, or the one notice
+    /// every new name shares once the capture's budget for names is spent.
+    fn name_id(&mut self, name: &[u8]) -> u32 {
+        if let Some(id) = self.names.get(name) {
+            return id;
+        }
+        let after = self.name_text_bytes.saturating_add(name.len());
+        if after <= NAME_TEXT_BUDGET_BYTES {
+            self.name_text_bytes = after;
+            return self.names.id_for(name);
+        }
+        if self.events_without_name == 0 {
+            log::warn!(
+                "name budget spent ({} MiB of distinct scope names): later new names are not kept",
+                NAME_TEXT_BUDGET_BYTES >> 20
+            );
+        }
+        self.events_without_name += 1;
+        self.names.id_for(NAME_DROPPED.as_bytes())
     }
 
     /// The id of a log line's text, or `None` when the line is new and the
@@ -1356,6 +1396,39 @@ mod log_tests {
         assert_eq!(text_of(&service, &batch[3]), "kept before the budget ran out");
         assert!(!batch[3].log_truncated());
         assert_eq!(source.log_text_bytes, LOG_TEXT_BUDGET_BYTES, "the budget did not grow");
+    }
+
+    #[test]
+    fn past_the_name_budget_a_new_scope_keeps_everything_but_its_name() {
+        let (_serial, service, mut source) = source();
+        let scope = |source: &mut ScopeSource, id: u64, name: &[u8], batch: &mut Vec<LiveEvent>| {
+            let mut start = ScopeEvent { timestamp_ns: id * 10, scope_id: id, tid: 79, kind: rk::SCOPE_START, ..ScopeEvent::default() };
+            start.text[..name.len()].copy_from_slice(name);
+            start.text_len = name.len() as u8;
+            source.accept(0, start, batch);
+            let stop = ScopeEvent { timestamp_ns: id * 10 + 5, scope_id: id, tid: 79, kind: rk::SCOPE_STOP, ..ScopeEvent::default() };
+            source.accept(0, stop, batch);
+        };
+        let mut batch = Vec::new();
+        scope(&mut source, 1, b"kept", &mut batch);
+        assert_eq!(source.name_text_bytes, 4);
+        // A target that puts a counter in its scope names, long enough.
+        source.name_text_bytes = NAME_TEXT_BUDGET_BYTES;
+        scope(&mut source, 2, b"request 81723", &mut batch);
+        scope(&mut source, 3, b"request 81724", &mut batch);
+        scope(&mut source, 4, b"kept", &mut batch);
+        source.announce_new_names();
+
+        assert_eq!(batch.len(), 4, "every scope is still a span");
+        assert!(batch.iter().all(|e| e.kind == kind::API_SCOPE && e.tid == 79 && e.duration_ns == 5));
+        assert_eq!(text_of(&service, &batch[0]), "kept");
+        assert_eq!(text_of(&service, &batch[1]), NAME_DROPPED);
+        assert_eq!(batch[1].name_id, batch[2].name_id, "one shared notice, not a string per scope");
+        assert_eq!(text_of(&service, &batch[3]), "kept", "a name already kept costs nothing more");
+        assert_eq!(source.events_without_name, 2);
+        assert_eq!(source.name_text_bytes, NAME_TEXT_BUDGET_BYTES, "the budget did not grow");
+        // Log text has its own budget, untouched by all this.
+        assert_eq!(source.log_text_bytes, 0);
     }
 
     #[test]

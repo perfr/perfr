@@ -65,8 +65,6 @@ pub fn perfr_state(old_state: Option<ThreadState>, reason: i8) -> i32 {
             } else {
                 // Delay execution, user requests, executive waits: the
                 // thread asked to wait and a signal (an APC) would end it.
-                let _ = wait_reason::DELAY_EXECUTION;
-                let _ = wait_reason::WR_DELAY_EXECUTION;
                 state::INTERRUPTIBLE_SLEEP
             }
         }

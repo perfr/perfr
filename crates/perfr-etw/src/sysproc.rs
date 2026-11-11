@@ -99,7 +99,12 @@ pub fn parse(buffer: &[u8]) -> Vec<ProcessInfo> {
         let parent_pid = u64_at(entry, 88) as u32;
         let working_set = u64_at(entry, 144);
         let image_name = image_name(buffer, name_ptr, name_len);
-        let mut threads = Vec::with_capacity(thread_count);
+        // The count is a field of the buffer. From the kernel it is true;
+        // from a saved or damaged buffer it can be four billion, and room
+        // for that many is an allocation that aborts. No more threads can
+        // be read than the bytes after this entry hold.
+        let room = (buffer.len() - at - PROCESS_ENTRY_BYTES) / THREAD_ENTRY_BYTES;
+        let mut threads = Vec::with_capacity(thread_count.min(room));
         for i in 0..thread_count {
             let t = at + PROCESS_ENTRY_BYTES + i * THREAD_ENTRY_BYTES;
             if t + THREAD_ENTRY_BYTES > buffer.len() {
@@ -138,7 +143,10 @@ fn image_name(buffer: &[u8], pointer: u64, bytes: usize) -> String {
         return String::new();
     }
     let base = buffer.as_ptr() as u64;
-    if pointer < base || pointer + bytes as u64 > base + buffer.len() as u64 {
+    // The end is checked, not just compared: a pointer near the top of the
+    // address space plus a length does not fit.
+    let inside = pointer.checked_add(bytes as u64).is_some_and(|end| end <= base + buffer.len() as u64);
+    if pointer < base || !inside {
         return String::new();
     }
     let at = (pointer - base) as usize;
@@ -184,6 +192,23 @@ mod tests {
         extern "system" {
             fn GetCurrentThreadId() -> u32;
         }
+    }
+
+    #[test]
+    fn a_thread_count_the_buffer_cannot_hold_reserves_nothing_for_it() {
+        // One entry claiming four billion threads, with room for one, and
+        // a name pointer at the top of the address space.
+        let mut buffer = vec![0u8; PROCESS_ENTRY_BYTES + THREAD_ENTRY_BYTES];
+        buffer[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        buffer[56..58].copy_from_slice(&64u16.to_le_bytes());
+        buffer[64..72].copy_from_slice(&(u64::MAX - 8).to_le_bytes());
+        buffer[80..88].copy_from_slice(&10u64.to_le_bytes());
+        buffer[PROCESS_ENTRY_BYTES + 48..PROCESS_ENTRY_BYTES + 56].copy_from_slice(&11u64.to_le_bytes());
+        let parsed = parse(&buffer);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].threads.len(), 1);
+        assert!(parsed[0].threads.capacity() < 16, "reserved for {}", parsed[0].threads.capacity());
+        assert_eq!(parsed[0].image_name, "");
     }
 
     #[test]

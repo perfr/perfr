@@ -136,15 +136,21 @@ impl Consumer {
             return Err(format!("OpenTrace: {error}"));
         }
         let thread_shared = shared.clone();
-        let thread = std::thread::Builder::new()
-            .name("perfr-etw".to_string())
-            .spawn(move || {
-                let _keep = thread_shared;
-                // SAFETY: a handle OpenTrace returned; blocks until the
-                // session stops or the buffer callback says so.
-                unsafe { ProcessTrace(&handle, 1, std::ptr::null(), std::ptr::null()) }
-            })
-            .map_err(|e| e.to_string())?;
+        let spawned = std::thread::Builder::new().name("perfr-etw".to_string()).spawn(move || {
+            let _keep = thread_shared;
+            // SAFETY: a handle OpenTrace returned; blocks until the
+            // session stops or the buffer callback says so.
+            unsafe { ProcessTrace(&handle, 1, std::ptr::null(), std::ptr::null()) }
+        });
+        let thread = match spawned {
+            Ok(thread) => thread,
+            Err(error) => {
+                // No Consumer will own the handle, so nothing else closes it.
+                // SAFETY: the handle OpenTrace returned, which no thread uses.
+                unsafe { CloseTrace(handle) };
+                return Err(format!("could not start the ETW consumer thread: {error}"));
+            }
+        };
         Ok(Consumer { handle, thread: Some(thread), shared, _logfile: logfile, _names: names })
     }
 

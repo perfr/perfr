@@ -162,7 +162,11 @@ def init():
 
     Returns 0 on success, ``E_NOLIB`` or ``E_ABI`` when no usable library was
     found, or a negative errno if the segment could not be created. Every
-    other call stays a valid no-op in each case."""
+    other call stays a valid no-op in each case.
+
+    A forked child (``os.fork``, ``multiprocessing`` with the fork start
+    method) does not inherit the segment: every call in it is a no-op until
+    the child calls ``init()`` itself."""
     lib = _load()
     return lib.perfr_init() if lib else _lib_error
 

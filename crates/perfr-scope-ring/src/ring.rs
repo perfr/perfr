@@ -286,6 +286,18 @@ pub struct Rings {
     base: *mut u8,
     ring_count: usize,
     slots_per_ring: usize,
+    /// Where the ring headers and the slots begin, worked out once. Both sit
+    /// behind [`control_bytes`], which on Linux is a `sysconf` call the
+    /// compiler can neither inline nor merge: asking it on every access put
+    /// two libc calls, about as dear as the claim itself, into each `push`.
+    headers: *const RingHeader,
+    slots: *const Slot,
+    /// `slots_per_ring - 1` when that is a power of two, which every segment
+    /// this crate creates or agrees to open is; a claim's slot is then one
+    /// AND instead of a division by a number the compiler cannot see. Zero
+    /// for any other size, which only a hand-built region has, and which
+    /// keeps the remainder.
+    slot_mask: u64,
 }
 
 // SAFETY: every access goes through atomics or through slots this thread has
@@ -323,7 +335,16 @@ impl Rings {
     /// # Safety
     /// See the type-level contract.
     pub unsafe fn from_raw(base: *mut u8, ring_count: usize, slots_per_ring: usize) -> Rings {
-        Rings { base, ring_count, slots_per_ring }
+        let slot_mask =
+            if slots_per_ring.is_power_of_two() { slots_per_ring as u64 - 1 } else { 0 };
+        Rings {
+            base,
+            ring_count,
+            slots_per_ring,
+            headers: base.add(ring_header_offset(0)).cast::<RingHeader>(),
+            slots: base.add(slots_offset(ring_count, slots_per_ring, 0)).cast::<Slot>(),
+            slot_mask,
+        }
     }
 
     pub fn ring_count(&self) -> usize {
@@ -337,14 +358,17 @@ impl Rings {
     fn ring_header(&self, ring: usize) -> &RingHeader {
         // SAFETY: ring < ring_count by the caller's contract, and the offset
         // is inside the mapping.
-        unsafe { &*self.base.add(ring_header_offset(ring)).cast::<RingHeader>() }
+        unsafe { &*self.headers.add(ring) }
     }
 
     fn slot(&self, ring: usize, claim: u64) -> &Slot {
-        let index = (claim % self.slots_per_ring as u64) as usize;
-        let offset = slots_offset(self.ring_count, self.slots_per_ring, ring) + index * CACHE_LINE;
+        let index = if self.slot_mask != 0 {
+            claim & self.slot_mask
+        } else {
+            claim % self.slots_per_ring as u64
+        } as usize;
         // SAFETY: index is masked into the ring's own slot array.
-        unsafe { &*self.base.add(offset).cast::<Slot>() }
+        unsafe { &*self.slots.add(ring * self.slots_per_ring + index) }
     }
 
     /// Appends one event. Never blocks and never fails; when the ring is full
@@ -551,6 +575,34 @@ mod tests {
         }
         assert!(rings.committed(0, 0).is_none(), "lapped slots must not read back");
         assert_eq!(rings.committed(0, 4).unwrap().timestamp_ns, 4);
+    }
+
+    #[test]
+    fn every_claim_lands_on_the_slot_the_layout_gives_it() {
+        // The header and slot addresses are worked out once per `Rings`
+        // rather than on every access, and the slot index is a mask. Both
+        // have to agree with the layout another process computes from the
+        // header alone, for the ordinary power-of-two ring and for the odd
+        // size only a hand-built region has.
+        for slots in [8usize, 6, 1] {
+            let region = Region::new(3, slots);
+            let rings = region.rings();
+            let base = rings.base as usize;
+            for ring in 0..3 {
+                assert_eq!(
+                    rings.ring_header(ring) as *const RingHeader as usize - base,
+                    ring_header_offset(ring)
+                );
+                for claim in 0..3 * slots as u64 {
+                    let index = (claim % slots as u64) as usize;
+                    assert_eq!(
+                        rings.slot(ring, claim) as *const Slot as usize - base,
+                        slots_offset(3, slots, ring) + index * CACHE_LINE,
+                        "ring {ring} claim {claim} of {slots} slots"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -18,7 +18,9 @@
 //! * **Drop counts.** When a claim will overwrite an unread slot, the
 //!   producer reads the event still sitting there and adds one to that
 //!   event's `(tid, kind)` counter. The lost event is counted as what it
-//!   was, not as whatever replaced it.
+//!   was, not as whatever replaced it. A record the producer gives up
+//!   because its slot is still held by a writer a lap behind (see
+//!   [`crate::ring::Rings::push`]) is counted here too, as itself.
 //!
 //! The drop table says *what* was lost. It is not the count of what a reader
 //! lost: that is the reader's own lap count, which is exact. The table can

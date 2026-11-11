@@ -15,8 +15,18 @@
 //! core, and store into a ring that a different thread is now writing to.
 //! Linux offers `rseq` for exactly this, but it is Linux-only and intrusive.
 //! One `fetch_add` on the write cursor makes each ring MPSC instead:
-//! still lock-free, still no CAS loop, ~20 cycles uncontended, and the
-//! per-core sharding keeps contention near zero anyway.
+//! still lock-free, ~20 cycles uncontended, and the per-core sharding keeps
+//! contention near zero anyway.
+//!
+//! **A slot is taken before it is written.** The bump hands out a claim, and
+//! a claim is a slot only until the ring has gone round: a thread descheduled
+//! between its bump and its stores, for one whole lap, wakes holding a slot
+//! that now belongs to a later claim. So a producer first swaps its claim
+//! into the slot's stamp with one compare-exchange, and stores nothing if the
+//! slot has moved on. That is a second locked instruction per record, on a
+//! cache line the record is about to dirty anyway. It retries only against
+//! another claim on the very same slot, which is a producer a whole lap away.
+//! [`Rings::push`] has the cases.
 //!
 //! **The commit is a release store.** Payload stores stay plain, but the
 //! store that publishes a slot has to be `Release` or the consumer can see a
@@ -148,7 +158,15 @@ pub struct RingHeader {
     /// Bumped *before* the payload is written, because a claim has to be
     /// handed out before there is anywhere to write.
     pub write_cursor: AtomicU64,
-    pub _pad: [u64; 7],
+    /// One past the highest claim a producer gave up without writing,
+    /// because an older claim's writer still held the slot (see
+    /// [`Rings::push`]). Such a claim never commits, and a reader that is
+    /// stopped on a claim below this stops waiting for it. In bytes that
+    /// were always zero and that no older build reads or writes, so the
+    /// layout version is unchanged: an older producer never gives a claim
+    /// up, and an older reader waits on one as it always has.
+    pub abandoned: AtomicU64,
+    pub _pad: [u64; 6],
 }
 
 const _: () = assert!(std::mem::size_of::<RingHeader>() == CACHE_LINE);
@@ -157,6 +175,8 @@ const _: () = assert!(std::mem::size_of::<RingHeader>() == CACHE_LINE);
 ///
 /// `seq` is `claim + 1` once committed, so zero means never written and a
 /// stale value from a previous lap is distinguishable from the current one.
+/// While the producer of `claim` is writing the record it is that number
+/// with [`WRITING`] set, which no reader takes for a committed claim.
 #[repr(C, align(64))]
 pub struct Slot {
     pub seq: AtomicU64,
@@ -168,6 +188,13 @@ pub struct Slot {
     /// undefined behaviour regardless of any handshake.
     pub event: UnsafeCell<ScopeEvent>,
 }
+
+/// Set in a slot's stamp from the moment a producer takes the slot until it
+/// commits. A build from before the bit existed never sets it, and reads a
+/// stamp that carries it as one more value that is not the claim it wants.
+/// Claims are counted from zero per ring, so the bit is free: at a hundred
+/// million records a second a ring takes three thousand years to reach it.
+const WRITING: u64 = 1 << 63;
 
 const _: () = assert!(8 + EVENT_SIZE == CACHE_LINE);
 
@@ -396,34 +423,116 @@ impl Rings {
     /// Appends one event. Never blocks and never fails; when the ring is full
     /// the oldest unread slot is overwritten, which the consumer detects.
     ///
-    /// The whole write path: one atomic bump, plain stores, one release
-    /// store. If a consumer has published its read cursor and this claim
-    /// will overwrite a slot at or past it, the event still sitting in that
-    /// slot is counted against its own thread and kind before the bytes are
+    /// The whole write path: one atomic bump for the claim, one
+    /// compare-exchange to take the slot, plain stores, one release store.
+    /// If a consumer has published its read cursor and this claim will
+    /// overwrite a slot at or past it, the event still sitting in that slot
+    /// is counted against its own thread and kind before the bytes are
     /// replaced. The count lives on the control page, so a lap cannot erase
     /// what was lost. It is a breakdown for the consumer's own lap count, not
     /// a second count of the loss: see [`crate::meta`].
+    ///
+    /// The slot is taken, not just written, because the claim alone does not
+    /// make it this producer's. A thread can be descheduled holding claim
+    /// `c` for as long as the rest of its ring needs to go all the way
+    /// round, 33 ms at a million records a second, and wake to find the
+    /// slot given to claim `c + capacity`. Its stores then landed on that
+    /// record, whole or half written, and its commit put the stamp of `c`
+    /// on the slot, which the reader took for "claim `c + capacity` is not
+    /// committed yet" and waited on, holding back everything behind it in
+    /// the ring. So the record is given up instead, in two cases:
+    ///
+    /// * The slot already belongs to a later claim. This one was lapped
+    ///   before it wrote, and the reader counts it with the rest of the lap
+    ///   it has lost, by the cursor.
+    /// * The slot is still being written by an earlier claim, whose thread
+    ///   is the one that stopped. Taking it would mix two records. This
+    ///   claim is not yet a lap behind, so the reader would wait for it:
+    ///   [`RingHeader::abandoned`] tells it not to.
     pub fn push(&self, ring: usize, event: ScopeEvent) {
         let ring = ring.min(self.ring_count.saturating_sub(1));
-        // The strongest ordering, and not for the count's sake: `fetch_add`
-        // hands each claim out once whatever the ordering. It is for the
-        // reader this claim laps. The slot keeps the stamp of the record a
-        // lap back until the commit below, so the cursor is all that tells
-        // that reader its slot is being rewritten, and only if the bump is
-        // visible to it no later than the first payload byte is.
-        // `read_claim` has the argument. On x86-64 every ordering is the
-        // same `lock xadd`; on aarch64 this is `ldaddal` where a relaxed
-        // bump would be `ldadd`.
-        let claim = self.ring_header(ring).write_cursor.fetch_add(1, Ordering::SeqCst);
+        let claim = self.claim(ring);
         self.note_overwrite(ring, claim);
         let slot = self.slot(ring, claim);
-        // SAFETY: this claim is ours alone -- fetch_add handed it out once --
-        // so writing the payload needs no further synchronisation. The
-        // release store below is what makes it visible.
+        if self.take_slot(slot, ring, claim, event.tid, event.kind) {
+            Rings::commit(slot, claim, event);
+        }
+    }
+
+    #[inline]
+    fn claim(&self, ring: usize) -> u64 {
+        // The strongest ordering, and not for the count's sake: `fetch_add`
+        // hands each claim out once whatever the ordering. It is for the
+        // reader this claim laps, which goes by the cursor to tell that its
+        // slot has been handed on, and has to see the bump no later than
+        // anything this producer does to the slot. `read_claim` has the
+        // argument. On x86-64 every ordering is the same `lock xadd`; on
+        // aarch64 this is `ldaddal` where a relaxed bump would be `ldadd`.
+        self.ring_header(ring).write_cursor.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Makes `slot`, which is the slot of `claim`, this producer's to
+    /// write, or says it is not to be written. `tid` and `kind` are the
+    /// record's, and are only what to count as lost. They come by value:
+    /// handed the record by reference, the compiler built it on the stack
+    /// for the sake of the one call in a million that reads it, and copied
+    /// it into the slot from there, at 4 ns a record.
+    ///
+    /// A stamp only ever moves to a later claim, and a stamp with
+    /// [`WRITING`] set is changed by nobody but the producer that set it.
+    /// Between them those two rules mean one producer at a time stores into
+    /// a slot, and none stores into one that a later claim has had. The
+    /// loop goes round again only when another claim on this same slot, a
+    /// whole lap away, moved the stamp between the load and the exchange.
+    #[inline]
+    fn take_slot(&self, slot: &Slot, ring: usize, claim: u64, tid: u32, kind: u8) -> bool {
+        let mine = claim + 1;
+        let mut seen = slot.seq.load(Ordering::Relaxed);
+        loop {
+            if (seen & !WRITING) >= mine {
+                return false;
+            }
+            if seen & WRITING != 0 {
+                self.abandon(ring, claim, tid, kind);
+                return false;
+            }
+            // `SeqCst` for the same reason as the claim: on aarch64 it is
+            // what orders the exchange ahead of the record's plain stores.
+            match slot.seq.compare_exchange(seen, mine | WRITING, Ordering::SeqCst, Ordering::Relaxed) {
+                Ok(_) => return true,
+                Err(now) => seen = now,
+            }
+        }
+    }
+
+    /// Gives up a claim whose slot an earlier claim is still writing.
+    #[cold]
+    fn abandon(&self, ring: usize, claim: u64, tid: u32, kind: u8) {
+        // Counted first, so the breakdown is there by the time a reader can
+        // act on the mark below and book the loss.
+        if self.published_read(ring).is_some() {
+            // SAFETY: only a producer gets here, and its mapping is
+            // writable, with the drop table on its control page.
+            unsafe { crate::meta::note_drop(self.base, tid, kind) }
+        }
+        self.ring_header(ring).abandoned.fetch_max(claim + 1, Ordering::SeqCst);
+    }
+
+    /// Writes the record into a slot [`Rings::take_slot`] said was ours.
+    #[inline]
+    fn commit(slot: &Slot, claim: u64, event: ScopeEvent) {
+        // SAFETY: the slot is ours alone until the stamp below says
+        // otherwise, so writing the payload needs no further
+        // synchronisation. The release store is what makes it visible.
         unsafe {
             std::ptr::write_volatile(slot.event.get(), event);
         }
         slot.seq.store(claim + 1, Ordering::Release);
+    }
+
+    /// One past the highest claim on `ring` that was given up unwritten.
+    pub(crate) fn abandoned(&self, ring: usize) -> u64 {
+        self.ring_header(ring).abandoned.load(Ordering::Acquire)
     }
 
     /// Counts the event about to be overwritten, if this claim laps the
@@ -477,19 +586,31 @@ impl Rings {
     /// construct that interleaving deterministically.
     #[doc(hidden)]
     pub fn reserve_for_test(&self, ring: usize, _timestamp_ns: u64) -> u64 {
-        self.ring_header(ring).write_cursor.fetch_add(1, Ordering::Relaxed)
+        self.claim(ring)
     }
 
-    /// Publishes a slot reserved by `reserve_for_test`, as a producer would
-    /// on waking from whatever stalled it. Test-only.
+    /// Finishes the push of a claim from `reserve_for_test`, as a producer
+    /// would on waking from whatever stalled it. Says whether the record
+    /// was written. Test-only.
     #[doc(hidden)]
-    pub fn publish_reserved_for_test(&self, ring: usize, claim: u64, event: ScopeEvent) {
-        let slot = self.slot(ring, claim);
-        // SAFETY: the test owns this claim; nothing else writes it.
-        unsafe {
-            std::ptr::write_volatile(slot.event.get(), event);
-        }
-        slot.seq.store(claim + 1, Ordering::Release);
+    pub fn publish_reserved_for_test(&self, ring: usize, claim: u64, event: ScopeEvent) -> bool {
+        self.take_reserved_for_test(ring, claim, &event)
+            && self.commit_taken_for_test(ring, claim, event)
+    }
+
+    /// The first half of `publish_reserved_for_test`: a producer that got
+    /// as far as taking its slot. Test-only.
+    #[doc(hidden)]
+    pub fn take_reserved_for_test(&self, ring: usize, claim: u64, event: &ScopeEvent) -> bool {
+        self.take_slot(self.slot(ring, claim), ring, claim, event.tid, event.kind)
+    }
+
+    /// The second half, for a claim `take_reserved_for_test` was given the
+    /// slot of. Test-only.
+    #[doc(hidden)]
+    pub fn commit_taken_for_test(&self, ring: usize, claim: u64, event: ScopeEvent) -> bool {
+        Rings::commit(self.slot(ring, claim), claim, event);
+        true
     }
 
     /// The claim counter, for the consumer.
@@ -553,9 +674,10 @@ impl Rings {
     ///   Only a barrier between the bump and the record would promise it
     ///   there.
     /// * A producer that slept through a whole lap holding `claim -
-    ///   capacity` writes this slot when it wakes, and the cursor shows
-    ///   nothing of it. That takes a producer that checks the slot is still
-    ///   its own before it commits.
+    ///   capacity` would write this slot when it woke, and the cursor shows
+    ///   nothing of it. `take_slot` is what stops it: it finds the stamp
+    ///   of this claim, or of this claim being written, and stores nothing.
+    ///   A producer built before `take_slot` existed still does it.
     pub(crate) fn read_claim(&self, ring: usize, claim: u64) -> Claimed {
         let copy = self.copy_if_stamped(ring, claim);
         fence(Ordering::Acquire);

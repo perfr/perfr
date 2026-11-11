@@ -277,6 +277,7 @@ fn setup_opts(matches: &ArgMatches) -> SetupOpts {
         check_only: matches.get_flag("check"),
         yes: matches.get_flag("yes"),
         persist: matches.get_flag("persist"),
+        uprobes: matches.get_flag("uprobes"),
     }
 }
 
@@ -578,13 +579,16 @@ fn setup_cmd() -> Command {
         .about("Apply permission fixes for sampling and instrumentation")
         .after_help(
             "Asks before each change when stdin is a terminal.\n\
-             --yes applies the runtime sysctls and setcap. --persist also writes\n\
-             /etc/sysctl.d/99-perfr-perf.conf. CAP_SYS_ADMIN, when offered, is root\n\
-             in all but name.\n\n\
+             --yes applies the runtime sysctls and, where the scheduler needs it,\n\
+             a cap_perfmon setcap. --persist also writes\n\
+             /etc/sysctl.d/99-perfr-perf.conf.\n\
+             --uprobes adds CAP_SYS_ADMIN for the kernel hook engine. It is root\n\
+             in all but name and is never granted without that flag.\n\n\
              Examples:\n  \
              perfr setup\n  \
              perfr setup --check\n  \
-             perfr setup --yes --persist",
+             perfr setup --yes --persist\n  \
+             perfr setup --uprobes",
         )
         .arg(
             Arg::new("check")
@@ -603,6 +607,12 @@ fn setup_cmd() -> Command {
                 .long("persist")
                 .action(ArgAction::SetTrue)
                 .help("Write sysctls to /etc/sysctl.d/99-perfr-perf.conf"),
+        )
+        .arg(
+            Arg::new("uprobes")
+                .long("uprobes")
+                .action(ArgAction::SetTrue)
+                .help("Also grant CAP_SYS_ADMIN, which kernel uprobes need"),
         )
 }
 
@@ -738,6 +748,15 @@ mod tests {
         let setup = render(&["setup", "--help"]);
         assert!(setup.contains("--check"), "{setup}");
         assert!(setup.contains("--persist"), "{setup}");
+        assert!(setup.contains("--uprobes"), "{setup}");
+        let flags = |args: &[&str]| {
+            let parsed = command().try_get_matches_from(args).unwrap();
+            let (_, sub) = parsed.subcommand().unwrap();
+            let opts = setup_opts(sub);
+            (opts.yes, opts.uprobes)
+        };
+        assert_eq!(flags(&["perfr", "setup", "--yes"]), (true, false));
+        assert_eq!(flags(&["perfr", "setup", "--yes", "--uprobes"]), (true, true));
     }
 
     #[test]

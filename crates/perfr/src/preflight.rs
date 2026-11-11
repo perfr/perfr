@@ -17,9 +17,10 @@
 //!
 //! Linux thresholds match `privileges` and docs/manual/troubleshooting.md.
 //! Uprobes need `CAP_SYS_ADMIN` even when `perf_event_paranoid` is already
-//! low. Tracefs is the id file the scheduler tracepoints read. On Windows
-//! the kernel logger needs an elevated token. On macOS this build does not
-//! sample; Frida attach needs a task port.
+//! low; `perfr setup` grants it only when run with `--uprobes`. Tracefs is
+//! the id file the scheduler tracepoints read. On Windows the kernel logger
+//! needs an elevated token. On macOS this build does not sample; Frida
+//! attach needs a task port.
 
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -114,6 +115,7 @@ pub struct SetupOpts {
     pub check_only: bool,
     pub yes: bool,
     pub persist: bool,
+    pub uprobes: bool,
 }
 
 pub fn suppressed(args: &[String]) -> bool {
@@ -249,7 +251,9 @@ pub fn evaluate(snap: &Snapshot) -> Report {
     }
 }
 
-pub fn plan_for(snap: &Snapshot) -> Plan {
+/// What `perfr setup` would change. `uprobes` is the user asking for the
+/// kernel hook engine by name (`--uprobes`).
+pub fn plan_for(snap: &Snapshot, uprobes: bool) -> Plan {
     let mut plan = Plan {
         sysctls: Vec::new(),
         setcap: None,
@@ -267,10 +271,23 @@ pub fn plan_for(snap: &Snapshot) -> Plan {
             if ptrace_degraded(snap) {
                 plan.sysctls.push(("kernel.yama.ptrace_scope", 0));
             }
-            if snap.uprobe_pmu && !snap.is_root && !snap.cap_sys_admin {
+            // Every distribution kernel has the uprobe PMU, so "uprobes
+            // could be armed here" is true of any machine and says nothing
+            // about wanting them. The set that arms them is root in all but
+            // name and stays on the binary for every later run of it, the
+            // MCP server and the unauthenticated service included, so it is
+            // planned only when asked for by name: never by `--yes` alone,
+            // which is what an agent runs after one "yes".
+            let uprobes_locked = snap.uprobe_pmu && !snap.is_root && !snap.cap_sys_admin;
+            if uprobes && uprobes_locked {
                 plan.setcap = Some("cap_sys_admin,cap_perfmon,cap_dac_read_search+ep".into());
             } else if snap.tracefs.is_none() && !bypass {
                 plan.setcap = Some("cap_perfmon,cap_sys_ptrace+ep".into());
+            }
+            if uprobes_locked && !uprobes {
+                plan.notes.push(
+                    "kernel uprobes are left as they are: arming them needs CAP_SYS_ADMIN, which is root in all but name. Frida hooks do not need it. For the kernel hook engine, run `perfr setup --uprobes`.".into(),
+                );
             }
             if !snap.uprobe_pmu {
                 plan.notes.push(
@@ -415,7 +432,9 @@ fn linux_checks(snap: &Snapshot, checks: &mut Vec<Check>) {
             Status::Degraded,
             "uprobe PMU present; arming it needs CAP_SYS_ADMIN. Frida does not".to_string(),
             Some(format!(
-                "sudo setcap cap_sys_admin,cap_perfmon,cap_dac_read_search+ep {}",
+                "perfr setup --uprobes, only if you want the kernel hook engine\n\
+                 it grants cap_sys_admin,cap_perfmon,cap_dac_read_search+ep to {}\n\
+                 CAP_SYS_ADMIN is root in all but name",
                 snap.binary
             )),
             true,
@@ -754,7 +773,7 @@ pub fn run_setup(
     if opts.check_only {
         return 0;
     }
-    let plan = plan_for(snap);
+    let plan = plan_for(snap, opts.uprobes);
     if plan.sysctls.is_empty() && plan.setcap.is_none() && plan.notes.is_empty() {
         talk.say("nothing to change.");
         return 0;
@@ -766,7 +785,10 @@ pub fn run_setup(
         return 0;
     }
     if !opts.yes && !interactive {
-        talk.say("re-run with --yes to apply the runtime changes. Add --persist to write /etc/sysctl.d/99-perfr-perf.conf.");
+        // The flags that apply the plan printed below: `--yes` alone would
+        // apply the one without the uprobe set.
+        let flags = if opts.uprobes { "--yes --uprobes" } else { "--yes" };
+        talk.say(&format!("re-run with {flags} to apply the runtime changes. Add --persist to write /etc/sysctl.d/99-perfr-perf.conf."));
         for (key, value) in &plan.sysctls {
             talk.say(&format!("sudo sysctl -w {key}={value}"));
         }
@@ -1074,7 +1096,8 @@ mod tests {
         fn say(&mut self, line: &str) {
             self.lines.push(line.to_string());
         }
-        fn confirm(&mut self, _prompt: &str) -> bool {
+        fn confirm(&mut self, prompt: &str) -> bool {
+            self.lines.push(prompt.to_string());
             let answer = self.answers.get(self.index).copied().unwrap_or(false);
             self.index += 1;
             answer
@@ -1117,12 +1140,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains(SYSCTL_FILE), "{text}");
-        assert!(
-            text.contains(
-                "sudo setcap cap_sys_admin,cap_perfmon,cap_dac_read_search+ep /usr/local/bin/perfr"
-            ),
-            "{text}"
-        );
+        assert!(text.contains("fix: perfr setup --uprobes"), "{text}");
         assert!(text.contains("kernel.yama.ptrace_scope = 1"), "{text}");
         assert!(text.contains("kernel.kptr_restrict = 1"), "{text}");
         assert!(text.contains("sched_switch id is not readable"), "{text}");
@@ -1151,8 +1169,8 @@ mod tests {
         snap.tracefs = Some("/sys/kernel/tracing".into());
         let report = evaluate(&snap);
         assert!(render_warning(&report, false).is_none());
-        assert!(plan_for(&snap).sysctls.is_empty());
-        assert!(plan_for(&snap).setcap.is_none());
+        assert!(plan_for(&snap, true).sysctls.is_empty());
+        assert!(plan_for(&snap, true).setcap.is_none());
     }
 
     #[test]
@@ -1241,6 +1259,7 @@ mod tests {
                 check_only: false,
                 yes: false,
                 persist: false,
+                uprobes: false,
             },
             true,
             &mut talk,
@@ -1271,6 +1290,109 @@ mod tests {
         );
     }
 
+    /// `run_setup` on the locked-down machine, answering every prompt with
+    /// `answer`. What it said and asked, and what it ran.
+    fn set_up(yes: bool, uprobes: bool, interactive: bool, answer: bool) -> (Vec<String>, Vec<String>) {
+        let snap = locked();
+        let mut talk = Script {
+            answers: vec![answer; 8],
+            index: 0,
+            lines: Vec::new(),
+        };
+        let mut runner = Rec { calls: Vec::new() };
+        let opts = SetupOpts {
+            check_only: false,
+            yes,
+            persist: false,
+            uprobes,
+        };
+        let code = run_setup(&snap, &evaluate(&snap), &opts, interactive, &mut talk, &mut runner);
+        assert_eq!(code, 0);
+        // The table `run_setup` prints first is the doctor's, not the plan.
+        let said = talk.lines.into_iter().skip(1).collect();
+        (said, runner.calls.into_iter().map(|(command, _)| command).collect())
+    }
+
+    #[test]
+    fn the_default_plan_never_includes_cap_sys_admin() {
+        // Not root, uprobe PMU present: every ordinary distribution kernel.
+        let mut snap = locked();
+        let plan = plan_for(&snap, false);
+        assert_eq!(plan.setcap.as_deref(), Some("cap_perfmon,cap_sys_ptrace+ep"));
+        assert_eq!(plan.sysctls.len(), 3, "{:?}", plan.sysctls);
+        assert!(
+            plan.notes.iter().any(|note| note.contains("perfr setup --uprobes")),
+            "the plan says how to ask for uprobes: {:?}",
+            plan.notes
+        );
+        // With tracefs readable there is nothing left to grant at all.
+        snap.tracefs = Some("/sys/kernel/tracing".into());
+        assert_eq!(plan_for(&snap, false).setcap, None);
+    }
+
+    #[test]
+    fn the_uprobes_flag_plans_the_cap_sys_admin_set() {
+        let mut snap = locked();
+        let asked = Some("cap_sys_admin,cap_perfmon,cap_dac_read_search+ep");
+        assert_eq!(plan_for(&snap, true).setcap.as_deref(), asked);
+        snap.tracefs = Some("/sys/kernel/tracing".into());
+        assert_eq!(plan_for(&snap, true).setcap.as_deref(), asked);
+        // Asking does not grant what cannot work or is already held.
+        snap.uprobe_pmu = false;
+        assert_eq!(plan_for(&snap, true).setcap, None);
+        snap.uprobe_pmu = true;
+        snap.cap_sys_admin = true;
+        assert_eq!(plan_for(&snap, true).setcap, None);
+    }
+
+    #[test]
+    fn yes_alone_runs_no_setcap_with_cap_sys_admin() {
+        let (said, ran) = set_up(true, false, false, false);
+        assert!(ran.iter().any(|command| command.contains("sysctl -w kernel.perf_event_paranoid=0")), "{ran:?}");
+        assert!(ran.contains(&"sudo setcap cap_perfmon,cap_sys_ptrace+ep /usr/local/bin/perfr".to_string()), "{ran:?}");
+        assert!(!ran.iter().any(|command| command.contains("cap_sys_admin")), "{ran:?}");
+        assert!(said.iter().any(|line| line.contains("perfr setup --uprobes")), "{said:?}");
+
+        let (said, ran) = set_up(true, true, false, false);
+        assert!(
+            ran.contains(&"sudo setcap cap_sys_admin,cap_perfmon,cap_dac_read_search+ep /usr/local/bin/perfr".to_string()),
+            "{ran:?}"
+        );
+        assert!(said.contains(&"CAP_SYS_ADMIN is root in all but name.".to_string()), "{said:?}");
+    }
+
+    #[test]
+    fn the_interactive_run_asks_about_cap_sys_admin_only_with_the_uprobes_flag() {
+        // Saying yes to everything it asks is not asking for uprobes.
+        let (said, ran) = set_up(false, false, true, true);
+        assert!(ran.iter().any(|command| command.contains("setcap cap_perfmon,cap_sys_ptrace+ep")), "{ran:?}");
+        assert!(!ran.iter().any(|command| command.contains("cap_sys_admin")), "{ran:?}");
+        assert!(!said.iter().any(|line| line.contains("Grant") && line.contains("cap_sys_admin")), "{said:?}");
+
+        let (said, ran) = set_up(false, true, true, true);
+        assert!(
+            said.iter().any(|line| line.starts_with("Grant cap_sys_admin,")
+                && line.ends_with("CAP_SYS_ADMIN is root in all but name.")),
+            "{said:?}"
+        );
+        assert!(ran.iter().any(|command| command.contains("setcap cap_sys_admin,")), "{ran:?}");
+        // And the prompt is a real question.
+        let (_, ran) = set_up(false, true, true, false);
+        assert!(ran.is_empty(), "{ran:?}");
+    }
+
+    #[test]
+    fn the_uprobes_row_points_at_the_flag_and_not_at_a_setcap_line() {
+        let report = evaluate(&locked());
+        let uprobes = report.checks.iter().find(|check| check.label == "uprobes").unwrap();
+        let fix = uprobes.fix.as_deref().unwrap();
+        assert!(fix.starts_with("perfr setup --uprobes"), "{fix}");
+        assert!(fix.contains("root in all but name"), "{fix}");
+        for text in [render_warning(&report, false).unwrap(), render_doctor(&report, false, "perfr doctor")] {
+            assert!(!text.contains("setcap cap_sys_admin"), "{text}");
+        }
+    }
+
     #[test]
     fn setup_check_and_noninteractive_do_not_change_the_system() {
         let snap = locked();
@@ -1288,7 +1410,8 @@ mod tests {
                 &SetupOpts {
                     check_only: true,
                     yes: false,
-                    persist: false
+                    persist: false,
+                    uprobes: false,
                 },
                 true,
                 &mut talk,
@@ -1309,7 +1432,8 @@ mod tests {
                 &SetupOpts {
                     check_only: false,
                     yes: false,
-                    persist: false
+                    persist: false,
+                    uprobes: false,
                 },
                 false,
                 &mut talk,

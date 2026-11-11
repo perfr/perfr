@@ -51,13 +51,21 @@ Non-interactive, still only after a yes:
 perfr setup --yes
 ```
 
-That applies the runtime sysctls and, when uprobes were requested by the plan, the setcap. It does not write a file under `/etc` unless `--persist` is also set:
+That applies the runtime sysctls and, when tracefs is not readable, `setcap cap_perfmon,cap_sys_ptrace+ep` on the binary. It never grants `CAP_SYS_ADMIN`. It does not write a file under `/etc` unless `--persist` is also set:
 
 ```
 perfr setup --yes --persist
 ```
 
 `--persist` writes `/etc/sysctl.d/99-perfr-perf.conf`.
+
+Kernel uprobes are a separate decision:
+
+```
+perfr setup --uprobes
+```
+
+That puts `cap_sys_admin,cap_perfmon,cap_dac_read_search+ep` on the binary, and every later run of that binary holds them. Run it only when the user asked for the kernel hook engine by name, and say first that `CAP_SYS_ADMIN` is root in all but name. A yes to `perfr setup` is not a yes to `--uprobes`. A degraded `uprobes` row is not a reason on its own: Frida is the default hook engine and needs no capability.
 
 What the rows mean:
 

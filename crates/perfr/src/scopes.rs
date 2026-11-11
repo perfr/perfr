@@ -41,6 +41,12 @@ const SCOPE_NAME_ID_BASE: u32 = 2 << 20;
 /// How often to look for a segment that has not appeared yet.
 const REOPEN_EVERY_NS: u64 = 250_000_000;
 
+/// How often a capture removes the segments of processes that have died.
+/// One was only ever removed at the start of the next capture, so a long
+/// capture of something that starts many short processes (a build, a test
+/// suite) left every one that was killed sitting in memory until it ended.
+const SWEEP_EVERY_NS: u64 = 10_000_000_000;
+
 /// The deepest nesting the timeline will draw for one thread. Real call
 /// stacks are far shallower; a depth climbing past this means STOPs are being
 /// lost -- a Frida `onLeave` that never fired, or a ring overflow -- and
@@ -140,6 +146,13 @@ pub struct ScopeSource {
     service: Arc<perfr_live_server::LiveService>,
     names: NameInterner,
     segments: Vec<Segment>,
+    /// Segments let go because their process died, which are still segments
+    /// this capture read.
+    segments_closed: usize,
+    /// Scopes such a process left open. They end with the capture, as they
+    /// did while its segment was kept to the end.
+    orphaned: Vec<Open>,
+    next_sweep_ns: u64,
     /// Pids tried and not found, with when, so a process that never
     /// instruments is not probed every five milliseconds forever.
     last_probe_ns: HashMap<u32, u64>,
@@ -180,6 +193,9 @@ impl ScopeSource {
             service,
             names: NameInterner::starting_at(SCOPE_NAME_ID_BASE),
             segments: Vec::new(),
+            segments_closed: 0,
+            orphaned: Vec::new(),
+            next_sweep_ns: 0,
             last_probe_ns: HashMap::new(),
             warned_version_mismatch: HashSet::new(),
             next_discovery_ns: 0,
@@ -194,14 +210,16 @@ impl ScopeSource {
         }
     }
 
+    /// Segments read during this capture, those of processes that have
+    /// since died included.
     pub fn segment_count(&self) -> usize {
-        self.segments.len()
+        self.segments.len() + self.segments_closed
     }
 
     /// Scopes started but not yet stopped, across every segment. A count that
     /// only grows is STOPs being lost, the same signal behind [`Self::events_lost`].
     pub fn open_scopes(&self) -> usize {
-        self.segments.iter().map(|s| s.open.len()).sum()
+        self.segments.iter().map(|s| s.open.len()).sum::<usize>() + self.orphaned.len()
     }
 
     /// The fullest ring across every open segment, 0.0 to 1.0: unread claims
@@ -258,6 +276,7 @@ impl ScopeSource {
             return;
         }
         self.next_discovery_ns = now_ns.saturating_add(REOPEN_EVERY_NS);
+        self.sweep_when_due(now_ns);
         // Every process with a segment, whoever it is: manual instrumentation
         // is of interest by definition, target or not. Plus the visible set,
         // whose segments may not exist yet (perfr_init after capture start),
@@ -267,6 +286,17 @@ impl ScopeSource {
         pids.push(std::process::id());
         pids.sort_unstable();
         pids.dedup();
+        for pid in self.open_new_segments(pids, now_ns) {
+            // An instrumented process gets rows, and its threads join the
+            // state focus on the next refresh.
+            visible.add_instrumented(pid);
+        }
+    }
+
+    /// Opens the segment of each of `pids` that has one and is not open
+    /// yet, and says which were opened.
+    fn open_new_segments(&mut self, pids: Vec<u32>, now_ns: u64) -> Vec<u32> {
+        let mut opened_now = Vec::new();
         for pid in pids {
             if self.segments.iter().any(|s| s.pid == pid) {
                 continue;
@@ -302,12 +332,37 @@ impl ScopeSource {
                 }
             }
             if let Ok(reader) = opened {
+                // A dead process's segment has nothing more to say, and a
+                // reader that starts now starts past everything it did say.
+                // The visible set keeps a pid for the whole capture, so
+                // without this a segment let go when its process died would
+                // be opened again a quarter of a second later, for as long
+                // as its file was there.
+                if !perfr_scope_ring::platform::process_alive(pid) {
+                    continue;
+                }
                 self.warned_version_mismatch.remove(&pid);
                 self.add_segment(pid, reader);
-                // An instrumented process gets rows, and its threads join the
-                // state focus on the next refresh.
-                visible.add_instrumented(pid);
+                opened_now.push(pid);
             }
+        }
+        opened_now
+    }
+
+    /// Removes dead processes' segments from the machine, the first time
+    /// [`SWEEP_EVERY_NS`] after the capture started (which swept once
+    /// itself) and at that interval from then on.
+    fn sweep_when_due(&mut self, now_ns: u64) {
+        if self.next_sweep_ns == 0 {
+            self.next_sweep_ns = now_ns.saturating_add(SWEEP_EVERY_NS);
+        }
+        if now_ns < self.next_sweep_ns {
+            return;
+        }
+        self.next_sweep_ns = now_ns.saturating_add(SWEEP_EVERY_NS);
+        let swept = perfr_scope_ring::sweep_dead_segments();
+        if swept > 0 {
+            log::info!("swept {swept} scope segment(s) left by dead processes");
         }
     }
 
@@ -360,6 +415,7 @@ impl ScopeSource {
     }
 
     fn drain(&mut self, now_ns: u64, batch: &mut Vec<LiveEvent>) {
+        let mut finished = Vec::new();
         for index in 0..self.segments.len() {
             let alive = if perfr_scope_ring::platform::process_alive(self.segments[index].pid) {
                 Producer::Alive
@@ -415,8 +471,34 @@ impl ScopeSource {
             for event in events {
                 self.accept(index, event, batch);
             }
+            // The process was gone before this pass began, so the pass read
+            // the last thing it will ever write.
+            let segment = &self.segments[index];
+            let rings = segment.reader.rings();
+            if alive == Producer::Gone
+                && (0..rings.ring_count()).all(|ring| segment.cursors.read[ring] >= rings.write_cursor(ring))
+            {
+                finished.push(index);
+            }
+        }
+        for index in finished.into_iter().rev() {
+            self.close_segment(index, batch);
         }
         self.announce_new_names();
+    }
+
+    /// Lets go of a segment whose process is gone and which has been read to
+    /// the end. Kept, it cost a liveness check and a look at every ring's
+    /// cursor on each pass for the rest of the capture, and held the
+    /// segment's memory, all 32 MiB of it if every ring had been written,
+    /// which removing its name does not give back while it is mapped.
+    fn close_segment(&mut self, index: usize, batch: &mut Vec<LiveEvent>) {
+        // Text whose tail will now never come is still a line or a name.
+        self.flush_awaiting(index, batch);
+        let mut segment = self.segments.remove(index);
+        self.orphaned.extend(segment.open.drain().map(|(_, open)| open));
+        self.segments_closed += 1;
+        log::info!("manual instrumentation: pid {} is gone, its segment is closed", segment.pid);
     }
 
     /// Tells the service, and through it every viewer, what the ids handed
@@ -723,6 +805,10 @@ impl ScopeSource {
                 batch.push(span(open, end_ns));
                 self.events_pushed += 1;
             }
+        }
+        for open in self.orphaned.drain(..) {
+            batch.push(span(open, end_ns));
+            self.events_pushed += 1;
         }
     }
 }
@@ -1061,6 +1147,101 @@ mod log_tests {
 
     fn text_of(service: &perfr_live_server::LiveService, event: &LiveEvent) -> String {
         service.intern.lock().get(event.name_id).unwrap_or("<not announced>").to_string()
+    }
+
+    const CHILD: &str = "PERFR_SCOPES_TEST_CHILD";
+
+    /// The other process of the test below: this test, run by it in a second
+    /// copy of the test binary. An ordinary run returns at once.
+    #[test]
+    fn child_that_leaves_a_scope_open_and_waits_to_be_killed() {
+        use std::io::Write;
+        if std::env::var_os(CHILD).is_none() {
+            return;
+        }
+        perfr_api::init().expect("the child's segment");
+        println!("ready");
+        std::io::stdout().flush().unwrap();
+        // The parent says when it is reading this segment: nothing is
+        // written before that.
+        let mut go = String::new();
+        std::io::stdin().read_line(&mut go).unwrap();
+        assert!(perfr_api::capturing(), "the parent is not reading this process");
+        std::mem::forget(perfr_api::scope("left open by a process that died"));
+        perfr_api::log_info(format!("a line whose end never came {}", "x".repeat(100)));
+        println!("written");
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dead_process_is_let_go_and_what_it_left_open_still_ends_with_the_capture() {
+        use std::io::{BufRead, Write};
+        let (_serial, service, mut source) = source();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "scopes::log_tests::child_that_leaves_a_scope_open_and_waits_to_be_killed"])
+            .args(["--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let mut from_child = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        // The harness prints the test's name ahead of what the test prints,
+        // on the same line.
+        let mut wait_for = |word: &str| {
+            assert!(
+                from_child.by_ref().any(|line| line.unwrap().ends_with(word)),
+                "the child ended before saying {word:?}"
+            );
+        };
+        wait_for("ready");
+        source.adopt(pid);
+        assert_eq!(source.segments.len(), 2, "this process's segment and the child's");
+        child.stdin.take().unwrap().write_all(b"go\n").unwrap();
+        wait_for("written");
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        let mut batch = Vec::new();
+        source.drain_now(perfr_scope_ring::shm::now_monotonic_ns(), &mut batch);
+        assert_eq!(source.segments.len(), 1, "the dead process's segment is still held and polled");
+        assert_eq!(source.segments[0].pid, std::process::id());
+        assert_eq!(source.segment_count(), 2, "it is still a segment this capture read");
+        assert!(source.open_scopes() >= 1, "its open scope is still open");
+        let line = batch.iter().find(|e| e.kind == kind::LOG && e.pid == pid).expect("its log line");
+        assert!(text_of(&service, line).starts_with("a line whose end never came"));
+
+        // Its file is still there, and the capture goes on looking at the
+        // pid: that must not open it again.
+        assert!(perfr_scope_ring::ScopeRingReader::open(pid).is_ok());
+        assert_eq!(source.open_new_segments(vec![pid], 1), Vec::<u32>::new());
+        assert_eq!(source.segments.len(), 1);
+
+        let end_ns = perfr_scope_ring::shm::now_monotonic_ns();
+        batch.clear();
+        source.finish(end_ns, &mut batch);
+        let span = batch
+            .iter()
+            .find(|e| e.kind == kind::API_SCOPE && e.pid == pid)
+            .expect("the scope the process never stopped is drawn to the end of the capture");
+        assert_eq!(text_of(&service, span), "left open by a process that died");
+        assert_eq!(span.start_ns + span.duration_ns, end_ns);
+        perfr_scope_ring::unlink_segment(pid);
+    }
+
+    #[test]
+    fn a_long_capture_sweeps_dead_segments_as_it_goes() {
+        let (_serial, _service, mut source) = source();
+        let start = 5_000_000_000;
+        source.sweep_when_due(start);
+        assert_eq!(source.next_sweep_ns, start + SWEEP_EVERY_NS, "the capture's start swept already");
+        source.sweep_when_due(start + SWEEP_EVERY_NS - 1);
+        assert_eq!(source.next_sweep_ns, start + SWEEP_EVERY_NS);
+        source.sweep_when_due(start + SWEEP_EVERY_NS + 7);
+        assert_eq!(source.next_sweep_ns, start + 2 * SWEEP_EVERY_NS + 7, "swept, and due again later");
     }
 
     #[test]

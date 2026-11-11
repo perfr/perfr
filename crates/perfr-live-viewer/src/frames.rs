@@ -68,7 +68,7 @@ impl StreamFault {
 
 /// Every stream opens with a Hello: a chunk that begins with one, magic
 /// and all, is the first of a stream and not the middle of some frame.
-fn starts_stream(chunk: &[u8]) -> bool {
+pub fn starts_stream(chunk: &[u8]) -> bool {
     chunk.len() >= HEADER + MAGIC.len() && chunk[4] == FRAME_HELLO && &chunk[HEADER..HEADER + MAGIC.len()] == MAGIC
 }
 

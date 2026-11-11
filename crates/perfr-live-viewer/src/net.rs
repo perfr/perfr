@@ -319,6 +319,11 @@ pub struct Inbox {
     pub processes: Option<Vec<ProcessJson>>,
     pub error: Option<String>,
     pub frames: Vec<Vec<u8>>,
+    /// The bytes waiting in `frames`, kept so each message does not have to
+    /// add them up.
+    frames_bytes: usize,
+    /// The backlog overflowed: messages are refused until a stream starts.
+    frames_dropped: bool,
     pub timeline: Option<TimelineJson>,
     pub frame: Option<ServiceFrame>,
     pub http_ok: bool,
@@ -337,6 +342,56 @@ pub struct Inbox {
     /// The code views: a disassembly and a source file, or why not.
     pub disassembly: Option<Result<crate::code::Disassembly, String>>,
     pub source: Option<Result<crate::code::SourceFile, String>>,
+}
+
+/// How many bytes of the event stream may wait in the inbox while the page
+/// is hidden. A hidden page draws no frames, so nothing takes the messages
+/// out, yet the socket keeps delivering: left alone the queue grew at the
+/// full stream rate until the 2 GiB heap ran out and the tab aborted. Far
+/// above what gathers between two frames of a page that is drawing.
+pub const HIDDEN_BACKLOG_MAX: usize = 64 << 20;
+
+/// What became of a socket message handed to [`Inbox::queue_frame`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Queued {
+    /// It waits for the app.
+    Kept,
+    /// The page is hidden and the backlog is full: everything waiting was
+    /// dropped, this message with it. The socket is to be closed; the next
+    /// one opens with a Hello and the whole ring, which is how the app
+    /// catches up without having held the stream in between.
+    Overflow,
+    /// It continues a stream that was dropped, and went the same way.
+    Discarded,
+}
+
+impl Inbox {
+    /// Queues one message of the event socket for the app.
+    pub fn queue_frame(&mut self, bytes: Vec<u8>, page_hidden: bool) -> Queued {
+        if self.frames_dropped {
+            // The rest of a dropped stream would be read as garbage after
+            // the part that got through. Only a new stream is taken.
+            if !crate::frames::starts_stream(&bytes) {
+                return Queued::Discarded;
+            }
+            self.frames_dropped = false;
+        }
+        if page_hidden && self.frames_bytes.saturating_add(bytes.len()) > HIDDEN_BACKLOG_MAX {
+            self.frames = Vec::new();
+            self.frames_bytes = 0;
+            self.frames_dropped = true;
+            return Queued::Overflow;
+        }
+        self.frames_bytes += bytes.len();
+        self.frames.push(bytes);
+        Queued::Kept
+    }
+
+    /// The queued messages, for the app; the backlog starts again from zero.
+    pub fn take_frames(&mut self) -> Vec<Vec<u8>> {
+        self.frames_bytes = 0;
+        std::mem::take(&mut self.frames)
+    }
 }
 
 #[allow(dead_code)] // used from the wasm Net impl
@@ -873,7 +928,9 @@ mod wasm_impl {
                 processes: inbox.processes.take(),
                 sampling: inbox.sampling.take(),
                 error: inbox.error.take(),
-                frames: std::mem::take(&mut inbox.frames),
+                frames: inbox.take_frames(),
+                frames_bytes: 0,
+                frames_dropped: false,
                 timeline: inbox.timeline.take(),
                 frame: inbox.frame.take(),
                 http_ok: inbox.http_ok,
@@ -1768,12 +1825,26 @@ mod wasm_impl {
         onopen.forget();
 
         let inbox_msg = inbox.clone();
+        let ws_msg = ws.clone();
         let onmessage = Closure::wrap(Box::new(move |ev: MessageEvent| match ws_bytes(&ev) {
             Ok(bytes) => {
-                if let Ok(mut g) = inbox_msg.lock() {
-                    g.ws_ok = true;
-                    g.bytes_in += bytes.len() as u64;
-                    g.frames.push(bytes);
+                let queued = match inbox_msg.lock() {
+                    Ok(mut g) => {
+                        g.ws_ok = true;
+                        g.bytes_in += bytes.len() as u64;
+                        g.queue_frame(bytes, page_hidden())
+                    }
+                    Err(_) => Queued::Kept,
+                };
+                if queued == Queued::Overflow {
+                    log::warn!(
+                        target: "perfr_live_viewer::net",
+                        "the page is hidden and {} MiB of the event stream were waiting: closing the socket; the capture is read again from the service when the page is shown",
+                        HIDDEN_BACKLOG_MAX >> 20
+                    );
+                    // The app's retry opens a new socket once frames are
+                    // drawn again, and that one starts with the whole ring.
+                    let _ = ws_msg.close();
                 }
             }
             Err(e) => push_err(&inbox_msg, &e),
@@ -1804,6 +1875,12 @@ mod wasm_impl {
         onclose.forget();
 
         *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(ws);
+    }
+
+    /// Whether the page is hidden (a background tab, a minimised window):
+    /// the browser then runs no animation frames, so nothing drains the inbox.
+    fn page_hidden() -> bool {
+        web_sys::window().and_then(|w| w.document()).is_some_and(|d| d.hidden())
     }
 
     fn ws_bytes(ev: &MessageEvent) -> Result<Vec<u8>, String> {
@@ -2064,6 +2141,62 @@ mod tests {
     }
 
     use super::*;
+
+    /// The first message of every socket.
+    fn hello_message() -> Vec<u8> {
+        perfr_live_protocol::encode_frame(&perfr_live_protocol::LiveFrame::Hello {
+            version: perfr_live_protocol::VERSION,
+            event_size: perfr_live_event::LIVE_EVENT_SIZE as u16,
+        })
+    }
+
+    #[test]
+    fn a_page_that_is_drawing_queues_every_message_whatever_the_backlog() {
+        // A visible page takes the queue every frame. A burst larger than
+        // the hidden limit between two frames (the snapshot of a large ring
+        // on a slow frame) must still all arrive: dropping it would close
+        // the socket, and the next snapshot would meet the same end.
+        let mut inbox = Inbox::default();
+        let message = vec![0u8; HIDDEN_BACKLOG_MAX / 4];
+        for _ in 0..6 {
+            assert_eq!(inbox.queue_frame(message.clone(), false), Queued::Kept);
+        }
+        assert_eq!(inbox.take_frames().len(), 6);
+    }
+
+    #[test]
+    fn a_hidden_page_stops_holding_the_stream_once_the_backlog_is_full() {
+        let mut inbox = Inbox::default();
+        let message = vec![0u8; HIDDEN_BACKLOG_MAX / 4];
+        for _ in 0..4 {
+            assert_eq!(inbox.queue_frame(message.clone(), true), Queued::Kept);
+        }
+        // One byte more than the limit: what waited is given up, not just
+        // the newcomer, since the stream is of no use with a hole in it.
+        assert_eq!(inbox.queue_frame(vec![0u8; 1], true), Queued::Overflow);
+        assert!(inbox.frames.is_empty());
+        // The rest of that stream is refused, shown or hidden.
+        assert_eq!(inbox.queue_frame(vec![0u8; 16], true), Queued::Discarded);
+        assert_eq!(inbox.queue_frame(vec![0u8; 16], false), Queued::Discarded);
+        assert!(inbox.take_frames().is_empty());
+        // A new socket's stream is taken from its first message on.
+        assert_eq!(inbox.queue_frame(hello_message(), false), Queued::Kept);
+        assert_eq!(inbox.queue_frame(vec![0u8; 16], false), Queued::Kept);
+        assert_eq!(inbox.take_frames().len(), 2);
+    }
+
+    #[test]
+    fn the_backlog_is_counted_from_the_last_time_the_app_took_it() {
+        // Hidden pages are drawn now and then (a tab being switched to);
+        // what was taken no longer counts against the limit.
+        let mut inbox = Inbox::default();
+        let message = vec![0u8; HIDDEN_BACKLOG_MAX / 2];
+        for _ in 0..5 {
+            assert_eq!(inbox.queue_frame(message.clone(), true), Queued::Kept);
+            assert_eq!(inbox.queue_frame(message.clone(), true), Queued::Kept);
+            assert_eq!(inbox.take_frames().len(), 2);
+        }
+    }
 
     #[test]
     fn status_json_parses_demo_live_ring() {

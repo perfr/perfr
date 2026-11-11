@@ -117,32 +117,34 @@ where
         ..Default::default()
     };
 
-    init_sections(&mut metadata, header, endian, data, file_path)?;
-    init_dynamic_entries(&mut metadata, header, endian, data, file_path)?;
+    // The program headers are the file: without its PT_LOADs nothing maps
+    // an address to a file offset, and that stays an error. What the
+    // sections and the dynamic table add (build id, debug link, soname) is
+    // wanted when it is there and well formed, and absent otherwise. One
+    // odd DT_SONAME used to fail the whole call, and the module then
+    // offered no hookable function and looked up no debug file.
     init_program_headers(&mut metadata, header, endian, data, file_path)?;
+    init_sections(&mut metadata, header, endian, data);
+    let _ = init_dynamic_entries(&mut metadata, header, endian, data, file_path);
 
     Ok(metadata)
 }
 
-/// Mirrors `ElfFileImpl::InitSections`.
-fn init_sections<Elf>(
-    metadata: &mut ElfMetadata,
-    header: &Elf,
-    endian: Endianness,
-    data: &[u8],
-    file_path: &str,
-) -> Result<(), String>
+/// Mirrors `ElfFileImpl::InitSections`, except that nothing here fails the
+/// file: an unreadable section table leaves every field at "absent", and
+/// a section that cannot be read is skipped for the ones after it.
+fn init_sections<Elf>(metadata: &mut ElfMetadata, header: &Elf, endian: Endianness, data: &[u8])
 where
     Elf: FileHeader<Endian = Endianness>,
 {
-    let sections = header
-        .sections(endian, data)
-        .map_err(|e| format!("Unable to load sections: {e}"))?;
+    let Ok(sections) = header.sections(endian, data) else {
+        return;
+    };
 
     for section in sections.iter() {
-        let name = sections
-            .section_name(endian, section)
-            .map_err(|e| format!("Unable to get section name: {e}"))?;
+        let Ok(name) = sections.section_name(endian, section) else {
+            continue;
+        };
 
         match name {
             b".symtab" => {
@@ -166,27 +168,18 @@ where
         }
 
         if name == b".note.gnu.build-id" && section.sh_type(endian) == elf::SHT_NOTE {
-            read_build_id::<Elf>(metadata, section, endian, data)?;
+            read_build_id::<Elf>(metadata, section, endian, data);
             continue;
         }
 
         if name == b".gnu_debuglink" {
-            let contents = section
-                .data(endian, data)
-                .map_err(|e| format!("Could not read .gnu_debuglink section: {e}"))?;
-            match debuglink::parse_gnu_debuglink(contents) {
-                Ok(info) => metadata.gnu_debuglink = Some(info),
-                Err(message) => {
-                    return Err(format!(
-                        "Invalid .gnu_debuglink section in \"{file_path}\". {message}"
-                    ))
-                }
-            }
+            // A link that does not parse is no link: the build id may
+            // still find the debug file.
+            metadata.gnu_debuglink =
+                section.data(endian, data).ok().and_then(|contents| debuglink::parse_gnu_debuglink(contents).ok());
             continue;
         }
     }
-
-    Ok(())
 }
 
 fn read_build_id<Elf>(
@@ -194,20 +187,17 @@ fn read_build_id<Elf>(
     section: &Elf::SectionHeader,
     endian: Endianness,
     data: &[u8],
-) -> Result<(), String>
-where
+) where
     Elf: FileHeader<Endian = Endianness>,
 {
     let Ok(Some(mut notes)) = section.notes(endian, data) else {
-        // The C++ surfaces a parse failure here; an absent note section is not
-        // an error and simply leaves the build id empty.
-        return Ok(());
+        // An absent note section, or one that does not parse, leaves the
+        // build id empty.
+        return;
     };
 
-    while let Some(note) = notes
-        .next()
-        .map_err(|e| format!("Error while reading elf notes: {e}"))?
-    {
+    // A note that does not parse ends the walk; an id read before it stands.
+    while let Ok(Some(note)) = notes.next() {
         if note.n_type(endian) != elf::NT_GNU_BUILD_ID {
             continue;
         }
@@ -217,14 +207,13 @@ where
             let _ = write!(metadata.build_id, "{byte:02x}");
         }
     }
-
-    Ok(())
 }
 
 /// Mirrors `ElfFileImpl::InitDynamicEntries`.
 ///
 /// Like the C++, a file with no dynamic section is not an error -- the soname
-/// is simply left empty.
+/// is simply left empty. The errors say why a soname that is declared could
+/// not be read; the caller treats them as "no soname" too.
 fn init_dynamic_entries<Elf>(
     metadata: &mut ElfMetadata,
     header: &Elf,
@@ -297,7 +286,9 @@ where
         None
     };
 
-    let Some(last_byte_offset) = to_mapped_offset(strtab_addr + strtab_size - 1) else {
+    // `strtab_size` is at least one here: it is above `soname_offset`. The
+    // sum is the file's to make overflow.
+    let Some(last_byte_offset) = strtab_addr.checked_add(strtab_size - 1).and_then(to_mapped_offset) else {
         return Err(format!(
             "Unable to get last byte address of dynamic string table \"{file_path}\""
         ));
@@ -314,8 +305,8 @@ where
         ));
     };
 
-    let soname_start = (strtab_offset + soname_offset) as usize;
-    let tail = data.get(soname_start..).unwrap_or(&[]);
+    let soname_start = strtab_offset.checked_add(soname_offset).and_then(|start| usize::try_from(start).ok());
+    let tail = soname_start.and_then(|start| data.get(start..)).unwrap_or(&[]);
     let end = tail.iter().position(|&b| b == 0).unwrap_or(tail.len());
     metadata.soname = String::from_utf8_lossy(&tail[..end]).into_owned();
 
@@ -542,6 +533,78 @@ mod tests {
         let link = with.gnu_debuglink.expect("should have a debuglink");
         let debug_file = testdata("hello_world_elf.debug");
         assert_eq!(crc32_gnu_debuglink(&debug_file), link.crc32_checksum);
+    }
+
+    fn u64_at(data: &[u8], at: usize) -> u64 {
+        u64::from_le_bytes(data[at..at + 8].try_into().unwrap())
+    }
+
+    /// File offset and size of the 64-bit section header `index`, and of
+    /// the contents it describes.
+    fn section_header_at(data: &[u8], index: usize) -> usize {
+        let e_shoff = u64_at(data, 0x28) as usize;
+        let e_shentsize = u16::from_le_bytes(data[0x3a..0x3c].try_into().unwrap()) as usize;
+        e_shoff + index * e_shentsize
+    }
+
+    fn section_named(data: &[u8], wanted: &[u8]) -> (usize, usize) {
+        let header = elf::FileHeader64::<Endianness>::parse(data).unwrap();
+        let endian = header.endian().unwrap();
+        let sections = header.sections(endian, data).unwrap();
+        let section = sections
+            .iter()
+            .find(|section| sections.section_name(endian, *section).ok() == Some(wanted))
+            .expect("the fixture has the section");
+        (section.sh_offset(endian) as usize, section.sh_size(endian) as usize)
+    }
+
+    /// The four PT_LOADs are what every caller wants: they turn a symbol's
+    /// address into the file offset a hook goes at. A debug link the file
+    /// got wrong must not take them away, only the debug link.
+    #[test]
+    fn a_malformed_debuglink_costs_the_debuglink_and_nothing_else() {
+        let mut data = testdata("hello_world_elf_with_gnu_debuglink");
+        let (offset, size) = section_named(&data, b".gnu_debuglink");
+        // No NUL anywhere: a path with no room left for its checksum.
+        data[offset..offset + size].fill(b'a');
+        let m = parse_elf_metadata(&data, "x").expect("the rest of the file is fine");
+        assert!(m.gnu_debuglink.is_none());
+        assert_eq!(m.loadable_segments.len(), 4);
+        assert_eq!(m.build_id, parse("hello_world_elf_with_gnu_debuglink").build_id);
+        assert!(!m.build_id.is_empty());
+    }
+
+    #[test]
+    fn a_section_with_an_unreadable_name_is_skipped_and_the_rest_are_read() {
+        let mut data = testdata("hello_world_elf");
+        // sh_name is the first field of a section header; section 1 comes
+        // before the build-id note and the symbol table.
+        let sh_name = section_header_at(&data, 1);
+        data[sh_name..sh_name + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let m = parse_elf_metadata(&data, "x").expect("one bad name is not a bad file");
+        assert_eq!(m.loadable_segments.len(), 4);
+        assert_eq!(m.build_id, "d12d54bc5b72ccce54a408bdeda65e2530740ac8");
+        assert!(m.has_symtab);
+    }
+
+    /// DT_STRTAB and DT_STRSZ are the file's to choose. Their sum must not
+    /// be computed unchecked: it wraps in a release build and aborts a
+    /// debug one.
+    #[test]
+    fn a_dynamic_string_table_at_the_top_of_the_address_space_is_no_soname_not_an_overflow() {
+        let mut data = testdata("libtest-1.0.so");
+        let (offset, size) = section_named(&data, b".dynamic");
+        let mut patched = false;
+        for entry in (offset..offset + size).step_by(16) {
+            if u64_at(&data, entry) == u64::from(elf::DT_STRTAB) {
+                data[entry + 8..entry + 16].copy_from_slice(&(u64::MAX - 1).to_le_bytes());
+                patched = true;
+            }
+        }
+        assert!(patched, "the fixture has a DT_STRTAB");
+        let m = parse_elf_metadata(&data, "x").expect("an odd soname is not a bad file");
+        assert_eq!(m.soname, "");
+        assert_eq!(m.loadable_segments, parse("libtest-1.0.so").loadable_segments);
     }
 
     /// Malformed input must not panic. The C++ has a fuzzer for exactly this.

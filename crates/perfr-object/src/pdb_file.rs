@@ -59,7 +59,9 @@ fn compute_address(
         return None;
     }
     let section_rva = u64::from(sections[usize::from(section) - 1].virtual_address);
-    Some(u64::from(offset_in_section) + section_rva + image_base)
+    // The two 32-bit terms cannot overflow a u64; adding the image base,
+    // which is whatever the PE header says, can.
+    (u64::from(offset_in_section) + section_rva).checked_add(image_base)
 }
 
 /// `PdbFileLlvm::LoadDebugSymbols`, minus the final size deduction.
@@ -270,6 +272,14 @@ mod tests {
             "{}",
             name_at(0x18000f060)
         );
+    }
+
+    /// The image base is the PE header's to choose; a section RVA added
+    /// to one near the top of the address space has no address.
+    #[test]
+    fn an_image_base_that_overflows_with_the_section_addresses_gives_no_symbols_not_a_panic() {
+        let symbols = load_pdb_symbols(&testdata("dllmain.pdb"), u64::MAX - 0xfff).expect("the PDB itself is fine");
+        assert!(symbols.is_empty(), "{} symbols at wrapped addresses", symbols.len());
     }
 
     #[test]

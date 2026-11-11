@@ -316,6 +316,24 @@ fn function_call_ingest_uses_interned_pretty_name() {
 }
 
 #[test]
+fn a_single_pushed_event_reaches_the_index_and_moves_the_live_edge() {
+    let svc = LiveService::new(small_cfg()).unwrap();
+    svc.push_events(&[ev(1)]);
+    // Something asked for the timeline: the index is built and cached.
+    assert_eq!(svc.cached_index().event_count(), 1);
+    let generation = svc.data_gen();
+    // An agent's scope closes, with no capture running: one event, pushed
+    // on its own.
+    svc.ingest_scope_start(1, 9, 100, 0, 7);
+    svc.ingest_scope_stop(1, 9, 180);
+    svc.push_event(ev(30));
+    assert_eq!(svc.stats().events_live, 3);
+    assert!(svc.data_gen() > generation, "the caches were not told the ring changed");
+    assert_eq!(svc.cached_index().event_count(), 3, "the timeline is served from an index without them");
+    assert_eq!(svc.live_end_ns(), 304, "the live edge stayed where the batch left it");
+}
+
+#[test]
 fn thread_and_process_names_are_replayed_to_a_late_subscriber() {
     use perfr_live_protocol::{decode_frame, LiveFrame};
     let svc = crate::LiveService::new(crate::ServerConfig {

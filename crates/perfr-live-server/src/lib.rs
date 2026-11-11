@@ -655,13 +655,13 @@ impl LiveService {
         });
     }
 
+    /// One event: a batch of one, with everything a batch does. On a path
+    /// of its own this skipped the generation count and the live edge, so
+    /// an agent's scope posted outside a capture reached the viewers and
+    /// the ring but never the timeline index or the scope reports, which
+    /// are cached by generation.
     pub fn push_event(&self, event: LiveEvent) {
-        if self.before_capture_start(&event) {
-            self.dropped_before_start.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        self.ring().push(event);
-        self.broadcast_events(std::slice::from_ref(&event));
+        self.push_events(std::slice::from_ref(&event));
     }
 
     /// True for an event that starts before the current capture did.

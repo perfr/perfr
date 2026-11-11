@@ -62,6 +62,21 @@ pub const DEFAULT_PORT: u16 = 44766;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 const FRAME_NAME_ID_BASE: u32 = 1 << 20;
 
+/// And end here, where the names of manual scopes begin (`scopes.rs`). Both
+/// allocators write into the service's one table of names, so a frame id
+/// past this renames a scope.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+const FRAME_NAME_ID_END: u32 = 2 << 20;
+
+/// The last frame id, shared by every name that no longer fits the range.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+const FRAME_NAME_ID_OTHER: u32 = FRAME_NAME_ID_END - 1;
+
+// The fixed lanes sit below the frames, and the frames below the agent
+// names (hashed into the top half of the id space).
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+const _: () = assert!(gpu_lane::JOB < FRAME_NAME_ID_BASE && FRAME_NAME_ID_END <= AGENT_NAME_ID_BASE);
+
 /// A synthetic pid for machine-wide GPU tracks, so they lane on their own
 /// rather than inside whatever process happened to be captured.
 const GPU_PID: u32 = 0xFFFF_FF01;
@@ -183,12 +198,14 @@ pub(crate) struct FrameNames {
     store: Arc<SampleStore>,
     ids: HashMap<String, u32>,
     next: u32,
+    /// The range ran out and the shared id has been named.
+    overflowed: bool,
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 impl FrameNames {
     pub(crate) fn new(service: Arc<LiveService>, store: Arc<SampleStore>) -> FrameNames {
-        FrameNames { service, store, ids: HashMap::new(), next: FRAME_NAME_ID_BASE }
+        FrameNames { service, store, ids: HashMap::new(), next: FRAME_NAME_ID_BASE, overflowed: false }
     }
 
     fn id_for(&mut self, name: &str) -> u32 {
@@ -207,6 +224,26 @@ impl FrameNames {
     pub(crate) fn id_for_frame(&mut self, frame: &crate::symbolize::ResolvedFrame) -> u32 {
         if let Some(id) = self.ids.get(&frame.name) {
             return *id;
+        }
+        // Names are per function when there are symbols, but per address
+        // without them (JIT code, a stripped module), and a long capture
+        // can see more distinct addresses than the range holds. What does
+        // not fit shares one row rather than taking a scope's id, and is not
+        // remembered: the map would grow without bound otherwise.
+        if self.next >= FRAME_NAME_ID_OTHER {
+            if !self.overflowed {
+                self.overflowed = true;
+                log::warn!(
+                    "more than {} distinct frame names in this capture; further ones are shown as \"(other)\"",
+                    FRAME_NAME_ID_OTHER - FRAME_NAME_ID_BASE
+                );
+                self.service.intern_id(FRAME_NAME_ID_OTHER, "(other)");
+                self.store.record_frame(
+                    FRAME_NAME_ID_OTHER,
+                    FrameInfo { name: "(other)".to_string(), module: String::new(), address: 0, function_id: 0 },
+                );
+            }
+            return FRAME_NAME_ID_OTHER;
         }
         let id = self.next;
         self.next += 1;
@@ -547,6 +584,9 @@ fn list_processes_json() -> Result<String, String> {
     crate::procs::list_processes_json()
 }
 
+/// Where the ids of agent scope names start; see [`agent_name_id`].
+const AGENT_NAME_ID_BASE: u32 = 0x8000_0000;
+
 /// A name id for an agent scope, in a range of its own. The server's
 /// sequential allocator and a scope ring's are separate tables that both
 /// start low, so an id handed out here would be overwritten by an
@@ -559,7 +599,7 @@ fn agent_name_id(service: &LiveService, name: &str) -> u32 {
         h ^= u32::from(b);
         h = h.wrapping_mul(0x0100_0193);
     }
-    let id = 0x8000_0000 | (h & 0x3FFF_FFFF);
+    let id = AGENT_NAME_ID_BASE | (h & 0x3FFF_FFFF);
     service.intern_id(id, name);
     id
 }
@@ -3478,6 +3518,73 @@ mod tests {
     use perfr_tracing_state::context_switches::SchedulingSlice;
 
     const S: u64 = 1_000_000_000;
+
+    /// A frame as the symbolizer hands it over, for the name-id tests.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn frame_named(name: &str) -> crate::symbolize::ResolvedFrame {
+        crate::symbolize::ResolvedFrame { name: name.to_string(), module: "m".into(), address: 1, function_id: 0 }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn each_kind_of_name_keeps_its_own_range_of_ids() {
+        // The ids are in saved captures and on the wire, and the ranges
+        // only stay apart by starting where they do: GPU lanes at 4000,
+        // frames at 2^20, scope names at 2^21, agent names in the top half.
+        let service = LiveService::new(ServerConfig { ring_buffer_bytes: 1 << 20, ..Default::default() }).unwrap();
+        let store = Arc::new(SampleStore::new());
+        let mut frames = FrameNames::new(service.clone(), store);
+        assert_eq!(frames.id_for_frame(&frame_named("first")), 1 << 20);
+        assert_eq!(frames.id_for_frame(&frame_named("second")), (1 << 20) + 1);
+        assert_eq!(frames.id_for_frame(&frame_named("first")), 1 << 20, "one id per name");
+        let mut scopes = ScopeSource::new(service.clone());
+        assert_eq!(scopes.intern_name("a scope"), 2 << 20);
+        assert_eq!(scopes.intern_name("another"), (2 << 20) + 1);
+        assert_eq!(
+            [
+                gpu_lane::UTILIZATION,
+                gpu_lane::MEMORY_MIB,
+                gpu_lane::POWER_W,
+                gpu_lane::TEMPERATURE_C,
+                gpu_lane::SM_CLOCK_MHZ,
+                gpu_lane::PROCESS_MEMORY_MIB,
+                gpu_lane::JOB,
+            ],
+            [4000, 4001, 4002, 4003, 4004, 4005, 4006]
+        );
+        let agent = agent_name_id(&service, "an agent scope");
+        assert_eq!(agent, 0x8000_0000 | (agent & 0x3FFF_FFFF), "top half, below the last quarter");
+        assert_eq!(agent, agent_name_id(&service, "an agent scope"), "a hash of the text, the same every time");
+        let intern = service.intern.lock();
+        assert_eq!(intern.get(1 << 20), Some("first"));
+        assert_eq!(intern.get(2 << 20), Some("a scope"));
+        assert_eq!(intern.get(agent), Some("an agent scope"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn frame_names_past_the_end_of_their_range_share_one_id_instead_of_renaming_scopes() {
+        // A JIT or a stripped module names frames by address, one name per
+        // pc, and a long capture can see more than the million the range
+        // holds. The next id would be the first scope name's.
+        let service = LiveService::new(ServerConfig { ring_buffer_bytes: 1 << 20, ..Default::default() }).unwrap();
+        let store = Arc::new(SampleStore::new());
+        let mut scopes = ScopeSource::new(service.clone());
+        let scope_id = scopes.intern_name("render frame");
+        let mut frames = FrameNames::new(service.clone(), store);
+        frames.next = scope_id - 2;
+        let last = frames.id_for_frame(&frame_named("0x7f0000001000"));
+        assert_eq!(last, scope_id - 2, "the range is used to its end");
+        let over = frames.id_for_frame(&frame_named("0x7f0000002000"));
+        let more = frames.id_for_frame(&frame_named("0x7f0000003000"));
+        assert_eq!(over, scope_id - 1);
+        assert_eq!(more, over, "every further name shares the last id");
+        assert_eq!(frames.id_for_frame(&frame_named("0x7f0000001000")), last, "names seen before keep theirs");
+        let intern = service.intern.lock();
+        assert_eq!(intern.get(scope_id), Some("render frame"), "the scope keeps its name");
+        assert_eq!(intern.get(over), Some("(other)"));
+        assert_eq!(intern.get(last), Some("0x7f0000001000"));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

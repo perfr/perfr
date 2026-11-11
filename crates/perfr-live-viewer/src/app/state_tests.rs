@@ -1196,3 +1196,101 @@ fn a_search_for_another_name_with_as_many_matches_is_drawn() {
     page.frames(3);
     assert_eq!(upload_mode_of(&page), "Skip", "and settles again");
 }
+
+/// The arrows `paint_flow_arrows` draws for `flows` over `layout`: each
+/// curve's four control points, in the order painted.
+fn flow_curves(layout: &[(LaneKey, f32)], flows: &[FlowEdge]) -> Vec<[Pos2; 4]> {
+    let ctx = egui::Context::default();
+    let body = Rect::from_min_size(Pos2::new(200.0, 60.0), Vec2::new(1000.0, 600.0));
+    let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))), ..Default::default() };
+    let out = ctx.run(input, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| paint_flow_arrows(ui, body, 0.0, 1_000_000.0, layout, flows, 1.0));
+    });
+    fn curves(shape: &Shape, out: &mut Vec<[Pos2; 4]>) {
+        match shape {
+            Shape::Vec(shapes) => shapes.iter().for_each(|s| curves(s, out)),
+            Shape::CubicBezier(curve) => out.push(curve.points),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &out.shapes {
+        curves(&clipped.shape, &mut found);
+    }
+    found
+}
+
+fn lane(pid: u32, tid: u32, depth: u8) -> LaneKey {
+    LaneKey { pid, tid, kind: kind::API_SCOPE, depth, extra: 0 }
+}
+
+fn flow(from: (u32, u32, u64), to: (u32, u32, u64)) -> FlowEdge {
+    let end = |(pid, tid, start_ns): (u32, u32, u64)| perfr_live_chrome::FlowEnd { start_ns, pid, tid, name_id: 0 };
+    FlowEdge { from: end(from), to: end(to) }
+}
+
+#[test]
+fn flow_arrows_join_the_first_lane_of_each_thread_and_skip_what_is_off_screen() {
+    // Thread 1 has two lanes (depths): an arrow goes to the first listed.
+    let layout = [(lane(1, 1, 0), 10.0), (lane(1, 1, 1), 40.0), (lane(1, 2, 0), 90.0)];
+    let flows = [
+        flow((1, 1, 100_000), (1, 2, 300_000)),
+        // Both ends right of the view: not drawn.
+        flow((1, 1, 5_000_000), (1, 2, 6_000_000)),
+        // A thread with no lane: not drawn.
+        flow((1, 1, 100_000), (9, 9, 300_000)),
+        flow((1, 2, 500_000), (1, 1, 900_000)),
+    ];
+    let curves = flow_curves(&layout, &flows);
+    assert_eq!(curves.len(), 2);
+    let h = lane_height(lane(1, 1, 0)) * 0.5;
+    let y1 = 60.0 + 10.0 + h;
+    let y2 = 60.0 + 90.0 + lane_height(lane(1, 2, 0)) * 0.5;
+    assert_eq!(curves[0][0], Pos2::new(300.0, y1));
+    assert_eq!(curves[0][3], Pos2::new(500.0, y2));
+    assert_eq!(curves[1][0], Pos2::new(700.0, y2));
+    assert_eq!(curves[1][3], Pos2::new(1100.0, y1));
+}
+
+/// Not a check: what a frame's flow arrows cost on a trace with many of
+/// them in view. `cargo test --release -- --ignored --nocapture flow_arrow_times`.
+#[test]
+#[ignore]
+fn flow_arrow_times() {
+    let layout: Vec<(LaneKey, f32)> = (0..500u32).map(|t| (lane(1, t, 0), t as f32 * 20.0)).collect();
+    let flows: Vec<FlowEdge> = (0..100_000u64)
+        .map(|i| flow((1, (i % 500) as u32, i * 10), (1, ((i * 7 + 250) % 500) as u32, i * 10 + 500)))
+        .collect();
+    let start = std::time::Instant::now();
+    let mut drawn = 0;
+    for _ in 0..5 {
+        drawn = flow_curves(&layout, &flows).len();
+    }
+    println!("100k flows over 500 lanes: {:8.2} ms/frame ({drawn} arrows)", start.elapsed().as_secs_f64() * 1000.0 / 5.0);
+}
+
+/// A finished capture of `threads` threads in one process, drawn as with a GPU.
+fn many_thread_page(threads: u32) -> Page {
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        draw_as_with_a_gpu(app);
+        let mut frames = vec![hello(), LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000_000 }];
+        frames.extend((0..threads).map(|t| LiveFrame::ThreadName { pid: 100, tid: 1_000 + t, name: format!("worker-{t}") }));
+        frames.push(LiveFrame::EventBatch {
+            events: (0..threads).map(|t| scope(100, 1_000 + t, 2_000_000 + t as u64, 5_000_000, 7)).collect(),
+        });
+        frames.push(LiveFrame::CaptureFinished);
+        feed(app, &frames);
+    });
+    page.frames(6);
+    page
+}
+
+/// Not a check: an idle frame of the timeline over a capture with many
+/// threads. `cargo test --release -- --ignored --nocapture timeline_frame_times`.
+#[test]
+#[ignore]
+fn timeline_frame_times() {
+    let mut page = many_thread_page(5_000);
+    println!("5,000 threads, idle frame:      {:8.3} ms/frame", ms_per_frame(&mut page, 200));
+}

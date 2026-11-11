@@ -10622,6 +10622,11 @@ impl PerfrLiveApp {
     }
 
     fn story_drive(&mut self) {
+        // Without a story there is nothing to drive, and the name lists
+        // below are a string per thread row, every frame.
+        if self.story.doc.is_none() {
+            return;
+        }
         let content = self.content_ns();
         let current = perfr_story::Camera { t0_ns: self.t0, t1_ns: self.t1, scroll_y: self.lane_scroll };
         let (threads, processes) = self.story_name_lists();
@@ -13147,6 +13152,14 @@ fn paint_flow_arrows(
     let span = (t1 - t0).max(1.0);
     let painter = ui.painter_at(body);
     let stroke = Stroke::new(1.15, Color32::from_rgba_unmultiplied(0xFF, 0xC1, 0x07, 200));
+    // Each thread's first lane, looked up once: scanning the layout for
+    // both ends of every arrow in view was lanes x arrows a frame.
+    let mut thread_y: HashMap<(u32, u32), f32> = HashMap::with_capacity(layout.len());
+    for (k, y) in layout {
+        thread_y
+            .entry((k.pid, k.tid))
+            .or_insert_with(|| body.top() + *y + lane_height(*k) * scale.max(0.01) * 0.5);
+    }
     for edge in flows {
         let x0 = body.left() + ((edge.from.start_ns as f64 - t0) / span) as f32 * body.width();
         let x1 = body.left() + ((edge.to.start_ns as f64 - t0) / span) as f32 * body.width();
@@ -13156,15 +13169,7 @@ fn paint_flow_arrows(
         if (x0 < body.left() && x1 < body.left()) || (x0 > body.right() && x1 > body.right()) {
             continue;
         }
-        let y_of = |pid: u32, tid: u32| -> Option<f32> {
-            layout.iter().find_map(|(k, y)| {
-                if k.pid == pid && k.tid == tid {
-                    Some(body.top() + *y + lane_height(*k) * scale.max(0.01) * 0.5)
-                } else {
-                    None
-                }
-            })
-        };
+        let y_of = |pid: u32, tid: u32| -> Option<f32> { thread_y.get(&(pid, tid)).copied() };
         let Some(y0) = y_of(edge.from.pid, edge.from.tid) else {
             continue;
         };

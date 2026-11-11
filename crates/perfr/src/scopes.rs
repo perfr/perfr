@@ -568,8 +568,14 @@ impl ScopeSource {
                 // name that fits, or later via a TEXT record.
                 if event.has_more_text() {
                     let key = (event.tid, event.scope_id);
-                    self.segments[index].text.accept(&event);
-                    self.segments[index].awaiting_name.insert(key, event);
+                    match self.segments[index].text.accept(&event) {
+                        // The assembler is waiting on as many names as it
+                        // will, so this one is not waited for either.
+                        Some((prefix, _)) => self.named(index, event, prefix.as_bytes(), true, batch),
+                        None => {
+                            self.segments[index].awaiting_name.insert(key, event);
+                        }
+                    }
                 } else {
                     let cut = event.flags & flags::CUT != 0;
                     self.named(index, event, event.text_bytes(), cut, batch);

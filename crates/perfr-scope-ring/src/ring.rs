@@ -346,6 +346,53 @@ pub fn checked_layout_size(ring_count: usize, slots_per_ring: usize) -> Option<u
     control_bytes().checked_add(headers)?.checked_add(slots)
 }
 
+/// Checks the header of a segment another process wrote, and returns the
+/// ring count and slots per ring it declares.
+///
+/// The segment is untrusted: its writer may be buggy, mid-crash, or a
+/// different build. Every field is checked before a single event is read,
+/// and a mismatch is an error rather than a mapping used at the wrong
+/// dimensions. One copy for every platform, since none of it is an
+/// operating-system call.
+///
+/// # Safety
+/// `base` must point at a readable mapping of `len` bytes, and `len` must
+/// be at least a cache line.
+pub(crate) unsafe fn validate_header(base: *const u8, len: usize, pid: u32) -> std::io::Result<(usize, usize)> {
+    let header = &*base.cast::<Header>();
+    let bad = |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, what.to_string());
+    if header.magic.load(Ordering::Acquire) != MAGIC {
+        // Also the answer while a writer is between creating the file and
+        // initialising it: the segment exists, zero-filled, and the magic is
+        // stored last precisely so this window is visible rather than
+        // silently mapped at bogus dimensions. Callers retry.
+        return Err(bad("not a perfr scope segment (or not initialised yet)"));
+    }
+    if header.pid != pid {
+        return Err(bad("scope segment pid mismatch"));
+    }
+    if header.version != VERSION {
+        return Err(bad("scope segment version mismatch"));
+    }
+    if header.event_size != EVENT_SIZE as u32 {
+        return Err(bad("scope segment event size mismatch"));
+    }
+    let ring_count = header.ring_count as usize;
+    let slots_per_ring = header.slots_per_ring as usize;
+    if ring_count == 0 || ring_count > MAX_RINGS {
+        return Err(bad("scope segment ring count out of range"));
+    }
+    if slots_per_ring < 2 || !slots_per_ring.is_power_of_two() {
+        return Err(bad("scope segment slot count is not a power of two"));
+    }
+    // The size the header describes must fit in the mapping actually made,
+    // or every offset computed from it reads out of bounds.
+    if checked_layout_size(ring_count, slots_per_ring).is_none_or(|needed| needed > len) {
+        return Err(bad("scope segment is smaller than its header describes"));
+    }
+    Ok((ring_count, slots_per_ring))
+}
+
 /// Byte offset of a ring's control block.
 pub fn ring_header_offset(ring: usize) -> usize {
     control_bytes() + ring * CACHE_LINE
@@ -1057,6 +1104,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_header_is_believed_only_when_every_field_checks_out() {
+        let region = Region::new(3, 16);
+        let rings = region.rings();
+        let len = layout_size(3, 16);
+        let header = rings.base.cast::<Header>();
+        let check = || unsafe { validate_header(rings.base, len, 4242) }.map_err(|e| e.to_string());
+        assert_eq!(check(), Ok((3, 16)));
+
+        // Each field put wrong in turn, and put back.
+        let refused = |what: &str| Err(what.to_string());
+        unsafe {
+            (*header).magic.store(0, Ordering::Release);
+            assert_eq!(check(), refused("not a perfr scope segment (or not initialised yet)"));
+            (*header).magic.store(MAGIC, Ordering::Release);
+
+            assert_eq!(
+                validate_header(rings.base, len, 4243).map_err(|e| e.to_string()),
+                refused("scope segment pid mismatch")
+            );
+
+            (*header).version = VERSION + 1;
+            assert_eq!(check(), refused("scope segment version mismatch"));
+            (*header).version = VERSION;
+
+            (*header).event_size = 32;
+            assert_eq!(check(), refused("scope segment event size mismatch"));
+            (*header).event_size = EVENT_SIZE as u32;
+
+            for count in [0, MAX_RINGS as u32 + 1] {
+                (*header).ring_count = count;
+                assert_eq!(check(), refused("scope segment ring count out of range"));
+            }
+            (*header).ring_count = 3;
+
+            for slots in [0, 1, 12] {
+                (*header).slots_per_ring = slots;
+                assert_eq!(check(), refused("scope segment slot count is not a power of two"));
+            }
+            // More slots than the file has room for.
+            (*header).slots_per_ring = 32;
+            assert_eq!(check(), refused("scope segment is smaller than its header describes"));
+            (*header).slots_per_ring = 16;
+        }
+        assert_eq!(check(), Ok((3, 16)));
+        assert!(
+            unsafe { validate_header(rings.base, len - 1, 4242) }.is_err(),
+            "a file one byte short of what its header describes"
+        );
     }
 
     #[test]

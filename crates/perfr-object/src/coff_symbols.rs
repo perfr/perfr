@@ -104,6 +104,17 @@ where
 {
     let image_base = file.nt_headers().optional_header().image_base();
 
+    // The twelve-byte RUNTIME_FUNCTION and its UNWIND_INFO are the x64
+    // exception table. ARM64 stores eight-byte entries under the same data
+    // directory, and a table of those whose length happens to divide by
+    // twelve would be read as function ranges that do not exist.
+    let machine = file.nt_headers().file_header().machine.get(LittleEndian);
+    if machine != pe::IMAGE_FILE_MACHINE_AMD64 {
+        return Err(format!(
+            "{UNWIND_RANGE_ERROR_PREFIX}Unable to read Exception Table: not an x64 image (machine {machine:#x})."
+        ));
+    }
+
     let Some(directory) = file
         .data_directories()
         .get(pe::IMAGE_DIRECTORY_ENTRY_EXCEPTION)
@@ -253,10 +264,12 @@ where
 
     // The Export Table carries no sizes, so they come from the Exception
     // Table -- which cannot cover leaf functions, as those have no
-    // RUNTIME_FUNCTION. Those get size 0, exactly as in the C++.
-    let ranges = unwind_ranges_typed(file, data).map_err(|e| {
-        format!("{EXPORT_ERROR_PREFIX}Unable to assign sizes to symbols from the Export Table: {e}")
-    })?;
+    // RUNTIME_FUNCTION. Those get size 0, exactly as in the C++. An image
+    // with no usable Exception Table at all (32-bit x86, ARM64, a DLL of
+    // leaf functions, a malformed table) is the same case for every
+    // export: the names are still worth having, where the C++ dropped
+    // them with the sizes and left the module without a single name.
+    let ranges = unwind_ranges_typed(file, data).unwrap_or_default();
     let sizes: HashMap<u64, u64> = ranges
         .iter()
         .map(|range| (range.start, range.end - range.start))
@@ -420,6 +433,61 @@ mod tests {
                 pair[1]
             );
         }
+    }
+
+    /// Where the PE headers of a 64-bit image start, and where its data
+    /// directories do: `e_lfanew`, then the signature, the 20-byte COFF
+    /// header and the 112 fixed bytes of a PE32+ optional header.
+    fn pe_header_at(data: &[u8]) -> usize {
+        u32::from_le_bytes(data[0x3c..0x40].try_into().unwrap()) as usize
+    }
+
+    fn data_directory_at(data: &[u8], index: usize) -> usize {
+        pe_header_at(data) + 4 + 20 + 112 + index * 8
+    }
+
+    /// Sizes are a courtesy of the Exception Table; names are not. A DLL
+    /// without one (leaf-only code, resources, every 32-bit image) used to
+    /// lose its export names along with the sizes.
+    #[test]
+    fn exports_keep_their_names_when_there_is_no_exception_table() {
+        let mut data = testdata("libtest.dll");
+        let directory = data_directory_at(&data, pe::IMAGE_DIRECTORY_ENTRY_EXCEPTION);
+        data[directory..directory + 8].fill(0);
+        assert!(exception_table_symbols(&data).is_err(), "the table is gone");
+        let symbols = export_table_symbols(&data).expect("the export table is still there");
+        assert_eq!(
+            symbols.into_iter().map(|s| (s.mangled_name, s.address, s.size)).collect::<Vec<_>>(),
+            vec![("PrintHelloWorld".to_owned(), 0x62640000 + 0x13a0, 0)]
+        );
+    }
+
+    /// The same when the table is there and cannot be used: a length that
+    /// is not a whole number of entries.
+    #[test]
+    fn exports_keep_their_names_when_the_exception_table_is_malformed() {
+        let mut data = testdata("libtest.dll");
+        let size_at = data_directory_at(&data, pe::IMAGE_DIRECTORY_ENTRY_EXCEPTION) + 4;
+        let size = u32::from_le_bytes(data[size_at..size_at + 4].try_into().unwrap());
+        data[size_at..size_at + 4].copy_from_slice(&(size - 5).to_le_bytes());
+        assert!(exception_table_symbols(&data).unwrap_err().contains("Unexpected size"));
+        let symbols = export_table_symbols(&data).expect("the export table is still there");
+        assert_eq!((symbols[0].mangled_name.as_str(), symbols[0].size), ("PrintHelloWorld", 0));
+    }
+
+    /// `RUNTIME_FUNCTION` is twelve bytes on x64 only. An ARM64 image's
+    /// table has eight-byte entries, and reading it by threes of `u32`
+    /// would invent function ranges whenever its length divides by twelve.
+    #[test]
+    fn an_image_for_another_machine_has_no_x64_unwind_ranges_and_keeps_its_exports() {
+        let mut data = testdata("libtest.dll");
+        let machine_at = pe_header_at(&data) + 4;
+        assert_eq!(data[machine_at..machine_at + 2], pe::IMAGE_FILE_MACHINE_AMD64.to_le_bytes());
+        data[machine_at..machine_at + 2].copy_from_slice(&pe::IMAGE_FILE_MACHINE_ARM64.to_le_bytes());
+        let error = exception_table_symbols(&data).unwrap_err();
+        assert!(error.contains("not an x64 image"), "{error}");
+        let symbols = export_table_symbols(&data).expect("the export table is still there");
+        assert_eq!((symbols[0].mangled_name.as_str(), symbols[0].size), ("PrintHelloWorld", 0));
     }
 
     #[test]

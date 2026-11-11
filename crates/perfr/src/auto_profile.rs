@@ -171,6 +171,10 @@ pub struct AutoProfiler {
     quiet_steps: u32,
     total_per_s: f64,
     unhooked: u32,
+    /// The session's running count of dropped records at the last report,
+    /// and how many of them fell in the window the next step judges.
+    lost_total: u64,
+    lost_in_window: u64,
 }
 
 impl AutoProfiler {
@@ -184,6 +188,8 @@ impl AutoProfiler {
             quiet_steps: 0,
             total_per_s: 0.0,
             unhooked: 0,
+            lost_total: 0,
+            lost_in_window: 0,
         }
     }
 
@@ -215,6 +221,17 @@ impl AutoProfiler {
         self.rejected.insert(function_id, u32::MAX);
     }
 
+    /// The kernel's running count of hook records it dropped for this
+    /// capture (`PERF_RECORD_LOST`, summed over the rings), told before each
+    /// step. A window that lost records cannot show that a hook was silent:
+    /// one hot function fills a ring and the hits of every other hook on
+    /// that CPU go with it. A count below the last one is a new session's.
+    pub fn records_lost(&mut self, total: u64) {
+        let new = if total >= self.lost_total { total - self.lost_total } else { total };
+        self.lost_total = total;
+        self.lost_in_window = self.lost_in_window.saturating_add(new);
+    }
+
     /// One step. `counts` is completed calls per hooked function since the
     /// last step, `entries` entry hits in that same span. `window_s` is how
     /// long the step was; `watched` is how long each hook was actually armed
@@ -237,6 +254,7 @@ impl AutoProfiler {
         let hot = self.config.hot_per_s();
         let window_s = window_s.max(1e-3);
         let retry = self.config.retry_after_steps;
+        let lossy = std::mem::take(&mut self.lost_in_window) > 0;
 
         // What each hook has cost since it went in. A hook armed partway
         // through the window is credited only with `watched`, so a slow
@@ -249,6 +267,16 @@ impl AutoProfiler {
                 h.entries += entries.get(id).copied().unwrap_or(0) as f64;
                 h.watched_s += dt;
                 h.quiet_s = if completed > 0 { 0.0 } else { h.quiet_s + dt };
+                if lossy {
+                    // The calls that did arrive still count towards the rate:
+                    // they are a floor, and the hook that caused the loss is
+                    // found by it. Silence is another matter. A return that
+                    // was dropped looks like a call that never ended, and a
+                    // dropped call like none at all, so the quiet clock and
+                    // the entries it is read with start over.
+                    h.quiet_s = 0.0;
+                    h.entries = 0.0;
+                }
                 if h.watched_s > MEMORY_S {
                     h.calls /= 2.0;
                     h.entries /= 2.0;
@@ -939,6 +967,51 @@ mod tests {
             let a = p.step(&c, &counts, 2.0, &HashMap::new(), &none, &[]);
             assert!(unhooks(&a).is_empty(), "round {round}: {a:?}");
         }
+    }
+
+    #[test]
+    fn a_window_that_lost_records_does_not_call_the_other_hooks_silent_or_stuck() {
+        let mut p = profiler();
+        let c = [cand(1, 50.0), cand(2, 30.0), cand(3, 20.0)];
+        let none = HashMap::new();
+        assert_eq!(hooks(&p.step(&c, &none, 2.0, &HashMap::new(), &none, &[])), vec![1, 2, 3]);
+        // 3 floods the ring. 1's entry got through and its return did not;
+        // nothing of 2 got through at all.
+        p.records_lost(4096);
+        let a = p.step(
+            &c,
+            &HashMap::from([(3, 3000)]),
+            2.0,
+            &HashMap::new(),
+            &HashMap::from([(1, 1), (3, 3000)]),
+            &[],
+        );
+        assert_eq!(unhooks(&a), vec![(3, Why::TooHot { per_s: 1500.0 })], "the cause still goes");
+        assert!(p.is_hooked(1) && p.is_hooked(2));
+        // The same total again is no new loss. A second of clean quiet is
+        // not yet silence, and the lossy window's entry is not held against 1.
+        p.records_lost(4096);
+        let a = p.step(&c, &none, 1.0, &HashMap::new(), &none, &[]);
+        assert!(unhooks(&a).is_empty(), "{a:?}");
+        // Clean windows are judged as ever: 1 runs, 2 stays quiet.
+        let a = p.step(&c, &HashMap::from([(1, 20)]), 1.0, &HashMap::new(), &none, &[]);
+        assert_eq!(unhooks(&a), vec![(2, Why::Silent)]);
+        assert!(p.is_hooked(1));
+    }
+
+    #[test]
+    fn a_dropped_record_count_that_starts_over_is_a_new_session() {
+        let mut p = profiler();
+        let c = [cand(1, 50.0)];
+        let none = HashMap::new();
+        p.step(&c, &none, 2.0, &HashMap::new(), &none, &[]);
+        p.records_lost(100);
+        assert!(unhooks(&p.step(&c, &none, 2.0, &HashMap::new(), &none, &[])).is_empty());
+        // Lower than before: the session was made again and lost 7 since.
+        p.records_lost(7);
+        assert!(unhooks(&p.step(&c, &none, 2.0, &HashMap::new(), &none, &[])).is_empty());
+        p.records_lost(7);
+        assert_eq!(unhooks(&p.step(&c, &none, 2.0, &HashMap::new(), &none, &[])), vec![(1, Why::Silent)]);
     }
 
     #[test]

@@ -1121,6 +1121,9 @@ impl AutoRun {
         }
         self.counted_through_ns = s.now_ns;
         let entries = s.session.take_entry_hits();
+        // A flooded ring drops the other hooks' hits with the flood: without
+        // this the controller reads the gap as "no calls" and bans them.
+        self.profiler.records_lost(s.session.report().records_lost);
         let actions = self.profiler.step(
             &candidates,
             &self.counts,

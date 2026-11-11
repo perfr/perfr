@@ -21,8 +21,8 @@ pub struct QpcClock {
 
 impl QpcClock {
     /// A clock at `frequency` ticks per second (zero is treated as one).
-    pub fn with_frequency(frequency: u64) -> QpcClock {
-        QpcClock { frequency: frequency.max(1) }
+    pub const fn with_frequency(frequency: u64) -> QpcClock {
+        QpcClock { frequency: if frequency == 0 { 1 } else { frequency } }
     }
 
     /// The host's counter frequency, the one `perfr-scope-ring` uses.

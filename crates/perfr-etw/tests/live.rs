@@ -67,7 +67,7 @@ fn the_kernel_logger_reports_this_thread_running_sampled_and_loaded() {
 
     let mut feed = SchedulerFeed::new(clock);
     feed.set_focus([me]);
-    let mut samples = SampleAssembler::new();
+    let mut samples = SampleAssembler::new(clock);
     let mut own_image = false;
     let mut thread_rundown = 0;
     for event in &events {

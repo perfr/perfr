@@ -521,7 +521,8 @@ fn open_etw(sampling: bool, focus: &[u32], capture_start_ns: u64) -> Result<Etw,
         feed.thread_count(),
         if sampling { "at 1 kHz" } else { "off" }
     );
-    Ok(Etw { session, consumer, feed, samples: SampleAssembler::new(), newest: 0, events: Vec::with_capacity(4096), lost_notices: 0 })
+    let samples = SampleAssembler::new(session.clock());
+    Ok(Etw { session, consumer, feed, samples, newest: 0, events: Vec::with_capacity(4096), lost_notices: 0 })
 }
 
 /// One sample's events: a tick on the thread's sample bar, then its frames
@@ -939,7 +940,7 @@ pub fn capture_loop(
         }
         let feed_stats = etw.feed.stats();
         log::info!(
-            "kernel logger stopped: {} events ({} ignored); the kernel lost {} events and {} whole buffers ({} loss notices in the stream); {} context switches -> {} slices ({} without a pid, {} mismatches); {} stacks -> {} samples ({} kernel-only); {} state slices",
+            "kernel logger stopped: {} events ({} ignored); the kernel lost {} events and {} whole buffers ({} loss notices in the stream); {} context switches -> {} slices ({} without a pid, {} mismatches); {} stacks -> {} samples ({} kernel-only, {} late user halves dropped); {} state slices",
             consumer_stats.events,
             consumer_stats.ignored,
             session_stats.events_lost,
@@ -952,6 +953,7 @@ pub fn capture_loop(
             etw.samples.stacks_seen,
             etw.samples.samples_emitted,
             etw.samples.kernel_only,
+            etw.samples.late_halves,
             feed_stats.state_slices
         );
     }

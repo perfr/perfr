@@ -140,6 +140,10 @@ pub struct ThreadStateTracer {
     newest_seen_ns: u64,
     /// Drains that ended in a read error, the first of which is logged.
     failed_drains: u64,
+    /// Records the kernel dropped because a tracepoint ring was full. The
+    /// states drawn across such a gap are whatever the last record before it
+    /// said, so the count is what tells a reader not to trust them.
+    records_lost: u64,
     focus: Focus,
     /// Field offsets read from each tracepoint's tracefs `format` at open,
     /// so a kernel that moved a field is parsed by its own layout rather
@@ -231,6 +235,7 @@ impl ThreadStateTracer {
                 pending: Vec::new(),
                 newest_seen_ns: 0,
                 failed_drains: 0,
+                records_lost: 0,
                 focus: Focus::all(),
                 switch_layout,
                 wakeup_layout,
@@ -271,6 +276,11 @@ impl ThreadStateTracer {
 
     pub fn focus(&self) -> &Focus {
         &self.focus
+    }
+
+    /// How many records the kernel has dropped from the tracepoint rings.
+    pub fn records_lost(&self) -> u64 {
+        self.records_lost
     }
 
     /// Drains the rings and returns the state slices that can now be closed.
@@ -329,13 +339,24 @@ impl ThreadStateTracer {
                     payload,
                 });
             });
-            if let Err(error) = read {
-                // The ring has skipped what it could not walk and reads on;
-                // one line is enough to say it happened.
-                if self.failed_drains == 0 {
-                    log::warn!("reading a scheduling tracepoint ring failed: {error}");
+            match read {
+                Ok(drained) => {
+                    if drained.lost > 0 && self.records_lost == 0 {
+                        log::warn!(
+                            "the kernel dropped {} scheduler tracepoint record(s): a tracepoint ring was full",
+                            drained.lost
+                        );
+                    }
+                    self.records_lost += drained.lost;
                 }
-                self.failed_drains += 1;
+                Err(error) => {
+                    // The ring has skipped what it could not walk and reads
+                    // on; one line is enough to say it happened.
+                    if self.failed_drains == 0 {
+                        log::warn!("reading a scheduling tracepoint ring failed: {error}");
+                    }
+                    self.failed_drains += 1;
+                }
             }
         }
         let horizon = self.newest_seen_ns.saturating_sub(REORDER_DELAY_NS);
@@ -441,6 +462,7 @@ mod tests {
             pending: Vec::new(),
             newest_seen_ns: 0,
             failed_drains: 0,
+            records_lost: 0,
             focus: Focus::all(),
             switch_layout: SchedSwitchLayout::DEFAULT,
             wakeup_layout: SchedWakeupLayout::DEFAULT,
@@ -455,6 +477,23 @@ mod tests {
             emitting_pid: 0,
             payload: Payload::Switch { prev_tid, prev_state, next_tid, prev_in: true, next_in: true },
         }
+    }
+
+    #[test]
+    fn records_the_kernel_dropped_from_a_tracepoint_ring_are_counted() {
+        let mut tracer = tracer();
+        let ring = perfr_perf_ring::ring::synthetic(4096).unwrap();
+        let mut lost = Vec::new();
+        lost.extend_from_slice(&record_type::LOST.to_le_bytes());
+        lost.extend_from_slice(&0u16.to_le_bytes());
+        lost.extend_from_slice(&(perfr_perf_records::Lost::SIZE as u16).to_le_bytes());
+        lost.extend_from_slice(&1u64.to_le_bytes());
+        lost.extend_from_slice(&250u64.to_le_bytes());
+        lost.resize(perfr_perf_records::Lost::SIZE, 0);
+        assert!(ring.publish(&lost));
+        tracer.rings.push((ring, Kind::SchedSwitch));
+        assert!(tracer.poll().is_empty());
+        assert_eq!(tracer.records_lost(), 250);
     }
 
     #[test]

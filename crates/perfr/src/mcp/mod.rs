@@ -1138,6 +1138,71 @@ mod tests {
         assert_eq!(keys, ["hotspots", "limit", "offset", "samples", "supported", "total_functions"]);
     }
 
+    /// The real service, bare: its router with nothing behind the capture
+    /// and symbol hooks. Returns its URL and the runtime that serves it.
+    fn spawn_real_service() -> (String, tokio::runtime::Runtime) {
+        use perfr_live_server::{LiveService, ServerConfig};
+        let service = LiveService::new(ServerConfig { ring_buffer_bytes: 1 << 20, ..ServerConfig::default() }).unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        // `serve` binds the configured address itself, so the port is chosen
+        // here and handed over; taken in between, the next one is tried.
+        for _ in 0..20 {
+            let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            service.config.lock().bind = SocketAddr::from(([127, 0, 0, 1], port));
+            let serving = runtime.spawn(perfr_live_server::http::serve(service.clone()));
+            for _ in 0..200 {
+                if serving.is_finished() {
+                    break;
+                }
+                if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                    return (format!("http://127.0.0.1:{port}"), runtime);
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        panic!("the service did not come up on a loopback port");
+    }
+
+    #[test]
+    fn every_service_call_the_tools_make_is_a_route_of_the_real_service() {
+        // The other tests answer from a mock whose paths were typed in by
+        // hand next to the code under test. This one asks the router the
+        // service is built from. Nothing is captured here, so most answers
+        // are an empty reading or a refusal; a path or a method the router
+        // does not have is what must not come back.
+        let (url, _runtime) = spawn_real_service();
+        let mcp = mcp(&url);
+        let caps = tool(&mcp, 1, "perfr_capabilities", json!({}));
+        assert_eq!(caps["service_reachable"], true, "{caps}");
+        assert_eq!(caps["capture"]["capturing"], false, "{caps}");
+        let pid = std::process::id();
+        let calls = [
+            ("perfr_list_processes", json!({"query": "perfr", "limit": 5})),
+            ("perfr_attach", json!({"pid": pid, "timeout_ms": 50})),
+            ("perfr_search_functions", json!({"pid": pid, "query": "main"})),
+            ("perfr_arm_hooks", json!({"pid": pid, "names": ["main"]})),
+            ("perfr_unhook", json!({"all": true})),
+            ("perfr_start_capture", json!({"pid": pid, "sampling": false, "scheduler": false})),
+            ("perfr_capture_status", json!({})),
+            ("perfr_stop_capture", json!({})),
+            ("perfr_sampling_report", json!({})),
+            ("perfr_callstacks", json!({"limit": 3})),
+            ("perfr_function_stats", json!({"query": "x", "order": "count"})),
+            ("perfr_logs", json!({"limit": 5, "scope": "a b"})),
+            ("perfr_story_find_threads", json!({"query": "x"})),
+            ("perfr_story_find_scopes", json!({"t0_ns": 1, "t1_ns": 2})),
+            ("perfr_story_cpu", json!({})),
+            ("perfr_story_hotspots", json!({"t0_ns": 1, "t1_ns": 2})),
+        ];
+        for (name, args) in calls {
+            let response = call(&mcp, 2, "tools/call", json!({"name": name, "arguments": args}));
+            let text = response["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{name}: {response}"));
+            for gone in ["HTTP 404", "HTTP 405", "has no /api/"] {
+                assert!(!text.contains(gone), "{name} asked the service for something it does not serve: {text}");
+            }
+        }
+    }
+
     #[test]
     fn remote_url_and_remote_bind_are_refused() {
         match Mcp::connect("http://10.1.2.3:44766", false, tools::Platform::linux()) {

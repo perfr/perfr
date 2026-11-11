@@ -585,25 +585,12 @@ impl ScopeRingReader {
         }
     }
 
-    /// Frees the slots of readers that exited while capturing, returning
-    /// their counts. Each slot is freed by exactly one compare-exchange, so a
-    /// count is returned once however many readers sweep at the same time.
     fn free_dead_leases(&self) {
-        for pid in &self.leases().pids {
-            let holder = pid.load(Ordering::Acquire);
-            if holder != 0
-                && !process_alive(holder)
-                && pid.compare_exchange(holder, 0, Ordering::AcqRel, Ordering::Relaxed).is_ok()
-            {
-                self.drop_count();
-            }
-        }
+        self.leases().free_dead(&self.header().capturing);
     }
 
-    /// Never below zero: a reader built before the count (a plain store of
-    /// 0 or 1) may have reset it under the leases.
     fn drop_count(&self) {
-        let _ = self.header().capturing.fetch_update(Ordering::Release, Ordering::Relaxed, |n| n.checked_sub(1));
+        ring::drop_count(&self.header().capturing);
     }
 
     pub fn rings(&self) -> &Rings {
@@ -668,13 +655,6 @@ fn process_owner(pid: u32) -> Option<u32> {
 /// `ScopeRingReader::lease` values other than a slot number (1-based).
 const NO_LEASE: u32 = 0;
 const UNSLOTTED_LEASE: u32 = u32::MAX;
-
-/// Whether `pid` still runs. EPERM means it does, under another user.
-fn process_alive(pid: u32) -> bool {
-    // SAFETY: signal 0 only checks the pid; nothing is delivered.
-    let signalled = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
-    signalled || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
 
 /// CLOCK_MONOTONIC in nanoseconds.
 ///

@@ -22,6 +22,7 @@ members = [
     "crates/perfr-lib",
     "crates/perfr-lib-windows",
     "crates/perfr-hook",
+    "crates/perfr-frida-build",
     "crates/perfr-frida-transport",
     "crates/perfr-gpu",
     "crates/perfr-live-chrome",

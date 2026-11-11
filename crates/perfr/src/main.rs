@@ -525,6 +525,12 @@ fn capture_file_linux(args: Args) {
         // is something to sample.
         if sampling_self {
             busy_accumulator = burn_cpu(busy_accumulator);
+        } else {
+            // The kernel rings hold megabytes; reading them every few
+            // milliseconds loses nothing, where reading them flat out took a
+            // whole core on the machine being measured and put this loop at
+            // the top of the scheduling trace it records.
+            std::thread::sleep(Duration::from_millis(5));
         }
         if let Some(helper) = gpu_helper.as_mut() {
             for event in helper.drain() {

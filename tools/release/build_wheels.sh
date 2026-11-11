@@ -124,9 +124,9 @@ build_frida_companions() {
   echo "-- Frida companions ($triple)"
   local -a cargo
   if [[ "$triple" != "$host" ]] && ! native_mac "$key" && ! native_windows "$key"; then
-    cargo=(cargo zigbuild --release --target "$triple")
+    cargo=(cargo zigbuild --locked --release --target "$triple")
   else
-    cargo=(cargo build --release --target "$triple")
+    cargo=(cargo build --locked --release --target "$triple")
   fi
   "${cargo[@]}" --manifest-path "$ROOT/Cargo.toml" -p perfr-hook >/dev/null
   local helper=perfr-hook
@@ -142,13 +142,17 @@ build_frida_companions() {
   cp "$ROOT/tools/frida/licenses/"* "$dest/licenses/"
 }
 
+# --locked everywhere, as in release-rust.yml: the wheel and the GitHub release
+# for one tag must resolve the same dependency versions, and a lock that is
+# out of date should stop the build, not be rewritten by it.
+#
 # cargo_for <key> <manifest> <target> [extra cargo args]
 cargo_for() {
   local key=$1 manifest=$2 target=$3; shift 3
   if native_mac "$key" || native_windows "$key"; then
-    cargo build --release --manifest-path "$manifest" --target "$target" "$@" >/dev/null
+    cargo build --locked --release --manifest-path "$manifest" --target "$target" "$@" >/dev/null
   else
-    cargo zigbuild --release --manifest-path "$manifest" --target "$target" "$@" >/dev/null
+    cargo zigbuild --locked --release --manifest-path "$manifest" --target "$target" "$@" >/dev/null
   fi
 }
 

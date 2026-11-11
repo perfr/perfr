@@ -316,6 +316,27 @@ pub unsafe fn init_region(
     pid: u32,
 ) {
     std::ptr::write_bytes(base, 0, layout_size(ring_count, slots_per_ring));
+    init_zeroed_region(base, ring_count, slots_per_ring, pid);
+}
+
+/// As [`init_region`], for a region the caller knows to be all zero already:
+/// a file the operating system has just created and extended.
+///
+/// Storing zeroes into such a file is not free. It touches every page, and a
+/// shared mapping backs every page that is touched: the default segment went
+/// from one resident page to all 32 MiB of tmpfs, 13 to 22 ms inside the
+/// host's `perfr_init()`, for a process nobody might ever capture. On a
+/// `/dev/shm` without that much room the store that found it out was the
+/// memset itself, as a SIGBUS in the application.
+///
+/// # Safety
+/// As [`init_region`], and every byte of the layout must read as zero.
+pub(crate) unsafe fn init_zeroed_region(
+    base: *mut u8,
+    ring_count: usize,
+    slots_per_ring: usize,
+    pid: u32,
+) {
     let header = base.cast::<Header>();
     (*header).version = VERSION;
     (*header).ring_count = ring_count as u32;
@@ -323,7 +344,7 @@ pub unsafe fn init_region(
     (*header).event_size = EVENT_SIZE as u32;
     (*header).pid = pid;
     (*header).api_version = API_VERSION;
-    // capturing is left at zero by the write_bytes above: a fresh segment is
+    // capturing is left at the zero the region came with: a fresh segment is
     // not being captured until a service says so.
 
     // Magic last and with release ordering: a consumer that sees the magic

@@ -2,26 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The remaining pure-logic bookkeeping of `src/LinuxTracing`, one module per
-//! ported class:
+//! Pure-logic bookkeeping shared by the capture backends, one module each:
 //!
 //!  - [`context_switches`]: pairs switch-in and switch-out per core into
-//!    scheduling slices (`ContextSwitchManager`).
+//!    scheduling slices. Fed by Linux perf records and by Windows ETW.
 //!  - [`function_calls`]: per-thread stacks of entered instrumented functions,
-//!    matched with their exits (`UprobesFunctionCallManager`).
-//!  - [`uprobe_addresses`]: resolves uprobe instruction pointers back to perfr
-//!    function ids through the target's memory maps (`UprobeAddressMap`).
-//!
-//! Not here, deliberately: `UprobesReturnAddressManager` and
-//! `LeafFunctionCallManager`, which are welded to libunwindstack -- a
-//! dependency the port keeps behind its existing C++ interface by design.
+//!    matched with their exits. Used by the uprobe engine.
+//!  - [`nvml`]: sampling cadence and record shapes for the NVIDIA helper.
+//!  - [`gpu`], [`cupti`]: GPU job correlation. Nothing feeds them yet.
 
 #![deny(unsafe_code)]
 
 use std::hash::{BuildHasherDefault, Hasher};
 
-/// The FxHash-style hasher shared by all three modules; see
-/// `perfr-perf-merge` for the rationale.
+/// The FxHash-style hasher shared by the modules here. `std`'s default
+/// SipHash is designed for untrusted keys; these are core numbers and thread
+/// ids on the capture hot path, so its DoS resistance buys nothing and the
+/// cycles matter.
 #[derive(Default)]
 pub struct FxHasher {
     state: u64,
@@ -41,14 +38,8 @@ impl Hasher for FxHasher {
 
 pub type FxBuildHasher = BuildHasherDefault<FxHasher>;
 
-/// A tid-keyed map on the capture hot path: FxHash, not SipHash.
-pub type TidMap<V> = std::collections::HashMap<i32, V, FxBuildHasher>;
-
 pub mod context_switches;
-pub mod return_addresses;
 pub mod function_calls;
 pub mod cupti;
 pub mod gpu;
 pub mod nvml;
-pub mod leaf_functions;
-pub mod uprobe_addresses;

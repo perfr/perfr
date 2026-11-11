@@ -268,20 +268,6 @@ pub fn parse_record_sample_with(
     Some(sample)
 }
 
-/// Where the event's capture timestamp lives, mirroring how TracerImpl
-/// reads it before deferring a record: a PERF_RECORD_SAMPLE opens with the
-/// sample id right after the header (`ReadSampleRecordTime`), every other
-/// record carries it in the `sample_id_all` tail.
-pub fn record_timestamp(bytes: &[u8]) -> Option<u64> {
-    let header = PerfEventHeader::parse(bytes)?;
-    if { header.kind } == crate::record_type::SAMPLE {
-        let start = PerfEventHeader::SIZE;
-        return SampleIdTidTimeStreamidCpu::parse(bytes.get(start..)?).map(|id| id.time);
-    }
-    parse_sample_id_all(bytes).map(|id| id.time)
-}
-
-
 /// `PERF_RECORD_MISC_SWITCH_OUT` in `perf_event_header::misc`: set when a
 /// context-switch record marks the thread switching OUT (cleared for a
 /// switch IN).

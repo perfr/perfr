@@ -587,7 +587,12 @@ in the URL opens a tab on load.
   `/api/sampling/report` and `/api/sampling/tree` (with `t0`, `t1`, `tid`
   or `scope=<name id>`), `/api/timeline`, `/api/frame`, `/api/config`,
   `/api/self/start|stop`, `/api/demo/start|stop`, and the `/ws` event
-  stream.
+  stream. There is no authentication, so the service decides by `Host` and
+  `Origin` who it answers: its own viewer (opened by IP address or as
+  `localhost`), and clients that are not web pages (curl, `perfr mcp`, a
+  peer) addressing it by IP address, `localhost` or the machine's own host
+  name. A page on another origin, or one whose DNS name was pointed at the
+  service, gets 403 on every route including the WebSockets.
 - **Readouts for a harness.** The page publishes `window.__perfr_sel`
   (selection, focus, tab, wire, socket rate, view, event count),
   `window.__perfr_ui` (the rectangle of every pill, report tab, menu item,

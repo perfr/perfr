@@ -394,6 +394,30 @@ impl Inbox {
     }
 }
 
+/// Tells the latest request of one kind from those it replaced.
+///
+/// The report, the call tree, the disassembly and the source file each have
+/// one slot in the inbox and replies that say nothing of the request they
+/// answer. Two requests in flight could finish in either order, and the
+/// slower one won: a long selection's report landing over the short one
+/// made after it, the panel then showing a selection that was no longer
+/// there. A request takes a number, and its reply is dropped unless that
+/// number is still the latest.
+#[derive(Clone, Default)]
+pub struct Latest(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+impl Latest {
+    /// A new request: every earlier one of this kind is now stale.
+    pub fn next(&self) -> u64 {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+    }
+
+    /// Whether the request numbered `seq` is still the one being waited for.
+    pub fn is(&self, seq: u64) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst) == seq
+    }
+}
+
 /// The one Share upload that may be on its way, so it can be stopped.
 ///
 /// `H` is the handle that aborts the request once it is being sent (the
@@ -759,6 +783,12 @@ mod wasm_impl {
         offline: bool,
         /// The Share upload in flight, kept so it can be aborted.
         upload: Arc<Mutex<ShareUpload<web_sys::XmlHttpRequest>>>,
+        /// The latest request for each inbox slot whose replies do not name
+        /// their request: both report forms share one, both tree forms too.
+        report_seq: Latest,
+        tree_seq: Latest,
+        disassembly_seq: Latest,
+        source_seq: Latest,
     }
 
     impl Net {
@@ -777,6 +807,10 @@ mod wasm_impl {
                 ws,
                 offline: false,
                 upload: Arc::default(),
+                report_seq: Latest::default(),
+                tree_seq: Latest::default(),
+                disassembly_seq: Latest::default(),
+                source_seq: Latest::default(),
             }
         }
 
@@ -809,6 +843,10 @@ mod wasm_impl {
                 ws: Arc::new(Mutex::new(None)),
                 offline: true,
                 upload: Arc::default(),
+                report_seq: Latest::default(),
+                tree_seq: Latest::default(),
+                disassembly_seq: Latest::default(),
+                source_seq: Latest::default(),
             }
         }
 
@@ -1298,10 +1336,14 @@ mod wasm_impl {
             }
             let query = ranges_query(ranges);
             let inbox = self.inbox.clone();
+            let (latest, seq) = (self.report_seq.clone(), self.report_seq.next());
             wasm_bindgen_futures::spawn_local(async move {
                 let result = get_text(&format!("/api/sampling/report{query}"))
                     .await
                     .and_then(|t| parse_sampling_report_json(&t));
+                if !latest.is(seq) {
+                    return;
+                }
                 let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
                 match result {
                     Ok(r) => g.sampling = Some(r),
@@ -1318,10 +1360,14 @@ mod wasm_impl {
                 return;
             }
             let inbox = self.inbox.clone();
+            let (latest, seq) = (self.report_seq.clone(), self.report_seq.next());
             wasm_bindgen_futures::spawn_local(async move {
                 let result = get_text(&format!("/api/sampling/report?scope={name_id}"))
                     .await
                     .and_then(|t| parse_sampling_report_json(&t));
+                if !latest.is(seq) {
+                    return;
+                }
                 let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
                 g.sampling = result.ok();
             });
@@ -1333,8 +1379,12 @@ mod wasm_impl {
             }
             let query = format!("/api/sampling/tree?scope={name_id}&mode={mode}");
             let inbox = self.inbox.clone();
+            let (latest, seq) = (self.tree_seq.clone(), self.tree_seq.next());
             wasm_bindgen_futures::spawn_local(async move {
                 let result = get_text(&query).await.and_then(|t| parse_sampling_tree_json(&t));
+                if !latest.is(seq) {
+                    return;
+                }
                 let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
                 g.tree = result.ok();
             });
@@ -1349,10 +1399,14 @@ mod wasm_impl {
             }
             let query = sampling_tree_query(ranges, mode);
             let inbox = self.inbox.clone();
+            let (latest, seq) = (self.tree_seq.clone(), self.tree_seq.next());
             wasm_bindgen_futures::spawn_local(async move {
                 let result = get_text(&format!("/api/sampling/tree{query}"))
                     .await
                     .and_then(|t| parse_sampling_tree_json(&t));
+                if !latest.is(seq) {
+                    return;
+                }
                 let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
                 g.tree = result.ok();
             });
@@ -1373,10 +1427,14 @@ mod wasm_impl {
                 return;
             }
             let inbox = self.inbox.clone();
+            let (latest, seq) = (self.disassembly_seq.clone(), self.disassembly_seq.next());
             wasm_bindgen_futures::spawn_local(async move {
                 let result = get_text(&url)
                     .await
                     .and_then(|t| serde_json::from_str::<crate::code::Disassembly>(&t).map_err(|e| format!("disassembly: {e}")));
+                if !latest.is(seq) {
+                    return;
+                }
                 let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
                 g.disassembly = Some(result);
             });
@@ -1389,10 +1447,14 @@ mod wasm_impl {
             }
             let inbox = self.inbox.clone();
             let url = format!("/api/code/source?path={}", percent_encode(path));
+            let (latest, seq) = (self.source_seq.clone(), self.source_seq.next());
             wasm_bindgen_futures::spawn_local(async move {
                 let result = get_text(&url)
                     .await
                     .and_then(|t| serde_json::from_str::<crate::code::SourceFile>(&t).map_err(|e| format!("source: {e}")));
+                if !latest.is(seq) {
+                    return;
+                }
                 let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
                 g.source = Some(result);
             });
@@ -2362,6 +2424,25 @@ mod tests {
             assert_eq!(inbox.queue_frame(message.clone(), true), Queued::Kept);
             assert_eq!(inbox.take_frames().len(), 2);
         }
+    }
+
+    #[test]
+    fn a_reply_to_a_request_that_was_replaced_is_stale() {
+        let slot = Latest::default();
+        // Two reports asked for in a row, the second before the first
+        // answered. Whatever order the answers come in, only the second's
+        // is wanted.
+        let first = slot.next();
+        let held_by_first = slot.clone();
+        let second = slot.next();
+        assert!(!held_by_first.is(first), "the replaced request still counts as the latest");
+        assert!(slot.is(second));
+        // One slot does not make another's requests stale.
+        let other = Latest::default();
+        let theirs = other.next();
+        slot.next();
+        assert!(other.is(theirs));
+        assert!(!slot.is(second));
     }
 
     #[test]

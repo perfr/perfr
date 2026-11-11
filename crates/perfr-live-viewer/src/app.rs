@@ -4985,9 +4985,10 @@ impl PerfrLiveApp {
                 .on_hover_text("Every function of the selected process, with a hooked column")
                 .clicked()
             {
-                self.report_open = true;
-                self.report_collapsed = false;
-                self.report_tab = ReportTab::Functions;
+                // Through the one opener that also undoes a collapse: a
+                // panel dragged shut keeps a width of next to nothing, and
+                // opened without a new one it collapsed again a frame later.
+                self.open_right_tab(ReportTab::Functions);
             }
             if manual > 0 && pill(ui, "Unhook all", false).clicked() {
                 self.selected_hooks.clear();
@@ -10351,10 +10352,14 @@ impl PerfrLiveApp {
                         self.measure = None;
                         self.sampling_ranges.clear();
                         self.scope_report = Some((pick.name_id, name.clone()));
-                        self.report_open = true;
-                        if matches!(self.report_tab, ReportTab::Live | ReportTab::Modules) {
-                            self.report_tab = ReportTab::Flat;
-                        }
+                        let tab = if matches!(self.report_tab, ReportTab::Live | ReportTab::Modules) {
+                            ReportTab::Flat
+                        } else {
+                            self.report_tab
+                        };
+                        // Not `report_open` alone: behind a collapsed panel
+                        // the report loaded where nobody could see it.
+                        self.open_right_tab(tab);
                         self.request_reports();
                         close = true;
                     }

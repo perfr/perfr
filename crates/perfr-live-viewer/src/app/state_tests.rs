@@ -1590,3 +1590,45 @@ fn a_press_on_a_window_over_the_splitter_is_not_a_splitter_grab() {
     page.frames(2);
     assert_eq!(page.app.report_w_last, width);
 }
+
+/// The report panel as dragging its splitter to the right edge leaves it:
+/// hidden behind its edge tab, with a width of next to nothing remembered.
+fn collapse_report_panel(page: &mut Page) {
+    page.app.open_right_tab(ReportTab::Flat);
+    page.frames(2);
+    page.app.report_w_user = Some(12.0);
+    page.frames(3);
+    assert!(page.app.report_collapsed, "a panel that narrow collapses once the button is up");
+}
+
+fn report_panel_is_showing(page: &Page) -> bool {
+    page.app.report_open && !page.app.report_collapsed && page.app.report_w_last > REPORT_COLLAPSE_W
+}
+
+#[test]
+fn the_functions_pill_brings_a_collapsed_report_panel_back() {
+    let mut page = three_thread_page();
+    page.app.selected_pid = Some(100);
+    collapse_report_panel(&mut page);
+    page.app.capture_open = true;
+    page.frames(3);
+    let pill = page.rect_of("Functions").expect("the settings have a Functions pill");
+    page.click(pill.center());
+    page.frames(4);
+    assert_eq!(page.app.report_tab, ReportTab::Functions);
+    assert!(report_panel_is_showing(&page), "the panel showed for a frame and collapsed again");
+}
+
+#[test]
+fn a_scope_report_from_the_menu_brings_a_collapsed_report_panel_back() {
+    let mut page = three_thread_page();
+    collapse_report_panel(&mut page);
+    let pick = ScopePick::from_event(scope(100, 101, 2_000_000, 5_000_000, 7));
+    page.app.scope_menu = Some((pick, Pos2::new(500.0, 300.0)));
+    page.frames(3);
+    let item = page.rect_of("menu:report").expect("the scope menu offers its report");
+    page.click(item.center());
+    page.frames(4);
+    assert!(page.app.scope_report.is_some());
+    assert!(report_panel_is_showing(&page), "the report loaded into a panel that stayed hidden");
+}

@@ -18,7 +18,7 @@ The MCP process is a client. The service has to be running first, on loopback:
 perfr --host 127.0.0.1
 ```
 
-That listens on `127.0.0.1:44766`. The HTTP API has no authentication. `--host 0.0.0.0`, the default when you pass `--serve` without `--host`, exposes attach and capture to the network. Leave it on `127.0.0.1` unless you mean to share it.
+That listens on `127.0.0.1:44766`, which is also what `perfr` and `perfr --serve` bind when `--host` is left out. The HTTP API has no authentication. `--host 0.0.0.0` exposes attach and capture to the network. Leave it on `127.0.0.1` unless you mean to share it.
 
 ## Claude Code
 

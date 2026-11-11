@@ -10,15 +10,21 @@ One viewer can show the processes of several machines on one timeline. The servi
 
 ## Link the machines
 
-On the machine you will watch from, start the service as usual and open its page. On every other machine, start the service pointed at the hub:
+A service listens on its own machine only unless `--host` says otherwise, so the side that is dialed has to be opened to the network. On the machine you will watch from, start the service where the others can reach it and open its page:
+
+```sh
+perfr --host 0.0.0.0 --serve
+```
+
+On every other machine, start the service pointed at the hub:
 
 ```sh
 perfr --join <hub-host>:44766
 ```
 
-The remote dials the hub, so it works from a container, a CI runner or anything behind a firewall that allows nothing inbound. It still serves its own viewer on its own port.
+The remote dials the hub, so it works from a container, a CI runner or anything behind a firewall that allows nothing inbound, and needs no `--host` of its own. It still serves its own viewer on its own port, to its own machine.
 
-The other way round, when the hub can reach the machines, is `--connect`:
+The other way round, when the hub can reach the machines, is `--connect`. Here the machines are the ones dialed, so each runs `perfr --host 0.0.0.0 --serve`, and the hub:
 
 ```sh
 perfr --connect render-01,build-mac:44766
@@ -30,7 +36,7 @@ or, with the hub already running, one request per machine:
 curl -X POST http://127.0.0.1:44766/api/peers/connect -d '{"target": "render-01"}'
 ```
 
-A target is `host`, `host:port` or a pasted `http://host:port/`; the port defaults to 44766. Name the machine by its IP address or by its own host name (what `hostname` prints there): a service answers only requests addressed to one of those, so another DNS name for the same machine is refused with a 403. A link that drops is redialed every two seconds by whichever side dialed it. Up to 64 machines can be linked to one hub.
+A target is `host`, `host:port` or a pasted `http://host:port/`; the port defaults to 44766. Name the machine by its IP address or by its own host name (what `hostname` prints there): a service answers only requests addressed to one of those, so another DNS name for the same machine is refused with a 403. `--host 0.0.0.0` puts an API with no authentication on the network; use it on networks you trust. A link that drops is redialed every two seconds by whichever side dialed it. Up to 64 machines can be linked to one hub.
 
 `GET /api/peers` lists the links: each machine's index, host name, core count, where its cores draw on the Scheduler track, and the state of its clock fit (below). `/api/status` reports how many machines are linked.
 

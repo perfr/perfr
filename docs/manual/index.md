@@ -36,7 +36,7 @@ irm https://perfr.dev/install.ps1 | iex
 perfr --serve 44766
 ```
 
-Open `http://127.0.0.1:44766/`. The process prints that URL and every LAN address, so another machine on the network can open the page. `--host` picks the bind address (default `0.0.0.0`; `--host 127.0.0.1` keeps it on this machine). `--wire raw|packed|deflate` picks the WebSocket encoding (default `packed`).
+Open `http://127.0.0.1:44766/`. The service listens on this machine only. `--host` picks the bind address (default `127.0.0.1`): with `--host 0.0.0.0` the process prints every LAN address too and another machine on the network can open the page, with no authentication in front of it. `--wire raw|packed|deflate` picks the WebSocket encoding (default `packed`).
 
 ## Attach and record
 

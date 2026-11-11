@@ -293,11 +293,14 @@ fn main() {
     }
     if parsed.serve.is_some() || parsed.join.is_some() || !parsed.connect.is_empty() {
         let port = parsed.serve.unwrap_or(serve::DEFAULT_PORT);
-        // The flag form binds every interface. There is no authentication
-        // in front of it; --host 127.0.0.1 keeps it on this machine.
-        // `perfr serve` binds loopback unless --host is set.
-        let host = parsed.host.clone().unwrap_or_else(|| "0.0.0.0".to_string());
+        // Loopback unless --host says otherwise, as `perfr serve` and
+        // `perfr` with no arguments: there is no authentication in front
+        // of the API, and this is the form ./run.sh --sudo runs as root.
+        let host = cli::bind_host(parsed.host.as_deref());
         let links = serve::Links { join: parsed.join.clone(), connect: parsed.connect.clone() };
+        if let Some(notice) = cli::loopback_link_notice(&host, links.join.is_some() || !links.connect.is_empty()) {
+            log::warn!("{notice}");
+        }
         if let Err(error) = serve::run_on(
             &host,
             port,
@@ -322,7 +325,7 @@ fn run_serve(opts: cli::ServeOpts) -> ! {
     }
     logging::install();
     let port = opts.port.unwrap_or(serve::DEFAULT_PORT);
-    let host = opts.host.unwrap_or_else(|| "127.0.0.1".to_string());
+    let host = cli::bind_host(opts.host.as_deref());
     let wire = match opts.wire.as_deref() {
         Some(text) => match perfr_live_server::WireFormat::parse(text) {
             Some(wire) => wire,

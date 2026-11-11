@@ -74,6 +74,35 @@ pub enum Front {
     Mcp,
 }
 
+/// The address every serving form binds when `--host` is not given: this
+/// machine only. Nothing authenticates a caller of the API behind it, and
+/// the service often runs as root, so being reachable from the network is
+/// something to ask for (`--host 0.0.0.0`, or one interface's address) and
+/// never what a bare `perfr --serve` or `./run.sh --sudo` does.
+pub const DEFAULT_HOST: &str = "127.0.0.1";
+
+/// The address to bind: `--host` when given, [`DEFAULT_HOST`] otherwise.
+/// One function for `perfr serve` and for the flag form (`--serve`,
+/// `--join`, `--connect`), which used to differ.
+pub fn bind_host(explicit: Option<&str>) -> String {
+    explicit.unwrap_or(DEFAULT_HOST).to_string()
+}
+
+/// What to say when a link between machines was asked for (`--join`,
+/// `--connect`) on a service bound to loopback. Both flags dial out, which
+/// works from there; but someone linking machines usually expects the others
+/// to reach this one as well, to open its viewer or to dial it, and they
+/// cannot. `None` when there is nothing to say.
+pub fn loopback_link_notice(host: &str, links_requested: bool) -> Option<String> {
+    let loopback = host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    (links_requested && loopback).then(|| {
+        format!(
+            "this service listens on {host} only: it can dial other machines, but they cannot reach it. \
+             Start it with --host 0.0.0.0 (or this machine's LAN address) to let them."
+        )
+    })
+}
+
 pub fn command() -> Command {
     Command::new("perfr")
         .version(version_text())
@@ -357,8 +386,9 @@ fn serve_cmd() -> Command {
     Command::new("serve")
         .about("Serve the live viewer")
         .after_help(
-            "With no --host, this binds 127.0.0.1, same as running perfr with no arguments.\n\
-             `perfr --serve` still binds 0.0.0.0 when --host is omitted.\n\n\
+            "With no --host, this binds 127.0.0.1, as `perfr` with no arguments and\n\
+             `perfr --serve` do. --host 0.0.0.0 opens it to the network, where nothing\n\
+             authenticates who connects.\n\n\
              Examples:\n  \
              perfr\n  \
              perfr serve --host 127.0.0.1 --port 44766",
@@ -367,7 +397,7 @@ fn serve_cmd() -> Command {
             Arg::new("host")
                 .long("host")
                 .value_name("ADDR")
-                .help("Bind address [default: 127.0.0.1]"),
+                .help(format!("Bind address [default: {DEFAULT_HOST}]")),
         )
         .arg(
             Arg::new("port")
@@ -757,6 +787,32 @@ mod tests {
         };
         assert_eq!(flags(&["perfr", "setup", "--yes"]), (true, false));
         assert_eq!(flags(&["perfr", "setup", "--yes", "--uprobes"]), (true, true));
+    }
+
+    #[test]
+    fn every_serving_form_binds_loopback_unless_a_host_is_given() {
+        assert_eq!(bind_host(None), "127.0.0.1");
+        assert_eq!(bind_host(Some("0.0.0.0")), "0.0.0.0");
+        assert_eq!(bind_host(Some("192.168.1.20")), "192.168.1.20");
+        // What `perfr serve --help` says is what happens.
+        let help = render(&["serve", "--help"]);
+        assert!(help.contains(&format!("[default: {}]", bind_host(None))), "{help}");
+        assert!(!help.contains("0.0.0.0 when --host is omitted"), "{help}");
+    }
+
+    #[test]
+    fn a_link_between_machines_on_a_loopback_bind_says_what_cannot_reach_it() {
+        for host in ["127.0.0.1", "127.0.0.2", "::1"] {
+            let notice = loopback_link_notice(host, true).unwrap_or_else(|| panic!("{host}: no notice"));
+            assert!(notice.contains("--host"), "{notice}");
+            assert!(notice.contains(host), "{notice}");
+            assert!(!notice.contains('\n'), "one line: {notice}");
+            // Nothing to say when no link was asked for.
+            assert_eq!(loopback_link_notice(host, false), None);
+        }
+        for host in ["0.0.0.0", "192.168.1.20", "::"] {
+            assert_eq!(loopback_link_notice(host, true), None, "{host}");
+        }
     }
 
     #[test]

@@ -222,6 +222,12 @@ impl ThreadStateTracer {
             }
             if opened == 0 {
                 report.failures.push(format!("{category}:{name}: {reason}"));
+            } else if opened < cpu_count {
+                // States on the CPUs without a ring are whatever the last
+                // record from another CPU said.
+                report.failures.push(format!(
+                    "{category}:{name}: opened on {opened} of {cpu_count} CPUs only: {reason}"
+                ));
             }
         }
         report.rings = rings.len();

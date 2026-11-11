@@ -1415,13 +1415,14 @@ async fn capture_start(
     }
     let json = local.to_json();
     let auto_profile = AutoProfileChoice::propose(&svc, local.auto_profile);
+    let starts_before = svc.capture_starts();
     match hooks_clone(&svc) {
         Some(h) => {
             let result = tokio::task::spawn_blocking(move || (h.start_capture)(&json)).await;
             auto_profile.settle(&svc, matches!(result, Ok(Ok(()))));
             match result {
                 Ok(Ok(())) => {
-                    svc.mark_capture_started(body.pid, 0);
+                    svc.mark_capture_requested(body.pid, starts_before);
                     svc.peers.send_start(remote_target);
                     StatusCode::OK.into_response()
                 }
@@ -1489,8 +1490,9 @@ impl AutoProfileChoice {
 pub fn start_capture_pid(svc: &Arc<LiveService>, pid: u32) -> Result<(), String> {
     let body: StartBody = serde_json::from_value(serde_json::json!({"pid": pid})).map_err(|e| e.to_string())?;
     let auto_profile = AutoProfileChoice::propose(svc, false);
+    let starts_before = svc.capture_starts();
     let started = match hooks_clone(svc) {
-        Some(h) => (h.start_capture)(&body.to_json()).map(|()| svc.mark_capture_started(pid, 0)),
+        Some(h) => (h.start_capture)(&body.to_json()).map(|()| svc.mark_capture_requested(pid, starts_before)),
         None => crate::demo::start(svc, 50_000),
     };
     auto_profile.settle(svc, started.is_ok());

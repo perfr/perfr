@@ -381,7 +381,9 @@ fn nothing_from_before_the_capture_start_reaches_the_ring() {
     svc.mark_capture_started(7, 0);
     assert_eq!(svc.capture_start_ns(), 1_000);
     svc.push_event(ev(50)); // start 500: before
-    svc.push_events(&[ev(90), ev(100), ev(200)]); // 900 before, 1000 and 2000 in
+    // 900 before, 1000 and 2000 in: the caller is told how many were kept.
+    assert_eq!(svc.push_events(&[ev(90), ev(100), ev(200)]), 2);
+    assert_eq!(svc.push_events(&[]), 0);
     assert_eq!(svc.stats().events_live, 2);
     assert_eq!(svc.dropped_before_start(), 2);
     assert_eq!(svc.stats().oldest_start_ns, 1_000);
@@ -918,6 +920,43 @@ fn hooks_with_start(start: impl Fn(&str) -> Result<(), String> + Send + Sync + '
         source_json: Arc::new(|_| Ok("{}".into())),
         example_disassembly_json: Arc::new(|| Ok("{}".into())),
     }
+}
+
+#[test]
+fn a_capture_that_came_and_went_before_record_returned_is_not_marked_running() {
+    let (svc, served) = serve_small();
+    let mut viewer = svc.subscribe();
+    // The capture thread is started by the hook and runs on its own. Here
+    // it gets as far as its real start and then gives up (its target is
+    // gone already), all before the request that started it is answered.
+    let capture = svc.clone();
+    svc.set_hooks(hooks_with_start(move |_| {
+        capture.mark_capture_started(42, 1_000);
+        capture.mark_capture_finished();
+        Ok(())
+    }));
+    assert_eq!(send_json(&served, "POST", "/api/capture/start", r#"{"pid":42}"#).0, 200);
+    assert!(!svc.is_capturing(), "marked as capturing with nothing running");
+    assert_eq!(svc.capture_pid(), 42);
+    let mut marks = Vec::new();
+    while let Ok(bytes) = viewer.try_recv() {
+        for frame in decode_all(&bytes).unwrap() {
+            match frame {
+                LiveFrame::CaptureStarted { start_ns, .. } => marks.push(format!("started {start_ns}")),
+                LiveFrame::CaptureFinished => marks.push("finished".into()),
+                _ => {}
+            }
+        }
+    }
+    // No second start, with no clock, after the end: it emptied every
+    // viewer and left them waiting for a capture that was over.
+    assert_eq!(marks, ["started 1000", "finished"]);
+
+    // The usual order still marks the capture at once, clock or no clock.
+    svc.set_hooks(hooks_with_start(|_| Ok(())));
+    assert_eq!(send_json(&served, "POST", "/api/capture/start", r#"{"pid":43}"#).0, 200);
+    assert!(svc.is_capturing());
+    assert_eq!(svc.capture_pid(), 43);
 }
 
 #[test]

@@ -219,12 +219,14 @@ pub fn ingest(svc: &LiveService, body: EventsBody, now: ClockNow) -> EventsSumma
         ));
     }
 
-    let dropped_before = svc.dropped_before_start();
-    svc.push_events(&events);
-    let dropped = svc.dropped_before_start() - dropped_before;
+    // Counted from what this push kept. Read off the service's counter
+    // before and after, the difference also took in what other producers
+    // dropped meanwhile, and wrapped when a capture start zeroed the
+    // counter in between.
+    let accepted = svc.push_events(&events) as u64;
     EventsSummary {
-        accepted: events.len() as u64 - dropped,
-        dropped_before_start: dropped,
+        accepted,
+        dropped_before_start: events.len() as u64 - accepted,
         named,
         monotonic_now_ns: now.monotonic_ns,
         capture_start_ns: svc.capture_start_ns(),
@@ -443,6 +445,34 @@ mod tests {
         assert_eq!(summary.capture_start_ns, 115);
         let (_, events) = svc.ring().snapshot();
         assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn the_summary_counts_this_requests_events_whatever_else_is_dropped_meanwhile() {
+        let svc = service();
+        svc.mark_capture_started(0, 115);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            // Captures starting one after the other (each zeroes the count
+            // of events dropped for starting too early) and another
+            // producer whose events are dropped too.
+            scope.spawn(|| {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    svc.mark_capture_started(0, 115);
+                    svc.push_events(&[LiveEvent { start_ns: 1, ..LiveEvent::default() }]);
+                }
+            });
+            // Whatever happens, the other thread is told to stop: a panic
+            // in here would otherwise wait on it for good.
+            let counts = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                (0..20_000)
+                    .map(|_| ingest(&svc, body(), ClockNow { monotonic_ns: 1_000, unix_ns: 5_000 }))
+                    .map(|summary| (summary.accepted, summary.dropped_before_start))
+                    .find(|counts| *counts != (2, 2))
+            }));
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(counts.expect("counting the dropped events overflowed"), None);
+        });
     }
 
     #[test]

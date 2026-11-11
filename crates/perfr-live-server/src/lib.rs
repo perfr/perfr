@@ -266,6 +266,9 @@ pub struct LiveService {
     /// scope drained from an app's ring that was open before Record, or an
     /// agent's back-dated timestamp, cannot put anything left of the start.
     capture_start_ns: AtomicU64,
+    /// How many captures have marked a start with a clock: see
+    /// `mark_capture_requested`.
+    capture_starts: AtomicU64,
     dropped_before_start: AtomicU64,
     /// The pid the running (or last) capture targets; 0 when none.
     capture_pid: AtomicU64,
@@ -442,6 +445,7 @@ impl LiveService {
             data_gen: AtomicU64::new(0),
             live_end_ns: AtomicU64::new(0),
             capture_start_ns: AtomicU64::new(0),
+            capture_starts: AtomicU64::new(0),
             dropped_before_start: AtomicU64::new(0),
             capture_pid: AtomicU64::new(0),
             index_cache: Mutex::new(None),
@@ -765,9 +769,11 @@ impl LiveService {
         self.config.lock().wire
     }
 
-    pub fn push_events(&self, events: &[LiveEvent]) {
+    /// Pushes a batch and returns how many of its events were kept: the
+    /// rest started before the capture did, and were counted as dropped.
+    pub fn push_events(&self, events: &[LiveEvent]) -> usize {
         if events.is_empty() {
-            return;
+            return 0;
         }
         let kept: Vec<LiveEvent>;
         let events = if events.iter().any(|e| self.before_capture_start(e)) {
@@ -775,13 +781,14 @@ impl LiveService {
             self.dropped_before_start
                 .fetch_add((events.len() - kept.len()) as u64, Ordering::Relaxed);
             if kept.is_empty() {
-                return;
+                return 0;
             }
             kept.as_slice()
         } else {
             events
         };
         self.admit_events(events);
+        events.len()
     }
 
     /// Loads events read back from a stored capture. Nothing is refused for
@@ -881,11 +888,38 @@ impl LiveService {
             return;
         }
         if start_ns > 0 {
+            self.capture_starts.fetch_add(1, Ordering::Relaxed);
             self.capture_start_ns.store(start_ns, Ordering::Relaxed);
             self.dropped_before_start.store(0, Ordering::Relaxed);
         }
         self.live_end_ns.store(start_ns, Ordering::Relaxed);
         self.broadcast_frame(&LiveFrame::CaptureStarted { pid, start_ns });
+    }
+
+    /// How many captures have marked their start with a clock so far. Read
+    /// before asking the service to start one, for `mark_capture_requested`.
+    pub fn capture_starts(&self) -> u64 {
+        self.capture_starts.load(Ordering::Relaxed)
+    }
+
+    /// The provisional mark of a request whose capture the service has
+    /// just agreed to start: `mark_capture_started(pid, 0)`, unless that
+    /// capture has marked its own start since `starts_before` was read.
+    /// The capture runs on its own thread from the moment the start hook
+    /// spawns it, and can be ahead of the request by its whole life: it
+    /// marks its start, finds its target gone, and marks its end. A
+    /// provisional mark after that said "capturing" with nothing running,
+    /// for good, and told every viewer to start over on a capture that
+    /// was already finished. Only the pid is recorded then, as it is when
+    /// the capture is ahead and still running.
+    pub fn mark_capture_requested(&self, pid: u32, starts_before: u64) {
+        if self.capture_starts() != starts_before {
+            if pid > 0 {
+                self.capture_pid.store(pid as u64, Ordering::Relaxed);
+            }
+            return;
+        }
+        self.mark_capture_started(pid, 0);
     }
 
     /// Whether a capture is running now.

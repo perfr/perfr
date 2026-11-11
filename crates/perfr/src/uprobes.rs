@@ -181,8 +181,15 @@ struct ReturnFrame {
     sp: u64,
     return_address: u64,
     entry_ns: u64,
-    /// `u64::MAX` while the frame is still on the stack.
-    exit_ns: u64,
+    /// `u64::MAX` while the frame is still on the stack. A cell because an
+    /// orphaned frame is closed by the sample that shows it gone, and
+    /// patching a sample only reads the session.
+    exit_ns: std::cell::Cell<u64>,
+    /// The function's return probe is off, so no return hit will close this
+    /// frame: the first sample that finds the thread's stack pointer above
+    /// the slot does.
+    orphaned: bool,
+    function_id: u64,
 }
 
 /// Saved return addresses for the capture's stack samples.
@@ -197,10 +204,13 @@ struct ReturnFrame {
 #[derive(Default)]
 struct LiveReturns {
     by_tid: HashMap<i32, Vec<ReturnFrame>>,
+    /// Functions whose probes were switched off. Their entries can still be
+    /// read from the rings afterwards; the returns of those calls cannot.
+    unhooked: std::collections::HashSet<u64>,
 }
 
 impl LiveReturns {
-    fn note_entry(&mut self, tid: i32, sp: u64, return_address: u64, entry_ns: u64) {
+    fn note_entry(&mut self, tid: i32, function_id: u64, sp: u64, return_address: u64, entry_ns: u64) {
         if sp == 0 || return_address == 0 {
             return;
         }
@@ -208,8 +218,29 @@ impl LiveReturns {
             sp,
             return_address,
             entry_ns,
-            exit_ns: u64::MAX,
+            exit_ns: std::cell::Cell::new(u64::MAX),
+            orphaned: self.unhooked.contains(&function_id),
+            function_id,
         });
+    }
+
+    /// The function's probes are off. A call inside it right now will
+    /// return without a return hit, and so will every call whose entry is
+    /// still to be read; left open, such a frame had its return address
+    /// written into that stack slot of every later sample of the thread,
+    /// whatever the slot held by then.
+    fn unhook(&mut self, function_id: u64) {
+        self.unhooked.insert(function_id);
+        for frame in self.by_tid.values_mut().flatten() {
+            if frame.function_id == function_id && frame.exit_ns.get() == u64::MAX {
+                frame.orphaned = true;
+            }
+        }
+    }
+
+    /// The function is armed again: its calls from here on have return hits.
+    fn rehook(&mut self, function_id: u64) {
+        self.unhooked.remove(&function_id);
     }
 
     /// Closes every still-open hijack of `sp`. A tail call reuses the slot,
@@ -219,14 +250,14 @@ impl LiveReturns {
     fn close_sp(&mut self, tid: i32, sp: u64, exit_ns: u64) {
         let Some(stack) = self.by_tid.get_mut(&tid) else { return };
         for frame in stack.iter_mut() {
-            if frame.exit_ns == u64::MAX && frame.sp == sp {
-                frame.exit_ns = exit_ns;
+            if frame.exit_ns.get() == u64::MAX && frame.sp == sp {
+                frame.exit_ns.set(exit_ns);
             }
         }
     }
 
     fn has_open(&self) -> bool {
-        self.by_tid.values().any(|stack| stack.iter().any(|f| f.exit_ns == u64::MAX))
+        self.by_tid.values().any(|stack| stack.iter().any(|f| f.exit_ns.get() == u64::MAX))
     }
 
     fn frame_count(&self) -> usize {
@@ -238,10 +269,18 @@ impl LiveReturns {
         // Innermost first, so two hijacks of one slot (tail call) leave the
         // original return address, matching `UprobesReturnAddressManager`.
         for frame in frames.iter().rev() {
-            if frame.return_address == 0 || frame.entry_ns > sample_ns || frame.exit_ns <= sample_ns {
+            if frame.return_address == 0 || frame.entry_ns > sample_ns || frame.exit_ns.get() <= sample_ns {
                 continue;
             }
             if frame.sp < sample_sp {
+                // The slot is above the stack: the call has returned. With
+                // the probe armed its return hit says so (and when); a frame
+                // whose probe is gone ends here. Only those, so a sample on
+                // another stack (a signal handler's, a coroutine's) cannot
+                // end the frame of a hook that is still armed.
+                if frame.orphaned && frame.exit_ns.get() == u64::MAX {
+                    frame.exit_ns.set(sample_ns);
+                }
                 continue;
             }
             let offset = (frame.sp - sample_sp) as usize;
@@ -258,7 +297,7 @@ impl LiveReturns {
     /// returned.
     fn forget_closed_before(&mut self, horizon: u64) {
         self.by_tid.retain(|_, stack| {
-            stack.retain(|f| f.exit_ns == u64::MAX || f.exit_ns > horizon);
+            stack.retain(|f| f.exit_ns.get() == u64::MAX || f.exit_ns.get() > horizon);
             !stack.is_empty()
         });
     }
@@ -441,6 +480,7 @@ impl UprobeSession {
             return Err(if reason.is_empty() { "no cpu accepted the probe".into() } else { reason });
         }
         self.names.insert(hook.function_id, hook.name.clone());
+        self.returns.rehook(hook.function_id);
         Ok(armed_here)
     }
 
@@ -471,6 +511,7 @@ impl UprobeSession {
             }
         }
         self.rates.remove(&function_id);
+        self.returns.unhook(function_id);
         true
     }
 
@@ -503,6 +544,7 @@ impl UprobeSession {
                 let _ = perfr_perf_ring::ring::disable_fd(fd);
             }
             self.rates.remove(&function_id);
+            self.returns.unhook(function_id);
             let name = self.names.get(&function_id).cloned().unwrap_or_else(|| format!("function {function_id}"));
             if from_others > 0 {
                 // Otherwise the number contradicts what the timeline shows
@@ -766,7 +808,7 @@ impl UprobeSession {
                     }
                 }
                 self.open.entry(hit.tid).or_default().push(hit.sp);
-                self.returns.note_entry(hit.tid, hit.sp, hit.return_address, hit.timestamp_ns);
+                self.returns.note_entry(hit.tid, hit.function_id, hit.sp, hit.return_address, hit.timestamp_ns);
                 self.rates.entry(hit.function_id).or_default().count(hit.timestamp_ns, true);
                 *self.entry_hits.entry(hit.function_id).or_insert(0) += 1;
                 self.calls
@@ -1592,6 +1634,76 @@ mod tests {
         stack[0x10..0x18].copy_from_slice(&TRAMPOLINE.to_le_bytes());
         session.patch_user_stack(7, 0x1FF0, 4_000, &mut stack);
         assert_eq!(word_at(&stack, 0x10), TRAMPOLINE);
+    }
+
+    #[test]
+    fn a_call_in_flight_when_its_function_is_unhooked_is_forgotten_once_the_thread_has_left_it() {
+        // The return probe goes with the hook, so the call that was inside
+        // the function never produces a return hit and its frame stays open.
+        let mut session = empty_session();
+        session.fds_by_function.insert(9, Vec::new());
+        let mut enter = entry(1_000, 9, 0x2000, 0x1000, 0);
+        enter.return_address = 0xAAAA;
+        session.pending.push(enter);
+        session.flush();
+        assert!(session.remove_hook(9));
+        // Still inside the call, the trampoline is still in the slot.
+        let mut during = trampoline_at(0x20, 0x10);
+        session.patch_user_stack(7, 0x1FF0, 1_500, &mut during);
+        assert_eq!(word_at(&during, 0x10), 0xAAAA);
+        // A sample with the stack pointer above the slot: the call returned.
+        let mut above = vec![0u8; 0x20];
+        session.patch_user_stack(7, 0x2010, 2_000, &mut above);
+        assert_eq!(above, vec![0u8; 0x20]);
+        // The thread is that deep again on another path; the slot now holds
+        // a saved register, which the stale return address must not replace.
+        let mut later = vec![0u8; 0x20];
+        later[0x10..0x18].copy_from_slice(&0x5555u64.to_le_bytes());
+        session.patch_user_stack(7, 0x1FF0, 3_000, &mut later);
+        assert_eq!(word_at(&later, 0x10), 0x5555);
+        // A sample from before the return is still patched, as for a frame
+        // closed by its return hit.
+        let mut earlier = trampoline_at(0x20, 0x10);
+        session.patch_user_stack(7, 0x1FF0, 1_800, &mut earlier);
+        assert_eq!(word_at(&earlier, 0x10), 0xAAAA);
+        assert_eq!(session.sample_horizon(1_000_000_000), u64::MAX, "nothing left to wait for");
+    }
+
+    #[test]
+    fn an_entry_still_in_the_rings_when_its_function_is_auto_unhooked_is_forgotten_the_same_way() {
+        let mut session = empty_session();
+        session.fds_by_function.insert(9, Vec::new());
+        session.rates.insert(9, CallRate { window_start_ns: 0, entries: 200_000, from_others: 0 });
+        assert_eq!(session.enforce_call_limit(100_000).len(), 1);
+        // Read after the probes went off: its return will not come either.
+        let mut enter = entry(1_000, 9, 0x2000, 0x1000, 0);
+        enter.return_address = 0xAAAA;
+        session.pending.push(enter);
+        session.flush();
+        let mut above = vec![0u8; 0x20];
+        session.patch_user_stack(7, 0x2010, 2_000, &mut above);
+        let mut later = vec![0u8; 0x20];
+        later[0x10..0x18].copy_from_slice(&0x5555u64.to_le_bytes());
+        session.patch_user_stack(7, 0x1FF0, 3_000, &mut later);
+        assert_eq!(word_at(&later, 0x10), 0x5555);
+    }
+
+    #[test]
+    fn an_armed_hooks_frame_is_closed_by_its_return_and_not_by_where_a_sample_found_the_stack() {
+        // A signal handler on an alternate stack, or a coroutine, samples
+        // with a stack pointer that says nothing about this frame. While the
+        // return probe is armed, only the return ends it.
+        let mut session = empty_session();
+        session.fds_by_function.insert(9, Vec::new());
+        let mut enter = entry(1_000, 9, 0x2000, 0x1000, 0);
+        enter.return_address = 0xAAAA;
+        session.pending.push(enter);
+        session.flush();
+        let mut elsewhere = vec![0u8; 0x20];
+        session.patch_user_stack(7, 0x9000, 2_000, &mut elsewhere);
+        let mut back = trampoline_at(0x20, 0x10);
+        session.patch_user_stack(7, 0x1FF0, 3_000, &mut back);
+        assert_eq!(word_at(&back, 0x10), 0xAAAA);
     }
 
     #[test]

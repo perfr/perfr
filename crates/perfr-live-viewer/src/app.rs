@@ -954,6 +954,9 @@ pub struct PerfrLiveApp {
     had_keyboard_focus: bool,
     search: String,
     search_ids: HashSet<u32>,
+    /// Bumped each time `search_ids` changes: what the timeline's
+    /// dirty key holds for the search. Never 0, which there means "off".
+    search_gen: u64,
     search_resolved: String,
     search_intern_len: usize,
     /// The tracks box: words that a track's name must contain (any of them)
@@ -1809,6 +1812,7 @@ impl PerfrLiveApp {
             had_keyboard_focus: false,
             search: String::new(),
             search_ids: HashSet::new(),
+            search_gen: 1,
             search_resolved: String::new(),
             search_intern_len: 0,
             track_filter: crate::dev::query_track_filter_from_location().unwrap_or_default(),
@@ -2000,11 +2004,15 @@ impl PerfrLiveApp {
         }
         self.search_resolved = q.clone();
         self.search_intern_len = n;
-        self.search_ids = if q.is_empty() {
+        let ids = if q.is_empty() {
             HashSet::new()
         } else {
             self.intern.ids_matching(&q)
         };
+        if ids != self.search_ids {
+            self.search_ids = ids;
+            self.search_gen = self.search_gen.wrapping_add(1).max(1);
+        }
     }
 
     fn search_active(&self) -> bool {
@@ -6774,11 +6782,10 @@ impl PerfrLiveApp {
             events: self.index.event_count() as u64,
             selected: pick_key(self.selected),
             hover: pick_key(self.hover),
-            search: if self.search_active() {
-                self.search_ids.len() as u64 + 1
-            } else {
-                0
-            },
+            // The generation of the match set, not its size: two searches
+            // with as many matches (one Live row, then another) are not
+            // the same highlight, and the size said they were.
+            search: if self.search_active() { self.search_gen } else { 0 },
             thread_sel: self.thread_focus().selected,
             target: self.thread_focus().target_pid,
         };

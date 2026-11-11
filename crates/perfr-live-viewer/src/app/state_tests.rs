@@ -1153,3 +1153,46 @@ fn a_browser_shortcut_on_a_navigation_key_does_not_move_the_view() {
     page.frame(vec![key_event(Key::S, false)]);
     assert_ne!((page.app.t0, page.app.t1), view);
 }
+
+/// What the last timeline payload decided to upload: "Full", "Flags" or "Skip".
+fn upload_mode_of(page: &Page) -> String {
+    let draw: serde_json::Value = serde_json::from_str(&page.app.draw_readout).expect("the draw readout is JSON");
+    draw["mode"].as_str().expect("a mode").to_string()
+}
+
+/// A finished capture of two scopes with different names, drawn as with a GPU.
+fn two_name_page() -> Page {
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        draw_as_with_a_gpu(app);
+        feed(
+            app,
+            &[
+                hello(),
+                LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000_000 },
+                LiveFrame::InternedString { id: 7, text: "alpha".into() },
+                LiveFrame::InternedString { id: 8, text: "beta".into() },
+                LiveFrame::EventBatch { events: vec![scope(100, 101, 2_000_000, 500_000_000, 7), scope(100, 101, 600_000_000, 500_000_000, 8)] },
+                LiveFrame::CaptureFinished,
+            ],
+        );
+    });
+    page.frames(6);
+    page
+}
+
+#[test]
+fn a_search_for_another_name_with_as_many_matches_is_drawn() {
+    let mut page = two_name_page();
+    // A click on a Live row, a flame bar, "Highlight every instance".
+    page.app.search = "alpha".into();
+    page.frames(4);
+    assert_eq!(page.app.search_ids.len(), 1);
+    assert_eq!(upload_mode_of(&page), "Skip", "the frame is settled");
+    page.app.search = "beta".into();
+    page.frame(Vec::new());
+    assert_eq!(page.app.search_ids.len(), 1, "one match again");
+    assert_ne!(upload_mode_of(&page), "Skip", "the timeline keeps highlighting the previous search");
+    page.frames(3);
+    assert_eq!(upload_mode_of(&page), "Skip", "and settles again");
+}

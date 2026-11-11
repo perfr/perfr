@@ -17,6 +17,7 @@
 #   test     cargo test over the workspace, under a memory cap
 #   musl     the static release build of the service, as shipped
 #   wasm     the viewer compiled for wasm32
+#   docs     crates/README.md names every crate directory
 #
 # fmt and clippy count what they find and pass anyway: the tree is not clean
 # under either yet, and a gate that starts red only teaches people to ignore
@@ -38,7 +39,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 command -v cargo >/dev/null 2>&1 || export PATH="$HOME/.cargo/bin:$PATH"
 
-ALL_STEPS=(fmt clippy test musl wasm)
+ALL_STEPS=(fmt clippy test musl wasm docs)
 MUSL_TARGET=x86_64-unknown-linux-musl
 TARGET_DIR=${CARGO_TARGET_DIR:-target}
 STRICT=${PERFR_CI_STRICT:-0}
@@ -129,6 +130,21 @@ step_musl() {
 
 step_wasm() {
   cargo check --locked -p perfr-live-viewer --target wasm32-unknown-unknown
+}
+
+step_docs() {
+  # crates/README.md is the map contributors are sent to. It once described
+  # sixteen fewer crates than this directory held.
+  local missing=0 dir name
+  for dir in crates/*/; do
+    name=$(basename "$dir")
+    if ! grep -qF "\`$name\`" crates/README.md; then
+      echo "crates/README.md does not mention \`$name\`"
+      missing=1
+    fi
+  done
+  [ "$missing" -eq 0 ] && echo "crates/README.md names every crate"
+  return "$missing"
 }
 
 steps=("$@")

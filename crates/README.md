@@ -1,42 +1,102 @@
-# perfr's service-side Rust
+# The crates
 
-Rust implementations of parts of perfr's capture backend, ported one module at
-a time. As of Phase 2, **`ObjectUtils` runs entirely on Rust**: ELF, PE/COFF
-and PDB are read by the crates here, and LLVM is no longer a dependency of the
-tree at all.
+perfr is one Cargo workspace at the repository root, and every crate is a
+directory here. `cargo build -p perfr` compiles the capture service and
+nothing of the viewer's eframe/wgpu tree; `cargo test --workspace` covers
+all of it.
 
-- Plan: [rust-port-plan.html](https://perfr.dev/rust-port-plan.html) (in perfr-web)
-- Log:  [the dev blog](https://perfr.dev/blog/) (in perfr-web)
-- Why:  [rust-service-port.html](https://perfr.dev/rust-service-port.html) (in perfr-web)
-- Run:  `./run.sh` at the repository root builds the service with the Frida
+- Run: `./run.sh` at the repository root builds the service with the Frida
   helper and agent beside it and serves the viewer; `./run.sh --help` lists
   the flags.
+- Use: the manual is in [`docs/manual`](../docs/manual/index.md) and on
+  [perfr.dev](https://perfr.dev/).
+- Background: [the dev blog](https://perfr.dev/blog/) is the running account
+  of how each part was built and what it cost.
 
-## Sampling in the viewer
+## What each crate is
 
-Callstacks are sampled, symbolized and drawn as flame-graph spans, and
-`GET /api/sampling/report?start_ns=&end_ns=` returns a self/inclusive report
-for a time range. The per-thread sample bar and a selection-driven report
-panel are viewer-side work still to do -- see
-[docs/design/sampling-viewer-plan.md](../docs/design/sampling-viewer-plan.md).
+The service, and what a capture is stored as:
+
+| Crate | What it is |
+|---|---|
+| `perfr` | The capture service, one binary: the command line, the capture loop, symbolization and demangling (`cpp_demangle`, `msvc-demangler`, `rustc-demangle`), function hooks, auto-profiling, the MCP server, `perfr update`. It serves the viewer through `perfr-live-server`. |
+| `perfr-build-info` | Version, commit, build date and release tag, stamped once by its build script and shown by `perfr --version` and the viewer's About window. |
+| `perfr-capture` | A capture on disk: Arrow in memory, Parquet in the `.perfr.zip` bundle, and slicing a capture to a time range. |
+| `perfr-wire` | The pod wire format: a one-byte tag and fixed little-endian fields per event, no dependencies. |
+| `perfr-pod-dump` | Reads a pod capture and prints the machine, the event counts and the hottest callstacks. |
+
+Where the events come from on Linux:
+
+| Crate | What it is |
+|---|---|
+| `perfr-perf-records` | Packed layouts of the perf ring-buffer records the service reads. The kernel's `linux/perf_event.h` is the specification. No dependencies. |
+| `perfr-perf-ring` | `perf_event_open`, the event attributes and the mmap ring-buffer protocol. The unsafe code is confined to its `sys` module; `libc` is the one dependency. |
+| `perfr-unwind` | DWARF callstack unwinding over sampled stack copies, with `framehop` and `object`. |
+| `perfr-maps` | Parsing of `/proc/<pid>/maps`. No dependencies. |
+| `perfr-thread-states` | The per-thread state machine over the scheduler tracepoints. |
+| `perfr-tracing-state` | Bookkeeping that needs no kernel: pairing context switches, hooked calls, GPU samples. |
+| `perfr-gpu` | The NVIDIA telemetry helper, a separate process (see Distributing). |
+
+On Windows:
+
+| Crate | What it is |
+|---|---|
+| `perfr-etw` | Event Tracing for Windows: the kernel logger as the source of scheduling, thread states and samples. |
+
+Symbols:
+
+| Crate | What it is |
+|---|---|
+| `perfr-object` | ELF, PE/COFF and PDB: symbols, line tables, unwind tables and debug-file lookup, on `object`, `gimli`, `pdb` and `msvc-demangler`. Its `testdata/` holds the binaries the tests parse. |
+
+What runs inside a profiled program, and what puts it there:
+
+| Crate | What it is |
+|---|---|
+| `perfr-scope-ring` | The per-core lock-free rings in shared memory that an instrumented process writes and the service drains. |
+| `perfr-api` | Manual instrumentation: the C ABI behind `include/perfr.h`, the Rust API, the Python package, and the bindings for other languages in its subdirectories. Its own [README](perfr-api/README.md) is the user guide. |
+| `perfr-lib` | `libperfr`, the one library loaded into profiled processes: the manual API and, with the `native` feature, the Frida Gum hook agent. |
+| `perfr-lib-windows` | `perfr-lib` under the file name Windows needs (`libperfr.dll`), so its PDB does not collide with `perfr.exe`'s. |
+| `perfr-hook` | The Frida Core controller the service spawns to attach to a target and load `libperfr` into it. |
+| `perfr-frida-transport` | The capture lease and the counters shared by the service, the helper and the agent. |
+| `perfr-frida-build` | Build-script helper that compiles the two small C adapters against the Frida devkits (`tools/frida/devkits.sh` downloads them). A debug build without devkits links a stub, so workspace-wide commands work on a fresh checkout. |
+| `perfr-test-rust` | `PerfrTestRust`, a program that makes every manual-instrumentation call. Its C, C++ and Python siblings are in `tools/test-programs`. |
+
+The viewer and its server:
+
+| Crate | What it is |
+|---|---|
+| `perfr-live-event` | The 32-byte packed events the viewer's whole model is made of. |
+| `perfr-live-protocol` | Binary framing of the WebSocket stream between service and viewer. |
+| `perfr-live-ring` | The service's in-process ring of live events, with optional spill to disk. |
+| `perfr-live-server` | The HTTP and WebSocket server inside `perfr`. Its build script embeds the viewer pack (`perfr-live-viewer/viewer-dist`) into the binary, so a rebuilt pack needs a rebuilt service. |
+| `perfr-live-chrome` | Import of Chrome Trace Event JSON and Perfetto proto traces into live events. |
+| `perfr-live-render` | The pixel-column rasterizer of the timeline. |
+| `perfr-live-viewer` | The viewer: an eframe/egui application compiled to WebAssembly by `build_wasm.sh`. The built pack is committed in `viewer-dist/`. See its [README](perfr-live-viewer/README.md). |
+| `perfr-story` | The versioned story document (camera targets and overlays) shared by the viewer and the MCP server. |
+
+The `docs` step of `tools/ci.sh` fails when a directory here is missing from
+these tables.
 
 ## Distributing
 
 Three binaries and one library, and only the first is ever required.
 
-| File | Build | Size | Needs on the target | Required? |
+| File | Build | Size, stripped | Needs on the target | Required? |
 |---|---|---|---|---|
-| `perfr` | `tools/build/build-service-musl.sh` | ~12 MB | nothing (static, 0 `DT_NEEDED`) | always |
-| `libperfr.so` | `cargo build --release -p perfr-lib --features native` | ~3.4 MB stripped | glibc; loaded into the profiled program | manual instrumentation and function hooks |
-| `perfr-hook` | `cargo build --release -p perfr-hook` | ~15 MB stripped | glibc >= 2.34 | only for function hooks |
-| `perfr-gpu` | `cargo build --release -p perfr-gpu` | 361 KB | glibc >= 2.34, libgcc_s; NVIDIA driver at runtime | only for NVIDIA GPU telemetry |
+| `perfr` | `tools/build/build-service-musl.sh` | ~25 MB | nothing (static, 0 `DT_NEEDED`) | always |
+| `libperfr.so` | `cargo build --release -p perfr-lib --features native` | ~3.5 MB | glibc; loaded into the profiled program | manual instrumentation and function hooks |
+| `perfr-hook` | `cargo build --release -p perfr-hook` | ~15 MB | glibc >= 2.34 | only for function hooks |
+| `perfr-gpu` | `cargo build --release -p perfr-gpu` | ~450 KB | glibc >= 2.34, libgcc_s; NVIDIA driver at runtime | only for NVIDIA GPU telemetry |
 
-`perfr` is statically linked and runs on any x86-64 Linux with no
-runtime dependencies at all. It was ~865 KB before it grew the ability to
-serve the viewer UI; embedding the wasm pack and linking the axum/tokio HTTP
-stack is what takes it to ~12 MB. Still one self-contained file, but the
-"under a megabyte" figure in earlier posts predates serve mode. It never links or loads a GPU library, so it
-behaves identically on NVIDIA, AMD, and machines with no GPU.
+Sizes are of a build on 2026-11-11 with debug info removed; they move, and
+the notes of every release end with the sizes measured in that run.
+
+`perfr` is statically linked and runs on any x86-64 Linux with no runtime
+dependencies at all. About 10 MB of it is the embedded viewer pack; the
+rest is the service, the HTTP stack and the Arrow/Parquet writer. It never
+links or loads a GPU library, so it behaves identically on NVIDIA, AMD, and
+machines with no GPU.
 
 `perfr-gpu` is dynamically linked *on purpose*: static musl cannot
 `dlopen`, and NVML must be loaded at runtime. It does **not** link
@@ -75,8 +135,8 @@ perfr-pod-dump capture.pod --events   # every event, for debugging
 `perfr-pod-dump` is how you inspect a capture: it prints the machine it was
 taken on, the GPUs, the event counts and time span, and the hottest
 callstacks by sample count (addresses only -- symbolization is a later
-stage). With no `--pid`, the service profiles its own busy worker threads,
-which is the quickest way to confirm a build works.
+stage). With `--out` and no `--pid`, the service profiles its own busy
+worker threads, which is the quickest way to confirm a build works.
 
 Privileges: stack sampling needs `perf_event_paranoid <= 2`; system-wide
 scheduling needs `<= 0`; tracing another user's process also needs
@@ -91,8 +151,7 @@ privileges at all.
 
 ## Logs
 
-Every run keeps a log, the way the C++ service and the Qt UI did with
-`PERFR_LOG`: what goes to stderr also goes to
+Every run keeps a log: what goes to stderr also goes to
 `~/.perfr/logs/perfr-<utc time>-<pid>.log`, and files older
 than a week are removed when a new one opens. Under `sudo` the directory is
 the invoking user's and the file is chowned to them, so `./run.sh --sudo`
@@ -117,92 +176,23 @@ ends of a session. Two open tabs get different page ids.
 (or `trace`) says more. `--help`, `--slice` and the other one-shot tools leave
 no log behind.
 
-## Backends
-
-`ObjectUtils` has one implementation now; `PERFR_OBJECT_BACKEND` is gone with
-the C++ it selected. `ParseMaps` still keeps its small C++ twin:
-
-| Variable                      | Values              | Default | Selects                                    |
-| ----------------------------- | ------------------- | ------- | ------------------------------------------ |
-| `PERFR_MAPS_BACKEND`          | `rust` `cpp` `both` | `rust`  | `perfr_module_utils::ParseMaps`             |
-| `PERFR_PERF_MERGE_BACKEND`    | `rust` `cpp` `both` | `rust`  | `PerfEventQueue`'s ordering                 |
-| `PERFR_THREAD_STATES_BACKEND` | `rust` `cpp` `both` | `rust`  | `ThreadStateManager`                        |
-| `PERFR_TRACING_STATE_BACKEND` | `rust` `cpp` `both` | `rust`  | `ContextSwitchManager`, `UprobesFunctionCallManager`, `UprobeAddressMap` |
-
-The LinuxTracing defaults are rust by decision, with a measured per-event FFI
-toll accepted for now -- see `https://perfr.dev/blog/metrics/phase-3-reopened.txt` for the
-numbers and the path to removing it.
-
-`both` runs the two implementations on every call and aborts with both values
-printed if they disagree.
-
-To compare `ObjectUtils` against LLVM again, check out `c7c4e6566` — the last
-commit where both implementations and the three-backend switch exist. That
-switch is how nearly every bug in the port was found; see the log.
-
 ## Testing
 
 ```
 cargo test --workspace
 ```
 
-The C++ test files were the specification during the port: every Rust unit
-test that mirrors one names it in a comment. Those files, the three-backend
-switch and the differential tools that compared the two implementations are
-on the `cpp` branch of the Orbit repository (`rust/tools/differential` there); `main` carries only
-the Rust.
+works on a fresh checkout: `perfr-hook` is the one crate that needs the
+Frida devkits, and its debug build links a stub when they have not been
+downloaded.
 
-## Layout
+`tools/ci.sh` is what the `ci` workflow runs and what to run before pushing:
+rustfmt and clippy (both report-only until the tree is clean), the workspace
+tests under a memory cap, the static musl build of the service, the viewer
+checked for wasm32, and a check that this file names every crate. `tools/ci.sh test wasm` runs only the named steps.
 
-One Cargo workspace at the repository root; every crate is a directory here.
-The `perfr-live-*` crates are the browser viewer and its server
-(`perfr-live-viewer/README.md`). `perfr-story` is the versioned story
-document those two share with the MCP server. The rest is the capture
-service and what it is built from, one crate per concern. The `ffi/` adapters, the C++
-`shims/` and the differential `tools/` of the port are on the `cpp` branch of the Orbit repository.
-`https://perfr.dev/blog/26-where-everything-lives.html` draws the tree and the crate
-graph.
-
-`crates/perfr-maps` has no dependencies. `crates/perfr-object` replaces six
-LLVM libraries with five crates: `object`, `gimli`, `pdb`, `msvc-demangler`
-and `flate2` (for `SHF_COMPRESSED` debug sections).
-
-`crates/perfr-perf-records` is the wire layer of the Phase 4 collector: the
-packed perf ring-buffer record layouts, zero dependencies, verified against
-the C++ structs field by field by
-`src/LinuxTracing/PerfEventRecordsLayoutParityTest.cpp` on the `cpp` branch of the Orbit repository.
-
-`crates/perfr-perf-ring` owns the kernel interface: `perf_event_open`, the
-attr construction, and the mmap ring-buffer protocol, with unsafe confined
-to its `sys` module and one dependency (`libc`). Verified against the C++
-path by `rust/tools/differential/perf_ring_differential.cpp`.
-
-`crates/perfr-unwind` replaces libunwindstack with framehop + object for
-offline DWARF unwinding, adopting libunwindstack's adjusted-pc convention;
-`rust/tools/differential/stack_unwind_differential.cpp` holds the frames
-identical against the C++ on live samples.
-
-`crates/perfr` writes a metadata head into every capture
-(`SystemInfo`: CPU model, cores/threads, RAM, kernel, hostname, both clocks;
-`GpuInfo`: one merged record per GPU with PCI ids, VRAM, model, driver). It
-is the all-Rust capture service entry point: sample a
-process (unwind + intern callstacks), capture scheduling system-wide via
-per-CPU context-switch rings, and (where an AMD GPU is present) GPU jobs, all
-written as a pod stream. It
-builds as a **fully static musl binary** (`./build-service-musl.sh`). With the
-embedded viewer that binary is about 12 MB (see Distributing above); `ldd`
-reports "statically linked", and the service itself has no shared-library
-dependencies. The older "756 KB" figure is from before the viewer was embedded.
-
-`crates/perfr-wire` is the pod capture wire format: a one-byte tag plus
-fixed little-endian fields per event, zero dependencies, ~4.8x faster to
-parse than protobuf (at ~1.7x the bytes -- a deliberate CPU-for-bandwidth
-trade on the hot path). Round-trip tested and size/speed-differentialed
-against protobuf.
-
-Demangling is in the service (`demangle.rs`): `cpp_demangle` for Itanium
-names, `msvc-demangler` for `?`-prefixed ones, `rustc-demangle` for Rust,
-the input unchanged otherwise.
+The end-to-end suite that drives a real service and a headless browser is
+`tools/e2e` ([README](../tools/e2e/README.md)); it is run by hand.
 
 ## Building
 
@@ -213,9 +203,20 @@ the input unchanged otherwise.
 PATH="$HOME/.cargo/bin:$PATH" cargo test --workspace
 ```
 
-## The viewer crates
+The viewer pack is built separately, with a nightly toolchain, by
+`crates/perfr-live-viewer/build_wasm.sh`; a service build embeds whatever
+pack is in `viewer-dist/` at that moment.
 
-The `perfr-live-*` crates share the workspace and its lockfile but not the
-service's build: `cargo build -p perfr` links `perfr-live-server`
-and the event crates and never compiles the eframe/wgpu tree, which only
-`perfr-live-viewer` depends on.
+## History
+
+perfr began as a port of Orbit's C++ capture service, one module at a time,
+each Rust crate checked against the C++ it replaced before that C++ was
+removed. That is why some module docs and test comments name C++ files
+(`ElfFile.cpp`, `ThreadStateManager.cpp`, ...): they were the specification.
+None of that C++ is in this repository, and nothing here reads a
+`PERFR_*_BACKEND` variable any more. The C++ tree, the switches that ran both
+implementations side by side and the differential tools are on the `cpp`
+branch of the author's Orbit fork, `github.com/pierricgimmig/orbit`; the
+plan and the per-step write-ups are at
+[perfr.dev/rust-port-plan.html](https://perfr.dev/rust-port-plan.html) and
+on [the blog](https://perfr.dev/blog/).

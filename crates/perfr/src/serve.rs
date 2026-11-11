@@ -48,7 +48,7 @@ use perfr_live_server::{http, ControlHooks, LiveService, ServerConfig};
 #[cfg(target_os = "linux")]
 use perfr_perf_records::reader::parse_context_switch;
 #[cfg(target_os = "linux")]
-use perfr_perf_records::{record_type, ForkExit, PerfEventHeader};
+use perfr_perf_records::{record_type, ForkExit};
 #[cfg(target_os = "linux")]
 use perfr_tracing_state::context_switches::{ContextSwitchManager, SwitchOut};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -733,6 +733,20 @@ struct SampleCounters {
     records: u64,
     parsed: u64,
     short_regs: u64,
+    failed_drains: u64,
+}
+
+/// Counts the drains of one kind of perf ring that ended in a read error,
+/// and logs the first. The ring skips what it could not walk and reads on,
+/// so one line says what happened and the count at the end says how often;
+/// the errors used to be taken for an empty ring, which left the ring full
+/// and silent for the rest of the capture.
+#[cfg(target_os = "linux")]
+fn note_ring_error(failed_drains: &mut u64, what: &str, error: &std::io::Error) {
+    if *failed_drains == 0 {
+        log::warn!("reading a {what} ring failed: {error}");
+    }
+    *failed_drains += 1;
 }
 
 /// One stack sample held until the uprobe reorder horizon catches up to it.
@@ -748,13 +762,13 @@ struct HeldSample {
 /// to allocate a fresh perf record and a fresh stack copy every time; those
 /// sit below glibc's mmap threshold, so a few minutes of capture fragmented
 /// the heap into a gigabyte of RSS and the service was OOM-killed on a 2 GiB
-/// machine. `record` and `stack` are the steady-state path (unwind in place).
+/// machine. The record is now read where it lies in the ring, and `stack` is
+/// the steady-state path (the used part of the stack, unwound in place).
 /// `pool` keeps the stacks of samples held for the ~100 ms uprobe reorder
 /// window and takes them back after unwind, so a long capture stops
 /// allocating once the high-water mark of that window is reached.
 #[cfg(target_os = "linux")]
 struct SampleScratch {
-    record: Vec<u8>,
     stack: Vec<u8>,
     held: Vec<HeldSample>,
     pool: Vec<Vec<u8>>,
@@ -789,23 +803,21 @@ fn drain_samples(
         unwinder, symbolizer, pc_ids, names, store, target_pid, period_ns, batch, horizon_ns, returns, scratch,
     );
     for thread in threads.iter_mut() {
-        let ring = &mut thread.sample;
-        while ring.read_record_into(&mut scratch.record).unwrap_or(false) {
-            let Some(header) = PerfEventHeader::parse(&scratch.record) else { continue };
-            if { header.kind } != record_type::SAMPLE {
-                continue;
+        let read = thread.sample.drain(|kind, record| {
+            if kind != record_type::SAMPLE {
+                return;
             }
             counters.records += 1;
-            let Some(sample) = parse_record_sample_with(&scratch.record, sample_flags, true, Some(&mut scratch.stack)) else {
-                continue;
+            let Some(sample) = parse_record_sample_with(record, sample_flags, true, Some(&mut scratch.stack)) else {
+                return;
             };
             counters.parsed += 1;
-            let Some(regs) = sample.regs.clone() else { continue };
+            let Some(regs) = sample.regs else { return };
             if regs.len() < REGS_USER_ALL_COUNT || scratch.stack.is_empty() {
                 if regs.len() < REGS_USER_ALL_COUNT {
                     counters.short_regs += 1;
                 }
-                continue;
+                return;
             }
             if sample.time <= horizon_ns {
                 push_sample(
@@ -829,6 +841,9 @@ fn drain_samples(
                 owned.extend_from_slice(&scratch.stack);
                 scratch.held.push(HeldSample { time: sample.time, tid: sample.tid, regs, stack: owned });
             }
+        });
+        if let Err(error) = read {
+            note_ring_error(&mut counters.failed_drains, "sampling", &error);
         }
     }
 }
@@ -1395,7 +1410,6 @@ fn capture_loop(
     );
     let sample_flags = SampleFlags::stack_sample();
     let mut sample_scratch = SampleScratch {
-        record: Vec::new(),
         stack: Vec::new(),
         held: Vec::new(),
         pool: Vec::new(),
@@ -1573,6 +1587,8 @@ fn capture_loop(
     let mut self_stat = crate::selfstat::SelfStat::default();
 
     let mut switches = ContextSwitchManager::new();
+    let mut switch_failed_drains: u64 = 0;
+    let mut task_failed_drains: u64 = 0;
     let mut instrumented_calls: u64 = 0;
     let mut samples = SampleCounters::default();
     let mut batch: Vec<LiveEvent> = Vec::with_capacity(256);
@@ -1726,14 +1742,11 @@ fn capture_loop(
         }
         let _switches = perfr_api::scope("read context switches");
         for ring in switch_rings.iter_mut() {
-            while let Ok(Some(record)) = ring.read_record() {
-                let Some(header) = PerfEventHeader::parse(&record) else { continue };
-                if { header.kind } != record_type::SWITCH
-                    && { header.kind } != record_type::SWITCH_CPU_WIDE
-                {
-                    continue;
+            let read = ring.drain(|kind, record| {
+                if kind != record_type::SWITCH && kind != record_type::SWITCH_CPU_WIDE {
+                    return;
                 }
-                let Some(switch) = parse_context_switch(&record) else { continue };
+                let Some(switch) = parse_context_switch(record) else { return };
                 if switch.is_switch_out {
                     if let SwitchOut::Slice(slice) = switches.process_context_switch_out(
                         switch.pid,
@@ -1747,7 +1760,7 @@ fn capture_loop(
                         // Emitting them filled every core lane wall to wall and
                         // cost size and render time for no information.
                         if slice.tid == 0 {
-                            continue;
+                            return;
                         }
                         // Every real slice reaches the core lanes: the
                         // Scheduler track is system-wide, and a core row does
@@ -1776,6 +1789,9 @@ fn capture_loop(
                         switch.timestamp_ns,
                     );
                 }
+            });
+            if let Err(error) = read {
+                note_ring_error(&mut switch_failed_drains, "context-switch", &error);
             }
         }
         drop(_switches);
@@ -1787,22 +1803,24 @@ fn capture_loop(
             let mut born: Vec<i32> = Vec::new();
             for thread in threads.iter_mut() {
                 let Some(task) = thread.task.as_mut() else { continue };
-                while let Ok(Some(record)) = task.read_record() {
-                    let Some(header) = PerfEventHeader::parse(&record) else { continue };
-                    let kind = { header.kind };
+                let (own_tid, dead) = (thread.tid, &mut thread.dead);
+                let read = task.drain(|kind, record| {
                     if kind != record_type::FORK && kind != record_type::EXIT {
-                        continue;
+                        return;
                     }
-                    let Some(fe) = ForkExit::parse(&record) else { continue };
+                    let Some(fe) = ForkExit::parse(record) else { return };
                     if { fe.pid } as i32 != target_pid {
-                        continue;
+                        return;
                     }
                     let tid = { fe.tid } as i32;
                     if kind == record_type::FORK {
                         born.push(tid);
-                    } else if tid == thread.tid {
-                        thread.dead = true;
+                    } else if tid == own_tid {
+                        *dead = true;
                     }
+                });
+                if let Err(error) = read {
+                    note_ring_error(&mut task_failed_drains, "task-event", &error);
                 }
             }
             for tid in born {
@@ -2307,6 +2325,14 @@ fn capture_loop(
         log::warn!(
             "{unparsed} sample(s) failed to parse, {} had too few registers",
             samples.short_regs
+        );
+    }
+    let failed_drains = samples.failed_drains + switch_failed_drains + task_failed_drains;
+    if failed_drains > 0 {
+        log::warn!(
+            "{failed_drains} drain(s) of a perf ring hit a record that could not be read and skipped to the newest \
+             ({} sampling, {switch_failed_drains} context-switch, {task_failed_drains} task-event)",
+            samples.failed_drains
         );
     }
     if !hooks.is_empty() {

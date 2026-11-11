@@ -29,7 +29,7 @@ use perfr_perf_records::tracepoints::{
     TaskNewtask, TaskNewtaskLayout,
 };
 use perfr_perf_records::reader::{parse_record_sample, sample_bits, SampleFlags};
-use perfr_perf_records::{record_type, PerfEventHeader};
+use perfr_perf_records::record_type;
 use perfr_perf_ring::RingBuffer;
 use perfr_thread_states::{Slice, ThreadStateManager};
 
@@ -138,6 +138,8 @@ pub struct ThreadStateTracer {
     manager: ThreadStateManager,
     pending: Vec<Transition>,
     newest_seen_ns: u64,
+    /// Drains that ended in a read error, the first of which is logged.
+    failed_drains: u64,
     focus: Focus,
     /// Field offsets read from each tracepoint's tracefs `format` at open,
     /// so a kernel that moved a field is parsed by its own layout rather
@@ -228,6 +230,7 @@ impl ThreadStateTracer {
                 manager: ThreadStateManager::new(),
                 pending: Vec::new(),
                 newest_seen_ns: 0,
+                failed_drains: 0,
                 focus: Focus::all(),
                 switch_layout,
                 wakeup_layout,
@@ -277,13 +280,12 @@ impl ThreadStateTracer {
             regs_user_count: 0,
         };
         for (ring, kind) in self.rings.iter_mut() {
-            while let Ok(Some(record)) = ring.read_record() {
-                let Some(header) = PerfEventHeader::parse(&record) else { continue };
-                if { header.kind } != record_type::SAMPLE {
-                    continue;
+            let read = ring.drain(|record_kind, record| {
+                if record_kind != record_type::SAMPLE {
+                    return;
                 }
-                let Some(sample) = parse_record_sample(&record, flags, true) else { continue };
-                let Some(raw) = sample.raw_data.as_deref() else { continue };
+                let Some(sample) = parse_record_sample(record, flags, true) else { return };
+                let Some(raw) = sample.raw_data.as_deref() else { return };
                 let payload = match kind {
                     Kind::SchedSwitch => SchedSwitch::parse_with(raw, &self.switch_layout).and_then(|s| {
                         let prev_in = self.focus.contains_tid(s.prev_tid);
@@ -318,7 +320,7 @@ impl ThreadStateTracer {
                         Some(Payload::NewTask { tid: t.tid })
                     }),
                 };
-                let Some(payload) = payload else { continue };
+                let Some(payload) = payload else { return };
                 self.newest_seen_ns = self.newest_seen_ns.max(sample.time);
                 self.pending.push(Transition {
                     timestamp_ns: sample.time,
@@ -326,6 +328,14 @@ impl ThreadStateTracer {
                     emitting_pid: sample.pid as i32,
                     payload,
                 });
+            });
+            if let Err(error) = read {
+                // The ring has skipped what it could not walk and reads on;
+                // one line is enough to say it happened.
+                if self.failed_drains == 0 {
+                    log::warn!("reading a scheduling tracepoint ring failed: {error}");
+                }
+                self.failed_drains += 1;
             }
         }
         let horizon = self.newest_seen_ns.saturating_sub(REORDER_DELAY_NS);
@@ -430,6 +440,7 @@ mod tests {
             manager: ThreadStateManager::new(),
             pending: Vec::new(),
             newest_seen_ns: 0,
+            failed_drains: 0,
             focus: Focus::all(),
             switch_layout: SchedSwitchLayout::DEFAULT,
             wakeup_layout: SchedWakeupLayout::DEFAULT,

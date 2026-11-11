@@ -52,6 +52,12 @@ struct MemoryV2 {
     used: u64,
 }
 
+// The sizes NVML's header gives these. The driver writes through pointers
+// to them, and the first carries its own size in its version word: a field
+// added or reordered here must not build.
+const _: () = assert!(std::mem::size_of::<MemoryV2>() == 40);
+const _: () = assert!(std::mem::size_of::<Memory>() == 24);
+
 /// `NVML_STRUCT_VERSION(Memory, 2)`: the struct size in the low bits, the
 /// version in bits 24+.
 const MEMORY_V2_VERSION: c_uint = (std::mem::size_of::<MemoryV2>() as c_uint) | (2 << 24);
@@ -65,6 +71,8 @@ struct ProcessInfoV3 {
     gpu_instance_id: c_uint,
     compute_instance_id: c_uint,
 }
+
+const _: () = assert!(std::mem::size_of::<ProcessInfoV3>() == 24);
 
 /// `nvmlDeviceGet{Compute,Graphics}RunningProcesses_v3`: one signature, two
 /// lists.
@@ -130,12 +138,11 @@ impl Nvml {
                 return None;
             }
 
+            // Every symbol is resolved before the library is initialised: a
+            // driver missing a required one is given up on by unloading it,
+            // and unloading a library that has been initialised and not
+            // shut down leaves the driver with a client that vanished.
             let init = required!(handle, "nvmlInit_v2", unsafe extern "C" fn() -> c_int);
-            if init() != NVML_SUCCESS {
-                eprintln!("perfr-gpu: nvmlInit failed (no NVIDIA driver?)");
-                libc::dlclose(handle);
-                return None;
-            }
 
             let nvml = Nvml {
                 device_get_count: required!(handle, "nvmlDeviceGetCount_v2", unsafe extern "C" fn(*mut c_uint) -> c_int),
@@ -162,6 +169,13 @@ impl Nvml {
                 shutdown: required!(handle, "nvmlShutdown", unsafe extern "C" fn() -> c_int),
                 handle,
             };
+            if init() != NVML_SUCCESS {
+                eprintln!("perfr-gpu: nvmlInit failed (no NVIDIA driver?)");
+                // Not `drop(nvml)`: that would shut down what never started.
+                std::mem::forget(nvml);
+                libc::dlclose(handle);
+                return None;
+            }
             Some(nvml)
         }
     }
@@ -259,18 +273,28 @@ impl Nvml {
             if status != NVML_ERROR_INSUFFICIENT_SIZE {
                 return Vec::new();
             }
-            let mut infos = vec![ProcessInfoV3::default(); count as usize];
-            if get_processes(device, &mut count, infos.as_mut_ptr()) != NVML_SUCCESS {
-                return Vec::new();
+            // A process can start between the call that sizes the array and
+            // the call that fills it; NVML then asks for more room again.
+            // Taking that for "no processes" read as the target holding no
+            // GPU memory for that sample. A few rounds, then give up.
+            for _ in 0..4 {
+                let mut infos = vec![ProcessInfoV3::default(); count as usize];
+                match get_processes(device, &mut count, infos.as_mut_ptr()) {
+                    NVML_SUCCESS => {
+                        return infos
+                            .iter()
+                            .take(count as usize)
+                            .map(|info| ProcessMemory {
+                                pid: info.pid as i32,
+                                used_bytes: info.used_gpu_memory,
+                            })
+                            .collect();
+                    }
+                    NVML_ERROR_INSUFFICIENT_SIZE if count as usize > infos.len() => continue,
+                    _ => break,
+                }
             }
-            infos
-                .iter()
-                .take(count as usize)
-                .map(|info| ProcessMemory {
-                    pid: info.pid as i32,
-                    used_bytes: info.used_gpu_memory,
-                })
-                .collect()
+            Vec::new()
         }
     }
 }
@@ -357,6 +381,48 @@ mod tests {
 
     fn process(pid: i32, used_bytes: u64) -> ProcessMemory {
         ProcessMemory { pid, used_bytes }
+    }
+
+    /// A driver whose list grows between the call that sizes the array and
+    /// the call that fills it: one process when asked how many, two by the
+    /// time the array for one arrives.
+    unsafe extern "C" fn a_list_that_grows(_device: Device, count: *mut c_uint, infos: *mut ProcessInfoV3) -> c_int {
+        static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let listed: c_uint = if call == 0 { 1 } else { 2 };
+        if infos.is_null() || *count < listed {
+            *count = listed;
+            return NVML_ERROR_INSUFFICIENT_SIZE;
+        }
+        *count = listed;
+        for index in 0..listed {
+            *infos.add(index as usize) =
+                ProcessInfoV3 { pid: 100 + index, used_gpu_memory: 1 << 20, ..ProcessInfoV3::default() };
+        }
+        NVML_SUCCESS
+    }
+
+    #[test]
+    fn a_process_appearing_between_the_two_calls_does_not_empty_the_list() {
+        let processes = Nvml::running_processes(Some(a_list_that_grows), std::ptr::null_mut());
+        assert_eq!(processes, vec![process(100, 1 << 20), process(101, 1 << 20)]);
+    }
+
+    unsafe extern "C" fn an_empty_list(_device: Device, count: *mut c_uint, _infos: *mut ProcessInfoV3) -> c_int {
+        *count = 0;
+        NVML_SUCCESS
+    }
+
+    unsafe extern "C" fn a_list_that_never_fits(_device: Device, count: *mut c_uint, _infos: *mut ProcessInfoV3) -> c_int {
+        *count += 1;
+        NVML_ERROR_INSUFFICIENT_SIZE
+    }
+
+    #[test]
+    fn an_empty_list_and_one_that_never_settles_both_end() {
+        assert!(Nvml::running_processes(Some(an_empty_list), std::ptr::null_mut()).is_empty());
+        assert!(Nvml::running_processes(Some(a_list_that_never_fits), std::ptr::null_mut()).is_empty());
+        assert!(Nvml::running_processes(None, std::ptr::null_mut()).is_empty());
     }
 
     #[test]

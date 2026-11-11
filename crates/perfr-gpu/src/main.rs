@@ -111,7 +111,10 @@ fn main() {
     loop {
         let now = now_ns();
         if !sampler.is_due(now) {
-            std::thread::sleep(Duration::from_millis(1));
+            // To the next sample, not a millisecond at a time: this runs
+            // inside the machine being profiled, and a thousand wakeups a
+            // second to take ten samples showed on its scheduler track.
+            std::thread::sleep(sampler.until_due(now));
             continue;
         }
         let mut writer = Writer::new();

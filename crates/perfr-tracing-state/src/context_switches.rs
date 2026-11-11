@@ -32,8 +32,9 @@ pub struct ContextSwitchManager {
     open_switches_by_core: HashMap<u16, OpenSwitchIn, FxBuildHasher>,
 }
 
-/// The switch-out result: `Died` is the timestamp-regression `PERFR_CHECK` the
-/// C++ dies on, and the shim must die the same way.
+/// The switch-out result. `Died` is a switch-out stamped before the
+/// switch-in it would close, which per-core order rules out; no caller
+/// draws a slice for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SwitchOut {
     Died,

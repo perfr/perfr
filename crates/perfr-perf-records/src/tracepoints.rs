@@ -2,15 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The scheduling tracepoint payloads, ported from
-//! `src/LinuxTracing/KernelTracepoints.h`.
+//! The scheduling tracepoint payloads.
 //!
 //! A tracepoint sample's `RAW` payload is the tracepoint's own fields, laid
-//! out exactly as its `format` file in tracefs describes. The C++ hard-codes
-//! those layouts with `static_assert`s on the sizes rather than parsing the
-//! format file at runtime, and this does the same, offset for offset -- the
-//! offsets are ABI in practice, and a mismatch is the sort of thing the size
-//! assertions catch at compile time rather than in the field.
+//! out exactly as its `format` file in tracefs describes. The offsets are
+//! read from that file when a capture starts (`*Layout::from_format`); the
+//! compiled-in `DEFAULT` layouts are the fallback for a format file that
+//! cannot be read, and match the kernels measured so far.
 //!
 //! Reading is by explicit offset rather than by casting a packed struct, so
 //! nothing here needs `unsafe` and a short payload returns `None` instead of

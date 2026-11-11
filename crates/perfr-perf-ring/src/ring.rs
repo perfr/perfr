@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The consumer side of a perf ring buffer, twin of
-//! `PerfEventRingBuffer.cpp`: the kernel writes `data_head` and reads
-//! `data_tail`, we do the reverse, with acquire/release ordering on both.
+//! The consumer side of a perf ring buffer: the kernel writes `data_head`
+//! and reads `data_tail`, we do the reverse, with acquire/release ordering
+//! on both.
 
 use crate::attr::PerfEventAttr;
 use crate::protocol::split_for_read;
@@ -169,10 +169,11 @@ impl RingBuffer {
 
     /// How much of the ring holds unread data, 0.0 to 1.0.
     ///
-    /// The consumer's early warning: a ring that stays near full is one the
-    /// kernel is about to overwrite, and the events it overwrites are gone
-    /// with no record but a `PERF_RECORD_LOST`. Cheap enough to sample every
-    /// pass -- two atomic loads on a page we already touch.
+    /// The consumer's early warning. The ring is mapped writable, so the
+    /// kernel does not overwrite: once it is full, new records are dropped
+    /// until the tail moves, and all that is left of them is the count in a
+    /// `PERF_RECORD_LOST`. Cheap enough to sample every pass -- two atomic
+    /// loads on a page we already touch.
     pub fn fill_fraction(&self) -> f32 {
         let head = self.head().load(Ordering::Acquire);
         let tail = self.tail().load(Ordering::Relaxed);
@@ -393,8 +394,8 @@ impl Drop for RingBuffer {
     }
 }
 
-/// Convenience: open, enabled later by the caller. Mirrors the fd-per-kind
-/// helpers of `PerfEventOpen.h` for the kinds the differential exercises.
+/// Convenience, here and below: one function per kind of event the capture
+/// opens. The ring is enabled later, by the caller.
 pub fn open_mmap_task(pid: i32, cpu: i32, size_kb: u64) -> io::Result<RingBuffer> {
     RingBuffer::open(&crate::attr::mmap_task(), pid, cpu, size_kb)
 }

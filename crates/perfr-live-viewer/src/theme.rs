@@ -248,7 +248,8 @@ mod tests {
 
     /// The active scheme is process-wide. Tests that switch it, and tests
     /// that assert the default scheme's derived colours, take this so a
-    /// switch never lands mid-assertion on another thread.
+    /// switch never lands mid-assertion on another thread. Switchers restore
+    /// Nord before releasing it.
     fn scheme_lock() -> MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
@@ -265,8 +266,45 @@ mod tests {
     }
 
     #[test]
+    fn the_default_scheme_is_nord() {
+        let _guard = scheme_lock();
+        assert_eq!(theme::active().key, "nord");
+        let canvas = theme::active().canvas;
+        let (cr, cg, cb) = ((canvas >> 16) & 0xFF, (canvas >> 8) & 0xFF, canvas & 0xFF);
+        assert_eq!((cr, cg, cb), (0x2E, 0x34, 0x40));
+        // Nord has no explicit wash table, so a process band is a tint of
+        // its canvas, not perfr's near-black washes.
+        let w = process_track_wash(1);
+        assert!((w.r() as i32 - cr as i32).abs() <= 40);
+        assert!((w.g() as i32 - cg as i32).abs() <= 40);
+        assert!((w.b() as i32 - cb as i32).abs() <= 40);
+        assert!(w.r() > 0x28 || w.g() > 0x28 || w.b() > 0x28, "not the old near-black table");
+    }
+
+    #[test]
+    fn web_page_background_matches_the_default_canvas() {
+        // The HTML behind the canvas paints before wasm. It has to be the
+        // default scheme's canvas or the first paint flashes another palette.
+        let html = include_str!("../viewer-dist/index.html");
+        let canvas = perfr_live_event::theme::default_theme().canvas;
+        let css = format!(
+            "#{:02X}{:02X}{:02X}",
+            (canvas >> 16) & 0xFF,
+            (canvas >> 8) & 0xFF,
+            canvas & 0xFF
+        );
+        assert!(
+            html.contains(&format!("background: {css};")),
+            "index.html background should be the default canvas {css}"
+        );
+    }
+
+    #[test]
     fn reserved_pids_get_distinct_dark_washes() {
         let _guard = scheme_lock();
+        // The near-black wash table belongs to the perfr scheme, not to the
+        // Nord default.
+        theme::set_active(&theme::PERFR);
         let a = process_track_wash(1);
         let b = process_track_wash(2);
         let c = process_track_wash(3);
@@ -282,6 +320,7 @@ mod tests {
         assert_eq!(process_track_wash(99), process_track_wash(99));
         assert_ne!(process_track_wash_role(1, WashRole::Process), a);
         assert_ne!(process_track_wash_role(1, WashRole::Leaf), a);
+        theme::restore_default();
     }
 
     #[test]
@@ -311,17 +350,19 @@ mod tests {
         assert!(w.r() > 0x20 || w.g() > 0x20 || w.b() > 0x20, "not near-black");
         // Distinct processes get distinct bands.
         assert_ne!(process_track_wash(1234), process_track_wash(1237));
-        theme::set_active(&theme::PERFR);
+        theme::restore_default();
     }
 
     #[test]
     fn a_scheme_switch_changes_the_chrome_then_restores() {
         let _guard = scheme_lock();
-        let perfr_panel = PANEL();
+        assert_eq!(theme::active().key, "nord");
+        let nord_panel = PANEL();
         assert!(theme::set_active_by_key("dracula"));
-        assert_ne!(PANEL(), perfr_panel, "the panel colour follows the scheme");
-        theme::set_active(&theme::PERFR);
-        assert_eq!(PANEL(), perfr_panel);
+        assert_ne!(PANEL(), nord_panel, "the panel colour follows the scheme");
+        theme::restore_default();
+        assert_eq!(PANEL(), nord_panel);
+        assert_eq!(theme::active().key, "nord");
     }
 
     #[test]

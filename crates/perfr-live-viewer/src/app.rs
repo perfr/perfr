@@ -1630,7 +1630,9 @@ impl PerfrLiveApp {
         fonts::install(&cc.egui_ctx);
         // Pick the colour scheme before building visuals from it: `?theme=`
         // wins (a shared link or screenshot pins the look), else the reader's
-        // saved choice, else perfr's default.
+        // saved choice, else Nord. A stored `perfr` is kept; only a missing
+        // key gets the default. The active scheme is already Nord, so a fresh
+        // load does not paint the old palette and then correct it.
         if let Some(key) = crate::dev::query_theme_from_location().or_else(read_saved_theme) {
             perfr_live_event::theme::set_active_by_key(&key);
         }
@@ -12169,7 +12171,8 @@ const UI_TWEAKS_KEY: &str = "perfr_ui_tweaks";
 const THEME_KEY: &str = "perfr_theme";
 
 /// The colour scheme the reader last chose, from `localStorage`. `None` on
-/// native or a fresh browser -- the caller falls back to perfr's default.
+/// native or a fresh browser -- the caller leaves Nord, the default, in
+/// place. An explicit saved key, including `perfr`, is returned as-is.
 fn read_saved_theme() -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {

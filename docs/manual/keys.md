@@ -55,7 +55,7 @@ More also lists “Pan time: A / D”, “Zoom: W / S” and “Scroll tracks: �
 | `?report=` | Open a tab: `flat`, `top_down`, `bottom_up`, `modules`, `live`, `flame`, `functions`, `code`, `inspector`, `selection` |
 | `?tracks=` | Fill the tracks filter. `+` and `%20` are spaces |
 | `?collapse=scheduler` | Start with the scheduler track folded |
-| `?theme=` | `perfr`, `dracula`, `nord`, `gruvbox`, `solarized`, `solarized-light`, `gruvbox-light` |
+| `?theme=` | `perfr`, `dracula`, `nord`, `gruvbox`, `solarized`, `solarized-light`, `gruvbox-light`. Omitted, the viewer uses Nord unless `perfr_theme` is already saved |
 | `?webgpu` | Try WebGPU instead of WebGL2 |
 | `?capture=` | Open a `.perfr.stream` with no service. The site’s embedded viewer uses this |
 | `?story=` | Open a story on that capture. `demo` is the story shipped with the viewer; any other value is a URL of a `perfr.story` document. `?capture=` still chooses the capture |

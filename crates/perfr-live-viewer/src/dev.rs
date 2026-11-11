@@ -451,7 +451,9 @@ pub fn query_track_filter(search: &str) -> Option<String> {
 }
 
 /// `?theme=<key>` -- pick a colour scheme at load (perfr, dracula, nord,
-/// gruvbox, solarized). Lets a screenshot or a shared link pin the look.
+/// gruvbox, solarized, solarized-light, gruvbox-light). Lets a screenshot
+/// or a shared link pin the look. Without it, the viewer uses Nord unless
+/// `perfr_theme` is already saved.
 pub fn query_theme_from_location() -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {

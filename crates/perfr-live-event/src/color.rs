@@ -21,9 +21,9 @@ pub mod mode {
     pub const MANUAL_API: u8 = 2;
 }
 
-/// perfr's original six-colour scope palette, the default scheme's `scope`.
-/// The live palette is [`crate::theme::active`]`().scope`; this stays as the
-/// canonical default value and what the tests pin.
+/// perfr's original six-colour scope palette (`scope` on the perfr scheme).
+/// The live palette is [`crate::theme::active`]`().scope`. Nord is the
+/// default; this constant stays so the original palette can still be pinned.
 pub const THREAD_PALETTE: [u32; 6] = crate::theme::PERFR_SCOPE;
 
 /// Marquee / range selection, from the active scheme.

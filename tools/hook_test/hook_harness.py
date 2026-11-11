@@ -307,7 +307,9 @@ def main():
     parser.add_argument("--sudo", action="store_true", help="run the service privileged (uprobes)")
     parser.add_argument("--port", type=int, default=44820)
     parser.add_argument("--seconds", type=float, default=3.0, help="capture seconds per function")
-    parser.add_argument("--report", default=os.path.join(REPO, "docs/hook-test/report.md"))
+    # Under target/, which git ignores: the report is this run's output. It
+    # used to default to a tracked file, so every run left the tree modified.
+    parser.add_argument("--report", default=os.path.join(REPO, "target/hook-test/report.md"))
     args = parser.parse_args()
 
     if tomllib is None:

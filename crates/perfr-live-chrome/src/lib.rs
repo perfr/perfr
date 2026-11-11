@@ -767,6 +767,36 @@ mod tests {
     }
 
     #[test]
+    fn open_scopes_are_closed_at_the_end_of_the_trace_not_of_the_last_batch() {
+        // The viewer passes `finish` the end of the last batch it pumped.
+        // Files are not in time order across processes, so that batch can
+        // lie well before the end of the trace -- here it is one early
+        // instant of another process.
+        let json = r#"[
+          {"name":"open","ph":"B","ts":100,"pid":1,"tid":1},
+          {"name":"job","ph":"b","ts":150,"pid":1,"tid":1,"id":"7"},
+          {"name":"late","ph":"B","ts":900,"pid":1,"tid":2},
+          {"name":"late","ph":"E","ts":1000,"pid":1,"tid":2},
+          {"name":"early","ph":"i","ts":5,"pid":2,"tid":2}
+        ]"#;
+        let mut stream = ChromeStream::default();
+        let mut ing = ChromeIngestor::default();
+        stream.push(json.as_bytes());
+        stream.finish_input();
+        let mut evs = stream.pump(&mut ing, 1024);
+        let last_batch_end = evs.iter().map(|e| e.end_ns()).max().unwrap();
+        assert_eq!(last_batch_end, 5_001);
+        evs.extend(ing.finish(last_batch_end));
+        let by_name = |n: &str| {
+            *evs.iter()
+                .find(|e| ing.intern.get(e.name_id) == Some(n))
+                .unwrap_or_else(|| panic!("missing {n}"))
+        };
+        assert_eq!(by_name("open").end_ns(), 1_000_000);
+        assert_eq!(by_name("job").end_ns(), 1_000_000);
+    }
+
+    #[test]
     fn be_pairing_by_id() {
         let json = r#"[
           {"name":"A","ph":"B","ts":0,"pid":1,"tid":1,"id":"x"},

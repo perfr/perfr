@@ -1147,10 +1147,17 @@ impl ChromeIngestor {
         });
     }
 
-    /// Close any still-open B / async slices at `end_ns` so a truncated file
-    /// still shows the stack, and hand out the slices that waited for their
-    /// row (see [`ThreadSlices`]).
+    /// Close any still-open B / async slices so a truncated file still
+    /// shows the stack, and hand out the slices that waited for their row
+    /// (see [`ThreadSlices`]).
+    ///
+    /// They close at `end_ns` or at the latest time this ingestor has seen,
+    /// whichever is later. A caller that pumps in batches knows the end of
+    /// its last batch, and a file is not in time order across processes:
+    /// closed there, a scope still open at the end of the trace was cut
+    /// short, down to 1 ns when the batch ended before the scope began.
     pub fn finish(&mut self, end_ns: u64) -> Vec<LiveEvent> {
+        let end_ns = end_ns.max(self.content_max_ns.unwrap_or(0));
         let mut out = Vec::new();
         let stacks = std::mem::take(&mut self.duration_stacks);
         let mut waiting = std::mem::take(&mut self.thread_slices);

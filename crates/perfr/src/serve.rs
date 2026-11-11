@@ -2281,9 +2281,9 @@ pub struct Links {
     pub connect: Vec<String>,
 }
 
-/// As [`run`], on a chosen host. `0.0.0.0` (the command line's default)
-/// exposes the viewer on the LAN; `127.0.0.1` keeps it to this machine,
-/// the choice for something with no authentication in front of it.
+/// As [`run`], on a chosen host. `0.0.0.0` exposes the viewer on the LAN;
+/// `127.0.0.1` (the command line's default) keeps it to this machine, the
+/// choice for something with no authentication in front of it.
 pub fn run_on(
     host: &str,
     port: u16,

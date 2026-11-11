@@ -774,10 +774,19 @@ fn clients_that_are_not_pages_keep_working_without_an_origin() {
         assert_eq!(from_page(&served, "GET", "/api/join", &host, None, None), 101, "{host}");
         assert_eq!(from_page(&served, "GET", "/api/status", &host, None, None), 200, "{host}");
     }
-    // The machine's name is for those clients only: a page that claims it
-    // as its origin is held to the stricter rule.
+    // The viewer opened from another machine as http://render-01:PORT/ (or
+    // by the name mDNS gives it) is this service's own page as well.
+    for named in [format!("render-01:{port}"), format!("render-01.local:{port}")] {
+        let origin = format!("http://{named}");
+        assert_eq!(from_page(&served, "GET", "/ws", &named, Some(&origin), None), 101, "{named}");
+        assert_eq!(from_page(&served, "POST", "/api/auto_profile", &named, Some(&origin), Some(r#"{"on":false}"#)), 200, "{named}");
+        // Not for an upload, though: that leaves the machine, and is asked
+        // for by address or as localhost only.
+        assert_eq!(from_page(&served, "POST", "/api/capture/share", &named, Some(&origin), None), 403, "{named}");
+    }
+    // Another page saying it is addressed to that name is still another page.
     let named = format!("render-01:{port}");
-    assert_eq!(from_page(&served, "GET", "/ws", &named, Some(&format!("http://{named}")), None), 403);
+    assert_eq!(from_page(&served, "GET", "/ws", &named, Some("https://unrelated.example"), None), 403);
     // HTTP/1.0 has no Host header, and no browser speaks it.
     let (status, _, _) = send_raw(served.addr, b"GET /api/status HTTP/1.0\r\n\r\n");
     assert_eq!(status, 200);
@@ -797,6 +806,8 @@ fn the_host_and_origin_rules_by_case() {
     assert!(ok(None, Some("10.1.2.3:9")));
     assert!(ok(None, Some("render-01:44766")));
     assert!(ok(None, Some("Render-01")));
+    assert!(ok(None, Some("render-01.local:44766")));
+    assert!(!ok(None, Some("render-01.locale")));
     // The MCP client writes an IPv6 host without its brackets.
     assert!(ok(None, Some("::1:44766")));
     assert!(ok(None, None));
@@ -812,7 +823,12 @@ fn the_host_and_origin_rules_by_case() {
     assert!(!ok(Some("http://127.0.0.1:3000"), Some("127.0.0.1:44766")));
     assert!(!ok(Some("https://unrelated.example"), Some("127.0.0.1:44766")));
     assert!(!ok(Some("http://evil.example:44766"), Some("evil.example:44766")));
-    assert!(!ok(Some("http://render-01:44766"), Some("render-01:44766")));
+    assert!(ok(Some("http://render-01:44766"), Some("render-01:44766")));
+    assert!(ok(Some("http://Render-01.local:44766"), Some("Render-01.local:44766")));
+    assert!(!ok(Some("http://render-01:3000"), Some("render-01:44766")));
+    assert!(!ok(Some("http://render-01.evil.example:44766"), Some("render-01.evil.example:44766")));
+    assert!(!ok(Some("http://render-01.local.evil.example:44766"), Some("render-01.local.evil.example:44766")));
+    assert!(!ok(Some("http://.local:44766"), Some(".local:44766")));
     assert!(!ok(Some("null"), Some("127.0.0.1:44766")));
     assert!(!ok(Some(""), Some("127.0.0.1:44766")));
     assert!(!ok(Some("http://127.0.0.1:44766"), None));

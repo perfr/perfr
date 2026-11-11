@@ -119,7 +119,7 @@ async fn origin_middleware(
     if !allowed {
         return (
             StatusCode::FORBIDDEN,
-            "perfr answers its own viewer, opened by IP address or as localhost, and clients that are not web pages",
+            "perfr answers its own viewer and clients that are not web pages, addressed by IP address, as localhost or by this machine's own host name",
         )
             .into_response();
     }
@@ -137,26 +137,42 @@ async fn origin_middleware(
 ///   page is this service's own viewer (`share_origin_allowed`).
 /// * A page whose DNS name is re-pointed at this machine after it loaded
 ///   (rebinding) is same-origin to the browser, and its GETs carry no
-///   `Origin` at all. Its `Host` is still the attacker's name, so a request
-///   without `Origin` must be addressed to a name DNS has no say in: an IP
-///   literal, `localhost`, the bound address, or this machine's own name
-///   (`machine`: the host name the service took from the OS at start). The
-///   last is for peers, which are told `--connect <machine>` and are not
-///   browsers; a page gets no use of it, since `share_origin_allowed` does
-///   not take it.
+///   `Origin` at all. Its `Host` is still the attacker's name, so every
+///   request must be addressed to a name the attacker's DNS has no say in:
+///   an IP literal, `localhost`, the bound address, or this machine's own
+///   name (`is_machine_name`). The last is what a peer told
+///   `--connect <machine>` dials and what someone on the LAN types to open
+///   the viewer; a rebinding page cannot carry it, because it would have
+///   had to be served under that name in the first place.
 ///
 /// A request with neither header is HTTP/1.0 from something that is not a
 /// browser, and is let through.
 pub(crate) fn request_allowed(origin: Option<&str>, host: Option<&str>, bind: std::net::SocketAddr, machine: &str) -> bool {
+    let reachable = |host: &str| {
+        let name = host_name(host);
+        host_needs_no_dns(name, bind) || is_machine_name(name, machine)
+    };
     match (origin, host) {
-        (Some(origin), Some(host)) => share_origin_allowed(origin, host, bind),
+        (Some(origin), Some(host)) => origin_is_host(origin, host) && reachable(host),
         (Some(_), None) => false,
-        (None, Some(host)) => {
-            let name = host_name(host);
-            host_needs_no_dns(name, bind) || (!machine.is_empty() && name.eq_ignore_ascii_case(machine))
-        }
+        (None, Some(host)) => reachable(host),
         (None, None) => true,
     }
+}
+
+/// Whether `name` is the host name this service took from the OS at start,
+/// bare or as the `.local` name mDNS answers for it. Public DNS serves
+/// neither for anyone else: the first has no dot to delegate, the second is
+/// reserved for the local link.
+fn is_machine_name(name: &str, machine: &str) -> bool {
+    if machine.is_empty() {
+        return false;
+    }
+    let bare = match name.len().checked_sub(".local".len()) {
+        Some(cut) if name.is_char_boundary(cut) && name[cut..].eq_ignore_ascii_case(".local") => &name[..cut],
+        _ => name,
+    };
+    bare.eq_ignore_ascii_case(machine)
 }
 
 async fn isolation_middleware(
@@ -648,7 +664,18 @@ async fn capture_export(
 }
 
 /// Publish a stopped capture (or selected slice) to the configured bucket.
-async fn capture_share(State(svc): State<Arc<LiveService>>, Query(q): Query<ExportQuery>) -> Response {
+async fn capture_share(State(svc): State<Arc<LiveService>>, Query(q): Query<ExportQuery>, headers: axum::http::HeaderMap) -> Response {
+    // Stricter than the rule every route is behind (`request_allowed`): an
+    // upload leaves the machine, so the page asking must have been opened
+    // by address or as localhost, not by the machine's name.
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        let origin = origin.to_str().unwrap_or_default();
+        let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or_default();
+        if !share_origin_allowed(origin, host, svc.config.lock().bind) {
+            return (StatusCode::FORBIDDEN,
+                "Sharing must be requested from the service viewer, opened by IP address or as localhost").into_response();
+        }
+    }
     let window = match (q.t0, q.t1) {
         (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
         (None, None) => None,
@@ -674,22 +701,23 @@ async fn capture_share(State(svc): State<Arc<LiveService>>, Query(q): Query<Expo
     }
 }
 
-/// Whether a page with this `Origin` may call the service. Written for the
-/// share upload, hence the name; `request_allowed` applies it to every
-/// route. The page must be this service's own viewer: same scheme-less
-/// origin as the request's `Host`, and that host one a page cannot reach by
-/// DNS rebinding -- an IP literal, `localhost`, or the address the service
-/// was told to bind. A rebinding attack needs a name the attacker controls,
-/// which resolves to us only after the page loaded; such a name matches
-/// none of these.
+/// Whether a browser `Origin` may trigger an upload. The page must be this
+/// service's own viewer: same scheme-less origin as the request's `Host`,
+/// and that host one a page cannot reach by DNS rebinding -- an IP literal,
+/// `localhost`, or the address the service was told to bind. A rebinding
+/// attack needs a name the attacker controls, which resolves to us only
+/// after the page loaded; such a name matches none of these.
 fn share_origin_allowed(origin: &str, host: &str, bind: std::net::SocketAddr) -> bool {
+    origin_is_host(origin, host) && host_needs_no_dns(host_name(host), bind)
+}
+
+/// Whether the page named by `origin` was served by the very `host` (name
+/// and port) this request is addressed to.
+fn origin_is_host(origin: &str, host: &str) -> bool {
     let Some(origin_host) = origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) else {
         return false;
     };
-    if origin_host.is_empty() || origin_host != host {
-        return false;
-    }
-    host_needs_no_dns(host_name(host), bind)
+    !origin_host.is_empty() && origin_host == host
 }
 
 /// The name in a `Host` header, without its port.

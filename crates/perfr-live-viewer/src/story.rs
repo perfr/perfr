@@ -1350,24 +1350,42 @@ fn scope_spans(
     let t0 = t0.max(0.0) as u64;
     let t1 = t1.max(0.0) as u64;
     let mut out = Vec::new();
+    let mut name_matches: crate::tracks::FastMap<u32, bool> = crate::tracks::FastMap::default();
     for (key, lane) in index.lanes() {
         if key.kind != kind::API_SCOPE && key.kind != kind::FUNCTION_CALL {
             continue;
         }
         let Some(&y) = ys.get(&key) else { continue };
         let h = lane_height(key) * tracks.scale.max(0.1);
-        for ev in lane.events() {
-            let named = !want.is_empty()
-                && intern
-                    .get(ev.name_id)
-                    .unwrap_or("")
-                    .to_ascii_lowercase()
-                    .contains(&want);
-            let id_ok = scope_id != 0 && u64::from(ev.name_id) == scope_id;
-            if !named && !id_ok {
+        // Only the events on screen. This runs every frame a step with a
+        // highlight is shown, and it used to walk every event of the
+        // capture, testing the name before the window: with few matches
+        // or none in view, millions of events per frame. Events are in
+        // start order, so the walk begins at the first one that can still
+        // reach `t0` and stops at the first that starts after `t1`.
+        let events = lane.events();
+        let first = match t0.checked_sub(1) {
+            Some(before) => lane.first_ending_after(before),
+            None => 0,
+        };
+        for ev in &events[first..] {
+            if ev.start_ns > t1 {
+                break;
+            }
+            // A lane whose ends are out of order (an instant inside a
+            // long scope) hands back events that ended before the window.
+            if ev.end_ns() < t0 {
                 continue;
             }
-            if ev.end_ns() < t0 || ev.start_ns > t1 {
+            let id_ok = scope_id != 0 && u64::from(ev.name_id) == scope_id;
+            // The name is judged once per id, not once per event: each
+            // test lower-cases a copy of it.
+            let named = !id_ok
+                && !want.is_empty()
+                && *name_matches.entry(ev.name_id).or_insert_with(|| {
+                    intern.get(ev.name_id).unwrap_or("").to_ascii_lowercase().contains(&want)
+                });
+            if !named && !id_ok {
                 continue;
             }
             out.push((ev.start_ns, ev.end_ns(), y, h));
@@ -1762,5 +1780,148 @@ mod tests {
         session.close();
         assert!(session.doc.is_none());
         assert!(!session.visible());
+    }
+
+    fn span_event(pid: u32, tid: u32, start_ns: u64, duration_ns: u64, name_id: u32) -> perfr_live_event::LiveEvent {
+        perfr_live_event::LiveEvent {
+            start_ns,
+            duration_ns,
+            tid,
+            pid,
+            kind: kind::API_SCOPE,
+            depth: 0,
+            extra: 0,
+            _pad: 0,
+            name_id,
+        }
+    }
+
+    /// The highlight as it was first written: every event of every scope
+    /// lane, the name lower-cased per event, the window checked last.
+    fn scope_spans_by_full_scan(
+        index: &TrackIndex,
+        tracks: &TrackStrip,
+        intern: &InternTable,
+        scope_id: u64,
+        name: Option<&str>,
+        t0: f64,
+        t1: f64,
+    ) -> Vec<(u64, u64, f32, f32)> {
+        let want = name.unwrap_or("").trim().to_ascii_lowercase();
+        if scope_id == 0 && want.is_empty() {
+            return Vec::new();
+        }
+        let ys: std::collections::HashMap<LaneKey, f32> = tracks.layout().iter().copied().collect();
+        let t0 = t0.max(0.0) as u64;
+        let t1 = t1.max(0.0) as u64;
+        let mut out = Vec::new();
+        for (key, lane) in index.lanes() {
+            if key.kind != kind::API_SCOPE && key.kind != kind::FUNCTION_CALL {
+                continue;
+            }
+            let Some(&y) = ys.get(&key) else { continue };
+            let h = lane_height(key) * tracks.scale.max(0.1);
+            for ev in lane.events() {
+                let named = !want.is_empty()
+                    && intern.get(ev.name_id).unwrap_or("").to_ascii_lowercase().contains(&want);
+                let id_ok = scope_id != 0 && u64::from(ev.name_id) == scope_id;
+                if !named && !id_ok {
+                    continue;
+                }
+                if ev.end_ns() < t0 || ev.start_ns > t1 {
+                    continue;
+                }
+                out.push((ev.start_ns, ev.end_ns(), y, h));
+                if out.len() >= 48 {
+                    return out;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_scope_highlight_finds_what_a_scan_of_every_event_finds() {
+        let mut intern = InternTable::default();
+        intern.insert_id(1, "Physics::Step");
+        intern.insert_id(2, "render");
+        intern.insert_id(3, "physics_island");
+        let mut index = TrackIndex::default();
+        // Back to back scopes on one thread: ends in order.
+        for i in 0..400u64 {
+            index.insert(span_event(10, 1, i * 100, 100, 1 + (i % 3) as u32));
+        }
+        // A thread with a long scope and instants inside it, which breaks
+        // the order of the ends that the window search leans on.
+        index.insert(span_event(10, 2, 0, 30_000, 3));
+        for i in 0..50u64 {
+            index.insert(span_event(10, 2, 500 + i * 400, 1, 1));
+        }
+        // An id nothing has, and a thread with nothing that matches.
+        for i in 0..50u64 {
+            index.insert(span_event(11, 1, i * 700, 300, 2));
+        }
+        let mut tracks = TrackStrip::default();
+        tracks.sync(&index, None);
+        let windows = [
+            (0.0, 40_000.0),
+            (0.0, 0.0),
+            (100.0, 100.0),
+            (199.0, 200.0),
+            (10_050.0, 10_950.0),
+            (39_900.0, 1e12),
+            (-5.0, 350.0),
+            (50_000.0, 60_000.0),
+        ];
+        let asks: [(u64, Option<&str>); 6] =
+            [(0, Some("physics")), (0, Some("  STEP ")), (2, None), (3, Some("render")), (99, None), (0, Some("nothing"))];
+        let mut found = 0;
+        for (t0, t1) in windows {
+            for (id, name) in asks {
+                let got = scope_spans(&index, &tracks, &intern, id, name, t0, t1);
+                let want = scope_spans_by_full_scan(&index, &tracks, &intern, id, name, t0, t1);
+                assert_eq!(got, want, "window {t0}..{t1}, scope {id} {name:?}");
+                found += got.len();
+            }
+        }
+        assert!(found > 200, "the cases found too little to compare ({found})");
+        assert!(scope_spans(&index, &tracks, &intern, 0, None, 0.0, 1e12).is_empty());
+    }
+
+    /// Per-frame cost of a story step's scope highlight on a large capture.
+    /// Run with `cargo test --release highlight_bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn highlight_bench() {
+        let mut intern = InternTable::default();
+        for id in 1..=64u32 {
+            intern.insert_id(id, &format!("namespace::Component{id}::update_step"));
+        }
+        intern.insert_id(100, "rare_marker");
+        let mut index = TrackIndex::default();
+        let per_thread = 250_000u64;
+        for tid in 1..=8u32 {
+            for i in 0..per_thread {
+                index.insert(span_event(10, tid, i * 1_000, 900, 1 + (i % 64) as u32));
+            }
+        }
+        // One match, at the very end: the highlight has to look everywhere.
+        index.insert(span_event(10, 8, per_thread * 1_000, 900, 100));
+        let mut tracks = TrackStrip::default();
+        tracks.sync(&index, None);
+        let end = (per_thread * 1_000 + 1_000) as f64;
+        // The step's camera on 1% of the capture, and on all of it.
+        for (label, t0, t1) in [("window_1_percent", end * 0.5, end * 0.51), ("whole_capture", 0.0, end)] {
+            for (how, id, name) in [("by_name", 0u64, Some("rare_marker")), ("by_id", 100u64, None)] {
+                let iters = 5;
+                let t = std::time::Instant::now();
+                let mut n = 0;
+                for _ in 0..iters {
+                    n += scope_spans(&index, &tracks, &intern, id, name, t0, t1).len();
+                }
+                let ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
+                println!("HIGHLIGHT_BENCH events={} {label} {how} ms_per_frame={ms:.3} (found {n})", index.event_count());
+            }
+        }
     }
 }

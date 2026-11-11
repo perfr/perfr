@@ -319,9 +319,26 @@ impl ScopeRingWriter {
         libc::close(self._owner_fd.as_raw_fd());
     }
 
+    /// Gives up the producer lease of a segment this process has replaced,
+    /// so its address is no longer vouched for and its descriptor does not
+    /// stay open for as long as the process runs.
+    /// # Safety
+    /// Only call once, for a permanently leaked writer that is never
+    /// dropped: the descriptor is closed under it.
+    pub unsafe fn release_lease(&self) {
+        libc::close(self._owner_fd.as_raw_fd());
+    }
+
     /// Publish a process-local descriptor for injected instrumentation.
     pub fn publish_api_descriptor(&self, address: u64) {
         unsafe { &*self.mapping.base.cast::<Header>() }.api_descriptor.store(address, Ordering::Release);
+    }
+
+    /// Tells the readers of this segment that the process has replaced it
+    /// with a new one and will write nothing more here.
+    pub fn mark_superseded(&self) {
+        // SAFETY: base maps the header for the life of the mapping.
+        unsafe { &*self.mapping.base.cast::<Header>() }.superseded.store(1, Ordering::Release);
     }
 
     pub fn rings(&self) -> &Rings {
@@ -512,6 +529,12 @@ impl ScopeRingReader {
         } else {
             self.return_lease();
         }
+    }
+
+    /// Whether the process has replaced this segment with a new one (see
+    /// [`ScopeRingWriter::mark_superseded`]).
+    pub fn superseded(&self) -> bool {
+        self.header().superseded.load(Ordering::Acquire) != 0
     }
 
     /// Readers currently holding a count, as the producer sees it.

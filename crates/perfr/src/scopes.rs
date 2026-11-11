@@ -121,13 +121,7 @@ impl Segment {
     /// The cursor is taken before the flag goes on, so the first drain reads
     /// everything written for this capture and nothing older.
     fn adopt(pid: u32, reader: ScopeRingReader) -> Segment {
-        let cursors = Cursors::at_write(reader.rings());
-        reader.publish_read_cursors(&cursors.read);
-        let drops = DropLedger::starting_at(&reader.rings().snapshot_drops());
-        // Until this, an instrumented process pays a relaxed load per call
-        // and writes nothing. This is also what turns on the service's own
-        // scopes, since it reads its own segment like any other.
-        reader.set_capturing(true);
+        let (cursors, drops) = Segment::start_reading(&reader);
         Segment {
             pid,
             reader,
@@ -138,6 +132,33 @@ impl Segment {
             open: HashMap::new(),
             sync_depth: HashMap::new(),
         }
+    }
+
+    /// Where to read `reader`'s segment from, and its producer told to write.
+    fn start_reading(reader: &ScopeRingReader) -> (Cursors, DropLedger) {
+        let cursors = Cursors::at_write(reader.rings());
+        reader.publish_read_cursors(&cursors.read);
+        let drops = DropLedger::starting_at(&reader.rings().snapshot_drops());
+        // Until this, an instrumented process pays a relaxed load per call
+        // and writes nothing. This is also what turns on the service's own
+        // scopes, since it reads its own segment like any other.
+        reader.set_capturing(true);
+        (cursors, drops)
+    }
+
+    /// Moves on to the segment the process replaced this one with: a
+    /// shutdown and a second init give it a new one under the same name,
+    /// and it writes nothing more to the old. Everything else carries
+    /// over, the open scopes above all, since a scope started before the
+    /// change is stopped after it. Says whether the new segment was there.
+    fn follow_replacement(&mut self) -> bool {
+        let Ok(reader) = ScopeRingReader::open(self.pid) else { return false };
+        let (cursors, drops) = Segment::start_reading(&reader);
+        // The old reader is dropped here, and returns its count with it.
+        self.reader = reader;
+        self.cursors = cursors;
+        self.drops = drops;
+        true
     }
 }
 
@@ -471,14 +492,16 @@ impl ScopeSource {
             for event in events {
                 self.accept(index, event, batch);
             }
-            // The process was gone before this pass began, so the pass read
-            // the last thing it will ever write.
-            let segment = &self.segments[index];
+            let segment = &mut self.segments[index];
             let rings = segment.reader.rings();
-            if alive == Producer::Gone
-                && (0..rings.ring_count()).all(|ring| segment.cursors.read[ring] >= rings.write_cursor(ring))
-            {
-                finished.push(index);
+            if (0..rings.ring_count()).all(|ring| segment.cursors.read[ring] >= rings.write_cursor(ring)) {
+                if alive == Producer::Gone {
+                    // The process was gone before this pass began, so the
+                    // pass read the last thing it will ever write.
+                    finished.push(index);
+                } else if segment.reader.superseded() && segment.follow_replacement() {
+                    log::info!("manual instrumentation: pid {} made a new segment, reading that", segment.pid);
+                }
             }
         }
         for index in finished.into_iter().rev() {
@@ -1230,6 +1253,37 @@ mod log_tests {
         assert_eq!(text_of(&service, span), "left open by a process that died");
         assert_eq!(span.start_ns + span.duration_ns, end_ns);
         perfr_scope_ring::unlink_segment(pid);
+    }
+
+    #[test]
+    fn a_capture_follows_a_process_that_shuts_down_and_initialises_again() {
+        let (_serial, service, mut source) = source();
+        let now = perfr_scope_ring::shm::now_monotonic_ns;
+        let mut batch = Vec::new();
+        let straddling = perfr_api::start("started before the shutdown");
+        assert_ne!(straddling, 0);
+        source.drain_now(now(), &mut batch);
+
+        perfr_api::shutdown();
+        perfr_api::init().expect("a second init");
+        source.drain_now(now(), &mut batch);
+        assert_eq!(source.segments.len(), 1, "still one segment for this process");
+        assert!(!source.segments[0].reader.superseded(), "the capture went on reading the old segment");
+
+        perfr_api::log_info("written to the new segment");
+        perfr_api::stop(straddling);
+        batch.clear();
+        source.drain_now(now(), &mut batch);
+        assert!(
+            batch.iter().any(|e| e.kind == kind::LOG && text_of(&service, e) == "written to the new segment"),
+            "nothing written after the second init reached the capture"
+        );
+        let span = batch
+            .iter()
+            .find(|e| e.kind == kind::API_SCOPE && e.duration_ns > 0)
+            .expect("the scope open across the change is closed by its own stop");
+        assert_eq!(text_of(&service, span), "started before the shutdown");
+        assert_eq!(source.events_lost, 0);
     }
 
     #[test]

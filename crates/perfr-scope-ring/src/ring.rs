@@ -108,7 +108,13 @@ pub struct Header {
     pub capturing: AtomicU32,
     /// Semantic version of the instrumentation calls.
     pub api_version: u32,
-    pub _reserved: u32,
+    /// Non-zero once the process has made itself a new segment, after a
+    /// shutdown and a second init: nothing more will be written here, and a
+    /// reader should open the segment the name leads to now. In bytes that
+    /// were reserved and always zero, so no offset moves. A reader from
+    /// before the field never looks, and goes on reading a segment that
+    /// has gone quiet.
+    pub superseded: AtomicU32,
     /// In-process API descriptor address, published by perfr-api. Never
     /// dereferenced by the service. Zero in older producers; offsets and size
     /// are unchanged because this occupies previously reserved header bytes.

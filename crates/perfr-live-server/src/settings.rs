@@ -6,7 +6,8 @@
 //! holds across browsers, sessions and restarts: `~/.config/perfr/
 //! settings.json` (`$XDG_CONFIG_HOME/perfr/settings.json` when that is set;
 //! the invoking user's home when the service runs under sudo, and the file
-//! is handed back to that user). `GET /api/settings` reads it, `PUT` replaces
+//! is that user's: written with their filesystem identity where the system
+//! has one to lend, handed back to them where it does not). `GET /api/settings` reads it, `PUT` replaces
 //! it and saves. Unknown keys in an older or newer file are kept as they
 //! are; a missing key takes its default.
 
@@ -87,7 +88,10 @@ impl Settings {
     }
 
     pub fn load() -> Settings {
-        Self::path().map(|p| Self::load_from(&p)).unwrap_or_default()
+        // Read as the user whose file it is: root reading whatever the
+        // name points at would hand the keys of any JSON file on the
+        // machine to `GET /api/settings`.
+        for_the_settings_owner(|_| Self::path().map(|p| Self::load_from(&p)).unwrap_or_default())
     }
 
     pub fn load_from(path: &Path) -> Settings {
@@ -110,14 +114,8 @@ impl Settings {
     }
 
     pub fn save_to(&self, path: &Path) -> Result<(), String> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            hand_back_to_invoker(dir);
-        }
-        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(path, text + "\n").map_err(|e| format!("{}: {e}", path.display()))?;
-        hand_back_to_invoker(path);
-        Ok(())
+        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())? + "\n";
+        for_the_settings_owner(|for_other| write_replacing(path, text.as_bytes(), for_other))
     }
 }
 
@@ -149,22 +147,175 @@ fn invoker_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// Under sudo the file would otherwise be root's, and the next unprivileged
-/// service could read but not update it.
-fn hand_back_to_invoker(path: &Path) {
+/// Who a file is written for when that is not who is running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Owner {
+    uid: u32,
+    gid: u32,
+}
+
+/// The user who started a service that now runs as root (`sudo perfr`):
+/// the settings are that user's, in that user's directory, and a file left
+/// there as root's is one the next unprivileged service can read but not
+/// update. `None` when this process is not root on someone's behalf.
+fn sudo_invoker() -> Option<Owner> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::chown;
-        let uid = std::env::var("SUDO_UID").ok().and_then(|v| v.parse::<u32>().ok());
-        let gid = std::env::var("SUDO_GID").ok().and_then(|v| v.parse::<u32>().ok());
-        if let (Some(uid), Some(gid)) = (uid, gid) {
-            let _ = chown(path, Some(uid), Some(gid));
+        // SAFETY: no arguments, cannot fail.
+        if unsafe { libc::geteuid() } != 0 {
+            return None;
         }
+        let id = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u32>().ok());
+        Some(Owner { uid: id("SUDO_UID")?, gid: id("SUDO_GID")? })
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
+        None
     }
+}
+
+/// This thread's filesystem identity switched to another user's, until
+/// dropped: every path lookup and every file created is then judged, and
+/// owned, as that user's. Root writing into a directory the invoking user
+/// controls is otherwise a way for anything running as that user to have
+/// root create, overwrite or chown a file of its choosing, by making the
+/// directory or the file a link: with the user's identity the kernel
+/// refuses exactly what it would refuse the user. Linux only; per thread,
+/// so the rest of the service keeps its privileges meanwhile.
+///
+/// The supplementary groups are still root's (they cannot be changed for
+/// one thread), which matters only for files writable by a group root is
+/// in.
+#[cfg(target_os = "linux")]
+struct FsIdentity {
+    previous: Owner,
+}
+
+#[cfg(target_os = "linux")]
+impl FsIdentity {
+    fn assume(who: Owner) -> Option<FsIdentity> {
+        // SAFETY: both calls take an id and touch only this thread's
+        // credentials.
+        let previous = unsafe {
+            let gid = libc::setfsgid(who.gid) as u32;
+            let uid = libc::setfsuid(who.uid) as u32;
+            Owner { uid, gid }
+        };
+        let identity = FsIdentity { previous };
+        // Neither call reports failure. Asking for an id that cannot be
+        // (-1) changes nothing and returns the current one.
+        // SAFETY: as above.
+        let now = unsafe {
+            Owner { uid: libc::setfsuid(u32::MAX) as u32, gid: libc::setfsgid(u32::MAX) as u32 }
+        };
+        (now == who).then_some(identity)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for FsIdentity {
+    fn drop(&mut self) {
+        // SAFETY: as in `assume`. The uid first: going back to 0 restores
+        // the capabilities the gid change may need.
+        unsafe {
+            libc::setfsuid(self.previous.uid);
+            libc::setfsgid(self.previous.gid);
+        }
+    }
+}
+
+/// Runs `f` on behalf of the user the settings belong to. `f` is told who
+/// that is only when it still has to take care itself: it runs as root, for
+/// someone else, and could not take that user's identity.
+fn for_the_settings_owner<T>(f: impl FnOnce(Option<Owner>) -> T) -> T {
+    let Some(invoker) = sudo_invoker() else {
+        return f(None);
+    };
+    #[cfg(target_os = "linux")]
+    if let Some(_identity) = FsIdentity::assume(invoker) {
+        return f(None);
+    }
+    f(Some(invoker))
+}
+
+static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The `n`th temporary name next to `path` in this process.
+fn temp_path(path: &Path, n: u64) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".tmp.{}.{n}", std::process::id()));
+    path.with_file_name(name)
+}
+
+/// Replaces the file at `path` with `bytes` in one step: written to a
+/// temporary file next to it, flushed, and renamed over it. Whoever reads
+/// the path sees the old file or the new one, never a truncated one (a
+/// crash or a full disk mid-write used to leave that, and the next start
+/// read it as "not valid settings JSON" and went on with the defaults), and
+/// two writers cannot interleave.
+///
+/// With `for_other`, this process is root writing for that user in a
+/// directory the user controls, and nothing may go through a link the user
+/// could have planted: a linked directory or file is refused, and what is
+/// created is handed to the user by descriptor, not by name. Without it the
+/// caller acts as the owner, whose own link to the file is followed and
+/// kept, as a plain write would.
+fn write_replacing(path: &Path, bytes: &[u8], for_other: Option<Owner>) -> Result<(), String> {
+    use std::io::Write;
+    let shown = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+    let is_link = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink());
+    let refuse_link = |p: &Path| {
+        format!("{} is a symbolic link: not writing settings through it as root for another user", p.display())
+    };
+    if let Some(dir) = path.parent() {
+        if for_other.is_some() && is_link(dir) {
+            return Err(refuse_link(dir));
+        }
+        // The directories that are new are the ones to hand over.
+        let missing: Vec<&Path> = dir.ancestors().take_while(|d| !d.as_os_str().is_empty() && !d.exists()).collect();
+        std::fs::create_dir_all(dir).map_err(|e| shown(dir, e))?;
+        #[cfg(unix)]
+        if let Some(owner) = for_other {
+            for created in missing {
+                // Never through a link: if the name was swapped for one
+                // since, it is the link that changes hands.
+                let _ = std::os::unix::fs::lchown(created, Some(owner.uid), Some(owner.gid));
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = missing;
+    }
+    let target = if is_link(path) {
+        if for_other.is_some() {
+            return Err(refuse_link(path));
+        }
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    let temp = temp_path(&target, TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    // A leftover of that name, or a link put there, goes: removing a link
+    // removes the link, and `create_new` opens nothing that exists.
+    let _ = std::fs::remove_file(&temp);
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp).map_err(|e| shown(&temp, e))?;
+    let written = (|| {
+        #[cfg(unix)]
+        if let Some(owner) = for_other {
+            std::os::unix::fs::fchown(&file, Some(owner.uid), Some(owner.gid))?;
+        }
+        // A file the user had closed to others stays closed.
+        if let Ok(existing) = std::fs::metadata(&target) {
+            file.set_permissions(existing.permissions())?;
+        }
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, &target)
+    })();
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(shown(path, error));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -204,6 +355,143 @@ mod tests {
         // Garbage: defaults, not a crash.
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(Settings::load_from(&path), Settings::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("perfr-settings-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_reader_never_sees_a_half_written_file_however_many_writers_there_are() {
+        let dir = scratch("atomic");
+        let path = dir.join("perfr").join("settings.json");
+        let short = Settings { max_hook_calls_per_s: 1, ..Default::default() };
+        let mut long = Settings { max_hook_calls_per_s: 2, track_order: "x".repeat(64 << 10), ..Default::default() };
+        long.other.insert("future_knob".into(), serde_json::json!({"a": 1}));
+        short.save_to(&path).unwrap();
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let writers: Vec<_> = (0..4)
+                .map(|n| {
+                    let (path, body) = (&path, if n % 2 == 0 { &short } else { &long });
+                    scope.spawn(move || {
+                        for _ in 0..200 {
+                            body.save_to(path).unwrap();
+                        }
+                    })
+                })
+                .collect();
+            // What the next start of the service would do at any moment:
+            // a file caught truncated reads as "not valid settings JSON",
+            // and the save after that replaces the user's settings with
+            // the defaults.
+            let reader = scope.spawn(|| {
+                let mut reads = 0u32;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    let read: Settings = serde_json::from_str(&text)
+                        .unwrap_or_else(|e| panic!("read {} torn bytes of settings: {e}", text.len()));
+                    assert!(read == short || read == long, "a mix of two saves");
+                    reads += 1;
+                }
+                reads
+            });
+            for writer in writers {
+                writer.join().unwrap();
+            }
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            assert!(reader.join().unwrap() > 0);
+        });
+        // Nothing is left behind next to the file.
+        let left: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("settings.json")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_users_own_link_to_their_settings_is_written_through_and_kept() {
+        // A dotfiles checkout: the file in the config directory is a link.
+        let dir = scratch("own-link");
+        std::fs::create_dir_all(dir.join("dotfiles")).unwrap();
+        std::fs::create_dir_all(dir.join("perfr")).unwrap();
+        let real = dir.join("dotfiles").join("perfr.json");
+        std::fs::write(&real, "{}").unwrap();
+        let path = dir.join("perfr").join("settings.json");
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+        let s = Settings { max_hook_calls_per_s: 7, ..Default::default() };
+        s.save_to(&path).unwrap();
+        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink(), "the link was replaced by a file");
+        assert_eq!(Settings::load_from(&real), s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn written_for_someone_else_nothing_goes_through_a_link() {
+        // Root saving into the invoking user's directory, where that user
+        // decides what every name points at.
+        let me = Owner { uid: unsafe { libc::geteuid() }, gid: unsafe { libc::getegid() } };
+        let body = b"{}\n";
+        let dir = scratch("for-other");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "precious").unwrap();
+
+        // settings.json is a link to a file the user could not write.
+        let config = dir.join("a").join("perfr");
+        std::fs::create_dir_all(&config).unwrap();
+        std::os::unix::fs::symlink(&victim, config.join("settings.json")).unwrap();
+        let error = write_replacing(&config.join("settings.json"), body, Some(me)).unwrap_err();
+        assert!(error.contains("symbolic link"), "{error}");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+
+        // The directory is a link to one the user could not write into.
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join("b").join("perfr")).unwrap();
+        let error = write_replacing(&dir.join("b").join("perfr").join("settings.json"), body, Some(me)).unwrap_err();
+        assert!(error.contains("symbolic link"), "{error}");
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0, "a file was created through the link");
+
+        // A link waiting where the temporary file goes is not followed.
+        let config = dir.join("c").join("perfr");
+        std::fs::create_dir_all(&config).unwrap();
+        let path = config.join("settings.json");
+        for n in 0..64 {
+            let _ = std::os::unix::fs::symlink(&victim, temp_path(&path, n));
+        }
+        write_replacing(&path, body, Some(me)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+
+        // Nothing in the way: written, and the new directories are theirs.
+        let path = dir.join("d").join("perfr").join("settings.json");
+        write_replacing(&path, body, Some(me)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_filesystem_identity_is_only_taken_when_it_really_changed() {
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        if uid == 0 {
+            return;
+        }
+        // Becoming who we already are works and changes nothing.
+        assert!(FsIdentity::assume(Owner { uid, gid }).is_some());
+        // Without the privilege the kernel leaves the ids as they were and
+        // reports no error: that must read as "did not happen".
+        assert!(FsIdentity::assume(Owner { uid: 0, gid: 0 }).is_none());
+        assert!(FsIdentity::assume(Owner { uid: uid + 1, gid }).is_none());
+        // And the thread is itself again afterwards.
+        let dir = scratch("identity");
+        std::fs::write(dir.join("still-mine"), "x").unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

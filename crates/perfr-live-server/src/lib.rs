@@ -176,6 +176,8 @@ pub struct LiveService {
     /// User settings kept on disk (`settings.rs`); the source of truth for
     /// choices made in the viewer, whichever browser made them.
     pub settings: Mutex<Settings>,
+    /// Held across a save and the swap that follows (`update_settings`).
+    settings_save: Mutex<()>,
     /// Optional: aggregates sampled callstacks over a time range into a
     /// sampling report. Set separately from `ControlHooks` so a service that
     /// does not sample (or predates this) needs no change.
@@ -409,6 +411,7 @@ impl LiveService {
             auto_profile: AtomicBool::new(false),
             auto_profile_status: Mutex::new(serde_json::Value::Null),
             settings: Mutex::new(Settings::load()),
+            settings_save: Mutex::new(()),
             sampling_report: Mutex::new(None),
             sampling_tree: Mutex::new(None),
             sampling_report_scope: Mutex::new(None),
@@ -513,6 +516,11 @@ impl LiveService {
     /// changes only when the write succeeded, so what a client reads back
     /// is what will survive a restart.
     pub fn update_settings(&self, new: Settings) -> Result<Settings, String> {
+        // One update at a time, from the write to the swap: of two that
+        // overlap, the one saved last is also the one kept in memory. Not
+        // under the settings lock itself, which the capture loop reads on
+        // its way and must not wait on a disk for.
+        let _saving = self.settings_save.lock();
         new.save()?;
         *self.settings.lock() = new.clone();
         Ok(new)

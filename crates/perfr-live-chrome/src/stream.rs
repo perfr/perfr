@@ -15,7 +15,7 @@
 use std::io::Write;
 
 use flate2::write::MultiGzDecoder;
-use crate::ingest::{ChromeEvent, ChromeIngestor, StackFrame};
+use crate::ingest::{ChromeEvent, ChromeIngestor, StackFrame, TimeUnit};
 use crate::json::{parse_json_string, skip_ws, value_end};
 use crate::id::FlexId;
 use crate::perfetto::PerfettoState;
@@ -60,7 +60,6 @@ const PACKET_TAG: u8 = 0x0a;
 enum PendingKey {
     None,
     TraceEvents,
-    DisplayTimeUnit,
     StackFrames,
     Samples,
     SystemTraceEvents,
@@ -433,7 +432,7 @@ impl ChromeStream {
                 Some(Format::Perfetto) => {
                     self.format = Format::Perfetto;
                     self.perfetto = Some(Box::default());
-                    ing.set_display_time_unit("ns");
+                    ing.unit = TimeUnit::Nanos;
                 }
                 Some(f) => self.format = f,
                 None => return Step::NeedBytes,
@@ -560,7 +559,6 @@ impl ChromeStream {
                 self.pending = match key.as_str() {
                     "traceEvents" => PendingKey::TraceEvents,
                     "systemTraceEvents" => PendingKey::SystemTraceEvents,
-                    "displayTimeUnit" => PendingKey::DisplayTimeUnit,
                     "stackFrames" => PendingKey::StackFrames,
                     "samples" => PendingKey::Samples,
                     _ => PendingKey::Other,
@@ -610,17 +608,6 @@ impl ChromeStream {
                     return Step::Event;
                 }
                 self.skip_value()
-            }
-            PendingKey::DisplayTimeUnit => {
-                let Some(end) = value_end(&self.raw, self.pos) else {
-                    return Step::NeedBytes;
-                };
-                if let Some(s) = parse_json_string(&self.raw[self.pos..end]) {
-                    ing.set_display_time_unit(&s);
-                }
-                self.pos = end;
-                self.phase = Phase::AfterValue;
-                Step::Event
             }
             PendingKey::StackFrames => {
                 let Some(end) = value_end(&self.raw, self.pos) else {

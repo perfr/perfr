@@ -6,7 +6,9 @@
 //! 32-byte [`LiveEvent`]s.
 //!
 //! JSON: an array of events (legacy `chrome://tracing`) or an object with
-//! `traceEvents[]`, plus `displayTimeUnit`, `stackFrames`, and `samples`.
+//! `traceEvents[]`, plus `stackFrames`, `samples` and `systemTraceEvents`.
+//! Times are microseconds, as the format says; `displayTimeUnit` is a
+//! display preference and does not change how they are read.
 //! Proto: Perfetto `.pftrace` / `.perfetto-trace` / `.pb` (see
 //! [`perfetto`](crate::perfetto) for what maps). gzip and a single-file zip
 //! are decoded into the parser a slice at a time: the decoded text is never
@@ -218,14 +220,22 @@ mod tests {
         assert_eq!(ing.intern.get(evs[0].name_id), Some("A"));
     }
 
+    /// `ts` and `dur` are microseconds whatever `displayTimeUnit` says: the
+    /// key only chooses how a viewer prints them. Read as the unit of the
+    /// data, a conforming trace that asks for nanosecond display came in a
+    /// thousand times too short, and only for the events after the key.
     #[test]
-    fn display_time_unit_ns() {
-        let json = r#"{"displayTimeUnit":"ns","traceEvents":[
-          {"name":"X","ph":"X","ts":1000,"dur":50,"pid":1,"tid":1}
-        ]}"#;
-        let (_ing, evs) = collect(json);
-        assert_eq!(evs[0].start_ns, 1000);
-        assert_eq!(evs[0].duration_ns, 50);
+    fn display_time_unit_does_not_rescale_timestamps() {
+        let event = r#"{"name":"X","ph":"X","ts":1000,"dur":50,"pid":1,"tid":1}"#;
+        for json in [
+            format!(r#"{{"displayTimeUnit":"ns","traceEvents":[{event}]}}"#),
+            format!(r#"{{"traceEvents":[{event}],"displayTimeUnit":"ns"}}"#),
+            format!(r#"{{"displayTimeUnit":"ms","traceEvents":[{event}]}}"#),
+            format!(r#"{{"displayTimeUnit":"ns","samples":[],"traceEvents":[{event}]}}"#),
+        ] {
+            let (_ing, evs) = collect(&json);
+            assert_eq!((evs[0].start_ns, evs[0].duration_ns), (1_000_000, 50_000), "{json}");
+        }
     }
 
     #[test]

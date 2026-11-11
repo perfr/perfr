@@ -82,6 +82,9 @@ pub struct IngestStats {
     pub sched: u64,
 }
 
+/// The unit of `ts` and `dur`. A JSON trace is always in microseconds (its
+/// `displayTimeUnit` is about how a viewer prints times, not about the
+/// data); the Perfetto path hands over nanoseconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimeUnit {
     Micros,
@@ -95,14 +98,6 @@ impl Default for TimeUnit {
 }
 
 impl TimeUnit {
-    pub fn from_display(s: &str) -> Self {
-        if s.eq_ignore_ascii_case("ns") {
-            Self::Nanos
-        } else {
-            Self::Micros
-        }
-    }
-
     pub fn to_ns(self, ts: f64) -> u64 {
         if !ts.is_finite() || ts < 0.0 {
             return 0;
@@ -339,10 +334,6 @@ impl Default for ChromeIngestor {
 }
 
 impl ChromeIngestor {
-    pub fn set_display_time_unit(&mut self, unit: &str) {
-        self.unit = TimeUnit::from_display(unit);
-    }
-
     pub fn add_stack_frame(&mut self, id: String, frame: StackFrame) {
         self.stack_frames.insert(id, frame);
     }

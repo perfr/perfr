@@ -4,10 +4,13 @@
 
 //! PDB reading, replacing `src/ObjectUtils/PdbFileLlvm.cpp`.
 //!
-//! Follows the same four steps: procedures from the module debug streams,
-//! then function symbols from the public stream that those did not cover,
-//! then sizes from the section contributions, then -- in the shim, because it
-//! is shared -- the remaining sizes as the distance to the next symbol.
+//! Three steps: procedures from the module debug streams, then function
+//! symbols from the public stream that those did not cover, then sizes from
+//! the section contributions. A public symbol no contribution sizes keeps
+//! [`UNKNOWN_SYMBOL_SIZE`]. The C++ went on to give those the distance to
+//! the next symbol; nothing does here, and the service turns the sentinel
+//! into zero, so such a function (typically a leaf from a library built
+//! without debug info) is matched at its entry address only.
 
 use std::collections::{HashMap, HashSet};
 
@@ -23,10 +26,9 @@ pub struct PdbInfo {
     pub age: u32,
 }
 
-/// A symbol whose size is not yet known.
-///
-/// `SymbolsFile::kUnknownSymbolSize` is `u64::MAX`; the shim applies the same
-/// placeholder, so it is spelled the same way here.
+/// The size of a symbol the PDB gives no size for: `u64::MAX`, the value
+/// of the C++ `SymbolsFile::kUnknownSymbolSize`. A caller must not read it
+/// as an extent.
 pub const UNKNOWN_SYMBOL_SIZE: u64 = u64::MAX;
 
 fn open(bytes: &[u8]) -> Result<pdb::PDB<'_, std::io::Cursor<&[u8]>>, String> {
@@ -67,7 +69,7 @@ fn compute_address(
 /// `PdbFileLlvm::LoadDebugSymbols`, minus the final size deduction.
 ///
 /// Names come back already assembled -- procedure name plus rendered argument
-/// list -- but still mangled; the shim demangles, as it does for ELF and PE.
+/// list -- but still mangled; the caller demangles, as it does for ELF.
 pub fn load_pdb_symbols(bytes: &[u8], image_base: u64) -> Result<Vec<Symbol>, String> {
     let mut pdb = open(bytes)?;
 
@@ -154,7 +156,7 @@ pub fn load_pdb_symbols(bytes: &[u8], image_base: u64) -> Result<Vec<Symbol>, St
             mangled_name: public.name.to_string().into_owned(),
             address,
             // The public stream carries no sizes; they come from the section
-            // contributions below, or from the distance to the next symbol.
+            // contributions below, where there is one for the address.
             size: UNKNOWN_SYMBOL_SIZE,
         });
     }

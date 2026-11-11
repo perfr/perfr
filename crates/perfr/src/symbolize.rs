@@ -621,11 +621,18 @@ pub(crate) fn try_map_file(path: &str) -> std::io::Result<FileBytes> {
     if file.metadata()?.len() == 0 {
         return Ok(FileBytes::Empty);
     }
-    // SAFETY: the mapping is private and read-only. A file that changes
-    // underneath a mapping can yield torn bytes; the parsers bounds-check
+    // SAFETY: the mapping is private and read-only. A file rewritten in
+    // place underneath it can yield torn bytes; the parsers bounds-check
     // every read and treat garbage as an unparsable image, never as memory
-    // unsafety, and the files here are the target's own executables and
-    // their debug files, which nothing writes while it runs.
+    // unsafety. A file *truncated* underneath it is different and is not
+    // handled: touching a page past the new end raises SIGBUS, which ends
+    // the service. That takes something shortening the file during the
+    // seconds a load or a disassembly holds the mapping (`cp` over a
+    // binary, a packager working in place); a build that replaces the file
+    // by rename does not, the mapping keeps the old one. The files here are
+    // the target's own executables and their debug files, which nothing
+    // writes while it runs, and reading them whole instead is what made a
+    // game's first sample seconds late.
     unsafe { memmap2::Mmap::map(&file) }.map(FileBytes::Mapped)
 }
 

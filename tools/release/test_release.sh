@@ -341,6 +341,17 @@ set -e
 assert_fail
 assert_has "refusing to edit it"
 
+it "no tracked file is stored with line endings its attributes forbid"
+# Git reports such a file as modified in every fresh checkout, nobody can
+# make it clean without committing it, and release.sh refuses a tree that
+# is not clean. text=auto is left out: it does not convert a file that is
+# already stored with CRLF.
+if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  unclean=$(git -C "$ROOT" ls-files --eol |
+    grep -E '^i/(crlf|mixed) +w/[^ ]* +attr/text[[:space:]]' || true)
+  [ -z "$unclean" ] || fail "stored with CRLF but marked text"$'\n'"$unclean"
+fi
+
 REPO=$TMP/repo
 make_repo "$REPO" "0.1.0"
 

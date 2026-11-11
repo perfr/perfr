@@ -89,6 +89,7 @@ mod any_input_tests {
         "samples":[{"name":"p","ts":300,"pid":1,"tid":10,"sf":"1"}],
         "stackFrames":{"1":{"name":"leaf","parent":2},"2":{"name":"root"}},
         "systemTraceEvents":"x-9 [000] .... 1.5: tracing_mark_write: B|9|F\n x-9 [000] .... 1.6: tracing_mark_write: E|9\n",
+        "version":12345678,"ratio":-0.125e2,"flag":true,"none":null,
         "metadata":{"n":-1.5e3,"t":true,"z":null}}"#
             .to_vec()
     }

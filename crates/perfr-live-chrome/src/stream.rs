@@ -16,7 +16,7 @@ use std::io::Write;
 
 use flate2::write::MultiGzDecoder;
 use crate::ingest::{ChromeEvent, ChromeIngestor, StackFrame, TimeUnit};
-use crate::json::{parse_json_string, skip_ws, value_end};
+use crate::json::{parse_json_string, skip_ws, ValueScan};
 use crate::id::FlexId;
 use crate::perfetto::PerfettoState;
 use crate::proto::{is_message, varint};
@@ -93,6 +93,9 @@ pub struct ChromeStream {
     pos: usize,
     phase: Phase,
     pending: PendingKey,
+    /// Where the scan of the value at `pos` has got to, when the value is
+    /// not all here yet.
+    scan: ValueScan,
     decode: Decode,
     /// Compressed input not inflated yet, from `packed_pos` on.
     packed: Vec<u8>,
@@ -121,6 +124,7 @@ impl Default for ChromeStream {
             pos: 0,
             phase: Phase::Start,
             pending: PendingKey::None,
+            scan: ValueScan::default(),
             decode: Decode::Identity,
             packed: Vec::new(),
             packed_pos: 0,
@@ -423,6 +427,7 @@ impl ChromeStream {
         self.dropped_tail_bytes += self.decoded_backlog() as u64;
         self.pos = self.raw.len();
         self.phase = Phase::Done;
+        self.scan.reset();
     }
 
     /// Drop the parsed prefix of `raw`, once it is at least as long as what
@@ -518,7 +523,7 @@ impl ChromeStream {
                 Step::Event
             }
             _ => {
-                let Some(end) = value_end(&self.raw, self.pos) else {
+                let Some(end) = self.scan.end(&self.raw, self.pos) else {
                     return Step::NeedBytes;
                 };
                 let slice = &self.raw[self.pos..end];
@@ -562,7 +567,7 @@ impl ChromeStream {
                 Step::Event
             }
             b'"' => {
-                let Some(end) = value_end(&self.raw, self.pos) else {
+                let Some(end) = self.scan.end(&self.raw, self.pos) else {
                     return Step::NeedBytes;
                 };
                 let key = parse_json_string(&self.raw[self.pos..end]).unwrap_or_default();
@@ -608,7 +613,7 @@ impl ChromeStream {
                     return Step::Event;
                 }
                 if self.pending == PendingKey::SystemTraceEvents && self.raw[self.pos] == b'"' {
-                    let Some(end) = value_end(&self.raw, self.pos) else {
+                    let Some(end) = self.scan.end(&self.raw, self.pos) else {
                         return Step::NeedBytes;
                     };
                     if let Some(s) = parse_json_string(&self.raw[self.pos..end]) {
@@ -621,7 +626,7 @@ impl ChromeStream {
                 self.skip_value()
             }
             PendingKey::StackFrames => {
-                let Some(end) = value_end(&self.raw, self.pos) else {
+                let Some(end) = self.scan.end(&self.raw, self.pos) else {
                     return Step::NeedBytes;
                 };
                 if let Ok(map) =
@@ -642,7 +647,10 @@ impl ChromeStream {
     }
 
     fn skip_value(&mut self) -> Step {
-        let Some(end) = value_end(&self.raw, self.pos) else {
+        let Some(end) = self.scan.end(&self.raw, self.pos) else {
+            // Nothing will be made of this value: what has been scanned
+            // need not be kept until its end arrives.
+            self.pos += self.scan.forget_scanned();
             return Step::NeedBytes;
         };
         self.pos = end;
@@ -1260,6 +1268,45 @@ mod tests {
                 assert!(load_byte_by_byte(text.as_bytes()).is_ok(), "{text:?}, a byte at a time");
             }
         }
+    }
+
+    /// `cargo test --release -p perfr-live-chrome one_large_value_bench -- --ignored --nocapture`
+    ///
+    /// One value far larger than a chunk, the shape of a `stackFrames`
+    /// table or a metadata blob, arriving 64 KiB at a time with a pump
+    /// after each push.
+    #[test]
+    #[ignore]
+    fn one_large_value_bench() {
+        let mut text = String::from(r#"{"traceEvents":[{"name":"a","ph":"i","ts":1,"pid":1,"tid":1}],"blob":""#);
+        text.push_str(&"x".repeat(16 << 20));
+        text.push_str(r#"","stackFrames":{"#);
+        for i in 0..150_000 {
+            use std::fmt::Write as _;
+            let comma = if i > 0 { "," } else { "" };
+            write!(text, r#"{comma}"{i}":{{"name":"frame number {i}","parent":"{}"}}"#, i / 2).unwrap();
+        }
+        text.push_str("}}");
+        let t = std::time::Instant::now();
+        let mut stream = ChromeStream::default();
+        let mut ing = ChromeIngestor::default();
+        let mut peak = 0;
+        for chunk in text.as_bytes().chunks(64 << 10) {
+            stream.push(chunk);
+            let _ = stream.pump(&mut ing, 48_000);
+            peak = peak.max(stream.raw.len());
+        }
+        stream.finish_input();
+        while !stream.is_done() {
+            let _ = stream.pump(&mut ing, 48_000);
+        }
+        assert_eq!((stream.error(), ing.stack_frames.len()), (None, 150_000));
+        println!(
+            "one_large_value_bench: {} MiB in 64 KiB pushes: {:?}, peak buffer {} KiB",
+            text.len() >> 20,
+            t.elapsed(),
+            peak >> 10
+        );
     }
 
     #[test]

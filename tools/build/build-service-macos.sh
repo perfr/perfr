@@ -56,5 +56,7 @@ mkdir -p "$output/licenses"
 cp tools/frida/licenses/* "$output/licenses/"
 cp crates/perfr-api/include/perfr.h "$output/include/"
 cp crates/perfr-api/python/perfr_api/__init__.py "$output/perfr_api.py"
-cp docs/building_macos.md "$output/README.md"
+# What a user unpacks, not how a contributor builds: docs/building_macos.md
+# used to be shipped here and told people about CI runners.
+cp tools/release/README.archive.md "$output/README.md"
 echo "Built $output; run $output/perfr --host 127.0.0.1 --serve 3000"

@@ -10,9 +10,6 @@
 //! Sources live in `src/shaders/*.wgsl` so editors, `wgsl-analyzer`, and the
 //! `naga` CLI can see them; `include_str!` bakes them in at compile time.
 
-/// Full-viewport blit of the CPU raster.
-pub const BLIT_WGSL: &str = include_str!("shaders/blit.wgsl");
-
 /// Instanced scope rects: SDF rounded boxes + analytical drop shadow.
 pub const INSTANCE_WGSL: &str = include_str!("shaders/instance.wgsl");
 

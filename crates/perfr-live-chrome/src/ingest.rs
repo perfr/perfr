@@ -157,9 +157,6 @@ pub struct ChromeEvent {
     pub sf: Option<FlexId>,
     #[serde(default)]
     pub stack: Option<Vec<String>>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub tts: Option<f64>,
     /// Row an async / object event is drawn on when it is not the event
     /// name: a Perfetto track carries many differently named slices on one
     /// lane. JSON never sets it.
@@ -1398,7 +1395,6 @@ fn systrace_mark_event(mark: &str, ts: f64) -> Option<ChromeEvent> {
         flow_out: None,
         sf: None,
         stack: None,
-        tts: None,
         lane: None,
     })
 }

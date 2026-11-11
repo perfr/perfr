@@ -46,15 +46,15 @@ mod par;
 mod shaders;
 pub use lod::{
     collect_instances_cached, ListingCache,ThreadFocus, 
-    apply_highlight_flags, choose_lod, choose_lod_first8, choose_lod_hint, collect_instances,
-    collect_instances_layout, collect_instances_layout_opts, drop_index_for_y, empty_column_color,
+    apply_highlight_flags, choose_lod, choose_lod_hint, collect_instances,
+    collect_instances_layout, collect_instances_layout_opts,
     instance_for_event, lane_gap, lane_height, leaf_label, pick_column_event, pick_instance_at,
-    reorder_insert, sample_lod_lanes, sort_thread_leaves, stack_height, stack_height_keys,
-    stacked_layout, sync_lane_order, value_lanes_in_view, CollectOpts, InstanceFrame,
+    sample_lod_lanes, sort_thread_leaves, stack_height, stack_height_keys,
+    stacked_layout, value_lanes_in_view, CollectOpts, InstanceFrame,
     ScopeInstance, ScopePick, TimelineLod, YCull, FLAG_DIMMED, FLAG_HOVER, FLAG_NONE,
     FLAG_SELECTED, FLAG_SIBLING, INSTANCE_MIN_PX, Y_CULL_PAD, FLAG_INACTIVE, FLAG_SAME_PID};
 pub use par::{is_parallel, parallelism, set_wasm_pool_threads, WorkerSpan};
-pub use shaders::{BLIT_RECT_WGSL, BLIT_WGSL, INSTANCE_WGSL};
+pub use shaders::{BLIT_RECT_WGSL, INSTANCE_WGSL};
 
 /// Events per entry of [`Lane::block_span`].
 const SPAN_BLOCK: usize = 64;
@@ -630,19 +630,7 @@ impl TrackIndex {
         intern: Option<&InternTable>,
     ) -> RasterizedFrame {
         let keys: Vec<LaneKey> = self.lanes.keys().copied().collect();
-        self.rasterize_pixel_ordered(t0, t1, width, &keys, intern)
-    }
-
-    /// Same hot path as [`Self::rasterize_pixel`], with a session lane order.
-    pub fn rasterize_pixel_ordered(
-        &self,
-        t0: u64,
-        t1: u64,
-        width: usize,
-        order: &[LaneKey],
-        intern: Option<&InternTable>,
-    ) -> RasterizedFrame {
-        self.rasterize_pixel_layout(t0, t1, width, order, None, None, intern, false)
+        self.rasterize_pixel_layout(t0, t1, width, &keys, None, None, intern, false)
     }
 
     /// Pixel-column raster with optional stack-Y cull. `ys` is `(lane, y)` in
@@ -720,6 +708,9 @@ impl TrackIndex {
         }
     }
 
+    /// Every lane through [`Lane::rasterize_naive`], on the calling thread.
+    /// Not a renderer: the baseline the benches and the scaling test hold
+    /// [`Self::rasterize_pixel`] against.
     pub fn rasterize_naive(
         &self,
         t0: u64,
@@ -766,47 +757,6 @@ impl RasterizedFrame {
             out.push(((*p >> 24) & 0xFF) as u8);
         }
         out
-    }
-
-    /// Repeat each lane row to its perfr track height so a blit is not a barcode.
-    pub fn to_rgba8_scaled(&self) -> (Vec<u8>, u32) {
-        self.to_rgba8_scaled_by(1.0)
-    }
-
-    pub fn to_rgba8_scaled_by(&self, scale: f32) -> (Vec<u8>, u32) {
-        let s = scale.max(0.01);
-        let mut height = 0u32;
-        let mut hs = Vec::with_capacity(self.lanes.len());
-        for key in &self.lanes {
-            let h = (lod::lane_height(*key) * s).round().max(1.0) as u32;
-            let g = (lod::lane_gap(*key) * s).round() as u32;
-            hs.push((h, g));
-            height = height.saturating_add(h.saturating_add(g));
-        }
-        let mut out = vec![0u8; self.width.saturating_mul(height as usize).saturating_mul(4)];
-        for px in out.chunks_exact_mut(4) {
-            px[0] = ((chrome::TRACK >> 16) & 0xFF) as u8;
-            px[1] = ((chrome::TRACK >> 8) & 0xFF) as u8;
-            px[2] = (chrome::TRACK & 0xFF) as u8;
-            px[3] = ((chrome::TRACK >> 24) & 0xFF) as u8;
-        }
-        let mut y = 0u32;
-        for (row, &(h, g)) in hs.iter().enumerate() {
-            let src = self.row(row);
-            for _ in 0..h {
-                let dest = (y as usize) * self.width * 4;
-                for (i, p) in src.iter().enumerate() {
-                    let o = dest + i * 4;
-                    out[o] = ((*p >> 16) & 0xFF) as u8;
-                    out[o + 1] = ((*p >> 8) & 0xFF) as u8;
-                    out[o + 2] = (*p & 0xFF) as u8;
-                    out[o + 3] = ((*p >> 24) & 0xFF) as u8;
-                }
-                y += 1;
-            }
-            y += g;
-        }
-        (out, height)
     }
 
     /// Lanes this frame actually rasterized, paired with their layout Y and
@@ -1317,7 +1267,6 @@ mod tests {
 
     #[test]
     fn shaders_are_present_for_both_lods() {
-        assert!(BLIT_WGSL.contains("textureSampleLevel"));
         assert!(BLIT_RECT_WGSL.contains("uni.dest"));
         assert!(INSTANCE_WGSL.contains("sd_rounded_box"));
         // The drop shadow was removed (87680c10b): the 6px quad expansion
@@ -1343,7 +1292,7 @@ mod tests {
         });
         let keys: Vec<LaneKey> = idx.lanes().map(|(k, _)| k).collect();
         let layout = stacked_layout(&keys, 0.0);
-        let full = idx.rasterize_pixel_ordered(0, 50, 8, &keys, None);
+        let full = idx.rasterize_pixel(0, 50, 8, None);
         assert_eq!(full.lanes.len(), 2);
         let y0 = layout[0].1;
         let h0 = lane_height(layout[0].0);
@@ -1386,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn scaled_raster_height_matches_layout_stack() {
+    fn placed_raster_height_spans_the_layout_gaps() {
         let mut idx = TrackIndex::default();
         idx.insert(scope(0, 50, 0, 1));
         idx.insert(LiveEvent {
@@ -1395,14 +1344,13 @@ mod tests {
             ..scope(0, 50, 1, 2)
         });
         let keys: Vec<LaneKey> = idx.lanes().map(|(k, _)| k).collect();
-        let raster = idx.rasterize_pixel_ordered(0, 50, 8, &keys, None);
+        let raster = idx.rasterize_pixel(0, 50, 8, None);
         let scale = 0.72_f32;
-        let (_, h) = raster.to_rgba8_scaled_by(scale);
-        let expect: f32 = keys
+        // The two lanes stacked with nothing between them.
+        let h: f32 = keys
             .iter()
             .map(|k| (lane_height(*k) + lane_gap(*k)) * scale)
             .sum();
-        assert!((h as f32 - expect).abs() < 1.0, "h={h} expect={expect}");
         let gapped = vec![(keys[0], 36.0), (keys[1], 80.0)];
         let (_, placed_h) = raster.to_rgba8_placed(&gapped, scale);
         let placed_expect = (80.0 + (lane_height(keys[1]) + lane_gap(keys[1])) * scale) - 36.0;
@@ -1411,7 +1359,7 @@ mod tests {
             "placed h={placed_h} expect={placed_expect}"
         );
         assert!(
-            placed_h as f32 > h as f32 + 1.0,
+            placed_h as f32 > h + 1.0,
             "header gaps must occupy rows, not stretch compact leaves"
         );
     }
@@ -1583,37 +1531,23 @@ mod tests {
     }
 
     #[test]
-    fn lane_order_sync_and_reorder() {
+    fn placed_rgba_uses_event_color_and_leaves_empty_columns_clear() {
         let mut idx = TrackIndex::default();
-        idx.insert(scope(0, 10, 0, 1));
-        idx.insert(LiveEvent {
-            tid: 2,
-            ..scope(0, 10, 0, 2)
-        });
-        let mut order = Vec::new();
-        sync_lane_order(&mut order, &idx);
-        assert_eq!(order.len(), 2);
-        let moved = reorder_insert(&order, order[0], 1);
-        assert_eq!(moved[1], order[0]);
-        assert_eq!(drop_index_for_y(&order, order[0], 1000.0), 1);
-    }
-
-    #[test]
-    fn scaled_rgba_uses_event_color_not_track_gray() {
-        let mut idx = TrackIndex::default();
-        idx.insert(scope(0, 100, 1, 1));
+        idx.insert(scope(0, 50, 1, 1));
         let frame = idx.rasterize_pixel(0, 100, 8, None);
         let expect = named_scope_color(&1u32.to_le_bytes(), 1);
         assert_eq!(frame.pixels[0], expect);
+        assert_eq!(frame.pixels[7], chrome::TRACK);
         assert_ne!(expect, chrome::TRACK);
-        let (bytes, h) = frame.to_rgba8_scaled();
+        let key = frame.lanes[0];
+        let (bytes, h) = frame.to_rgba8_placed(&[(key, 0.0)], 1.0);
         assert!(h >= 16);
         assert_eq!(bytes[0], ((expect >> 16) & 0xFF) as u8);
         assert_eq!(bytes[1], ((expect >> 8) & 0xFF) as u8);
         assert_eq!(bytes[2], (expect & 0xFF) as u8);
         assert_eq!(bytes[3], 0xFF);
-        // A gap/empty byte run still decodes as track gray, not 0.
-        assert!(bytes.chunks_exact(4).any(|c| c == [0x32, 0x32, 0x32, 0xFF]));
+        // A column with no event is transparent, so the row behind shows.
+        assert_eq!(bytes[7 * 4..8 * 4], [0, 0, 0, 0]);
     }
 
     #[test]

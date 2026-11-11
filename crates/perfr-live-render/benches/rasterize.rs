@@ -12,8 +12,8 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use perfr_live_event::{kind, LiveEvent};
 use perfr_live_render::{
-    choose_lod, choose_lod_first8, collect_instances_layout_opts, generate_nested_scopes,
-    stacked_layout, CollectOpts, TrackIndex, YCull, INSTANCE_MIN_PX,
+    choose_lod, collect_instances_layout_opts, generate_nested_scopes, stacked_layout,
+    CollectOpts, TrackIndex, YCull, INSTANCE_MIN_PX,
 };
 
 fn build_index(n: usize) -> TrackIndex {
@@ -143,9 +143,6 @@ fn choose_lod_sample(c: &mut Criterion) {
         name_id: 99,
     });
     let mut group = c.benchmark_group("choose_lod_sample");
-    group.bench_function("first8", |b| {
-        b.iter(|| black_box(choose_lod_first8(&idx, 0, 100_000, 100, INSTANCE_MIN_PX)));
-    });
     group.bench_function("density", |b| {
         b.iter(|| black_box(choose_lod(&idx, 0, 100_000, 100, INSTANCE_MIN_PX)));
     });

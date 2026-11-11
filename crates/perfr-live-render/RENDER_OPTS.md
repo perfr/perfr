@@ -18,8 +18,7 @@ measurement window (this run).
 |---|---|---|---|
 | `collect_y_cull/no_cull` | **99.8 µs** | — | 200 lanes × 64 events, full stack |
 | `collect_y_cull/y_cull_small_view` | **2.61 µs** | **38× faster** | same index, visible Y = 80 px + pad |
-| `choose_lod_sample/first8` | 118 ns | — | old BTreeMap first-8 (misses dense row) |
-| `choose_lod_sample/density` | 245 ns | 2.1× slower | scores all lanes by `len()`; still << 1 µs |
+| `choose_lod_sample/density` | 245 ns | — | scores all lanes by `len()`; the first-8 sample it replaced (removed since) took 118 ns and missed the dense row |
 | `rasterize_vs_pixels/pixel_columns/1280` | **5.86 ms** | — | 1e6 scopes, no-regress check |
 | `rasterize_vs_pixels/pixel_columns/1920` | **7.70 ms** | — | same |
 
@@ -58,9 +57,9 @@ egui idle-chrome widget skip; on-screen FPS / `fps_sweep`.
 5. **LOD sampling.** `choose_lod` samples the densest non-VALUE lanes by
    `Lane::len()` (O(lanes), not O(scopes)) plus the cursor/hover hint.
    `INSTANCE_MIN_PX = 4.0`. VALUE still skipped
-   (`value_bits_do_not_force_instanced_lod`). Old first-8 path remains as
-   `choose_lod_first8` for A/B. Density is a few hundred ns slower and
-   actually sees a busy row the old sample missed.
+   (`value_bits_do_not_force_instanced_lod`). Density is a few hundred ns
+   slower than the first-8 sample it replaced and actually sees a busy row
+   that one missed.
 6. **Idle chrome.** `skip_idle_chrome` still skips `apply_perfr_visuals`
    on the 100 ms timer wake when not live/follow/dragging. Header rows
    stay full widgets (title-band names, chevrons, hide chips, drag

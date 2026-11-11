@@ -62,19 +62,6 @@ pub fn is_parallel() -> bool {
     all(target_arch = "wasm32", not(feature = "parallel")),
     allow(dead_code)
 )]
-/// One lane per thread, from a single counter.
-///
-/// Deliberately *not* `rayon::current_thread_index()`. The thread that calls
-/// `par_chunks` runs chunks itself but is not a pool thread, so it returned
-/// `None` there and fell through to this counter -- taking slot 0, the same tid
-/// rayon hands pool worker 0. Both then emitted spans into one lane while
-/// running concurrently, and a lane is required to hold non-overlapping
-/// intervals. That is the RasterLane scopes overlapping each other.
-
-#[cfg_attr(
-    all(target_arch = "wasm32", not(feature = "parallel")),
-    allow(dead_code)
-)]
 fn now_ns() -> u64 {
     perfr_live_event::dev::now_ns()
 }

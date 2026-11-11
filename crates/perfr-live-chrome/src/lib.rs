@@ -31,22 +31,6 @@ pub use ingest::{
 };
 pub use stream::{ingest_bytes, ingest_collect, ChromeStream, Format};
 
-use perfr_live_event::LIVE_EVENT_SIZE;
-
-/// Documented WASM / process heap budget for a loaded file session.
-/// The live ring is not used; events go into the viewer's `TrackIndex`.
-pub const TRACE_HEAP_HINT: &str = "\
-Loaded traces use the viewer TrackIndex (32 bytes per event + interned \
-names/args), not the 64 MB capture ring. gzip is inflated as chunks arrive \
-(not buffered then decoded). wasm32 heap is capped at 2 GiB (`--max-memory`); \
-a 1–2 GB uncompressed JSON fits when streamed (JSON is not retained). A \
-single enormous memory-dump object still transits the scan window and is \
-then dropped.";
-
-pub fn live_event_size() -> usize {
-    LIVE_EVENT_SIZE
-}
-
 /// Any input, cut into any chunks: the stream must not panic, must end, and
 /// for input that is a trace must give the events one push gives. The
 /// generator is a fixed xorshift, so a failure names a case that fails again.
@@ -247,7 +231,7 @@ mod any_input_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perfr_live_event::{kind, LIVE_EVENT_SIZE};
+    use perfr_live_event::kind;
     use std::collections::HashSet;
     use std::io::Write;
 
@@ -289,12 +273,6 @@ mod tests {
 
     fn collect(json: &str) -> (ChromeIngestor, Vec<perfr_live_event::LiveEvent>) {
         ingest_collect(json.as_bytes()).expect("ingest")
-    }
-
-    #[test]
-    fn live_event_stays_32() {
-        assert_eq!(LIVE_EVENT_SIZE, 32);
-        assert_eq!(live_event_size(), 32);
     }
 
     #[test]

@@ -1189,7 +1189,6 @@ impl PerfettoState {
             flow_out: None,
             sf: None,
             stack: None,
-            tts: None,
             lane: None,
         };
         // The first flow id an event carries becomes its arrow. An id seen
@@ -1684,7 +1683,6 @@ impl PerfettoState {
             flow_out: None,
             sf: None,
             stack: Some(stack),
-            tts: None,
             lane: None,
         };
         ing.ingest(ev)
@@ -1931,7 +1929,6 @@ fn chrome_trace_event(buf: &[u8], table: &HashMap<u32, String>) -> Option<Chrome
         flow_out: None,
         sf: None,
         stack: None,
-        tts: None,
         lane: None,
     };
     let mut flags = 0u32;

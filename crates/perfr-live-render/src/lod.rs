@@ -5,7 +5,7 @@
 //! Timeline LOD: pixel columns when scopes are sub-pixel, instanced
 //! rounded-rect primitives when a visible scope is wider than a few pixels.
 
-use perfr_live_event::{chrome, kind, InternTable, LaneKey, LiveEvent};
+use perfr_live_event::{kind, InternTable, LaneKey, LiveEvent};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -390,37 +390,6 @@ pub fn stacked_layout(keys: &[LaneKey], y0: f32) -> Vec<(LaneKey, f32)> {
     out
 }
 
-/// Keep session order; append new lanes; drop lanes that left the index.
-pub fn sync_lane_order(order: &mut Vec<LaneKey>, index: &TrackIndex) {
-    order.retain(|k| index.lane(*k).is_some());
-    for (k, _) in index.lanes() {
-        if !order.iter().any(|o| *o == k) {
-            order.push(k);
-        }
-    }
-}
-
-pub fn reorder_insert(order: &[LaneKey], moving: LaneKey, dest: usize) -> Vec<LaneKey> {
-    let mut v: Vec<LaneKey> = order.iter().copied().filter(|k| *k != moving).collect();
-    let dest = dest.min(v.len());
-    v.insert(dest, moving);
-    v
-}
-
-/// Insert index among the other lanes for a pointer y in stack space.
-pub fn drop_index_for_y(keys: &[LaneKey], moving: LaneKey, y: f32) -> usize {
-    let rest: Vec<LaneKey> = keys.iter().copied().filter(|k| *k != moving).collect();
-    let mut acc = 0.0;
-    for (i, k) in rest.iter().enumerate() {
-        let h = lane_height(*k) + lane_gap(*k);
-        if y < acc + h * 0.5 {
-            return i;
-        }
-        acc += h;
-    }
-    rest.len()
-}
-
 /// Lanes whose events are marks, not spans: `duration_ns` holds something
 /// else (a value's bits, a sampling period, a count of lost events, nothing)
 /// and the event draws one pixel wide at every zoom. They never make a view
@@ -461,27 +430,6 @@ pub fn choose_lod_hint(
         min_wide_px,
         &sample_lod_lanes(index, hint),
     )
-}
-
-/// Old first-8 BTreeMap-order sample. Kept so benches can A/B density.
-pub fn choose_lod_first8(
-    index: &TrackIndex,
-    t0: u64,
-    t1: u64,
-    width: usize,
-    min_wide_px: f32,
-) -> TimelineLod {
-    let mut keys = Vec::new();
-    for (key, _) in index.lanes() {
-        if key.kind == kind::VALUE {
-            continue;
-        }
-        keys.push(key);
-        if keys.len() >= LOD_SAMPLE_LANES {
-            break;
-        }
-    }
-    choose_lod_from_keys(index, t0, t1, width, min_wide_px, &keys)
 }
 
 /// Densest lanes of spans (by `Lane::len`) plus `hint`. O(lanes), not O(scopes).
@@ -633,9 +581,8 @@ mod value_lod_tests {
         for i in 0..24u32 {
             idx.insert(scope(u64::from(i) * 5_000, 4_800, 99, 100 + i));
         }
-        // The first-8 BTreeMap sample still misses tid 99 -- that is the point
-        // of ranking by density -- but a sample miss no longer decides the
-        // verdict, so both samplers now agree.
+        // The first eight lanes in key order do not include tid 99, which
+        // is why the sample ranks by density instead.
         let first8: Vec<LaneKey> = idx
             .lanes()
             .map(|(k, _)| k)
@@ -645,11 +592,6 @@ mod value_lod_tests {
         assert!(
             !first8.iter().any(|k| k.tid == 99),
             "fixture is only meaningful while first-8 misses the busy lane"
-        );
-        assert_eq!(
-            choose_lod_first8(&idx, 0, 100_000, 100, INSTANCE_MIN_PX),
-            TimelineLod::Instanced,
-            "a sample miss must not decide the verdict"
         );
         assert_eq!(
             choose_lod(&idx, 0, 100_000, 100, INSTANCE_MIN_PX),
@@ -1207,10 +1149,6 @@ pub fn instance_for_event(
         event_flags: e._pad,
         flags: FLAG_NONE,
     }
-}
-
-pub fn empty_column_color() -> u32 {
-    chrome::TRACK
 }
 
 #[cfg(test)]

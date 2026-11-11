@@ -871,7 +871,6 @@ fn deserialize_dump_marker(bytes: &[u8]) -> Result<ChromeEvent, serde_json::Erro
         flow_out: None,
         sf: None,
         stack: None,
-        tts: None,
         lane: None,
     })
 }

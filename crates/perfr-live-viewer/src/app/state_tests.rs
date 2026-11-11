@@ -1632,3 +1632,35 @@ fn a_scope_report_from_the_menu_brings_a_collapsed_report_panel_back() {
     assert!(page.app.scope_report.is_some());
     assert!(report_panel_is_showing(&page), "the report loaded into a panel that stayed hidden");
 }
+
+#[test]
+fn the_settings_item_opens_the_interface_knobs_on_a_static_page() {
+    let mut page = Page::with(|app| *app = loaded_static_app());
+    page.frames(3);
+    let more = page.rect_of("More").expect("More");
+    page.click(more.center());
+    page.frames(2);
+    let item = page.text_rect("Settings").expect("the menu offers Settings");
+    page.click(item.center());
+    page.frames(3);
+    assert!(page.shows("INTERFACE"), "the menu item did nothing: {:?}", page.texts);
+    assert!(page.shows("track scale"));
+    // What needs a service is not offered: the capture settings, the hook
+    // list's pill, the track order file that is kept by the service.
+    assert!(page.rect_of("Functions").is_none(), "{:?}", page.labels());
+    assert!(!page.shows("Record"));
+    // And the knobs work.
+    let before = page.app.ui_tweaks;
+    page.app.ui_tweaks.report_font = 15.0;
+    page.frames(2);
+    assert_ne!(page.app.ui_tweaks, before);
+}
+
+#[test]
+fn the_settings_window_of_a_page_with_a_service_keeps_its_capture_settings() {
+    let mut page = three_thread_page();
+    page.app.capture_open = true;
+    page.frames(3);
+    assert!(page.shows("INTERFACE"));
+    assert!(page.rect_of("Functions").is_some(), "the capture settings are above the knobs: {:?}", page.labels());
+}

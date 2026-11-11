@@ -10535,9 +10535,13 @@ impl PerfrLiveApp {
     /// the interface knobs. What used to be a strip across the top and a
     /// second window for the knobs.
     fn tweaks_window(&mut self, ctx: &Context) {
-        if !self.capture_open || self.static_capture.is_some() {
+        if !self.capture_open {
             return;
         }
+        // A page on a capture file has no capture to set up, and nowhere
+        // to keep a track order file. The interface knobs are its too:
+        // the More menu offered this window there and nothing opened.
+        let has_service = self.has_service();
         let before = self.ui_tweaks;
         let mut open = self.capture_open;
         egui::Window::new("Settings")
@@ -10547,10 +10551,12 @@ impl PerfrLiveApp {
             .default_pos(Pos2::new(12.0, 48.0))
             .frame(Frame::window(&ctx.style()).fill(theme::RAIL()))
             .show(ctx, |ui| {
-                self.capture_strip(ui);
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(2.0);
+                if has_service {
+                    self.capture_strip(ui);
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(2.0);
+                }
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
                     section_label(ui, "INTERFACE");
@@ -10576,8 +10582,10 @@ impl PerfrLiveApp {
                     self.relayout_tracks();
                 }
                 ui.add_space(6.0);
-                self.track_order_control(ui, ctx);
-                ui.add_space(6.0);
+                if has_service {
+                    self.track_order_control(ui, ctx);
+                    ui.add_space(6.0);
+                }
                 if ui.button("Reset").clicked() {
                     self.ui_tweaks = UiTweaks::default();
                 }

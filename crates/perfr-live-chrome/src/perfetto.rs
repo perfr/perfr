@@ -38,6 +38,12 @@ use crate::ingest::{ChromeEvent, ChromeIngestor, TimeUnit};
 use crate::proto::fields;
 use crate::stream::ChromeStream;
 
+// Field numbers, copied by hand from the Perfetto protos; nothing in the
+// build checks them. All of them (and that none of these fields is a zigzag
+// `sint`) were last compared with the schema embedded in
+// trace_processor_shell v57.2 on 2026-11-11. A wrong one fails silently: the
+// field is skipped as unknown.
+
 // TracePacket
 const P_FTRACE_EVENTS: u32 = 1;
 const P_PROCESS_TREE: u32 = 2;

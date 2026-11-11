@@ -35,6 +35,14 @@ impl<'a> Val<'a> {
         self.u64() as i32
     }
 
+    /// A `sint32` / `sint64` field, which is zigzag-encoded: read with
+    /// [`Self::i64`] its -1 is 1. None of the fields read today is one;
+    /// this is here so that the first one is not read wrong.
+    pub fn sint(self) -> i64 {
+        let v = self.u64();
+        ((v >> 1) as i64) ^ -((v & 1) as i64)
+    }
+
     pub fn u32(self) -> u32 {
         self.u64() as u32
     }
@@ -222,6 +230,10 @@ impl Encoder {
         self.varint(num, v as u64)
     }
 
+    pub fn sint(&mut self, num: u32, v: i64) -> &mut Self {
+        self.varint(num, ((v << 1) ^ (v >> 63)) as u64)
+    }
+
     pub fn fixed64(&mut self, num: u32, v: u64) -> &mut Self {
         self.tag(num, 1);
         self.buf.extend_from_slice(&v.to_le_bytes());
@@ -308,6 +320,20 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(varint(&[0x80, 0x80], 0), None);
         assert_eq!(varint(&[0xac, 0x02], 0), Some((300, 2)));
+    }
+
+    #[test]
+    fn zigzag_fields_keep_their_sign() {
+        for v in [0i64, -1, 1, -2, 2, 63, -64, i64::MAX, i64::MIN] {
+            let mut m = Encoder::new();
+            m.sint(7, v);
+            let (_, val) = fields(&m.buf).next().unwrap();
+            assert_eq!(val.sint(), v);
+        }
+        // The wire value of -1 is 1: what a plain read returns.
+        let mut m = Encoder::new();
+        m.sint(7, -1);
+        assert_eq!(fields(&m.buf).next().unwrap().1.i64(), 1);
     }
 
     #[test]

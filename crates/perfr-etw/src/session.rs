@@ -64,8 +64,12 @@ impl Default for SessionOptions {
 pub struct SessionStats {
     pub buffers: u32,
     pub free_buffers: u32,
+    /// Events dropped because every buffer was full when they were logged.
     pub events_lost: u32,
     pub buffers_written: u32,
+    /// Whole buffers the real-time consumer never got, because it fell
+    /// behind. Each is `SessionOptions::buffer_kb` of events, so this is
+    /// the larger loss by far, and `events_lost` does not include it.
     pub real_time_buffers_lost: u32,
 }
 

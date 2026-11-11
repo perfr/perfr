@@ -480,6 +480,8 @@ struct Etw {
     /// assembler's horizon even while no stack walks arrive.
     newest: i64,
     events: Vec<KernelEvent>,
+    /// Gaps the session announced in the stream this consumer read.
+    lost_notices: u64,
 }
 
 /// Starts the kernel logger for a capture, or says why it could not.
@@ -519,7 +521,7 @@ fn open_etw(sampling: bool, focus: &[u32], capture_start_ns: u64) -> Result<Etw,
         feed.thread_count(),
         if sampling { "at 1 kHz" } else { "off" }
     );
-    Ok(Etw { session, consumer, feed, samples: SampleAssembler::new(), newest: 0, events: Vec::with_capacity(4096) })
+    Ok(Etw { session, consumer, feed, samples: SampleAssembler::new(), newest: 0, events: Vec::with_capacity(4096), lost_notices: 0 })
 }
 
 /// One sample's events: a tick on the thread's sample bar, then its frames
@@ -627,6 +629,12 @@ fn ingest(etw: &mut Etw, target_pid: u32, visible: &VisibleProcesses, self_pid: 
                 if !image_name.is_empty() && visible.contains(pid) {
                     service.set_process_name(pid, &image_name);
                 }
+            }
+            KernelEvent::Lost { what, .. } => {
+                if etw.lost_notices == 0 {
+                    log::warn!("the kernel logger dropped data this capture did not read in time ({what:?}): scheduling slices, thread states and samples have gaps from here");
+                }
+                etw.lost_notices += 1;
             }
             _ => {}
         }
@@ -792,6 +800,10 @@ pub fn capture_loop(
             if let Some(etw) = etw.as_mut() {
                 if let Ok(stats) = etw.session.query() {
                     perfr_api::value("etw events lost", f64::from(stats.events_lost));
+                    // Not the same loss: a whole buffer that never reached
+                    // this consumer, where the count above is events that
+                    // found no buffer to be written to.
+                    perfr_api::value("etw buffers lost", f64::from(stats.real_time_buffers_lost));
                     perfr_api::value("etw buffers free", f64::from(stats.free_buffers));
                 }
             }
@@ -927,11 +939,12 @@ pub fn capture_loop(
         }
         let feed_stats = etw.feed.stats();
         log::info!(
-            "kernel logger stopped: {} events ({} ignored, {} lost in buffers, {} lost by the kernel); {} context switches -> {} slices ({} without a pid, {} mismatches); {} stacks -> {} samples ({} kernel-only); {} state slices",
+            "kernel logger stopped: {} events ({} ignored); the kernel lost {} events and {} whole buffers ({} loss notices in the stream); {} context switches -> {} slices ({} without a pid, {} mismatches); {} stacks -> {} samples ({} kernel-only); {} state slices",
             consumer_stats.events,
             consumer_stats.ignored,
-            consumer_stats.lost,
             session_stats.events_lost,
+            session_stats.real_time_buffers_lost,
+            etw.lost_notices,
             feed_stats.context_switches,
             feed_stats.slices,
             feed_stats.slices_without_pid,

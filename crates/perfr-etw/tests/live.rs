@@ -125,4 +125,7 @@ fn the_kernel_logger_reports_this_thread_running_sampled_and_loaded() {
         "most samples of a spinning thread should land in user code"
     );
     assert_eq!(session_stats.events_lost, 0, "the kernel lost events; the buffers are too small");
+    assert_eq!(session_stats.real_time_buffers_lost, 0, "whole buffers never reached the consumer");
+    let notices = events.iter().filter(|event| matches!(event, KernelEvent::Lost { .. })).count();
+    assert_eq!(notices, 0, "the stream says it has gaps");
 }

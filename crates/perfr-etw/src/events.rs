@@ -34,7 +34,8 @@ pub const STACK_WALK_GUID: [u8; 16] =
 /// The session itself: `SystemTraceControlGuid`, 9e814aad-3204-11d2-9a82-006008a86939.
 pub const SYSTEM_TRACE_CONTROL_GUID: [u8; 16] =
     guid(0x9e814aad, 0x3204, 0x11d2, [0x9a, 0x82, 0x00, 0x60, 0x08, 0xa8, 0x69, 0x39]);
-/// `EventTraceGuid`, the session header event: 68fdd900-4a3e-11d1-84f4-0000f80464e3.
+/// `EventTraceGuid`, the session's own events (its header, and the notices
+/// that a real-time consumer lost something): 68fdd900-4a3e-11d1-84f4-0000f80464e3.
 pub const EVENT_TRACE_GUID: [u8; 16] =
     guid(0x68fdd900, 0x4a3e, 0x11d1, [0x84, 0xf4, 0x00, 0x00, 0xf8, 0x04, 0x64, 0xe3]);
 
@@ -66,6 +67,21 @@ pub mod opcode {
     pub const SAMPLED_PROFILE: u8 = 46;
     /// `StackWalk`: the frames of the event that preceded it.
     pub const STACK: u8 = 32;
+    /// `EventTrace` (`RT_LostEvent`): the real-time stream has a gap here.
+    pub const RT_LOST_EVENT: u8 = 32;
+    pub const RT_LOST_BUFFER: u8 = 33;
+    pub const RT_LOST_FILE: u8 = 34;
+}
+
+/// What a real-time consumer was told it missed (`RT_LostEvent`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lost {
+    /// Events that found no free buffer to be written to.
+    Events,
+    /// A whole buffer that was not delivered to this consumer.
+    Buffer,
+    /// A backing file of the real-time session that could not be kept.
+    File,
 }
 
 /// `KTHREAD_STATE`, the state a switched-out thread goes into
@@ -149,6 +165,12 @@ pub enum KernelEvent {
     /// The frames of the event that fired at `event_timestamp` on `tid` of
     /// `pid`, innermost first, kernel and user addresses mixed.
     Stack { timestamp: i64, event_timestamp: i64, pid: u32, tid: u32, frames: Vec<u64> },
+    /// The session's notice that the stream this consumer reads has a gap:
+    /// the consumer fell behind and the kernel dropped rather than waited.
+    /// The record carries no count, only that it happened and when; the
+    /// context switches missing around it are why a core's slices stop
+    /// pairing up.
+    Lost { timestamp: i64, what: Lost },
     /// Anything else, counted and dropped.
     Other,
 }
@@ -298,6 +320,10 @@ pub fn decode(event: &RawEvent) -> KernelEvent {
                 frames,
             }
         }
+        // RT_LostEvent has no payload: the opcode is the whole message.
+        (EVENT_TRACE_GUID, opcode::RT_LOST_EVENT) => KernelEvent::Lost { timestamp: ts, what: Lost::Events },
+        (EVENT_TRACE_GUID, opcode::RT_LOST_BUFFER) => KernelEvent::Lost { timestamp: ts, what: Lost::Buffer },
+        (EVENT_TRACE_GUID, opcode::RT_LOST_FILE) => KernelEvent::Lost { timestamp: ts, what: Lost::File },
         _ => KernelEvent::Other,
     }
 }
@@ -536,6 +562,18 @@ pub(crate) mod tests {
         );
         assert!(is_kernel_address(0xFFFF_F800_0000_1000));
         assert!(!is_kernel_address(0x7ff6_0000_0100));
+    }
+
+    #[test]
+    fn the_sessions_lost_notices_decode_and_its_header_does_not() {
+        for (opcode, what) in [(32, Lost::Events), (33, Lost::Buffer), (34, Lost::File)] {
+            assert_eq!(decode(&raw(&EVENT_TRACE_GUID, opcode, 2, &[])), KernelEvent::Lost { timestamp: 1000, what });
+        }
+        // Opcode 0 is the session header, 35 nothing this decoder knows.
+        assert_eq!(decode(&raw(&EVENT_TRACE_GUID, 0, 2, &[0; 64])), KernelEvent::Other);
+        assert_eq!(decode(&raw(&EVENT_TRACE_GUID, 35, 2, &[])), KernelEvent::Other);
+        // 32 is also the stack walk's opcode: the provider tells them apart.
+        assert_eq!(decode(&raw(&STACK_WALK_GUID, 32, 2, &[])), KernelEvent::Other);
     }
 
     #[test]

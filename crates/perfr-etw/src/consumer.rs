@@ -26,19 +26,20 @@ struct Shared {
     pending: Mutex<Vec<KernelEvent>>,
     events: AtomicU64,
     ignored: AtomicU64,
-    lost: AtomicU64,
     stop: AtomicBool,
 }
 
-/// Counters for the end-of-capture summary.
+/// Counters for the end-of-capture summary. What the kernel lost is not
+/// among them: `EVENT_TRACE_LOGFILE.EventsLost`, which the buffer callback
+/// could read, is documented as unused. Loss is in the session's own
+/// counters ([`crate::SessionStats`]) and in the stream as
+/// [`KernelEvent::Lost`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ConsumerStats {
     /// Events the callback saw.
     pub events: u64,
     /// Events decoded as `Other` and dropped.
     pub ignored: u64,
-    /// Events the kernel reported lost from buffers this consumer read.
-    pub lost: u64,
 }
 
 pub struct Consumer {
@@ -91,7 +92,6 @@ unsafe extern "system" fn on_buffer(logfile: *mut EVENT_TRACE_LOGFILEW) -> u32 {
     // SAFETY: as for on_event.
     let logfile = &*logfile;
     let shared = &*(logfile.Context as *const Shared);
-    shared.lost.fetch_add(u64::from(logfile.EventsLost), Ordering::Relaxed);
     // Returning FALSE ends ProcessTrace at the next buffer.
     (!shared.stop.load(Ordering::Acquire)) as u32
 }
@@ -114,7 +114,6 @@ impl Consumer {
             pending: Mutex::new(Vec::with_capacity(4096)),
             events: AtomicU64::new(0),
             ignored: AtomicU64::new(0),
-            lost: AtomicU64::new(0),
             stop: AtomicBool::new(false),
         });
         // SAFETY: all-zero is a valid EVENT_TRACE_LOGFILEW.
@@ -163,7 +162,6 @@ impl Consumer {
         ConsumerStats {
             events: self.shared.events.load(Ordering::Relaxed),
             ignored: self.shared.ignored.load(Ordering::Relaxed),
-            lost: self.shared.lost.load(Ordering::Relaxed),
         }
     }
 

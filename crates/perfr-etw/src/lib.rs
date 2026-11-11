@@ -65,6 +65,6 @@ pub use session::{KernelSession, SessionOptions, SessionStats};
 pub use token::{enable_system_profile_privilege, is_elevated};
 
 pub use clock::QpcClock;
-pub use events::{KernelEvent, ThreadState as EtwThreadState};
+pub use events::{KernelEvent, Lost, ThreadState as EtwThreadState};
 pub use samples::{Sample, SampleAssembler};
 pub use scheduler::{SchedulerFeed, SchedulerStats, StateEvent};

@@ -230,7 +230,7 @@ fn apply_isolation(mut resp: Response) -> Response {
 /// bytes, and the answer is a 304.
 fn asset_response(path: &str, headers: &axum::http::HeaderMap) -> Option<Response> {
     let (mime, data) = assets::get(path)?;
-    let etag = format!("\"{:016x}\"", asset_hash(data));
+    let etag = format!("\"{:016x}\"", asset_etag(data));
     let unchanged = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
@@ -247,8 +247,19 @@ fn asset_response(path: &str, headers: &axum::http::HeaderMap) -> Option<Respons
     Some(apply_isolation(resp))
 }
 
-/// FNV-1a over the asset, for its ETag. The assets are a few megabytes and
-/// this runs per request; it is cheap next to sending them.
+/// The hash of an embedded asset, computed the first time it is asked for.
+/// The assets are compiled in and never change, the wasm is ten megabytes,
+/// and a reload of the page asks about each of them: hashed per request,
+/// every "is my copy current?" cost a pass over the file to answer 304.
+fn asset_etag(data: &'static [u8]) -> u64 {
+    static HASHES: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashMap<(usize, usize), u64>>> =
+        std::sync::OnceLock::new();
+    let mut hashes = HASHES.get_or_init(Default::default).lock();
+    // By address and length: each asset is one static.
+    *hashes.entry((data.as_ptr() as usize, data.len())).or_insert_with(|| asset_hash(data))
+}
+
+/// FNV-1a over the asset, for its ETag.
 fn asset_hash(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {

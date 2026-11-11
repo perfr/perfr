@@ -1578,3 +1578,61 @@ fn index_bench() {
         asked.elapsed() / 20
     );
 }
+
+// ------------------------------------------------------ the viewer's pack ---
+
+/// The value of a response header, from the head `send_raw` returns.
+fn header_of(head: &str, name: &str) -> Option<String> {
+    head.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name).then(|| value.trim().to_string())
+    })
+}
+
+#[test]
+fn a_viewer_asset_is_served_with_an_etag_and_revalidated_by_it() {
+    let (_svc, served) = serve_small();
+    let host = host_of(served.addr);
+    let fetch = |path: &str, etag: Option<&str>| {
+        let condition = etag.map(|tag| format!("If-None-Match: {tag}\r\n")).unwrap_or_default();
+        send_raw(served.addr, format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{condition}\r\n").as_bytes())
+    };
+    for path in ["/", "/app.js", "/perfr_live_viewer_bg.wasm"] {
+        let (status, head, _) = fetch(path, None);
+        assert_eq!(status, 200, "{path}");
+        assert_eq!(header_of(&head, "cache-control").as_deref(), Some("no-cache"), "{path}");
+        let etag = header_of(&head, "etag").unwrap_or_else(|| panic!("{path}: no ETag in {head}"));
+        assert!(etag.starts_with('"') && etag.len() == 18, "{path}: {etag}");
+        // The same bytes, asked for again: the same tag, and with it a 304.
+        assert_eq!(header_of(&fetch(path, None).1, "etag").as_deref(), Some(etag.as_str()), "{path}");
+        let (status, head, body) = fetch(path, Some(&etag));
+        assert_eq!((status, body.len()), (304, 0), "{path}");
+        assert_eq!(header_of(&head, "etag").as_deref(), Some(etag.as_str()), "{path}");
+        assert_eq!(fetch(path, Some("\"0000000000000000\"")).0, 200, "{path}: another tag is not this one");
+    }
+    // Two assets do not share a tag.
+    let tag = |path: &str| header_of(&fetch(path, None).1, "etag").unwrap();
+    assert_ne!(tag("/app.js"), tag("/index.html"));
+    assert_eq!(tag("/"), tag("/index.html"));
+}
+
+/// What a page load pays to be told its copy of the viewer is current. Run
+/// with `cargo test --release -p perfr-live-server -- --ignored --nocapture etag_bench`.
+#[test]
+#[ignore]
+fn etag_bench() {
+    let (_svc, served) = serve_small();
+    let host = host_of(served.addr);
+    let revalidate = |etag: &str| {
+        send_raw(
+            served.addr,
+            format!("GET /perfr_live_viewer_bg.wasm HTTP/1.1\r\nHost: {host}\r\nIf-None-Match: {etag}\r\n\r\n").as_bytes(),
+        )
+    };
+    let etag = header_of(&revalidate("\"\"").1, "etag").unwrap();
+    let asked = std::time::Instant::now();
+    for _ in 0..50 {
+        assert_eq!(revalidate(&etag).0, 304);
+    }
+    eprintln!("revalidating the wasm: {:?} a request", asked.elapsed() / 50);
+}

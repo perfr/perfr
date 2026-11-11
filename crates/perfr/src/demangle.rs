@@ -94,9 +94,13 @@ fn is_rust(mangled: &str) -> bool {
     let Some(stem) = mangled.strip_suffix('E') else {
         return false;
     };
+    // As bytes: a name can hold multi-byte characters (UTF-8 identifiers,
+    // U+FFFD for each undecodable byte), and slicing the `str` nineteen
+    // bytes from its end panicked when one of them straddled that byte.
+    let stem = stem.as_bytes();
     stem.len() >= 19
-        && &stem[stem.len() - 19..stem.len() - 16] == "17h"
-        && stem[stem.len() - 16..].bytes().all(|b| b.is_ascii_hexdigit())
+        && &stem[stem.len() - 19..stem.len() - 16] == b"17h"
+        && stem[stem.len() - 16..].iter().all(u8::is_ascii_hexdigit)
 }
 
 fn itanium(mangled: &str) -> Option<String> {
@@ -165,7 +169,7 @@ mod ispc {
         let mut cursor = decoded.as_str();
         let mut params = Vec::new();
         while !cursor.is_empty() {
-            let (ty, next) = parse_type(cursor)?;
+            let (ty, next) = parse_type(cursor, 0)?;
             params.push(ty);
             cursor = next;
         }
@@ -200,8 +204,16 @@ mod ispc {
         Some(out)
     }
 
+    /// How deep pointer types may nest. ISPC code has pointers to pointers;
+    /// a symbol with thousands of `<` is not ISPC's, and each one is a
+    /// stack frame of `parse_type` -- enough of them overflowed the stack,
+    /// which aborts the service where a failed parse would have passed the
+    /// name through.
+    const MAX_POINTER_DEPTH: usize = 16;
+
     /// One type at the head of `s`; returns it rendered and the remainder.
-    fn parse_type(s: &str) -> Option<(String, &str)> {
+    /// `depth` is how many pointers enclose it.
+    fn parse_type(s: &str, depth: usize) -> Option<(String, &str)> {
         let mut prefix = String::new();
         let mut rest = s;
         loop {
@@ -219,7 +231,10 @@ mod ispc {
             }
         }
         if let Some(r) = rest.strip_prefix('<') {
-            let (inner, after) = parse_type(r)?;
+            if depth == MAX_POINTER_DEPTH {
+                return None;
+            }
+            let (inner, after) = parse_type(r, depth + 1)?;
             let after = after.strip_prefix('>')?;
             return Some((format!("{prefix}{inner}*"), after));
         }
@@ -318,6 +333,55 @@ mod tests {
         assert_eq!(pretty("legacy___helper"), "legacy___helper");
         assert_eq!(pretty("foo___"), "foo___");
         assert_eq!(pretty("foo____avx512skx"), "foo [ispc avx512skx]");
+    }
+
+    #[test]
+    fn a_multi_byte_character_anywhere_in_a_names_tail_is_read_not_sliced() {
+        // Symbol names are decoded lossily, so they hold whatever a string
+        // table does: UTF-8 identifiers, which GCC and clang mangle as they
+        // are, and U+FFFD for every stray byte. `app::größex(app::Canvas)`
+        // has its `ö` across the byte where a Rust hash would start.
+        // (Demangled or passed through, whichever the C++ demangler makes
+        // of a non-ASCII identifier: the name survives either way.)
+        assert!(!super::is_rust("_ZN3app8größexENS_6CanvasE"));
+        assert!(pretty("_ZN3app8größexENS_6CanvasE").contains("größex"));
+        // Every width of character at every distance from the end, in a
+        // name of the `_Z..E` shape the Rust-hash test looks at.
+        for character in ['é', '€', '\u{fffd}', '😀'] {
+            for after in 0..40 {
+                let name = format!("_Z3fooN2ns{}{character}{}E", "a".repeat(12), "a".repeat(after));
+                assert!(!super::is_rust(&name), "{name}");
+                assert_eq!(pretty(&name), super::pretty_cached(&name), "{name}");
+                // Inside what would otherwise be a hash it is not a hash.
+                let hash: String = (0..16).map(|i| if i == after % 16 { character } else { 'a' }).collect();
+                let name = format!("_ZN3foo3bar17h{hash}E");
+                assert!(!super::is_rust(&name), "{name}");
+                assert_eq!(pretty(&name), super::pretty_cached(&name), "{name}");
+                // And in the tail of an ISPC kernel's type list.
+                let name = format!("kernel___un_3C_s_5B_un{character}{}_5D__3E__avx2", "a".repeat(after));
+                assert_eq!(pretty(&name), super::pretty_cached(&name), "{name}");
+            }
+        }
+        // The hash is still found when it is one.
+        assert!(super::is_rust("_ZN4core3ptr13drop_in_place17h1234567890abcdefE"));
+        assert!(!super::is_rust("_ZN4core3ptr13drop_in_place17h1234567890abcdegE"));
+        assert!(!super::is_rust("17hE"));
+    }
+
+    #[test]
+    fn an_ispc_pointer_nested_past_any_real_type_is_not_a_kernel() {
+        // Pointer types nest by recursion, one frame per `<`. A real kernel
+        // has a pointer to a pointer at most.
+        assert_eq!(
+            super::ispc::demangle("Deep___un_3C_un_3C_un_3C_unf_3E__3E__3E_").unwrap().params,
+            vec!["uniform uniform uniform uniform float***"]
+        );
+        // A name is whatever a file's string table says it is; this one
+        // used to take a stack frame per character until there were none.
+        let hostile = format!("kernel___{}", "_3C_".repeat(200_000));
+        assert_eq!(pretty(&hostile), hostile);
+        let hostile = format!("kernel___{}f{}_avx2", "<".repeat(200_000), ">".repeat(200_000));
+        assert_eq!(pretty(&hostile), hostile);
     }
 
     #[test]

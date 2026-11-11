@@ -1919,11 +1919,12 @@ fn chrome_trace_event(buf: &[u8], table: &HashMap<u32, String>) -> Option<Chrome
 }
 
 /// A JSON trace embedded in a proto packet: run it through the JSON path
-/// in µs, then put the ingestor back in ns.
+/// in µs, then put the ingestor back in ns. Through the JSON path only: a
+/// payload that is something else is not a trace to open in turn.
 fn nested_json(ing: &mut ChromeIngestor, data: &[u8]) -> Vec<LiveEvent> {
     let saved = ing.unit;
     ing.unit = TimeUnit::Micros;
-    let mut stream = ChromeStream::default();
+    let mut stream = ChromeStream::json_text();
     stream.push(data);
     stream.finish_input();
     let mut out = Vec::new();
@@ -2529,6 +2530,48 @@ mod tests {
         let f = evs.iter().find(|e| name(e) == "F").unwrap();
         assert_eq!((f.start_ns, f.duration_ns), (2_000_000_000, 1_000));
         assert_eq!(ing.unit, TimeUnit::Nanos, "the ingestor is back in ns after the nested JSON");
+    }
+
+    fn embedded_json(data: &[u8]) -> Vec<u8> {
+        let mut json = Encoder::new();
+        json.bytes(CLJ_DATA, data);
+        let mut b = Encoder::new();
+        b.msg(CE_LEGACY_JSON_TRACE, &json);
+        let mut p = Encoder::new();
+        p.msg(P_CHROME_EVENTS, &b);
+        packet(&p)
+    }
+
+    /// `legacy_json_trace.data` is JSON text. Sniffed like a file, a payload
+    /// that begins with a packet tag was read as a Perfetto trace, whose
+    /// packets can embed the next one: recursion as deep as the file is
+    /// long, a few bytes a level, and each level free to be gzip as well.
+    #[test]
+    fn an_embedded_json_trace_is_read_as_json_and_nothing_else() {
+        let mut inner = thread_track(11, 7, 70, "Main");
+        inner.extend(te(5, 1, |e| {
+            e.varint(TE_TYPE, TYPE_INSTANT).varint(TE_TRACK_UUID, 11).string(TE_NAME, "smuggled");
+        }));
+        let (ing, evs) = collect(&embedded_json(&inner));
+        assert!(evs.is_empty(), "a Perfetto trace where JSON belongs was parsed: {evs:?}");
+        assert_eq!(ing.stats.packets, 1, "only the outer packet is one");
+
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(br#"[{"name":"J","ph":"i","ts":1,"pid":8,"tid":8}]"#).unwrap();
+        let (_ing, evs) = collect(&embedded_json(&enc.finish().unwrap()));
+        assert!(evs.is_empty(), "gzip where JSON belongs was inflated: {evs:?}");
+    }
+
+    #[test]
+    fn traces_embedded_in_each_other_thousands_deep_do_not_recurse() {
+        let mut trace = Vec::new();
+        for _ in 0..5_000 {
+            trace = embedded_json(&trace);
+        }
+        let (ing, evs) = collect(&trace);
+        assert!(evs.is_empty());
+        assert_eq!(ing.stats.packets, 1);
     }
 
     #[test]

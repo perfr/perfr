@@ -85,6 +85,8 @@ pub struct ChromeStream {
     format: Format,
     perfetto: Option<Box<PerfettoState>>,
     eof: bool,
+    /// The input is JSON text and nothing else; see [`Self::json_text`].
+    plain_json: bool,
     pub bytes_in: u64,
     pub bytes_decoded: u64,
     /// JSON events or Perfetto packets decoded so far (the progress line).
@@ -107,6 +109,7 @@ impl Default for ChromeStream {
             format: Format::Unknown,
             perfetto: None,
             eof: false,
+            plain_json: false,
             bytes_in: 0,
             bytes_decoded: 0,
             events_seen: 0,
@@ -117,6 +120,17 @@ impl Default for ChromeStream {
 }
 
 impl ChromeStream {
+    /// A stream for JSON text carried inside another trace. It is not
+    /// sniffed: no gzip, no zip, and above all not a Perfetto trace, which
+    /// could carry JSON text of its own and so on down.
+    pub(crate) fn json_text() -> Self {
+        Self {
+            format: Format::Json,
+            plain_json: true,
+            ..Self::default()
+        }
+    }
+
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
@@ -144,7 +158,7 @@ impl ChromeStream {
         self.bytes_in += chunk.len() as u64;
         match &mut self.decode {
             Decode::Identity => {
-                if self.bytes_in == chunk.len() as u64 {
+                if !self.plain_json && self.bytes_in == chunk.len() as u64 {
                     self.magic_buf.extend_from_slice(chunk);
                     if self.magic_buf.len() < 4 && !looks_like_json(&self.magic_buf) {
                         return;

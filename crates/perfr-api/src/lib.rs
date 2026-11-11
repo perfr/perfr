@@ -39,13 +39,15 @@ pub use perfr_scope_ring::event::level;
 /// prefork worker and a Python `multiprocessing` child all ran
 /// uninstrumented with nothing to say why.
 ///
-/// Only what a child of a threaded process may do here: stores, a `close`,
-/// and a thread-local that needs no initialising.
+/// Only what a child of a threaded process may do here: stores, a `close`
+/// and a `munmap`, and a thread-local that needs no initialising.
 #[cfg(unix)]
 unsafe extern "C" fn after_fork() {
     if let Some(writer) = SEGMENT.swap(std::ptr::null_mut(), Ordering::AcqRel).as_ref() {
-        // The lease descriptor came across the fork, and holds the
-        // parent's lock for as long as it stays open here.
+        // The lease descriptor and the mapping came across the fork, and
+        // either holds the parent's lock for as long as it stays here. The
+        // pointer is gone first: nothing in this process can reach the
+        // writer again.
         writer.abandon_in_fork_child();
     }
     UNLINKED.store(false, Ordering::Release);
@@ -193,6 +195,8 @@ pub fn init() -> Result<(), i32> {
     if let Some(replaced) = unsafe { replaced.as_ref() } {
         // Last, so a reader that sees the mark finds the new segment there.
         replaced.mark_superseded();
+        // Its descriptor is closed so that one is not left open per
+        // re-initialisation; the mapping stays.
         // SAFETY: the writer is leaked, and this is the one time it is
         // replaced. Windows keeps the handle: closing it there is what
         // deletes the file, under any thread still inside a call.
@@ -876,6 +880,29 @@ mod tests {
                 // capturing them: nothing may go into them from this side.
                 if start(b"in the child, before init") != 0 || capturing() {
                     return Err("the child wrote into its parent's segment");
+                }
+                // A lock on a file lasts as long as anything refers to the
+                // open file, and a mapping does. While the child maps its
+                // parent's segment the parent's lease is held, by a process
+                // that may outlive it by days: a daemon's.
+                // (The writer's mapping is the writable one of the whole
+                // segment. The reader this test opened in the parent came
+                // across too, read-only but for one page, on an open file
+                // of its own that carries no lock.)
+                #[cfg(target_os = "linux")]
+                {
+                    let name = perfr_scope_ring::shm::shm_file_name(parent);
+                    let maps = std::fs::read_to_string("/proc/self/maps").map_err(|_| "no /proc/self/maps")?;
+                    let writable_bytes = |line: &str| -> Option<u64> {
+                        let mut fields = line.split_whitespace();
+                        let (start, end) = fields.next()?.split_once('-')?;
+                        let writable = fields.next()?.starts_with("rw");
+                        let bytes = u64::from_str_radix(end, 16).ok()? - u64::from_str_radix(start, 16).ok()?;
+                        writable.then_some(bytes)
+                    };
+                    if maps.lines().filter(|line| line.contains(&name)).filter_map(writable_bytes).any(|n| n > 65536) {
+                        return Err("the child still maps its parent's segment for writing");
+                    }
                 }
                 init().map_err(|_| "init failed in the child")?;
                 if !segment_file(me).exists() {

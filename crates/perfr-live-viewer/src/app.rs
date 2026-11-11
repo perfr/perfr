@@ -2029,7 +2029,20 @@ impl PerfrLiveApp {
             || self.story.needs_frames()
     }
 
+    /// Whether there is a service to ask: a page opened on a capture file
+    /// (`?capture=`) has none, and a request it sends goes nowhere.
+    fn has_service(&self) -> bool {
+        self.static_capture.is_none()
+    }
+
     fn start_record(&mut self) {
+        // With no service nothing would ever answer, or end, the capture:
+        // the page would drop the file it shows (and the stream Share
+        // posts), follow an edge that never moves and run its timer until
+        // reloaded.
+        if !self.has_service() {
+            return;
+        }
         self.clear_file_trace();
         self.error.clear();
         if self.status.hooks {
@@ -2051,6 +2064,9 @@ impl PerfrLiveApp {
     }
 
     fn start_demo_path(&mut self) {
+        if !self.has_service() {
+            return;
+        }
         self.clear_file_trace();
         self.error.clear();
         self.recording = true;
@@ -2095,6 +2111,9 @@ impl PerfrLiveApp {
     /// Start the benchmark producer. With nothing recording it starts a
     /// capture of its own, like the demo; during a capture it joins it.
     fn start_bench(&mut self) {
+        if !self.has_service() {
+            return;
+        }
         self.error.clear();
         if !self.recording && !self.status.capturing && !self.status.demo {
             self.clear_file_trace();
@@ -3712,7 +3731,7 @@ impl PerfrLiveApp {
         note_ui_rect("Presets", presets.rect);
         if presets.clicked() { self.presets.open = true; ui.close(); }
         ui.set_min_width(220.0);
-        if !self.status.hooks || !self.status.capturing {
+        if self.has_service() && (!self.status.hooks || !self.status.capturing) {
             if ui
                 .selectable_label(self.status.demo, "Demo")
                 .on_hover_text("Dummy scopes (no PerfrService attach)")
@@ -3757,10 +3776,13 @@ impl PerfrLiveApp {
         let own = ui.selectable_label(self.self_pane_open, "Self   F2");
         note_ui_rect("Self", own.rect);
         if own.clicked() { self.self_pane_open = !self.self_pane_open; ui.close(); }
-        let bench = ui.selectable_label(self.bench_open, "Benchmark   F3")
-            .on_hover_text("Fake scopes from the service at a rate you set while it runs");
-        note_ui_rect("Benchmark", bench.rect);
-        if bench.clicked() { self.bench_open = !self.bench_open; ui.close(); }
+        // The benchmark producer lives in the service.
+        if self.has_service() {
+            let bench = ui.selectable_label(self.bench_open, "Benchmark   F3")
+                .on_hover_text("Fake scopes from the service at a rate you set while it runs");
+            note_ui_rect("Benchmark", bench.rect);
+            if bench.clicked() { self.bench_open = !self.bench_open; ui.close(); }
+        }
         ui.separator();
         if ui
             .selectable_label(self.capture_open, "UI knobs")
@@ -3927,7 +3949,9 @@ impl PerfrLiveApp {
         ui.horizontal(|ui| {
             ui.add_space(6.0);
             self.paint_link_dot(ui);
-            self.transport_record(ui);
+            if self.has_service() {
+                self.transport_record(ui);
+            }
             self.transport_more(ui);
             if let Some(load) = &self.trace_load {
                 ui.label(
@@ -7108,7 +7132,7 @@ impl PerfrLiveApp {
             if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::R)) { self.toggle_report(); }
             if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::I)) { self.open_right_tab(ReportTab::Inspector); }
             if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::F2)) { self.self_pane_open = !self.self_pane_open; }
-            if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::F3)) { self.bench_open = !self.bench_open; }
+            if self.has_service() && ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::F3)) { self.bench_open = !self.bench_open; }
         }
         if !self.story.on_key(ctx) && ctx.input(|i| i.key_pressed(Key::Space) && !i.modifiers.alt) {
             self.follow = !self.follow;

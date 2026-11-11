@@ -31,6 +31,8 @@ pub(super) struct Page {
     frame: eframe::Frame,
     time: f64,
     size: Vec2,
+    /// Every piece of text the last frame painted.
+    texts: Vec<String>,
 }
 
 impl Page {
@@ -43,7 +45,14 @@ impl Page {
         let ctx = egui::Context::default();
         let mut app = PerfrLiveApp::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
         setup(&mut app);
-        Page { app, ctx, frame: eframe::Frame::_new_kittest(), time: 0.0, size: Vec2::new(1280.0, 800.0) }
+        Page {
+            app,
+            ctx,
+            frame: eframe::Frame::_new_kittest(),
+            time: 0.0,
+            size: Vec2::new(1280.0, 800.0),
+            texts: Vec::new(),
+        }
     }
 
     pub fn sized(mut self, w: f32, h: f32) -> Self {
@@ -66,7 +75,18 @@ impl Page {
             ..Default::default()
         };
         let (app, frame) = (&mut self.app, &mut self.frame);
-        self.ctx.run(input, |ctx| eframe::App::update(app, ctx, frame))
+        let out = self.ctx.run(input, |ctx| eframe::App::update(app, ctx, frame));
+        self.texts.clear();
+        for clipped in &out.shapes {
+            collect_texts(&clipped.shape, &mut self.texts);
+        }
+        out
+    }
+
+    /// Whether the last frame painted exactly this text somewhere: a menu
+    /// item or a label the `__perfr_ui` readout does not name.
+    pub fn shows(&self, text: &str) -> bool {
+        self.texts.iter().any(|t| t == text)
     }
 
     pub fn frames(&mut self, n: usize) {
@@ -114,6 +134,14 @@ impl Page {
         self.press(at);
         self.release(at);
         self.frame(Vec::new());
+    }
+}
+
+fn collect_texts(shape: &Shape, out: &mut Vec<String>) {
+    match shape {
+        Shape::Vec(shapes) => shapes.iter().for_each(|s| collect_texts(s, out)),
+        Shape::Text(text) => out.push(text.galley.text().to_string()),
+        _ => {}
     }
 }
 
@@ -230,4 +258,58 @@ fn whole_frames_run_headless_and_publish_the_readouts() {
     let sel: serde_json::Value = serde_json::from_str(&page.app.sel_readout).expect("__perfr_sel is JSON");
     assert_eq!(sel["events"], 1);
     assert_eq!(sel["hellos"], 1);
+}
+
+/// A static page that finished loading its `?capture=` stream.
+fn loaded_static_app() -> PerfrLiveApp {
+    let mut app = static_app();
+    app.accept_stream(capture_stream(
+        status_frame(false, false),
+        vec![scope(100, 101, 5_000_000_000, 1_000_000, 7), scope(100, 101, 6_000_000_000, 1_000_000, 7)],
+    ));
+    app
+}
+
+#[test]
+fn a_page_without_a_service_does_not_start_a_capture_over_its_file() {
+    for start in [PerfrLiveApp::start_record, PerfrLiveApp::start_demo_path, PerfrLiveApp::start_bench] {
+        let mut app = loaded_static_app();
+        let view = (app.t0, app.t1);
+        assert!(app.can_share());
+        start(&mut app);
+        assert!(!app.recording, "nothing answers a start, so nothing ever ends it");
+        assert!(app.can_share(), "the stream Share posts was dropped");
+        assert!(!app.follow, "the view left the file for a live edge that does not exist");
+        assert_eq!((app.t0, app.t1), view);
+        assert!(app.content_span().is_some());
+        assert!(!app.wants_live_repaint());
+    }
+}
+
+#[test]
+fn a_narrow_static_page_has_no_record_demo_or_benchmark_control() {
+    let mut page = Page::with(|app| *app = loaded_static_app()).sized(390.0, 800.0);
+    page.frames(3);
+    assert!(page.app.was_narrow);
+    assert!(page.rect_of("Rec").is_none(), "Rec is drawn on a page with no service: {:?}", page.labels());
+    let more = page.rect_of("More").expect("the narrow bar keeps More");
+    page.click(more.center());
+    page.frames(2);
+    let labels = page.labels();
+    assert!(labels.iter().any(|l| l == "Report"), "the More menu is open: {labels:?}");
+    assert!(!labels.iter().any(|l| l == "Benchmark"), "{labels:?}");
+    assert!(!page.shows("Demo"), "{:?}", page.texts);
+}
+
+#[test]
+fn a_narrow_page_with_a_service_keeps_record_and_benchmark() {
+    let mut page = Page::new().sized(390.0, 800.0);
+    page.frames(3);
+    assert!(page.rect_of("Rec").is_some(), "{:?}", page.labels());
+    let more = page.rect_of("More").expect("the narrow bar keeps More");
+    page.click(more.center());
+    page.frames(2);
+    let labels = page.labels();
+    assert!(labels.iter().any(|l| l == "Benchmark"), "{labels:?}");
+    assert!(page.shows("Demo"), "{:?}", page.texts);
 }

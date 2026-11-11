@@ -723,6 +723,8 @@ struct SampleCounters {
     unwound_whole: u64,
     unwound_cut: u64,
     unwind_failed: u64,
+    /// Samples taken with no unwinder at all: their sampled pc only.
+    not_unwound: u64,
 }
 
 /// The deepest stack a sample keeps. One timeline event per frame per sample
@@ -901,7 +903,7 @@ const STACK_POOL_MAX: usize = 2048;
 #[allow(clippy::too_many_arguments)]
 fn drain_samples(
     threads: &mut [SampledThread],
-    unwinder: &mut ProcessUnwinder,
+    mut unwinder: Option<&mut ProcessUnwinder>,
     symbolizer: &Symbolizer,
     named_through_ns: u64,
     pc_ids: &mut crate::report::FastMap<u64, u32>,
@@ -930,7 +932,7 @@ fn drain_samples(
             held.tid,
             &held.regs,
             &mut held.stack,
-            unwinder,
+            unwinder.as_deref_mut(),
             symbolizer,
             named_through_ns,
             pc_ids,
@@ -993,7 +995,7 @@ fn drain_samples(
                     sample.tid,
                     &regs,
                     &mut scratch.stack,
-                    unwinder,
+                    unwinder.as_deref_mut(),
                     symbolizer,
                     named_through_ns,
                     pc_ids,
@@ -1057,6 +1059,10 @@ fn name_waiting_samples(
 /// Unwind one sample and, when the symbols are there to name its frames,
 /// push its timeline events; otherwise its frames wait in `unnamed`. `stack`
 /// is patched in place when a uprobe session has hijacked return addresses.
+///
+/// Without an unwinder (the target's maps could not be read) the sample is
+/// its sampled pc alone: a tick on the thread's bar that says what was
+/// running, and no callers.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn push_sample(
@@ -1064,7 +1070,7 @@ fn push_sample(
     tid: u32,
     regs: &[u64],
     stack: &mut [u8],
-    unwinder: &mut ProcessUnwinder,
+    unwinder: Option<&mut ProcessUnwinder>,
     symbolizer: &Symbolizer,
     named_through_ns: u64,
     pc_ids: &mut crate::report::FastMap<u64, u32>,
@@ -1086,14 +1092,23 @@ fn push_sample(
         session.patch_user_stack(tid as i32, start.sp, time, stack);
     }
     // frames[0] is the sampled pc.
-    let end = {
-        let _unwind = perfr_api::scope("unwind");
-        unwinder.unwind_into(start, start.sp, stack, MAX_SAMPLE_FRAMES, frames)
-    };
-    match end {
-        UnwindEnd::Root => counters.unwound_whole += 1,
-        UnwindEnd::Truncated => counters.unwound_cut += 1,
-        UnwindEnd::Failed(_) => counters.unwind_failed += 1,
+    match unwinder {
+        Some(unwinder) => {
+            let end = {
+                let _unwind = perfr_api::scope("unwind");
+                unwinder.unwind_into(start, start.sp, stack, MAX_SAMPLE_FRAMES, frames)
+            };
+            match end {
+                UnwindEnd::Root => counters.unwound_whole += 1,
+                UnwindEnd::Truncated => counters.unwound_cut += 1,
+                UnwindEnd::Failed(_) => counters.unwind_failed += 1,
+            }
+        }
+        None => {
+            frames.clear();
+            frames.push(start.ip);
+            counters.not_unwound += 1;
+        }
     }
     if time <= named_through_ns {
         name_sample(time, tid, frames, symbolizer, pc_ids, names, store, target_pid, period_ns, batch);
@@ -1651,7 +1666,8 @@ fn capture_loop(
             (true, Ok(unwinder)) => Some(unwinder),
             (true, Err(error)) => {
                 // Not fatal, and worth saying out loud: without an unwinder
-                // there are no callstacks, but the sample bar below still works.
+                // there are no callstacks, but the sample bar still works --
+                // each sample is a tick named by the function it was in.
                 log::warn!("no unwinder for pid {target_pid} ({error}); \
                            sample ticks only, no callstacks");
                 None
@@ -2274,10 +2290,10 @@ fn capture_loop(
         // Read and unwound every pass; named once the symbols are ready, so
         // they arrive named rather than as bare addresses.
         let _samples = perfr_api::scope("read samples");
-        if let Some(unwinder) = unwinder.as_mut() {
+        if sampling_works {
             drain_samples(
                 &mut threads,
-                unwinder,
+                unwinder.as_mut(),
                 &symbolizer,
                 named_through_ns,
                 &mut pc_ids,
@@ -2573,11 +2589,11 @@ fn capture_loop(
     // of a big binary, stopped within a second or two -- has every sample
     // it took waiting for names. Wait for the load, within reason; one that
     // is still not done has them named by address rather than lost.
-    if let (true, Some(unwinder)) = (sampling_works, unwinder.as_mut()) {
+    if sampling_works {
         let mut tail: Vec<LiveEvent> = Vec::new();
         drain_samples(
             &mut threads,
-            unwinder,
+            unwinder.as_mut(),
             &symbolizer,
             named_through_ns,
             &mut pc_ids,
@@ -2745,6 +2761,9 @@ fn capture_loop(
     // How good the stacks are, which a count of samples does not say: a
     // stack cut at the limit has lost its outermost frames, and one that
     // failed stops wherever the unwind tables or the stack copy ran out.
+    if samples.not_unwound > 0 {
+        log::info!("{} of those have no callstack: there was no unwinder", samples.not_unwound);
+    }
     if samples.unwound_cut + samples.unwind_failed > 0 {
         log::info!(
             "of those, {} unwound to the root of their stack, {} were cut at {MAX_SAMPLE_FRAMES} frames \
@@ -3614,7 +3633,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     struct SampleRig {
         threads: Vec<SampledThread>,
-        unwinder: ProcessUnwinder,
+        unwinder: Option<ProcessUnwinder>,
         symbolizer: Symbolizer,
         pc_ids: crate::report::FastMap<u64, u32>,
         names: FrameNames,
@@ -3640,7 +3659,7 @@ mod tests {
                         dead: false,
                     })
                     .collect(),
-                unwinder: ProcessUnwinder::from_maps_content(b""),
+                unwinder: Some(ProcessUnwinder::from_maps_content(b"")),
                 symbolizer: Symbolizer::empty(),
                 pc_ids: Default::default(),
                 names: FrameNames::new(service, store.clone()),
@@ -3672,7 +3691,7 @@ mod tests {
             let mut batch = Vec::new();
             drain_samples(
                 &mut self.threads,
-                &mut self.unwinder,
+                self.unwinder.as_mut(),
                 &self.symbolizer,
                 named_through_ns,
                 &mut self.pc_ids,
@@ -3917,6 +3936,26 @@ mod tests {
         assert_eq!((rig.counters.unwound_whole, rig.counters.unwound_cut, rig.counters.unwind_failed), (1, 1, 0));
         let deepest = batch.iter().filter(|e| e.kind == kind::FUNCTION_CALL && e.start_ns == 6_000).count();
         assert_eq!(deepest, MAX_SAMPLE_FRAMES);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn without_an_unwinder_a_sample_is_still_a_tick_naming_what_ran() {
+        let mut rig = SampleRig::new(&[4001]);
+        // The target's maps could not be read: the rings are open and
+        // sampling, and there is nothing to unwind with.
+        rig.unwinder = None;
+        assert!(rig.ring(4001).publish(&stack_sample_record(4001, 5_000, 0x401000, &[0u8; 64])));
+        let batch = rig.drain(u64::MAX);
+        let ticks: Vec<&LiveEvent> = batch.iter().filter(|e| e.kind == kind::SAMPLE).collect();
+        assert_eq!(ticks.len(), 1, "the sample was left in a ring nobody reads");
+        assert_eq!((ticks[0].start_ns, ticks[0].tid), (5_000, 4001));
+        assert_eq!(rig.ring(4001).fill_fraction(), 0.0);
+        // One frame: the pc it was sampled at, and no callers.
+        let rows = rig.store.export_rows().0;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].2.len(), 1);
+        assert_eq!(rig.counters.not_unwound, 1);
     }
 
     #[cfg(target_os = "linux")]

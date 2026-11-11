@@ -599,16 +599,22 @@ pub(crate) fn find_pdb(module_path: &str, info: &perfr_object::PdbDebugInfo) -> 
 /// only the pages it needs; an empty buffer when it cannot be opened, which
 /// every parser here treats as "no symbols".
 pub(crate) fn map_file(path: &str) -> FileBytes {
-    let Ok(file) = std::fs::File::open(path) else { return FileBytes::Empty };
+    try_map_file(path).unwrap_or(FileBytes::Empty)
+}
+
+/// [`map_file`] for a caller that says why a file could not be read.
+pub(crate) fn try_map_file(path: &str) -> std::io::Result<FileBytes> {
+    let file = std::fs::File::open(path)?;
+    // An empty file reads as no bytes; mapping nothing is an error instead.
+    if file.metadata()?.len() == 0 {
+        return Ok(FileBytes::Empty);
+    }
     // SAFETY: the mapping is private and read-only. A file that changes
     // underneath a mapping can yield torn bytes; the parsers bounds-check
     // every read and treat garbage as an unparsable image, never as memory
     // unsafety, and the files here are the target's own executables and
     // their debug files, which nothing writes while it runs.
-    match unsafe { memmap2::Mmap::map(&file) } {
-        Ok(map) => FileBytes::Mapped(map),
-        Err(_) => FileBytes::Empty,
-    }
+    unsafe { memmap2::Mmap::map(&file) }.map(FileBytes::Mapped)
 }
 
 pub(crate) enum FileBytes {

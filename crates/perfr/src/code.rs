@@ -29,9 +29,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Formatter, Instruction, IntelFormatter, OpKind};
-use perfr_object::{detached_debug_file, line_rows, parse_elf_metadata, ObjectSegment};
+use perfr_object::{detached_debug_file, parse_elf_metadata, ObjectSegment};
 
 use crate::functions::{file_offset_of, FunctionIndex, InstrumentableFunction};
+use crate::symbolize::{map_file, try_map_file, FileBytes};
 
 /// Instructions past which a function is cut, with a last line saying so:
 /// a 60,000-instruction function is not something to read.
@@ -71,16 +72,19 @@ fn disassemble_function(
     allow: &SourceAllowList,
 ) -> Result<String, String> {
     let path = &function.module_path;
-    let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    // Mapped, not read, as the symbolizer does: a game's module is hundreds
+    // of megabytes and its debug file a gigabyte, of which one function's
+    // bytes and the DWARF sections are wanted.
+    let bytes = try_map_file(path).map_err(|e| format!("{path}: {e}"))?;
     // A PE image's sections stand in for an ELF's loadable segments; its
     // line table is in a PDB, which `line_rows` does not read, so a PE
     // disassembly has no source interleave.
-    let (segments, is_64_bit, debug_bytes): (Vec<ObjectSegment>, bool, Option<Vec<u8>>) = if perfr_object::is_pe(&bytes) {
+    let (segments, is_64_bit, debug_bytes): (Vec<ObjectSegment>, bool, Option<FileBytes>) = if perfr_object::is_pe(&bytes) {
         let metadata = perfr_object::parse_coff_metadata(&bytes, path)?;
         (metadata.sections, metadata.is_64_bit, None)
     } else {
         let metadata = parse_elf_metadata(&bytes, path)?;
-        let debug = detached_debug_file(Path::new(path), &metadata).and_then(|p| std::fs::read(p).ok());
+        let debug = detached_debug_file(Path::new(path), &metadata).and_then(|p| p.to_str().map(map_file));
         (metadata.loadable_segments, metadata.is_64_bit, debug)
     };
     let segments = &segments;
@@ -126,9 +130,12 @@ fn disassemble_function(
             .unwrap_or_default()
     };
 
+    // Opened once for both questions asked of it below: opening inflates
+    // every compressed DWARF section, seconds for a game's debug file.
+    let debug_info = perfr_object::DebugInfo::parse(debug_data);
     // The line table for the whole function, one walk; the row in force at
     // an instruction is the last one at or below it.
-    let rows = line_rows(debug_data, address, address + function.size.max(1));
+    let rows = debug_info.as_ref().map(|info| info.line_rows(address, address + function.size.max(1))).unwrap_or_default();
     let row_at = |ip: u64| -> Option<&perfr_object::LineRow> {
         let at = rows.partition_point(|r| r.address <= ip);
         (at > 0).then(|| &rows[at - 1])
@@ -185,9 +192,9 @@ fn disassemble_function(
     allow_named(allow, &files);
     let files_json: Vec<String> = files.iter().map(|f| json_str(f)).collect();
     // Where the function is declared, for the source view to open on.
-    let (decl_file, decl_line) = match perfr_object::declaration_location(debug_data, address) {
-        Ok(info) => (info.source_file, info.source_line),
-        Err(_) => files.first().cloned().map(|f| (f, 0)).unwrap_or_default(),
+    let (decl_file, decl_line) = match debug_info.as_ref().map(|info| info.declaration_location(address)) {
+        Some(Ok(info)) => (info.source_file, info.source_line),
+        _ => files.first().cloned().map(|f| (f, 0)).unwrap_or_default(),
     };
     Ok(format!(
         "{{\"function\":{{\"id\":{},\"name\":{},\"module\":{},\"module_path\":{},\"address\":{address},\"size\":{},\"file\":{},\"line\":{decl_line}}},\"arch\":\"{}\",\"truncated\":{truncated},\"files\":[{}],\"lines\":[{lines}]}}",

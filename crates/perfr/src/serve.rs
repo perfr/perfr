@@ -1687,11 +1687,15 @@ fn capture_loop(
         unnamed: Vec::new(),
         frames: Vec::new(),
     };
+    // The per-CPU rings go on the CPUs that are online, by number: with one
+    // offline in the middle, counting from zero opens a CPU that is not
+    // there and never the last one that is.
+    let online_cpus = perfr_perf_ring::attr::online_cpus(crate::num_cpus_hint());
     let mut switch_rings = Vec::new();
     let mut switch_ring_failures = RingOpenFailures::default();
     {
         let _phase = perfr_api::scope("open scheduler rings");
-        for cpu in 0..crate::num_cpus_hint() as i32 {
+        for cpu in online_cpus.iter().copied() {
             match perfr_perf_ring::ring::open_context_switch(-1, cpu, 8192).and_then(|ring| ring.enable().map(|()| ring))
             {
                 Ok(ring) => switch_rings.push(ring),
@@ -1825,7 +1829,7 @@ fn capture_loop(
     // with the perf transitions rather than looking decades older.
     let (mut thread_states, tracepoint_report) = {
         let _phase = perfr_api::scope("open thread states");
-        ThreadStateTracer::open(crate::num_cpus_hint())
+        ThreadStateTracer::open(&online_cpus)
     };
     // The service's own pid, so its threads get state bars like anything else.
     let self_pid = std::process::id();

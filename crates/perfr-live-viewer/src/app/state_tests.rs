@@ -607,3 +607,61 @@ fn a_stream_saved_mid_capture_is_not_a_capture_ending_on_a_live_page() {
     page.frames(2);
     assert!(!page.app.report_open, "the file's stale status read as a capture that just stopped");
 }
+
+/// A connected page with the Self pane open and its timeline drawing.
+fn page_with_self_pane() -> Page {
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.self_pane_open = true;
+    });
+    page.frames(6);
+    assert!(page.app.self_tl.index.event_count() > 0, "the Self pane has frames of its own to draw");
+    page
+}
+
+#[test]
+fn x_starts_a_capture_with_the_self_pane_open() {
+    let mut page = page_with_self_pane();
+    let self_follow = page.app.self_tl.follow;
+    let self_edge = page.app.self_tl.live_edge_ns;
+    page.key(Key::X);
+    assert!(page.app.recording, "the second timeline of the frame saw the same key press and stopped it");
+    assert_eq!(page.app.live_edge_ns, DEMO_ORIGIN_NS, "the capture's timeline is the one that starts");
+    assert_eq!(
+        (page.app.self_tl.follow, page.app.self_tl.live_edge_ns >= self_edge),
+        (self_follow, true),
+        "Record ran against the Self pane's timeline"
+    );
+    page.key(Key::X);
+    assert!(!page.app.recording);
+}
+
+#[test]
+fn a_story_key_moves_one_step_with_the_self_pane_open() {
+    let mut page = page_with_self_pane();
+    page.app.story.load_demo();
+    page.frames(3);
+    assert!(page.texts.iter().any(|t| t.starts_with("1/")), "the story bar shows step 1: {:?}", page.texts);
+    page.key(Key::CloseBracket);
+    page.frames(2);
+    assert!(page.texts.iter().any(|t| t.starts_with("2/")), "one press of ] is one step: {:?}", page.texts);
+}
+
+#[test]
+fn a_story_drives_the_captures_timeline_not_the_self_panes() {
+    let mut page = page_with_self_pane();
+    feed(
+        &mut page.app,
+        &[
+            LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000_000_000 },
+            LiveFrame::EventBatch { events: vec![scope(100, 101, 1_000_000_000, 4_000_000_000, 7)] },
+            LiveFrame::CaptureFinished,
+        ],
+    );
+    page.frames(2);
+    assert!(page.app.self_tl.follow);
+    page.app.story.load_demo();
+    page.frames(4);
+    assert!(page.app.self_tl.follow, "the story's camera was written into the Self pane's window");
+    assert!(!page.app.follow, "and the capture's timeline is the one a story poses");
+}

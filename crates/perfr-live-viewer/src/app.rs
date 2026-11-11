@@ -5471,7 +5471,13 @@ impl PerfrLiveApp {
             }
             self.tracks.tick(dt, &self.index, filter);
         }
-        self.story_drive();
+        // A story is about the capture. Driven from the Self pane's draw
+        // too, which comes first in a frame, its camera went into the
+        // pane's window and its track folds into the pane's strip, and
+        // the capture's timeline got neither.
+        if !self.in_self_pane {
+            self.story_drive();
+        }
 
         let timebar_h = 26.0;
         let (time_rect, _) =
@@ -7288,17 +7294,23 @@ impl PerfrLiveApp {
             }
             return;
         }
+        // With the Self pane open this runs twice a frame, once per
+        // timeline, on the same key presses. What is about the app and
+        // not about one timeline is the capture's timeline's to handle:
+        // taken by both, X started a capture and stopped it again, a story
+        // key moved two steps and Ctrl+O opened two dialogs.
         if !self.in_self_pane {
             if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::R)) { self.toggle_report(); }
             if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::I)) { self.open_right_tab(ReportTab::Inspector); }
             if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::F2)) { self.self_pane_open = !self.self_pane_open; }
             if self.has_service() && ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::F3)) { self.bench_open = !self.bench_open; }
         }
-        if !self.story.on_key(ctx) && ctx.input(|i| i.key_pressed(Key::Space) && !i.modifiers.alt) {
+        let story_key = !self.in_self_pane && self.story.on_key(ctx);
+        if !story_key && ctx.input(|i| i.key_pressed(Key::Space) && !i.modifiers.alt) {
             self.follow = !self.follow;
         }
         // X starts and stops a capture, as the Record button does.
-        if self.static_capture.is_none() && ctx.input(|i| i.key_pressed(Key::X) && i.modifiers.is_none()) {
+        if !self.in_self_pane && self.static_capture.is_none() && ctx.input(|i| i.key_pressed(Key::X) && i.modifiers.is_none()) {
             if self.recording || self.status.demo || self.status.capturing {
                 self.stop_record();
             } else {
@@ -7310,7 +7322,7 @@ impl PerfrLiveApp {
             self.fit_to_content();
             self.needs_repaint = true;
         }
-        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(Key::O)) {
+        if !self.in_self_pane && ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(Key::O)) {
             #[cfg(target_arch = "wasm32")]
             chrome_load::start_open_dialog(&self.pending_file);
             #[cfg(not(target_arch = "wasm32"))]

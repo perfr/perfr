@@ -30,36 +30,76 @@ pub fn no_line_info_error(address: u64) -> String {
     format!("Unable to get line info for address={address:#x}")
 }
 
-/// Resolves `address` to a source file and line.
-pub fn line_info(data: &[u8], address: u64) -> Result<LineInfo, String> {
-    match object::FileKind::parse(data) {
-        Ok(object::FileKind::Elf32) => {
-            line_info_typed::<elf::FileHeader32<Endianness>>(data, address)
+/// The DWARF of one ELF file, opened once for any number of questions.
+///
+/// Opening is the expensive part: the sections are located and, where the
+/// file stores them compressed, inflated. A game's debug file holds two
+/// gigabytes of DWARF behind `SHF_COMPRESSED`, and a code view asks about
+/// one function twice -- its line rows and its declaration -- so each
+/// question opening the file for itself paid those seconds twice over.
+pub struct DebugInfo<'data> {
+    sections: crate::sections::DwarfSections<'data>,
+}
+
+impl<'data> DebugInfo<'data> {
+    /// Opens the DWARF of `data`; `None` when it is not an ELF file. A file
+    /// without debug sections opens, and answers every question with
+    /// nothing.
+    pub fn parse(data: &'data [u8]) -> Option<DebugInfo<'data>> {
+        match object::FileKind::parse(data) {
+            Ok(object::FileKind::Elf32) => Self::parse_typed::<elf::FileHeader32<Endianness>>(data),
+            Ok(object::FileKind::Elf64) => Self::parse_typed::<elf::FileHeader64<Endianness>>(data),
+            _ => None,
         }
-        Ok(object::FileKind::Elf64) => {
-            line_info_typed::<elf::FileHeader64<Endianness>>(data, address)
+    }
+
+    fn parse_typed<Elf>(data: &'data [u8]) -> Option<DebugInfo<'data>>
+    where
+        Elf: FileHeader<Endian = Endianness>,
+    {
+        let header = Elf::parse(data).ok()?;
+        let endian = header.endian().ok()?;
+        Some(DebugInfo { sections: crate::sections::DwarfSections::load(header, endian, data) })
+    }
+
+    /// gimli's view over the sections: slices and offsets, nothing copied.
+    fn dwarf(&self) -> gimli::Dwarf<gimli::EndianSlice<'_, gimli::RunTimeEndian>> {
+        let load = |id| -> Result<gimli::EndianSlice<gimli::RunTimeEndian>, std::convert::Infallible> {
+            Ok(gimli::EndianSlice::new(self.sections.get(id), gimli::RunTimeEndian::Little))
+        };
+        match gimli::Dwarf::load(load) {
+            Ok(dwarf) => dwarf,
+            Err(never) => match never {},
         }
-        _ => Err(no_line_info_error(address)),
+    }
+
+    /// Resolves `address` to a source file and line; see [`line_info`].
+    pub fn line_info(&self, address: u64) -> Result<LineInfo, String> {
+        line_info_in(&self.dwarf(), address)
+    }
+
+    /// Every line-table row whose address is in `[start, end)`; see
+    /// [`line_rows`].
+    pub fn line_rows(&self, start: u64, end: u64) -> Vec<LineRow> {
+        line_rows_in(&self.dwarf(), start, end)
+    }
+
+    /// Where the function covering `address` is declared; see
+    /// [`declaration_location`].
+    pub fn declaration_location(&self, address: u64) -> Result<LineInfo, String> {
+        declaration_location_in(&self.dwarf(), address)
     }
 }
 
-fn line_info_typed<Elf>(data: &[u8], address: u64) -> Result<LineInfo, String>
-where
-    Elf: FileHeader<Endian = Endianness>,
-{
-    let header = Elf::parse(data).map_err(|_| no_line_info_error(address))?;
-    let endian = header.endian().map_err(|_| no_line_info_error(address))?;
+/// Resolves `address` to a source file and line.
+pub fn line_info(data: &[u8], address: u64) -> Result<LineInfo, String> {
+    DebugInfo::parse(data).ok_or_else(|| no_line_info_error(address))?.line_info(address)
+}
 
-    let loaded = crate::sections::DwarfSections::load(header, endian, data);
-    let dwarf = gimli::Dwarf::load(
-        |id| -> Result<gimli::EndianSlice<gimli::RunTimeEndian>, ()> {
-            Ok(gimli::EndianSlice::new(
-                loaded.get(id),
-                gimli::RunTimeEndian::Little,
-            ))
-        },
-    )
-    .map_err(|_: ()| no_line_info_error(address))?;
+fn line_info_in(
+    dwarf: &gimli::Dwarf<gimli::EndianSlice<'_, gimli::RunTimeEndian>>,
+    address: u64,
+) -> Result<LineInfo, String> {
 
     // The line table is walked directly rather than through addr2line, because
     // the file *path* has to be assembled by LLVM's rules and addr2line hands
@@ -70,7 +110,7 @@ where
         let Ok(unit) = dwarf.unit(unit_header) else {
             continue;
         };
-        if !unit_covers(&dwarf, &unit, address) {
+        if !unit_covers(dwarf, &unit, address) {
             continue;
         }
         if fallback_unit_name.is_none() {
@@ -80,7 +120,7 @@ where
                 .map(|name| name.to_string_lossy().into_owned());
         }
 
-        if let Some(info) = line_info_in_unit(&dwarf, &unit, address) {
+        if let Some(info) = line_info_in_unit(dwarf, &unit, address) {
             return Ok(info);
         }
     }
@@ -307,30 +347,19 @@ pub struct LineRow {
 /// disassembly view shows it, not the outermost call site `line_info`
 /// reports for symbolization.
 pub fn line_rows(data: &[u8], start: u64, end: u64) -> Vec<LineRow> {
-    match object::FileKind::parse(data) {
-        Ok(object::FileKind::Elf32) => line_rows_typed::<elf::FileHeader32<Endianness>>(data, start, end),
-        Ok(object::FileKind::Elf64) => line_rows_typed::<elf::FileHeader64<Endianness>>(data, start, end),
-        _ => Vec::new(),
-    }
+    DebugInfo::parse(data).map(|info| info.line_rows(start, end)).unwrap_or_default()
 }
 
-fn line_rows_typed<Elf>(data: &[u8], start: u64, end: u64) -> Vec<LineRow>
-where
-    Elf: FileHeader<Endian = Endianness>,
-{
+fn line_rows_in(
+    dwarf: &gimli::Dwarf<gimli::EndianSlice<'_, gimli::RunTimeEndian>>,
+    start: u64,
+    end: u64,
+) -> Vec<LineRow> {
     let mut out = Vec::new();
-    let Ok(header) = Elf::parse(data) else { return out };
-    let Ok(endian) = header.endian() else { return out };
-    let loaded = crate::sections::DwarfSections::load(header, endian, data);
-    let Ok(dwarf) = gimli::Dwarf::load(|id| -> Result<gimli::EndianSlice<gimli::RunTimeEndian>, ()> {
-        Ok(gimli::EndianSlice::new(loaded.get(id), gimli::RunTimeEndian::Little))
-    }) else {
-        return out;
-    };
     let mut units = dwarf.units();
     while let Ok(Some(unit_header)) = units.next() {
         let Ok(unit) = dwarf.unit(unit_header) else { continue };
-        if !unit_covers(&dwarf, &unit, start) {
+        if !unit_covers(dwarf, &unit, start) {
             continue;
         }
         let Some(program) = unit.line_program.clone() else { continue };
@@ -352,7 +381,7 @@ where
                 let file = file_names
                     .entry(row.file_index())
                     .or_insert_with(|| {
-                        file_name_by_index(&dwarf, &unit, header, row.file_index(), &comp_dir).unwrap_or_default()
+                        file_name_by_index(dwarf, &unit, header, row.file_index(), &comp_dir).unwrap_or_default()
                     })
                     .clone();
                 let line = row.line().map(std::num::NonZeroU64::get).unwrap_or(0) as u32;
@@ -389,48 +418,27 @@ pub mod declaration_errors {
 /// *declared*, from `DW_AT_decl_file` and `DW_AT_decl_line` on its subprogram
 /// DIE, rather than where its first instruction is.
 pub fn declaration_location(data: &[u8], address: u64) -> Result<LineInfo, String> {
-    match object::FileKind::parse(data) {
-        Ok(object::FileKind::Elf32) => {
-            declaration_location_typed::<elf::FileHeader32<Endianness>>(data, address)
-        }
-        Ok(object::FileKind::Elf64) => {
-            declaration_location_typed::<elf::FileHeader64<Endianness>>(data, address)
-        }
-        _ => Err(declaration_errors::INVALID_ADDRESS.to_owned()),
-    }
+    DebugInfo::parse(data)
+        .ok_or_else(|| declaration_errors::INVALID_ADDRESS.to_owned())?
+        .declaration_location(address)
 }
 
-fn declaration_location_typed<Elf>(data: &[u8], address: u64) -> Result<LineInfo, String>
-where
-    Elf: FileHeader<Endian = Endianness>,
-{
-    let header = Elf::parse(data).map_err(|_| declaration_errors::INVALID_ADDRESS.to_owned())?;
-    let endian = header
-        .endian()
-        .map_err(|_| declaration_errors::INVALID_ADDRESS.to_owned())?;
-    let loaded = crate::sections::DwarfSections::load(header, endian, data);
-    let dwarf = gimli::Dwarf::load(
-        |id| -> Result<gimli::EndianSlice<gimli::RunTimeEndian>, ()> {
-            Ok(gimli::EndianSlice::new(
-                loaded.get(id),
-                gimli::RunTimeEndian::Little,
-            ))
-        },
-    )
-    .map_err(|_: ()| declaration_errors::INVALID_ADDRESS.to_owned())?;
-
+fn declaration_location_in(
+    dwarf: &gimli::Dwarf<gimli::EndianSlice<'_, gimli::RunTimeEndian>>,
+    address: u64,
+) -> Result<LineInfo, String> {
     let mut units = dwarf.units();
     let mut found_unit = false;
     while let Ok(Some(unit_header)) = units.next() {
         let Ok(unit) = dwarf.unit(unit_header) else {
             continue;
         };
-        if !unit_covers(&dwarf, &unit, address) {
+        if !unit_covers(dwarf, &unit, address) {
             continue;
         }
         found_unit = true;
 
-        let Some((decl_file, decl_line)) = subprogram_declaration(&dwarf, &unit, address) else {
+        let Some((decl_file, decl_line)) = subprogram_declaration(dwarf, &unit, address) else {
             continue;
         };
         let Some(decl_file) = decl_file else {
@@ -446,7 +454,7 @@ where
             .map(|dir| dir.to_string_lossy().into_owned())
             .unwrap_or_default();
         let Some(source_file) =
-            file_name_by_index(&dwarf, &unit, program.header(), decl_file, &comp_dir)
+            file_name_by_index(dwarf, &unit, program.header(), decl_file, &comp_dir)
         else {
             return Err(declaration_errors::NO_PATH.to_owned());
         };
@@ -638,6 +646,77 @@ mod tests {
             "{}",
             fallback.source_file
         );
+    }
+
+    fn row(address: u64, file: &str, line: u32) -> LineRow {
+        LineRow { address, file: file.to_owned(), line }
+    }
+
+    #[test]
+    fn line_rows_cover_a_function_in_address_order() {
+        let data = testdata("hello_world_elf_with_debug_info");
+        assert_eq!(
+            line_rows(&data, 0x1140, 0x1160),
+            vec![row(0x1140, "/ssd/local/hello.cpp", 3), row(0x114f, "/ssd/local/hello.cpp", 4)]
+        );
+        // Not an ELF file, and an ELF file with no DWARF: no rows, no error.
+        assert!(line_rows(b"not an elf", 0x1140, 0x1160).is_empty());
+        assert!(line_rows(&testdata("no_symbols_elf"), 0x1140, 0x1160).is_empty());
+    }
+
+    /// `libc.debug` stores its DWARF with `SHF_COMPRESSED`: the rows have to
+    /// come out of sections that were inflated first.
+    #[test]
+    fn line_rows_read_compressed_sections() {
+        let data = testdata("libc.debug");
+        let file = "/build/glibc-yWQXbR/glibc-2.24/sunrpc/auth_none.c";
+        assert_eq!(
+            line_rows(&data, 0x10a0e0, 0x10a100),
+            vec![
+                row(0x10a0e0, file, 90),
+                row(0x10a0f0, file, 94),
+                row(0x10a0f0, file, 94),
+                row(0x10a0f4, file, 95),
+                row(0x10a0fe, file, 95),
+            ]
+        );
+    }
+
+    /// The code view asks two questions about one function. Opened once,
+    /// the file answers both with what the one-shot functions say.
+    #[test]
+    fn one_opened_file_answers_rows_and_declaration() {
+        let data = testdata("line_info_test_binary");
+        let info = DebugInfo::parse(&data).expect("an ELF file");
+        assert_eq!(info.line_rows(0x401140, 0x401150), line_rows(&data, 0x401140, 0x401150));
+        assert_eq!(info.line_rows(0x401140, 0x401150).len(), 4);
+        assert_eq!(info.declaration_location(0x401140), declaration_location(&data, 0x401140));
+        assert_eq!(info.declaration_location(0x401140).map(|d| d.source_line), Ok(12));
+        assert_eq!(info.line_info(0x401141), line_info(&data, 0x401141));
+        assert!(DebugInfo::parse(b"not an elf").is_none());
+    }
+
+    /// Sections the file stores as they are must be read in place. Copying
+    /// them out is what made one disassembly of a game touch every page of
+    /// a gigabyte of DWARF, twice.
+    #[test]
+    fn uncompressed_sections_are_borrowed_from_the_file() {
+        let inside = |data: &[u8], section: &[u8]| data.as_ptr_range().contains(&section.as_ptr());
+
+        let data = testdata("hello_world_elf_with_debug_info");
+        let info = DebugInfo::parse(&data).expect("an ELF file");
+        for id in [gimli::SectionId::DebugInfo, gimli::SectionId::DebugLine, gimli::SectionId::DebugStr] {
+            let section = info.sections.get(id);
+            assert!(!section.is_empty(), "{} should be present", id.name());
+            assert!(inside(&data, section), "{} was copied out of the file", id.name());
+        }
+
+        // A compressed one cannot be: it is inflated into its own buffer.
+        let data = testdata("libc.debug");
+        let info = DebugInfo::parse(&data).expect("an ELF file");
+        let section = info.sections.get(gimli::SectionId::DebugInfo);
+        assert!(!section.is_empty());
+        assert!(!inside(&data, section));
     }
 
     #[test]

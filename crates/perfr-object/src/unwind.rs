@@ -34,17 +34,17 @@ pub fn load_unwind_ranges(data: &[u8]) -> Result<Vec<Symbol>, String> {
 
 /// A section's bytes together with the address it is loaded at, which
 /// `.eh_frame`'s pc-relative pointer encodings need in order to resolve.
-struct SectionBytes {
-    data: Vec<u8>,
+struct SectionBytes<'data> {
+    data: std::borrow::Cow<'data, [u8]>,
     address: u64,
 }
 
-fn find_section<Elf>(
+fn find_section<'data, Elf>(
     header: &Elf,
     endian: Endianness,
-    data: &[u8],
+    data: &'data [u8],
     wanted: &[u8],
-) -> Option<SectionBytes>
+) -> Option<SectionBytes<'data>>
 where
     Elf: FileHeader<Endian = Endianness>,
 {

@@ -13,35 +13,28 @@
 //! needed a patch to turn `LLVM_ENABLE_ZLIB` on before it could read these
 //! sections at all. See docs/bazel-port.html.
 
+use std::borrow::Cow;
+
 use object::read::elf::{CompressionHeader, FileHeader, SectionHeader};
 use object::{elf, CompressedFileRange, CompressionFormat, Endianness};
 
-/// Every DWARF section gimli may ask `Dwarf::load` for. gimli exposes no
-/// iterator over `SectionId`, and a section not listed simply reads as empty --
-/// which is what an absent one does anyway.
+/// The DWARF sections the line and declaration walks read: units and their
+/// abbreviations, the line programs, address ranges, and the string and
+/// address tables those refer into. gimli asks `Dwarf::load` for more
+/// (locations, macros, type units), and a section not listed reads as
+/// empty, which is what an absent one does anyway. They are left out
+/// because nothing here follows a reference into them, and a compressed
+/// `.debug_loc` would be inflated on every load for no reader.
 const DWARF_SECTION_IDS: &[gimli::SectionId] = &[
     gimli::SectionId::DebugAbbrev,
     gimli::SectionId::DebugAddr,
-    gimli::SectionId::DebugAranges,
-    gimli::SectionId::DebugCuIndex,
-    gimli::SectionId::DebugFrame,
     gimli::SectionId::DebugInfo,
     gimli::SectionId::DebugLine,
     gimli::SectionId::DebugLineStr,
-    gimli::SectionId::DebugLoc,
-    gimli::SectionId::DebugLocLists,
-    gimli::SectionId::DebugMacinfo,
-    gimli::SectionId::DebugMacro,
-    gimli::SectionId::DebugPubNames,
-    gimli::SectionId::DebugPubTypes,
     gimli::SectionId::DebugRanges,
     gimli::SectionId::DebugRngLists,
     gimli::SectionId::DebugStr,
     gimli::SectionId::DebugStrOffsets,
-    gimli::SectionId::DebugTuIndex,
-    gimli::SectionId::DebugTypes,
-    gimli::SectionId::EhFrame,
-    gimli::SectionId::EhFrameHdr,
 ];
 
 /// Returns the contents of the section whose name, after stripping any leading
@@ -50,14 +43,14 @@ const DWARF_SECTION_IDS: &[gimli::SectionId] = &[
 /// The name trimming matches what LLVM does before comparing section names, so
 /// that `.eh_frame`, `eh_frame` and the old `.zdebug_*` spellings all resolve.
 ///
-/// Returns `None` when no such section exists; returns an empty vector when it
+/// Returns `None` when no such section exists; returns an empty slice when it
 /// exists but cannot be read, so that callers can tell "absent" from "empty".
-pub fn section_bytes<Elf>(
+pub fn section_bytes<'data, Elf>(
     header: &Elf,
     endian: Endianness,
-    data: &[u8],
+    data: &'data [u8],
     wanted: &[u8],
-) -> Option<(Vec<u8>, u64)>
+) -> Option<(Cow<'data, [u8]>, u64)>
 where
     Elf: FileHeader<Endian = Endianness>,
 {
@@ -82,12 +75,15 @@ where
     None
 }
 
-/// The section's contents, inflated when `SHF_COMPRESSED` is set.
+/// The section's contents: borrowed from the file as they are, or inflated
+/// into a buffer when `SHF_COMPRESSED` is set. Borrowing matters: a game's
+/// debug file carries a gigabyte of DWARF, and copying it out of a mapping
+/// reads every page of it to answer a question about one function.
 ///
-/// Returns an empty vector rather than an error for anything unreadable: the
+/// Returns an empty slice rather than an error for anything unreadable: the
 /// callers all treat a section they cannot parse as one that describes
 /// nothing, which is what LLVM does too.
-fn decompressed_bytes<S>(section: &S, endian: Endianness, data: &[u8]) -> Vec<u8>
+fn decompressed_bytes<'data, S>(section: &S, endian: Endianness, data: &'data [u8]) -> Cow<'data, [u8]>
 where
     S: SectionHeader<Endian = Endianness>,
 {
@@ -96,7 +92,7 @@ where
             let format = match header.ch_type(endian) {
                 elf::ELFCOMPRESS_ZLIB => CompressionFormat::Zlib,
                 elf::ELFCOMPRESS_ZSTD => CompressionFormat::Zstandard,
-                _ => return Vec::new(),
+                _ => return Cow::Borrowed(&[]),
             };
             let range = CompressedFileRange {
                 format,
@@ -107,26 +103,25 @@ where
             range
                 .data(data)
                 .and_then(|compressed| compressed.decompress())
-                .map(std::borrow::Cow::into_owned)
                 .unwrap_or_default()
         }
-        Ok(None) => section.data(endian, data).unwrap_or(&[]).to_vec(),
-        Err(_) => Vec::new(),
+        Ok(None) => Cow::Borrowed(section.data(endian, data).unwrap_or(&[])),
+        Err(_) => Cow::Borrowed(&[]),
     }
 }
 
-/// Every DWARF section gimli may ask for, decompressed once up front.
+/// The DWARF sections of one file, located once and decompressed where the
+/// file stores them compressed.
 ///
 /// gimli borrows from what it is given, so the decompressed buffers have to
 /// outlive the `Dwarf` built over them; loading them into a table first is the
 /// simplest way to arrange that.
-pub(crate) struct DwarfSections {
-    sections: std::collections::HashMap<&'static str, Vec<u8>>,
-    empty: Vec<u8>,
+pub(crate) struct DwarfSections<'data> {
+    sections: std::collections::HashMap<&'static str, Cow<'data, [u8]>>,
 }
 
-impl DwarfSections {
-    pub(crate) fn load<Elf>(header: &Elf, endian: Endianness, data: &[u8]) -> Self
+impl<'data> DwarfSections<'data> {
+    pub(crate) fn load<Elf>(header: &Elf, endian: Endianness, data: &'data [u8]) -> Self
     where
         Elf: FileHeader<Endian = Endianness>,
     {
@@ -141,14 +136,10 @@ impl DwarfSections {
                 sections.insert(id.name(), bytes);
             }
         }
-        Self {
-            sections,
-            empty: Vec::new(),
-        }
+        Self { sections }
     }
 
     pub(crate) fn get(&self, id: gimli::SectionId) -> &[u8] {
-        self.sections.get(id.name()).unwrap_or(&self.empty)
+        self.sections.get(id.name()).map_or(&[], |bytes| &bytes[..])
     }
 }
-

@@ -80,7 +80,8 @@ pub enum Why {
     Sampled { inclusive_percent: f32 },
     /// It fired this often on its own.
     TooHot { per_s: f64 },
-    /// It never completed a call in the time it was armed.
+    /// It completed no call for as long as a hook is given: since it was
+    /// armed, or since its last call if it has run.
     Silent,
     /// It was entered and did not return: a main loop, not a quiet path.
     NeverReturns,
@@ -124,12 +125,21 @@ struct Hooked {
     watched_s: f64,
     /// `calls / watched_s`.
     per_s: f64,
+    /// Seconds armed since the last step in which it completed a call. Kept
+    /// apart from `calls`: that one is halved, never reaches zero again once
+    /// the function has run, and so cannot say that it stopped running.
+    quiet_s: f64,
 }
 
 /// Seconds of history a hook's rate remembers, roughly.
 const MEMORY_S: f64 = 10.0;
 /// A hook watched this long with no call is silent.
 const SILENT_AFTER_S: f64 = 1.5;
+/// A hook that has completed calls is silent after this long without one.
+/// Longer than for one that never ran: a function called every few seconds is
+/// still part of what the program does now. Start-up code that ran once and
+/// is over would otherwise keep its slot for the rest of the capture.
+const QUIET_AFTER_S: f64 = 10.0;
 /// Calls before a rate is trusted enough to call a hook too hot.
 const HOT_MIN_CALLS: f64 = 10.0;
 /// Times a function may be unhooked as silent before it is left alone.
@@ -234,9 +244,11 @@ impl AutoProfiler {
         for (id, h) in self.hooked.iter_mut() {
             if h.since_step < step {
                 let dt = watched.get(id).copied().unwrap_or(window_s).max(0.0);
-                h.calls += counts.get(id).copied().unwrap_or(0) as f64;
+                let completed = counts.get(id).copied().unwrap_or(0);
+                h.calls += completed as f64;
                 h.entries += entries.get(id).copied().unwrap_or(0) as f64;
                 h.watched_s += dt;
+                h.quiet_s = if completed > 0 { 0.0 } else { h.quiet_s + dt };
                 if h.watched_s > MEMORY_S {
                     h.calls /= 2.0;
                     h.entries /= 2.0;
@@ -263,13 +275,15 @@ impl AutoProfiler {
             .hooked
             .iter()
             .filter(|(_, h)| h.since_step < step)
-            .map(|(id, h)| (*id, h.per_s, h.calls, h.watched_s, h.entries))
+            .map(|(id, h)| (*id, h.per_s, h.calls, h.quiet_s, h.entries))
             .collect();
-        for (id, per_s, calls, watched_s, entries_seen) in &judged {
+        for (id, per_s, calls, quiet_s, entries_seen) in &judged {
+            let never_called = *calls == 0.0;
+            let silent_after = if never_called { SILENT_AFTER_S } else { QUIET_AFTER_S };
             if *per_s > hot && *calls >= HOT_MIN_CALLS {
                 unhook(self, *id, Why::TooHot { per_s: *per_s }, None);
-            } else if *calls == 0.0 && *watched_s >= SILENT_AFTER_S {
-                if *entries_seen > 0.0 {
+            } else if *quiet_s >= silent_after {
+                if never_called && *entries_seen > 0.0 {
                     // Entered and still inside: retrying arms the same probe
                     // on a function that will not return.
                     unhook(self, *id, Why::NeverReturns, None);
@@ -336,6 +350,7 @@ impl AutoProfiler {
                         entries: 0.0,
                         watched_s: 0.0,
                         per_s: 0.0,
+                        quiet_s: 0.0,
                     },
                 );
                 actions.push(Action::Hook {
@@ -886,6 +901,43 @@ mod tests {
                 hooks(&quiet(&mut p)).is_empty(),
                 "three silent tries is the cap"
             );
+        }
+    }
+
+    #[test]
+    fn a_function_that_was_called_and_then_went_quiet_gives_its_slot_to_one_that_runs_now() {
+        // One slot. The start-up function takes it, runs for a while, and the
+        // program moves on to another phase.
+        let mut p = AutoProfiler::new(Config::with_budget(1000, 1));
+        let c = [cand(1, 60.0), cand(2, 40.0)];
+        let none = HashMap::new();
+        assert_eq!(hooks(&p.step(&c, &none, 2.0, &HashMap::new(), &none, &[])), vec![1]);
+        for _ in 0..3 {
+            let a = p.step(&c, &HashMap::from([(1, 50)]), 2.0, &HashMap::new(), &none, &[]);
+            assert!(a.is_empty(), "{a:?}");
+        }
+        // Thirty seconds in which only the other function runs.
+        let mut all = Vec::new();
+        for _ in 0..15 {
+            all.extend(p.step(&c, &HashMap::from([(2, 50)]), 2.0, &HashMap::new(), &none, &[]));
+        }
+        assert_eq!(unhooks(&all), vec![(1, Why::Silent)], "{all:?}");
+        assert_eq!(hooks(&all), vec![2], "the freed slot goes to the next candidate");
+        assert!(p.is_hooked(2) && !p.is_hooked(1));
+    }
+
+    #[test]
+    fn a_function_called_now_and_then_is_not_called_quiet_between_calls() {
+        let mut p = profiler();
+        let c = [cand(1, 60.0)];
+        let none = HashMap::new();
+        p.step(&c, &none, 2.0, &HashMap::new(), &none, &[]);
+        // One call every eight seconds: quiet for longer than a never-called
+        // hook is given, shorter than the bar for one that has run.
+        for round in 0..20 {
+            let counts = if round % 4 == 0 { HashMap::from([(1, 1)]) } else { HashMap::new() };
+            let a = p.step(&c, &counts, 2.0, &HashMap::new(), &none, &[]);
+            assert!(unhooks(&a).is_empty(), "round {round}: {a:?}");
         }
     }
 

@@ -152,6 +152,9 @@ pub struct LiveService {
     /// and never twice by one thread.
     feed: parking_lot::RwLock<()>,
     pub capturing: AtomicBool,
+    /// The capture in progress is a stored one being read back
+    /// (`restore_events`), not a live one: see `is_live_capture`.
+    restoring: AtomicBool,
     pub demo: AtomicBool,
     /// The benchmark producer's knobs and counters (`bench.rs`).
     pub bench: bench::BenchState,
@@ -397,6 +400,7 @@ impl LiveService {
             live_tx,
             feed: parking_lot::RwLock::new(()),
             capturing: AtomicBool::new(false),
+            restoring: AtomicBool::new(false),
             demo: AtomicBool::new(false),
             bench: bench::BenchState::default(),
             hooks: Mutex::new(None),
@@ -575,6 +579,7 @@ impl LiveService {
         self.clear_ring()?;
         self.clear_names();
         self.capturing.store(false, Ordering::Relaxed);
+        self.restoring.store(false, Ordering::Relaxed);
         self.capture_start_ns.store(0, Ordering::Relaxed);
         self.dropped_before_start.store(0, Ordering::Relaxed);
         self.capture_pid.store(0, Ordering::Relaxed);
@@ -769,6 +774,7 @@ impl LiveService {
     /// was dropped on reopening.
     pub fn restore_events(&self, events: &[LiveEvent]) {
         if !events.is_empty() {
+            self.restoring.store(true, Ordering::Relaxed);
             self.admit_events(events);
         }
     }
@@ -845,6 +851,9 @@ impl LiveService {
     /// have marked first.
     pub fn mark_capture_started(&self, pid: u32, start_ns: u64) {
         let _feed = self.feed.read();
+        // Every capture, live or opened, begins with a start; an opened
+        // one says what it is with its first restored event.
+        self.restoring.store(false, Ordering::Relaxed);
         let was_capturing = self.capturing.swap(true, Ordering::Relaxed);
         if pid > 0 {
             self.capture_pid.store(pid as u64, Ordering::Relaxed);
@@ -863,6 +872,15 @@ impl LiveService {
     /// Whether a capture is running now.
     pub fn is_capturing(&self) -> bool {
         self.capturing.load(Ordering::Relaxed)
+    }
+
+    /// Whether events are arriving from a capture that is running, for as
+    /// long as it runs: true between a start and its end, except while the
+    /// events are a stored capture's being read back. That is "capturing"
+    /// to everything else, but it is a burst with an end, and what a
+    /// viewer that fell behind it should be given differs (`http::ws_loop`).
+    pub fn is_live_capture(&self) -> bool {
+        self.is_capturing() && !self.restoring.load(Ordering::Relaxed)
     }
 
     /// The pid of the running or last capture; 0 when there is none.

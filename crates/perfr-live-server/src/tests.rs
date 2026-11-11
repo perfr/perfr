@@ -991,7 +991,13 @@ struct Viewer {
 
 impl Viewer {
     fn connect(addr: std::net::SocketAddr) -> Viewer {
+        Viewer::connect_with(addr, |_| {})
+    }
+
+    /// As `connect`, with `prepare` run on the socket before the handshake.
+    fn connect_with(addr: std::net::SocketAddr, prepare: impl FnOnce(&std::net::TcpStream)) -> Viewer {
         let stream = std::net::TcpStream::connect(addr).unwrap();
+        prepare(&stream);
         stream.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
         let (ws, _) = tokio_tungstenite::tungstenite::client(format!("ws://{addr}/ws"), stream).expect("the handshake");
         Viewer { ws, events: Vec::new(), names: Default::default(), hellos: 0, finished: 0 }
@@ -1035,6 +1041,23 @@ impl Viewer {
                 // The read timeout: nothing to read just now.
                 Err(Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
                 Err(error) => panic!("{what}: the socket failed: {error}"),
+            }
+        }
+    }
+
+    /// Reads until nothing has arrived for `quiet`.
+    fn read_until_quiet(&mut self, quiet: std::time::Duration) {
+        use tokio_tungstenite::tungstenite::{Error, Message};
+        let mut last = std::time::Instant::now();
+        while last.elapsed() < quiet {
+            match self.ws.read() {
+                Ok(Message::Binary(bytes)) => {
+                    self.apply(&bytes);
+                    last = std::time::Instant::now();
+                }
+                Ok(_) => {}
+                Err(Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                Err(error) => panic!("the socket failed: {error}"),
             }
         }
     }
@@ -1117,4 +1140,109 @@ fn a_viewer_that_connects_while_events_arrive_misses_nothing_and_gets_nothing_tw
             assert_eq!(viewer.names.get(&(i as u32)).map(String::as_str), Some(format!("name {i}").as_str()), "viewer {n}");
         }
     }
+}
+
+/// A viewer whose socket takes little before the server's sends wait for
+/// it: one that has stopped reading falls behind the broadcast for certain,
+/// instead of having megabytes of slack in the kernel's buffers.
+#[cfg(unix)]
+fn connect_a_viewer_that_is_slow_to_read(addr: std::net::SocketAddr) -> Viewer {
+    Viewer::connect_with(addr, |stream| {
+        use std::os::fd::AsRawFd;
+        // Not under a loopback segment (64 KiB), or the transfer crawls
+        // from one window probe to the next.
+        let size: libc::c_int = 256 << 10;
+        // SAFETY: the option value is a c_int that outlives the call.
+        let done = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&size as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(done, 0);
+    })
+}
+
+/// What opening a stored capture does to the service, as far as viewers can
+/// tell: the ring emptied, a start, thousands of names at once, the events
+/// restored in chunks. Far more frames than a viewer may fall behind by.
+/// Returns without marking the end.
+#[cfg(unix)]
+fn open_a_capture_larger_than_the_broadcast_slack(svc: &LiveService) {
+    svc.clear_ring().unwrap();
+    svc.clear_names();
+    svc.mark_capture_started(7, 100);
+    // Sixteen megabytes on the raw wire: more than the socket of a viewer
+    // that is not reading will take.
+    let first: Vec<LiveEvent> = (10..500_010).map(ev).collect();
+    for chunk in first.chunks(4096) {
+        svc.restore_events(chunk);
+    }
+    for i in 0..3_000u32 {
+        svc.intern_id(2_000_000 + i, &format!("frame {i}"));
+    }
+    let rest: Vec<LiveEvent> = (500_010..520_010).map(ev).collect();
+    for chunk in rest.chunks(4096) {
+        svc.restore_events(chunk);
+    }
+}
+
+#[cfg(unix)]
+fn assert_the_viewer_holds_the_ring_once(viewer: &Viewer, svc: &LiveService) {
+    let (got, in_ring) = (viewer.event_ids(), ring_ids(svc));
+    let missing = in_ring.iter().filter(|id| got.binary_search(id).is_err()).count();
+    assert_eq!(
+        (got.len(), missing),
+        (in_ring.len(), 0),
+        "the viewer holds {} events of the ring's {}, and lacks {missing} of them",
+        got.len(),
+        in_ring.len()
+    );
+    assert_eq!(in_ring.len(), 520_000);
+    for i in 0..3_000u32 {
+        assert!(viewer.names.contains_key(&(2_000_000 + i)), "frame {i} has no name");
+    }
+}
+
+#[cfg(unix)]
+fn raw_wire_ring_of_a_million() -> ServerConfig {
+    ServerConfig { ring_buffer_bytes: 32 << 20, wire: crate::WireFormat::Raw, ..ServerConfig::default() }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_viewer_started_over_after_falling_behind_holds_the_capture_once() {
+    let (svc, served) = serve_with(raw_wire_ring_of_a_million());
+    svc.push_events(&[ev(1), ev(2)]);
+    let mut viewer = connect_a_viewer_that_is_slow_to_read(served.addr);
+    viewer.read_until("the first snapshot", |v| v.events.len() == 2);
+    // The capture is opened and finished while the viewer reads nothing.
+    open_a_capture_larger_than_the_broadcast_slack(&svc);
+    svc.mark_capture_finished();
+    svc.broadcast_status();
+    // It reads again, finds it fell behind, and is started over.
+    viewer.read_until("a second snapshot", |v| v.hellos == 2);
+    viewer.read_until_quiet(std::time::Duration::from_millis(400));
+    assert_the_viewer_holds_the_ring_once(&viewer, &svc);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_viewer_that_falls_behind_while_a_capture_is_being_opened_has_no_holes() {
+    let (svc, served) = serve_with(raw_wire_ring_of_a_million());
+    svc.push_events(&[ev(1), ev(2)]);
+    let mut viewer = connect_a_viewer_that_is_slow_to_read(served.addr);
+    viewer.read_until("the first snapshot", |v| v.events.len() == 2);
+    open_a_capture_larger_than_the_broadcast_slack(&svc);
+    // The viewer reads again before the open is through: the service still
+    // says it is capturing when the lag is found.
+    assert!(svc.is_capturing());
+    viewer.read_until_quiet(std::time::Duration::from_millis(400));
+    svc.mark_capture_finished();
+    svc.broadcast_status();
+    viewer.read_until_quiet(std::time::Duration::from_millis(400));
+    assert_the_viewer_holds_the_ring_once(&viewer, &svc);
 }

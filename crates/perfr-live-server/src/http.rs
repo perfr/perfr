@@ -1914,7 +1914,7 @@ async fn ws_loop(socket: WebSocket, svc: Arc<LiveService>) {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        if svc.is_capturing() {
+                        if svc.is_live_capture() {
                             // A viewer that cannot keep up with a live
                             // capture goes on with a gap. It gets the names
                             // and strings again, since a name it missed
@@ -1941,16 +1941,24 @@ async fn ws_loop(socket: WebSocket, svc: Arc<LiveService>) {
                             }
                             continue;
                         }
-                        // Otherwise the burst was finite -- opening a
+                        // Otherwise the burst is finite -- opening a
                         // capture posts its names and batches all at once
                         // -- and rather than leave the viewer with holes it
                         // cannot see, start it over: a fresh Hello plus the
                         // whole ring, which the viewer takes as a reset.
-                        // Anything broadcast meanwhile follows.
-                        for frame in svc.hello_and_snapshot_frames() {
-                            if !send_frame(&mut sink, frame).await {
-                                return;
-                            }
+                        // That holds while the capture is still being read
+                        // back, too: it counts as capturing, and a viewer
+                        // sent on with a gap then kept the gap, since
+                        // nothing lags once the burst is over.
+                        //
+                        // The subscription is replaced along with the
+                        // snapshot. The frames still queued in the old one
+                        // carry events the ring, and so the snapshot,
+                        // already holds: sent after it, they showed every
+                        // event of the capture's tail twice.
+                        match start_viewer(&svc, &mut sink).await {
+                            Some(fresh) => rx = fresh,
+                            None => return,
                         }
                         continue;
                     }

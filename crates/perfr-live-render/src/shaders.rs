@@ -4,13 +4,15 @@
 
 //! WGSL for the hybrid GPU timeline.
 //!
-//! Pixel-column path: nearest-neighbor blit of the CPU raster.
-//! Instanced path: SDF rounded rects + an analytical drop shadow.
+//! Pixel-column path: nearest-neighbor blit of the CPU raster into its
+//! destination rect.
+//! Instanced path: SDF rounded rects, antialiased at the edge. No drop
+//! shadow: the quad expansion it needed was overdraw on every scope.
 //!
 //! Sources live in `src/shaders/*.wgsl` so editors, `wgsl-analyzer`, and the
 //! `naga` CLI can see them; `include_str!` bakes them in at compile time.
 
-/// Instanced scope rects: SDF rounded boxes + analytical drop shadow.
+/// Instanced scope rects: SDF rounded boxes.
 pub const INSTANCE_WGSL: &str = include_str!("shaders/instance.wgsl");
 
 /// Textured dest-rect blit for the zoomed-out pixel-column LOD.

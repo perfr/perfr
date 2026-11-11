@@ -21,6 +21,7 @@ use crate::id::FlexId;
 use crate::perfetto::PerfettoState;
 use crate::proto::{is_message, varint};
 
+/// The parsed prefix of the buffer is not dropped before it is this long.
 const COMPACT_EVERY: usize = 1 << 20;
 /// Compressed input is inflated this much at a time, and only while fewer
 /// decoded bytes than [`BACKLOG_TARGET`] wait for the parser. Inflating
@@ -31,7 +32,9 @@ const COMPACT_EVERY: usize = 1 << 20;
 /// size. A slice bounds that to about 16 MB.
 const INFLATE_SLICE: usize = 16 << 10;
 const BACKLOG_TARGET: usize = 4 << 20;
-/// Skip `args` for memory-dump events so a heap snapshot cannot explode RAM.
+/// What [`is_memory_dump`] looks for in an event's bytes before parsing
+/// it: a memory dump (`"ph":"v"`) is parsed without its `args`, so a heap
+/// snapshot is never built as a value tree.
 const DUMP_SCAN: &[u8] = br#""ph""#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

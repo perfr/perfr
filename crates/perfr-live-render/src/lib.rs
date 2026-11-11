@@ -15,14 +15,20 @@
 //!   or `(kind, core)`).
 //! * A per-lane vector sorted by `start_ns` can answer "which interval covers
 //!   this pixel column?" with a binary search on `end_ns`.
-//! * Hot path: **O(lanes × width × log n_lane)**. Independent of walking all
-//!   scopes. GPU then draws one textured quad.
+//! * Hot path: **O(lanes × width × log n_lane)**, plus one comparison per 64
+//!   events under a column: a column that covers many events shows the
+//!   longest of them, found through each lane's per-block longest spans
+//!   rather than by visiting them. GPU then draws one textured quad.
+//!
+//! That is the zoomed-out level of detail. Zoomed in, when some visible
+//! scope is a few pixels wide, the view is a list of instances instead, one
+//! per visible event (see `lod`), and costs what is in view.
 //!
 //! Alternatives considered (and left as benches, not the default):
 //!
-//! * **Naive instancing** (`rasterize_naive`): one fill per event. O(n) or
-//!   worse O(n × pixels_touched). Falls over at millions — kept only so the
-//!   benches can fail clearly if someone ships it as the only path.
+//! * **Naive instancing** (`rasterize_naive`): one fill per event in view.
+//!   O(n) or worse O(n × pixels_touched). Falls over at millions; a lane
+//!   uses it only while it has fewer events than pixels, or has overlap.
 //! * **GPU compute binning**: still O(n) visits per dirty frame; more moving
 //!   parts; the CPU column walk is already cheaper than uploading n quads.
 //! * **Mip / tile pyramid**: O(width) lookup after ingest, extra memory and

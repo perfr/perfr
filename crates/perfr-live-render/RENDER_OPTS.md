@@ -53,7 +53,9 @@ egui idle-chrome widget skip; on-screen FPS / `fps_sweep`.
 4. **End-time index.** Verified: non-overlapping start-sorted lanes have
    sorted `end_ns`, so `partition_point` is a real binary search. Comment +
    `ends_are_sorted` / overlapping-ends tests. No dual index (would cost
-   append-mostly insert).
+   append-mostly insert). A lane that loses the order (an imported
+   trace's instant inside a slice) keeps, per position, the latest end so
+   far, and searches that: 8 bytes an event on those lanes only.
 5. **LOD sampling.** `choose_lod` samples the densest non-VALUE lanes by
    `Lane::len()` (O(lanes), not O(scopes)) plus the cursor/hover hint.
    `INSTANCE_MIN_PX = 4.0`. VALUE still skipped
@@ -106,9 +108,20 @@ egui idle-chrome widget skip; on-screen FPS / `fps_sweep`.
    sequential wasm32 compile (CI path), and `build_wasm.sh`. It could
    not confirm SharedArrayBuffer + `render-wN` in a browser.
 8. **Shader animation.** `uni.time` + selected pulse (~1.2 s, small
-   radius/sigma/brightness) on `FLAG_SELECTED` (`#0080FF`, lift, Wallace
-   shadow). Idle + selected writes `u_time` every frame without rebuilding
-   instances.
+   radius/brightness) on `FLAG_SELECTED` (`#0080FF`, lift, glow; the
+   drop shadow was removed, see `shaders/instance.wgsl`). Idle + selected
+   writes `u_time` every frame without rebuilding instances.
+
+9. **Longest event in a range.** Each lane keeps the longest span of
+   every 64 consecutive events. The column raster (which shows the
+   longest event under a column) and `choose_lod` (which asks whether any
+   visible event is wide) skip whole blocks instead of visiting every
+   event in view. `zoomed_out/*` in the bench, 1e6 scopes, on the machine
+   that made the change (32 cores, shared): `choose_lod` 4.10 ms → 28 µs
+   over 48 lanes; one lane rastered at 256 px 3.65 ms → 88 µs, at 1920 px
+   6.17 ms → 1.31 ms. `overlapping_lane/*` (item 4's latest-end search,
+   a 500-scope window at the end of 1e6): listing 2.10 ms → 19 µs,
+   raster 2.21 ms → 21 µs.
 
 Self-profile names: `PrimitiveListing` (parent of Y-cull + early-out +
 collect), `YCull`, `EarlyOut`, `CollectLane` / `RasterLane` on

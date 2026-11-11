@@ -3,7 +3,7 @@ name = "perfr-live-render"
 version = "0.1.1"
 edition.workspace = true
 license.workspace = true
-description = "Pixel-column live-trace rasterizer (O(width * log n) per lane)"
+description = "Live-trace timeline index: pixel-column raster (O(width * log n) per lane) and instance listing"
 
 [features]
 default = []

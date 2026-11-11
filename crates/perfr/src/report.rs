@@ -794,15 +794,20 @@ impl SampleStore {
                     }
                     write_thread_node(&mut out, *tid, thread.sample_count, 0, total, total);
                     out.push_str(",\"children\":[");
-                    write_children(&mut out, &thread.root, thread.sample_count, total, &folded, 0);
-                    out.push_str("]}");
+                    let cut = write_children(&mut out, &thread.root, thread.sample_count, total, &folded, 0);
+                    out.push(']');
+                    cut.write(&mut out);
+                    out.push('}');
                 }
+                out.push(']');
             }
             TreeMode::BottomUp => {
-                write_children(&mut out, &merged.root, merged.sample_count, total, &folded, 0)
+                let cut = write_children(&mut out, &merged.root, merged.sample_count, total, &folded, 0);
+                out.push(']');
+                cut.write(&mut out);
             }
         }
-        out.push_str("]}");
+        out.push('}');
         out
     }
 
@@ -910,6 +915,32 @@ fn percent_of(count: u64, total: u64) -> f64 {
     }
 }
 
+/// What a node's `children` array leaves out, written on the node itself.
+/// A reader adding up the children of a cut node gets less than the node and
+/// cannot tell that from self time; top-down, the exclusive counts of frames
+/// below the depth cap are otherwise nowhere in the tree.
+#[derive(Default)]
+struct Cut {
+    /// Children past the 24 hottest, and the samples that pass through them.
+    more_children: u64,
+    more_samples: u64,
+    /// The node sits at the depth cap and has callees or threads below it.
+    depth: bool,
+}
+
+impl Cut {
+    /// The keys, only when something was cut: a tree that fits reads as before.
+    fn write(&self, out: &mut String) {
+        if self.depth {
+            out.push_str(",\"truncated\":true");
+        }
+        if self.more_children > 0 {
+            write_kv_u64(out, "more_children", self.more_children);
+            write_kv_u64(out, "more_samples", self.more_samples);
+        }
+    }
+}
+
 fn write_children(
     out: &mut String,
     node: &TreeNode,
@@ -917,12 +948,18 @@ fn write_children(
     total: u64,
     inner: &Folded,
     depth: usize,
-) {
+) -> Cut {
     if depth >= MAX_TREE_DEPTH {
-        return;
+        return Cut { depth: !node.children.is_empty() || !node.threads.is_empty(), ..Cut::default() };
     }
     let mut ordered: Vec<(&u32, &TreeNode)> = node.children.iter().collect();
     ordered.sort_by(|a, b| b.1.sample_count.cmp(&a.1.sample_count).then(a.0.cmp(b.0)));
+    let dropped = ordered.get(MAX_CHILDREN_PER_NODE..).unwrap_or(&[]);
+    let cut = Cut {
+        more_children: dropped.len() as u64,
+        more_samples: dropped.iter().map(|(_, child)| child.sample_count).sum(),
+        depth: false,
+    };
     ordered.truncate(MAX_CHILDREN_PER_NODE);
     let mut first = true;
     for (id, child) in ordered {
@@ -945,8 +982,10 @@ fn write_children(
         write_kv_f64(out, "inclusive_percent", percent_of(child.sample_count, total));
         write_kv_f64(out, "of_parent_percent", percent_of(child.sample_count, parent_count));
         out.push_str(",\"children\":[");
-        write_children(out, child, child.sample_count, total, inner, depth + 1);
-        out.push_str("]}");
+        let below = write_children(out, child, child.sample_count, total, inner, depth + 1);
+        out.push(']');
+        below.write(out);
+        out.push('}');
     }
     // Thread leaves last, so the functions a reader is scanning for stay at
     // the top of each node's children.
@@ -960,6 +999,7 @@ fn write_children(
         write_thread_node(out, *tid, *count, *count, total, parent_count);
         out.push_str(",\"children\":[]}");
     }
+    cut
 }
 
 #[cfg(test)]
@@ -1305,6 +1345,64 @@ mod tests {
             node = first["children"].clone();
         }
         assert_eq!(depth, MAX_TREE_DEPTH, "capped, and the cap is what is claimed");
+    }
+
+    #[test]
+    fn a_tree_says_where_it_was_cut() {
+        // Depth: 30 frames under the thread, 24 of them drawn. The last
+        // drawn node says there is more below it; without that its samples
+        // look like its own, and the exclusive count of the real leaf is
+        // nowhere in the tree.
+        let store = SampleStore::new();
+        for id in 1..=30u32 {
+            store.record_name(id, &format!("f{id}"));
+        }
+        // Innermost first: f1 is the leaf, f30 the entry point.
+        store.push(StoredSample { timestamp_ns: 5, tid: 1, frames: (1..=30).collect() });
+        let tree = parse(&store.tree_json(0, 100, TreeMode::TopDown));
+        let mut node = tree["roots"][0].clone();
+        let mut depth = 0;
+        while let Some(first) = node["children"].get(0).cloned() {
+            assert!(node.get("truncated").is_none(), "depth {depth}: {node}");
+            depth += 1;
+            node = first;
+        }
+        assert_eq!(depth, MAX_TREE_DEPTH);
+        assert_eq!(node["truncated"], true, "{node}");
+        assert_eq!(node["exclusive"], 0);
+
+        // Width: 30 callees, the 24 hottest drawn. The node says how many
+        // are missing and what they add up to, so the children account for
+        // the parent again.
+        let store = SampleStore::new();
+        store.record_name(100, "main");
+        for id in 1..=30u32 {
+            store.record_name(id, &format!("callee{id}"));
+            for n in 0..id {
+                store.push(StoredSample { timestamp_ns: u64::from(id * 100 + n), tid: 1, frames: vec![id, 100] });
+            }
+        }
+        let tree = parse(&store.tree_json(0, u64::MAX, TreeMode::TopDown));
+        let main = &tree["roots"][0]["children"][0];
+        assert_eq!(main["name"], "main");
+        let shown = main["children"].as_array().unwrap();
+        assert_eq!(shown.len(), MAX_CHILDREN_PER_NODE);
+        assert_eq!(main["more_children"], 6);
+        // The six coldest: 1 + 2 + ... + 6 samples.
+        assert_eq!(main["more_samples"], 21);
+        let drawn: u64 = shown.iter().map(|child| child["inclusive"].as_u64().unwrap()).sum();
+        assert_eq!(drawn + 21, main["inclusive"].as_u64().unwrap());
+        // Bottom-up, the leaves are the roots, and the cut is on the tree itself.
+        let tree = parse(&store.tree_json(0, u64::MAX, TreeMode::BottomUp));
+        assert_eq!(tree["roots"].as_array().unwrap().len(), MAX_CHILDREN_PER_NODE);
+        assert_eq!(tree["more_children"], 6);
+        assert_eq!(tree["more_samples"], 21);
+
+        // A tree that fits carries none of these keys.
+        let text = tree_store().tree_json(0, 100, TreeMode::TopDown);
+        assert!(!text.contains("truncated") && !text.contains("more_"), "{text}");
+        let text = tree_store().tree_json(0, 100, TreeMode::BottomUp);
+        assert!(!text.contains("truncated") && !text.contains("more_"), "{text}");
     }
 
     #[test]

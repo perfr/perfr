@@ -131,7 +131,29 @@ struct CpuRing {
 #[derive(Default)]
 struct CallRate {
     window_start_ns: u64,
+    /// Every entry in the window, whichever process made it: each one took
+    /// the trap and wrote a record into the shared rings.
     entries: u64,
+    /// The part of `entries` made by processes other than the target.
+    from_others: u64,
+}
+
+impl CallRate {
+    /// Counts one entry at `timestamp_ns`, starting a new window when the
+    /// current one is a second old. A timestamp from before the window (the
+    /// target's hits are counted after the reorder delay, the others' as they
+    /// are read) counts into the current one.
+    fn count(&mut self, timestamp_ns: u64, from_target: bool) {
+        if timestamp_ns.saturating_sub(self.window_start_ns) >= 1_000_000_000 {
+            self.window_start_ns = timestamp_ns;
+            self.entries = 0;
+            self.from_others = 0;
+        }
+        self.entries += 1;
+        if !from_target {
+            self.from_others += 1;
+        }
+    }
 }
 
 impl Drop for CpuRing {
@@ -262,7 +284,7 @@ pub struct UprobeSession {
     /// Every perf fd (leaders and attached) per function, so one function's
     /// probes can be switched off on their own.
     fds_by_function: HashMap<u64, Vec<i32>>,
-    /// Entries per function in the current one-second window.
+    /// Entries per function in the current one-second window, machine-wide.
     rates: HashMap<u64, CallRate>,
     /// Entry hits since `take_entry_hits`, per function. Completed calls are
     /// not enough to tell a quiet function from one that was entered and
@@ -462,14 +484,14 @@ impl UprobeSession {
         if max_calls_per_s == 0 {
             return Vec::new();
         }
-        let offenders: Vec<(u64, u64)> = self
+        let offenders: Vec<(u64, u64, u64)> = self
             .rates
             .iter()
             .filter(|(_, rate)| rate.entries > max_calls_per_s)
-            .map(|(function_id, rate)| (*function_id, rate.entries))
+            .map(|(function_id, rate)| (*function_id, rate.entries, rate.from_others))
             .collect();
         let mut unhooked = Vec::new();
-        for (function_id, entries) in offenders {
+        for (function_id, entries, from_others) in offenders {
             // Returns before entries, same reason as `remove_hook`.
             for fd in self
                 .fds_by_function
@@ -482,6 +504,15 @@ impl UprobeSession {
             }
             self.rates.remove(&function_id);
             let name = self.names.get(&function_id).cloned().unwrap_or_else(|| format!("function {function_id}"));
+            if from_others > 0 {
+                // Otherwise the number contradicts what the timeline shows
+                // of the target: a handful of calls, and a hook switched off
+                // for a hundred thousand.
+                log::info!(
+                    "{name}: {from_others} of its {entries} calls/s came from other processes mapping the same \
+                     file; a uprobe fires for all of them"
+                );
+            }
             unhooked.push((name, entries));
             self.auto_unhooked.push((function_id, entries));
         }
@@ -536,8 +567,8 @@ impl UprobeSession {
 
     fn ingest_rings(&mut self) {
         let flags = uprobe_sample_flags();
-        for cpu in self.rings.iter_mut() {
-            while let Ok(Some(record)) = cpu.ring.read_record() {
+        for ring in 0..self.rings.len() {
+            while let Ok(Some(record)) = self.rings[ring].ring.read_record() {
                 let Some(header) = PerfEventHeader::parse(&record) else { continue };
                 if { header.kind } == record_type::LOST {
                     // id (u64), lost (u64) after the 8-byte header.
@@ -554,50 +585,66 @@ impl UprobeSession {
                     self.report.parse_failures += 1;
                     continue;
                 };
-                // Every process mapping the file fires the probe; only the
-                // target's hits are this capture's.
-                if sample.pid as i32 != self.target_pid {
-                    continue;
-                }
-                let Some(&(function_id, is_return)) = self.by_stream.get(&sample.stream_id) else {
-                    self.report.unknown_stream += 1;
-                    continue;
-                };
-                let (sp, ip) = match sample.regs.as_deref() {
-                    Some([sp, ip, ..]) => (*sp, *ip),
-                    _ => {
-                        self.report.without_regs += 1;
-                        (0, 0)
-                    }
-                };
-                let hit = ProbeHit {
-                    timestamp_ns: sample.time,
-                    tid: sample.tid as i32,
-                    function_id,
-                    is_return,
-                    sp,
-                    ip,
-                    cpu: sample.cpu,
-                    return_address: entry_return_address(&sample, is_return),
-                };
-                self.newest_seen_ns = self.newest_seen_ns.max(hit.timestamp_ns);
-                if let Some(dump) = self.dump.as_mut() {
-                    use std::io::Write;
-                    let _ = writeln!(
-                        dump,
-                        "{} {} {} {} {} {:#x} {:#x}",
-                        hit.timestamp_ns,
-                        hit.tid,
-                        hit.cpu,
-                        self.names.get(&hit.function_id).map(String::as_str).unwrap_or("?"),
-                        if hit.is_return { "ret" } else { "entry" },
-                        hit.sp,
-                        hit.ip
-                    );
-                }
-                self.pending.push(hit);
+                self.ingest_sample(&sample);
             }
         }
+    }
+
+    /// One parsed uprobe sample, from whichever CPU ring carried it.
+    fn ingest_sample(&mut self, sample: &perfr_perf_records::reader::RecordSample) {
+        // Every process mapping the file fires the probe; only the
+        // target's hits are this capture's. The others still cost a trap in
+        // their process and a record in these rings, so they count toward
+        // the call limit: a libc function hooked in an idle target while a
+        // neighbour calls it a million times a second overflows the rings
+        // just the same, and the target's own rate would never trip it.
+        if sample.pid as i32 != self.target_pid {
+            if let Some(&(function_id, false)) = self.by_stream.get(&sample.stream_id) {
+                // Only while armed: records of a function already switched
+                // off are still in the rings and must not switch it off again.
+                if self.fds_by_function.contains_key(&function_id) {
+                    self.rates.entry(function_id).or_default().count(sample.time, false);
+                }
+            }
+            return;
+        }
+        let Some(&(function_id, is_return)) = self.by_stream.get(&sample.stream_id) else {
+            self.report.unknown_stream += 1;
+            return;
+        };
+        let (sp, ip) = match sample.regs.as_deref() {
+            Some([sp, ip, ..]) => (*sp, *ip),
+            _ => {
+                self.report.without_regs += 1;
+                (0, 0)
+            }
+        };
+        let hit = ProbeHit {
+            timestamp_ns: sample.time,
+            tid: sample.tid as i32,
+            function_id,
+            is_return,
+            sp,
+            ip,
+            cpu: sample.cpu,
+            return_address: entry_return_address(sample, is_return),
+        };
+        self.newest_seen_ns = self.newest_seen_ns.max(hit.timestamp_ns);
+        if let Some(dump) = self.dump.as_mut() {
+            use std::io::Write;
+            let _ = writeln!(
+                dump,
+                "{} {} {} {} {} {:#x} {:#x}",
+                hit.timestamp_ns,
+                hit.tid,
+                hit.cpu,
+                self.names.get(&hit.function_id).map(String::as_str).unwrap_or("?"),
+                if hit.is_return { "ret" } else { "entry" },
+                hit.sp,
+                hit.ip
+            );
+        }
+        self.pending.push(hit);
     }
 
     /// Reads whatever is still in the rings and pairs everything still held,
@@ -720,12 +767,7 @@ impl UprobeSession {
                 }
                 self.open.entry(hit.tid).or_default().push(hit.sp);
                 self.returns.note_entry(hit.tid, hit.sp, hit.return_address, hit.timestamp_ns);
-                let rate = self.rates.entry(hit.function_id).or_default();
-                if hit.timestamp_ns.saturating_sub(rate.window_start_ns) >= 1_000_000_000 {
-                    rate.window_start_ns = hit.timestamp_ns;
-                    rate.entries = 0;
-                }
-                rate.entries += 1;
+                self.rates.entry(hit.function_id).or_default().count(hit.timestamp_ns, true);
                 *self.entry_hits.entry(hit.function_id).or_insert(0) += 1;
                 self.calls
                     .process_function_entry(hit.tid, hit.function_id, hit.timestamp_ns, None);
@@ -1417,6 +1459,61 @@ mod tests {
         assert_eq!(report.orphan_returns, 0, "every return matched its entry's frame");
         assert_eq!(report.discarded_unclosed, 0, "no entry was left open");
         assert_eq!(report.records_lost, 0);
+    }
+
+    /// A parsed entry sample of `function_id`'s probe, as the ring delivers it.
+    fn entry_sample(pid: u32, stream_id: u64, time: u64) -> perfr_perf_records::reader::RecordSample {
+        perfr_perf_records::reader::RecordSample {
+            pid,
+            tid: pid,
+            time,
+            stream_id,
+            regs: Some(vec![0x7000, 0x1000]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_function_hammered_by_another_process_is_unhooked_though_the_target_barely_calls_it() {
+        // The probe is on the file, so every process mapping it takes the
+        // trap and fills the rings. A shared-library function the target
+        // calls ten times a second and a neighbour calls 150k times a second
+        // must trip the limit: the rings overflow all the same.
+        let mut session = empty_session();
+        session.target_pid = 100;
+        session.by_stream.insert(1, (9, false));
+        session.by_stream.insert(2, (9, true));
+        session.names.insert(9, "malloc".to_string());
+        session.fds_by_function.insert(9, Vec::new());
+        for i in 0..150_000u64 {
+            session.ingest_sample(&entry_sample(555, 1, 1_000_000 + i * 5_000));
+        }
+        for i in 0..10u64 {
+            session.ingest_sample(&entry_sample(100, 1, 1_000_000 + i * 50_000_000));
+        }
+        assert_eq!(session.pending.len(), 10, "only the target's hits are paired");
+        session.drain_up_to(u64::MAX);
+        let unhooked = session.enforce_call_limit(100_000);
+        assert_eq!(unhooked.len(), 1, "the machine-wide rate is what the limit is for");
+        assert_eq!(unhooked[0].0, "malloc");
+        assert!(unhooked[0].1 > 100_000, "the rate reported is the total: {}", unhooked[0].1);
+        assert!(session.fds_by_function.is_empty(), "its probes are off");
+    }
+
+    #[test]
+    fn other_processes_under_the_limit_leave_the_hook_armed() {
+        let mut session = empty_session();
+        session.target_pid = 100;
+        session.by_stream.insert(1, (9, false));
+        session.fds_by_function.insert(9, Vec::new());
+        for i in 0..50_000u64 {
+            session.ingest_sample(&entry_sample(555, 1, 1_000_000 + i * 5_000));
+            // Returns of other processes are not calls.
+            session.ingest_sample(&entry_sample(555, 2, 1_000_000 + i * 5_000));
+        }
+        assert!(session.enforce_call_limit(100_000).is_empty());
+        assert!(session.pending.is_empty(), "nothing of another process is paired");
+        assert_eq!(session.report().unknown_stream, 0, "and nothing of it is counted as this capture's");
     }
 
     const TRAMPOLINE: u64 = 0xffff_ffff_ffdf_ffff;

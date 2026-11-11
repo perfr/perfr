@@ -120,6 +120,13 @@ pub fn unlink_segment(pid: u32) -> bool {
 
 /// Unlinks every perfr segment in [`SHM_DIR`] whose process no longer exists.
 /// Returns how many were removed. Never touches a live process's segment.
+///
+/// "No longer exists" takes two witnesses. The pid in the name is only a
+/// number in the namespace of the process that wrote it: a producer in a
+/// container that shares this directory is nobody by that number here, and
+/// its segment was removed from under it. So a segment is also left alone
+/// while its writer holds the lease, which a process keeps until it exits
+/// whatever it is called.
 pub fn sweep_dead_segments() -> usize {
     let Ok(entries) = std::fs::read_dir(segment_directory()) else { return 0 };
     let mut removed = 0;
@@ -130,11 +137,29 @@ pub fn sweep_dead_segments() -> usize {
         if pid == std::process::id() {
             continue;
         }
-        if !crate::platform::process_alive(pid) && unlink_segment(pid) {
+        if !crate::platform::process_alive(pid) && !writer_holds(pid) && unlink_segment(pid) {
             removed += 1;
         }
     }
     removed
+}
+
+/// Whether some process holds the producer lease on `pid`'s segment.
+fn writer_holds(pid: u32) -> bool {
+    let name = shm_name(pid);
+    // SAFETY: plain syscall, result checked.
+    let fd = unsafe { segment_open(&name, libc::O_RDONLY, 0) };
+    if fd < 0 {
+        return false;
+    }
+    // SAFETY: fd is freshly opened; OwnedFd closes it, and the lock with
+    // it, when this returns.
+    let owner = unsafe { OwnedFd::from_raw_fd(fd) };
+    // Shared: it conflicts with a writer's exclusive lease and with nothing
+    // else, so two sweeps never take each other for a writer.
+    // SAFETY: plain syscall on an open descriptor.
+    let refused = unsafe { libc::flock(owner.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } != 0;
+    refused && io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
 }
 
 /// Every perfr segment in [`SHM_DIR`] whose process is alive: the pids that
@@ -952,6 +977,28 @@ mod tests {
         assert!(std::path::Path::new(&path).exists(), "{path} should exist");
         drop(writer);
         assert!(!std::path::Path::new(&path).exists(), "and be unlinked on drop");
+    }
+
+    #[test]
+    fn the_sweep_leaves_a_segment_whose_writer_still_holds_it() {
+        let _guard = exclusive();
+        // A producer in another PID namespace that shares /dev/shm (a
+        // container run with --ipc=host): it names its segment with a pid
+        // that, seen from here, is nobody. Its lease says it is alive.
+        let unseen_pid = 4_000_000_000u32 - 11;
+        let name = shm_name(unseen_pid);
+        let fd = unsafe { segment_open(&name, libc::O_CREAT | libc::O_RDWR, 0o600) };
+        assert!(fd >= 0);
+        assert_eq!(unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) }, 0);
+        let path = segment_directory().join(shm_file_name(unseen_pid));
+
+        sweep_dead_segments();
+        assert!(path.exists(), "the sweep removed the segment of a process that is running");
+
+        // Once the writer is gone, so is its lease, and the file is swept.
+        unsafe { libc::close(fd) };
+        sweep_dead_segments();
+        assert!(!path.exists());
     }
 
     #[test]

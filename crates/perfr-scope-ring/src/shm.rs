@@ -14,8 +14,7 @@
 //! read, and a mismatch is an error rather than a mapping used at the wrong
 //! dimensions.
 
-use crate::event::EVENT_SIZE;
-use crate::ring::{self, Header, RingWriter, Rings, MAGIC, MAX_RINGS, VERSION};
+use crate::ring::{self, Header, RingWriter, Rings, MAGIC, MAX_RINGS};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::Ordering;
@@ -472,38 +471,9 @@ impl ScopeRingReader {
         let base = base.cast::<u8>();
         let mapping = Mapping { base, len };
 
-        // SAFETY: the mapping is at least one cache line, which covers Header.
-        let header = unsafe { &*base.cast::<Header>() };
-        let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_string());
-        if header.magic.load(Ordering::Acquire) != MAGIC {
-            // Also the answer while a writer is between shm_open and
-            // init_region: the segment exists, zero-filled, and the magic is
-            // stored last precisely so this window is visible rather than
-            // silently mapped at bogus dimensions. Callers retry.
-            return Err(bad("not a perfr scope segment (or not initialised yet)"));
-        }
-        if header.pid != pid {
-            return Err(bad("scope segment pid mismatch"));
-        }
-        if header.version != VERSION {
-            return Err(bad("scope segment version mismatch"));
-        }
-        if header.event_size != EVENT_SIZE as u32 {
-            return Err(bad("scope segment event size mismatch"));
-        }
-        let ring_count = header.ring_count as usize;
-        let slots_per_ring = header.slots_per_ring as usize;
-        if ring_count == 0 || ring_count > MAX_RINGS {
-            return Err(bad("scope segment ring count out of range"));
-        }
-        if slots_per_ring < 2 || !slots_per_ring.is_power_of_two() {
-            return Err(bad("scope segment slot count is not a power of two"));
-        }
-        // The size the header describes must fit in the mapping actually
-        // made, or every offset computed from it reads out of bounds.
-        if ring::checked_layout_size(ring_count, slots_per_ring).is_none_or(|needed| needed > len) {
-            return Err(bad("scope segment is smaller than its header describes"));
-        }
+        // SAFETY: the mapping is `len` bytes, checked above to be at least
+        // a cache line.
+        let (ring_count, slots_per_ring) = unsafe { ring::validate_header(base, len, pid) }?;
 
         // A second, writable mapping of the control page alone. It overlaps
         // the read-only mapping's first page, which is harmless: nothing but
@@ -672,6 +642,7 @@ pub fn now_monotonic_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ring::VERSION;
     use crate::event::ScopeEvent;
 
     /// A process has exactly one scope segment, named by its pid -- so tests

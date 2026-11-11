@@ -37,8 +37,7 @@
 //! The reader treats the segment as untrusted, as on Linux: every header
 //! field is validated before an event is read.
 
-use crate::event::EVENT_SIZE;
-use crate::ring::{self, Header, RingWriter, Rings, MAGIC, MAX_RINGS, VERSION};
+use crate::ring::{self, Header, RingWriter, Rings, MAGIC, MAX_RINGS};
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -499,35 +498,9 @@ impl ScopeRingReader {
         let mapping = section.map(FILE_MAP_READ, len)?;
         let base = mapping.base;
 
-        // SAFETY: the mapping is at least one cache line, which covers Header.
-        let header = unsafe { &*base.cast::<Header>() };
-        let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_string());
-        if header.magic.load(Ordering::Acquire) != MAGIC {
-            // Also the answer while a writer is between create and
-            // init_region: the file exists, zero-filled, and the magic is
-            // stored last precisely so this window is visible. Callers retry.
-            return Err(bad("not a perfr scope segment (or not initialised yet)"));
-        }
-        if header.pid != pid {
-            return Err(bad("scope segment pid mismatch"));
-        }
-        if header.version != VERSION {
-            return Err(bad("scope segment version mismatch"));
-        }
-        if header.event_size != EVENT_SIZE as u32 {
-            return Err(bad("scope segment event size mismatch"));
-        }
-        let ring_count = header.ring_count as usize;
-        let slots_per_ring = header.slots_per_ring as usize;
-        if ring_count == 0 || ring_count > MAX_RINGS {
-            return Err(bad("scope segment ring count out of range"));
-        }
-        if slots_per_ring < 2 || !slots_per_ring.is_power_of_two() {
-            return Err(bad("scope segment slot count is not a power of two"));
-        }
-        if ring::checked_layout_size(ring_count, slots_per_ring).is_none_or(|needed| needed > len) {
-            return Err(bad("scope segment is smaller than its header describes"));
-        }
+        // SAFETY: the mapping is `len` bytes, checked above to be at least
+        // a cache line.
+        let (ring_count, slots_per_ring) = unsafe { ring::validate_header(base, len, pid) }?;
 
         // The writable view of the control page alone. It overlaps the
         // read-only view's first page, which is harmless: nothing but the
@@ -647,6 +620,7 @@ pub fn now_monotonic_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ring::VERSION;
     use crate::event::ScopeEvent;
 
     /// A process has exactly one scope segment, named by its pid -- so tests

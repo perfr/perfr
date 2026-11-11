@@ -947,7 +947,6 @@ pub struct PerfrLiveApp {
     capture_user: bool,
     needs_repaint: bool,
     compact: bool,
-    light_canvas: bool,
     /// This page asked for a capture (Record, Demo, the benchmark) and has
     /// not stopped it. Only a request until `recording_confirmed`.
     recording: bool,
@@ -1102,8 +1101,6 @@ pub struct PerfrLiveApp {
     /// egui's pointer state as JSON, for the harness: what a synthetic drag
     /// actually reached.
     pointer_readout: String,
-    /// The UI knobs window (row spacing and the like) is open.
-    show_tweaks: bool,
     ui_tweaks: UiTweaks,
     /// The Live table over the whole capture, fed as events arrive.
     live_all: crate::live::LiveTable,
@@ -1513,7 +1510,7 @@ impl PerfrLiveApp {
     fn canvas_color(&self) -> Color32 {
         self.canvas_override
             .map(|(c, _)| c)
-            .unwrap_or_else(|| theme::timeline_canvas(self.light_canvas))
+            .unwrap_or_else(|| theme::timeline_canvas(false))
     }
 
     /// Which threads draw in colour: the selected thread if one is
@@ -1557,7 +1554,9 @@ impl PerfrLiveApp {
                 .collect::<Vec<_>>()
                 .join(","),
             self.report_open,
-            self.show_tweaks,
+            // `tweaks`: a window that is part of the settings now. The key
+            // stays for the harnesses that read it.
+            false,
             self.report_tab.label(),
             self.hello_count,
             json_str(&self.status.wire),
@@ -1824,7 +1823,6 @@ impl PerfrLiveApp {
             capture_user: false,
             needs_repaint: false,
             compact: false,
-            light_canvas: false,
             recording: false,
             recording_confirmed: false,
             capture_was_active: false,
@@ -1902,7 +1900,6 @@ impl PerfrLiveApp {
             report_w_user: None,
             report_splitter_grab: None,
             pointer_readout: "null".to_string(),
-            show_tweaks: false,
             ui_tweaks: UiTweaks::load(),
             live_all: crate::live::LiveTable::default(),
             live_sel: crate::live::LiveTable::default(),
@@ -4943,12 +4940,12 @@ impl PerfrLiveApp {
             );
             vsep(ui);
             section_label(ui, "UNWIND");
-            if let Some(i) = segmented(ui, "perfr_unwind", &["DWARF", "FP"], usize::from(!self.unwind_dwarf)) {
+            if let Some(i) = segmented(ui, &["DWARF", "FP"], usize::from(!self.unwind_dwarf)) {
                 self.unwind_dwarf = i == 0;
             }
             vsep(ui);
             section_label(ui, "HOOKS");
-            if let Some(i) = segmented(ui, "perfr_hook_method", &["Frida", "Uprobes"], usize::from(!self.user_space_hooks)) {
+            if let Some(i) = segmented(ui, &["Frida", "Uprobes"], usize::from(!self.user_space_hooks)) {
                 self.user_space_hooks = i == 0;
             }
             if !self.user_space_hooks && pill(ui, "Dedupe", self.uprobe_duplicate_filter)
@@ -5117,11 +5114,11 @@ impl PerfrLiveApp {
         // Out of `self` while the rows are drawn (they need `&mut self`),
         // and back at the end.
         let rows = std::mem::take(&mut self.functions_view.rows);
-        self.function_rows_table(ui, pid, font, &rows);
+        self.function_rows_table(ui, font, &rows);
         self.functions_view.rows = rows;
     }
 
-    fn function_rows_table(&mut self, ui: &mut Ui, pid: u32, font: f32, rows: &[usize]) {
+    fn function_rows_table(&mut self, ui: &mut Ui, font: f32, rows: &[usize]) {
         const MAX_ROWS: usize = 500;
         let capped = !self.functions_show_all && rows.len() > MAX_ROWS;
         ui.horizontal(|ui| {
@@ -5688,7 +5685,7 @@ impl PerfrLiveApp {
             }
             ui.painter()
                 .rect_filled(body, 0.0, self.canvas_color());
-            paint_quiet_grid(ui, body, self.t0, self.t1, self.light_canvas);
+            paint_quiet_grid(ui, body, self.t0, self.t1, false);
             ui.painter()
                 .line_segment([head.right_top(), head.right_bottom()], hairline());
             if self.tracks.any_dragging() {
@@ -5721,7 +5718,6 @@ impl PerfrLiveApp {
                     } else {
                         HeaderPass::All
                     },
-                    header_widgets_enabled(self.idle_skip_chrome),
                 );
             }
 
@@ -5889,7 +5885,7 @@ impl PerfrLiveApp {
                 if lifting {
                     {
                         let _headers = dev.scope(TID_UI, NAME_PAINT_HEADERS);
-                        self.paint_headers(ui, head, body, hover_row, HeaderPass::Dragged, true);
+                        self.paint_headers(ui, head, body, hover_row, HeaderPass::Dragged);
                     }
                     if let Some(fg) = overlay {
                         let _cb = dev.scope(TID_RENDER, NAME_PAINT_CALLBACK);
@@ -5947,7 +5943,7 @@ impl PerfrLiveApp {
                     self.t0,
                     self.t1,
                     self.live_edge_ns as f64,
-                    self.light_canvas,
+                    false,
                 );
                 paint_selection_overlay(
                     ui,
@@ -6105,7 +6101,6 @@ impl PerfrLiveApp {
         body: Rect,
         hover_row: Option<RowId>,
         pass: HeaderPass,
-        interactive: bool,
     ) {
         let dragged = self.tracks.dragging_track();
         let rows: Vec<TrackRow> = self.tracks.rows().to_vec();
@@ -6160,7 +6155,7 @@ impl PerfrLiveApp {
                 let band = Rect::from_min_max(
                     Pos2::new(head.left(), r.top()),
                     Pos2::new(
-                        if self.light_canvas || matches!(row.id, RowId::Machine(_)) {
+                        if matches!(row.id, RowId::Machine(_)) {
                             r.right()
                         } else {
                             body.right()
@@ -6195,14 +6190,7 @@ impl PerfrLiveApp {
                             .map(|(y, h)| {
                                 Rect::from_min_size(
                                     Pos2::new(head.left(), head.top() + y),
-                                    Vec2::new(
-                                        if self.light_canvas {
-                                            r.width()
-                                        } else {
-                                            body.right() - head.left()
-                                        },
-                                        h.max(1.0),
-                                    ),
+                                    Vec2::new(body.right() - head.left(), h.max(1.0)),
                                 )
                             })
                             .unwrap_or(r)
@@ -6222,7 +6210,7 @@ impl PerfrLiveApp {
                     );
                 }
             }
-            self.paint_tree_row(ui, head, *row, r, interactive, &core_util);
+            self.paint_tree_row(ui, head, *row, r, &core_util);
         }
     }
 
@@ -6232,7 +6220,6 @@ impl PerfrLiveApp {
         head: Rect,
         row: TrackRow,
         r: Rect,
-        interactive: bool,
         core_util: &std::collections::HashMap<u8, f32>,
     ) {
         let tight = self.header_w < 140.0;
@@ -6242,16 +6229,6 @@ impl PerfrLiveApp {
                 let label = format!("Scheduler ({n} cores)");
                 // Indented like a Process: the scheduler is a child of its
                 // machine, not a peer of one.
-                if !interactive {
-                    ui.painter().text(
-                        Pos2::new(r.left() + 30.0, r.center().y),
-                        Align2::LEFT_CENTER,
-                        label,
-                        FontId::new(11.0, fonts::medium()),
-                        theme::TEXT(),
-                    );
-                    return;
-                }
                 let open = !self.tracks.collapsed(row.id);
                 if chevron(ui, r, 16.0, open, ("s", 0u32, 0u32)) {
                     self.tracks.toggle(row.id);
@@ -6269,16 +6246,6 @@ impl PerfrLiveApp {
             }
             RowId::Machine(m) => {
                 let machine_label = self.machine_label(m);
-                if !interactive {
-                    ui.painter().text(
-                        Pos2::new(r.left() + 22.0, r.center().y),
-                        Align2::LEFT_CENTER,
-                        format!("MACHINE  {}", machine_label.to_uppercase()),
-                        FontId::new(9.5, fonts::medium()),
-                        theme::MUTED(),
-                    );
-                    return;
-                }
                 let open = !self.tracks.collapsed(row.id);
                 let (toggled, m_resp, m_reorder) =
                     draggable_header(ui, r, 8.0, open, ("m", m.sort_key() as u32, 0u32));
@@ -6312,16 +6279,6 @@ impl PerfrLiveApp {
                 );
             }
             RowId::Process(pid) => {
-                if !interactive {
-                    ui.painter().text(
-                        Pos2::new(r.left() + 30.0, r.center().y),
-                        Align2::LEFT_CENTER,
-                        format!("process  {pid}"),
-                        FontId::new(11.0, fonts::medium()),
-                        theme::TEXT(),
-                    );
-                    return;
-                }
                 let open = !self.tracks.collapsed(row.id);
                 let (toggled, p_resp, p_reorder) = draggable_header(ui, r, 16.0, open, ("p", pid, 0u32));
                 if toggled {
@@ -6386,26 +6343,6 @@ impl PerfrLiveApp {
                 }
             }
             RowId::Thread(th) => {
-                if !interactive {
-                    let tname = self.thread_display_name(th.pid, th.tid);
-                    let label = if tight {
-                        if tname.is_empty() {
-                            format!("{}", th.tid)
-                        } else {
-                            tname
-                        }
-                    } else {
-                        format!("thread  {}  {tname}", th.tid)
-                    };
-                    ui.painter().text(
-                        Pos2::new(r.left() + if tight { 36.0 } else { 64.0 }, r.center().y),
-                        Align2::LEFT_CENTER,
-                        label,
-                        FontId::new(11.0, FontFamily::Proportional),
-                        theme::TEXT(),
-                    );
-                    return;
-                }
                 let open = !self.tracks.collapsed(row.id);
                 let dragging = self.tracks.is_dragging_thread(th);
                 let title = Rect::from_min_size(
@@ -6525,16 +6462,6 @@ impl PerfrLiveApp {
                     format!("async  {}  {tname}", th.tid)
                 };
                 let text_x = if tight { 38.0 } else { 64.0 };
-                if !interactive {
-                    ui.painter().text(
-                        Pos2::new(r.left() + text_x, r.center().y),
-                        Align2::LEFT_CENTER,
-                        label,
-                        FontId::new(10.5, FontFamily::Proportional),
-                        theme::MUTED(),
-                    );
-                    return;
-                }
                 let key = TrackKey::Async(th);
                 let dragging = self.tracks.is_dragging(key);
                 let title = Rect::from_min_size(r.min, Vec2::new(r.width(), 20.0_f32.min(r.height())));
@@ -6589,17 +6516,6 @@ impl PerfrLiveApp {
                     // room, always the percentage.
                     let util = core_util.get(&key.extra).copied().unwrap_or(0.0);
                     paint_core_util(ui.painter(), r, util);
-                    return;
-                }
-                if !interactive {
-                    let name = value_lane_name(&self.index, &self.intern, key);
-                    ui.painter().text(
-                        Pos2::new(r.left() + 40.0, r.center().y),
-                        Align2::LEFT_CENTER,
-                        name,
-                        FontId::new(10.5, FontFamily::Proportional),
-                        theme::MUTED(),
-                    );
                     return;
                 }
                 // A graph is a track of its own: its handle lifts it alone,
@@ -7947,7 +7863,7 @@ impl PerfrLiveApp {
     /// one, so it works in both themes.
     fn sample_bar_color(&self) -> Color32 {
         let c = self.canvas_color();
-        let light = self.light_canvas || perfr_live_event::theme::active().light;
+        let light = perfr_live_event::theme::active().light;
         let mix = |v: u8| -> u8 {
             let target = if light { 0u8 } else { 255u8 };
             ((v as f32) * 0.88 + (target as f32) * 0.12) as u8
@@ -8862,7 +8778,7 @@ impl PerfrLiveApp {
             let modes = [CodeMode::Source, CodeMode::Disassembly, CodeMode::Both];
             let labels: Vec<&str> = modes.iter().map(|m| m.label()).collect();
             let current = modes.iter().position(|m| *m == self.code_mode).unwrap_or(2);
-            if let Some(i) = segmented(ui, "perfr_code_mode", &labels, current) {
+            if let Some(i) = segmented(ui, &labels, current) {
                 self.code_mode = modes[i];
             }
             ui.add_space(8.0);
@@ -11597,7 +11513,7 @@ fn paint_clear_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
 
 /// Joined buttons for one choice among a few: the selected one is filled.
 /// Returns the index clicked, if any.
-fn segmented(ui: &mut Ui, id: &str, options: &[&str], selected: usize) -> Option<usize> {
+fn segmented(ui: &mut Ui, options: &[&str], selected: usize) -> Option<usize> {
     let mut clicked = None;
     ui.spacing_mut().item_spacing.x = 0.0;
     ui.horizontal(|ui| {
@@ -11631,7 +11547,6 @@ fn segmented(ui: &mut Ui, id: &str, options: &[&str], selected: usize) -> Option
                 clicked = Some(i);
             }
         }
-        let _ = id;
     });
     ui.spacing_mut().item_spacing.x = 8.0;
     clicked
@@ -13876,11 +13791,6 @@ fn skip_idle_chrome(live: bool, interaction: bool, search_sel_changed: bool) -> 
     !live && !interaction && !search_sel_changed
 }
 
-/// Headers stay full widgets even on idle skip (names live on the title band).
-fn header_widgets_enabled(_idle_skip_chrome: bool) -> bool {
-    true
-}
-
 /// Header rail uses the row's own clip, not the body-leaf Y-cull window.
 fn header_row_intersects_clip(row_y: f32, row_h: f32, clip_y0: f32, clip_y1: f32) -> bool {
     row_y + row_h >= clip_y0 && row_y <= clip_y1
@@ -15084,12 +14994,6 @@ mod tests {
         assert!(!skip_idle_chrome(true, false, false));
         assert!(!skip_idle_chrome(false, true, false));
         assert!(!skip_idle_chrome(false, false, true));
-    }
-
-    #[test]
-    fn headers_stay_interactive_when_idle_skip() {
-        assert!(header_widgets_enabled(true));
-        assert!(header_widgets_enabled(false));
     }
 
     #[test]

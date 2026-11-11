@@ -19,7 +19,7 @@ use crate::ingest::{ChromeEvent, ChromeIngestor, StackFrame, TimeUnit};
 use crate::json::{parse_json_string, skip_ws, value_end};
 use crate::id::FlexId;
 use crate::perfetto::PerfettoState;
-use crate::proto::varint;
+use crate::proto::{is_message, varint};
 
 const COMPACT_EVERY: usize = 1 << 20;
 /// Compressed input is inflated this much at a time, and only while fewer
@@ -97,12 +97,13 @@ pub struct ChromeStream {
     /// Compressed input not inflated yet, from `packed_pos` on.
     packed: Vec<u8>,
     packed_pos: usize,
+    /// The first bytes pushed, until there are enough of them to tell a
+    /// gzip or zip container from plain text (`container_known`).
     magic_buf: Vec<u8>,
+    container_known: bool,
     format: Format,
     perfetto: Option<Box<PerfettoState>>,
     eof: bool,
-    /// The input is JSON text and nothing else; see [`Self::json_text`].
-    plain_json: bool,
     pub bytes_in: u64,
     pub bytes_decoded: u64,
     /// JSON events or Perfetto packets decoded so far (the progress line).
@@ -124,10 +125,10 @@ impl Default for ChromeStream {
             packed: Vec::new(),
             packed_pos: 0,
             magic_buf: Vec::new(),
+            container_known: false,
             format: Format::Unknown,
             perfetto: None,
             eof: false,
-            plain_json: false,
             bytes_in: 0,
             bytes_decoded: 0,
             events_seen: 0,
@@ -144,7 +145,7 @@ impl ChromeStream {
     pub(crate) fn json_text() -> Self {
         Self {
             format: Format::Json,
-            plain_json: true,
+            container_known: true,
             ..Self::default()
         }
     }
@@ -193,30 +194,35 @@ impl ChromeStream {
                 return;
             }
         }
-        if !self.plain_json && self.bytes_in == chunk.len() as u64 {
-            self.magic_buf.extend_from_slice(chunk);
-            if self.magic_buf.len() < 4 && !looks_like_json(&self.magic_buf) {
-                return;
-            }
-            let held = std::mem::take(&mut self.magic_buf);
-            if held.len() >= 2 && held[0] == 0x1f && held[1] == 0x8b {
-                self.decode = Decode::Gzip(Box::new(MultiGzDecoder::new(Vec::new())));
-                self.packed = held;
-                self.inflate(false);
-                return;
-            }
-            if held.starts_with(b"PK\x03\x04") {
-                self.decode = Decode::ZipPending;
-                self.packed = held;
-                self.inflate(false);
-                return;
-            }
+        if self.container_known {
+            self.raw.extend_from_slice(chunk);
+            self.bytes_decoded += chunk.len() as u64;
+            return;
+        }
+        // Held across pushes: a reader may hand over a byte at a time, and
+        // a first push shorter than the magic used to be set aside here
+        // and never looked at again.
+        self.magic_buf.extend_from_slice(chunk);
+        if self.magic_buf.len() >= 4 || looks_like_json(&self.magic_buf) {
+            self.open_container();
+        }
+    }
+
+    /// Decide what the first bytes are a container of, and release them.
+    fn open_container(&mut self) {
+        self.container_known = true;
+        let held = std::mem::take(&mut self.magic_buf);
+        if held.starts_with(&[0x1f, 0x8b]) {
+            self.decode = Decode::Gzip(Box::new(MultiGzDecoder::new(Vec::new())));
+        } else if held.starts_with(b"PK\x03\x04") {
+            self.decode = Decode::ZipPending;
+        } else {
             self.bytes_decoded += held.len() as u64;
             self.raw.extend_from_slice(&held);
             return;
         }
-        self.raw.extend_from_slice(chunk);
-        self.bytes_decoded += chunk.len() as u64;
+        self.packed = held;
+        self.inflate(false);
     }
 
     /// Decode more of the compressed input into `raw`: while the decoded
@@ -375,6 +381,10 @@ impl ChromeStream {
     /// knows its last packet has arrived.
     pub fn finish_input(&mut self) {
         self.eof = true;
+        if !self.container_known {
+            // A file of fewer than four bytes: it is what it is.
+            self.open_container();
+        }
         self.inflate(false);
     }
 
@@ -671,25 +681,60 @@ enum Step {
 }
 
 impl ChromeStream {
-    /// JSON starts with `[` / `{` after optional whitespace; a Perfetto file
-    /// starts with the packet tag, which is also `\n`, so JSON is asked
-    /// first and only a tag that is not followed by a JSON opener is proto.
-    fn sniff(&self) -> Option<Format> {
-        let b = &self.raw[self.pos..];
-        if b.is_empty() {
-            return if self.input_ended() { Some(Format::Json) } else { None };
-        }
-        let i = skip_ws(b, 0);
-        if i < b.len() && (b[i] == b'[' || b[i] == b'{') {
-            return Some(Format::Json);
-        }
-        if b[0] == PACKET_TAG {
-            return Some(Format::Perfetto);
-        }
-        if i >= b.len() && !self.input_ended() && b.len() < 64 {
+    /// JSON starts with `[` / `{` after optional whitespace (and an optional
+    /// byte-order mark); a Perfetto file starts with the packet tag. `None`
+    /// while the bytes held do not say which.
+    ///
+    /// The tag is a newline, which JSON skips, and the length after it is
+    /// `[` for a 91-byte first packet and `{` for a 123-byte one: "is there
+    /// a JSON opener after the whitespace" took such a trace for JSON,
+    /// buffered all of it and showed nothing. So an opener after a leading
+    /// tag is put to the test: Perfetto if the bytes frame as a packet, a
+    /// message from end to end with the next packet or the end of the file
+    /// right behind it. JSON text does not do that.
+    fn sniff(&mut self) -> Option<Format> {
+        const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+        let ended = self.input_ended();
+        let held = &self.raw[self.pos..];
+        if held.starts_with(BOM) {
+            self.pos += BOM.len();
+        } else if !ended && BOM.starts_with(held) {
+            // Empty, or the beginning of a mark.
             return None;
         }
-        Some(Format::Json)
+        let b = &self.raw[self.pos..];
+        if b.is_empty() {
+            return ended.then_some(Format::Json);
+        }
+        let i = skip_ws(b, 0);
+        let opener = i < b.len() && (b[i] == b'[' || b[i] == b'{');
+        if b[0] != PACKET_TAG {
+            // Whitespace alone says nothing yet; anything else is JSON's
+            // to accept or to report.
+            return (opener || ended || i < b.len() || b.len() >= 64).then_some(Format::Json);
+        }
+        if i >= b.len() && !ended {
+            // Newlines so far: blank lines before JSON, or a packet tag and
+            // the start of a length.
+            return None;
+        }
+        if !opener {
+            return Some(Format::Perfetto);
+        }
+        let Some((len, n)) = varint(b, 1) else {
+            return Some(Format::Json);
+        };
+        let Some(end) = usize::try_from(len).ok().and_then(|len| (1 + n).checked_add(len)) else {
+            return Some(Format::Json);
+        };
+        if b.len() <= end && !ended {
+            // Not decidable before the claimed packet and the byte behind
+            // it are here. A JSON file this short is rare and loses
+            // nothing by waiting for its end.
+            return None;
+        }
+        let framed = b.len() >= end && is_message(&b[1 + n..end]) && b.get(end).is_none_or(|&t| t == PACKET_TAG);
+        Some(if framed { Format::Perfetto } else { Format::Json })
     }
 
     /// One `TracePacket`: `0x0a`, varint length, bytes. A tail that cannot
@@ -1002,7 +1047,7 @@ mod tests {
                 stream.push(&zip[..cut]);
                 stream.finish_input();
                 let _ = stream.pump(&mut ing, 1024);
-                assert_eq!(stream.pending_bytes(), 0, "deflate {deflate}, cut at {cut}");
+                assert!(stream.is_done(), "deflate {deflate}, cut at {cut}");
             }
             // The directory arriving in a push of its own is still not
             // trace data.
@@ -1095,6 +1140,126 @@ mod tests {
         let text = r#"{"samples":[],"traceEvents":[{"name":"t","ph":"i","ts":1,"pid":1,"tid":1}]}"#;
         let (_, events) = load_like_the_viewer(text.as_bytes()).expect("finishes");
         assert_eq!(events.len(), 1);
+    }
+
+    /// One push per byte, the smallest a reader can hand over.
+    fn load_byte_by_byte(bytes: &[u8]) -> Result<Vec<perfr_live_event::LiveEvent>, String> {
+        let mut stream = ChromeStream::default();
+        let mut ing = ChromeIngestor::default();
+        let mut events = Vec::new();
+        for b in bytes {
+            stream.push(std::slice::from_ref(b));
+            events.extend(stream.pump(&mut ing, 64));
+        }
+        stream.finish_input();
+        while !stream.is_done() {
+            events.extend(stream.pump(&mut ing, 64));
+        }
+        match stream.error() {
+            Some(e) => Err(e.to_string()),
+            None => Ok(events),
+        }
+    }
+
+    const ONE_INSTANT: &[u8] = br#"[{"name":"a","ph":"i","ts":1,"pid":1,"tid":1}]"#;
+
+    #[test]
+    fn a_first_push_of_a_byte_or_two_does_not_lose_them() {
+        // The container is told from the first four bytes; a first push
+        // shorter than that used to be set aside and never looked at again.
+        for (label, bytes) in [
+            ("json", ONE_INSTANT.to_vec()),
+            ("gzip", gzip(ONE_INSTANT)),
+            ("zip", zip_of(ONE_INSTANT, true)),
+        ] {
+            assert_eq!(load_byte_by_byte(&bytes).map(|e| e.len()), Ok(1), "{label}");
+            for first in 1..4 {
+                let mut stream = ChromeStream::default();
+                let mut ing = ChromeIngestor::default();
+                stream.push(&bytes[..first]);
+                stream.push(&bytes[first..]);
+                stream.finish_input();
+                let n = stream.pump(&mut ing, 1024).len();
+                assert_eq!((n, stream.error()), (1, None), "{label}, first push of {first}");
+            }
+        }
+        // A file shorter than four bytes is still read at the end of input.
+        assert_eq!(load_byte_by_byte(b"[]").map(|e| e.len()), Ok(0));
+        assert!(load_byte_by_byte(&[0x1f, 0x8b]).is_err());
+    }
+
+    #[test]
+    fn a_byte_order_mark_before_json_is_skipped() {
+        let mut text = vec![0xEF, 0xBB, 0xBF];
+        text.extend_from_slice(ONE_INSTANT);
+        assert_eq!(crate::ingest_collect(&text).map(|(_, e)| e.len()), Ok(1));
+        assert_eq!(load_byte_by_byte(&text).map(|e| e.len()), Ok(1));
+    }
+
+    /// A Perfetto trace whose first packet is `len` bytes long: a clock
+    /// snapshot padded with an unknown field, then one instant.
+    fn perfetto_with_first_packet_of(len: usize) -> Vec<u8> {
+        use crate::proto::Encoder;
+        let mut clock = Encoder::new();
+        clock.varint(1, 6).varint(2, 1_000);
+        let mut snap = Encoder::new();
+        snap.msg(1, &clock);
+        let mut first = Encoder::new();
+        first.msg(6, &snap);
+        let pad = len - first.buf.len() - 2;
+        first.bytes(900 % 16, &vec![0u8; pad]);
+        assert_eq!(first.buf.len(), len);
+        let mut th = Encoder::new();
+        th.i32(1, 7).i64(2, 70).string(5, "Main");
+        let mut td = Encoder::new();
+        td.varint(1, 11).msg(4, &th);
+        let mut second = Encoder::new();
+        second.msg(60, &td);
+        let mut e = Encoder::new();
+        e.varint(9, 3).varint(11, 11).string(23, "tick");
+        let mut third = Encoder::new();
+        third.varint(8, 2_000).varint(10, 1).msg(11, &e);
+        let mut trace = Encoder::new();
+        trace.msg(1, &first).msg(1, &second).msg(1, &third);
+        trace.buf
+    }
+
+    #[test]
+    fn a_perfetto_trace_is_not_taken_for_json_by_the_length_of_its_first_packet() {
+        // The packet tag is a newline, which JSON skips; the length byte
+        // after it is `[` for a 91-byte packet and `{` for a 123-byte one.
+        for len in [91usize, 123, 90, 124] {
+            let trace = perfetto_with_first_packet_of(len);
+            assert_eq!(trace[0], b'\n');
+            let mut stream = ChromeStream::default();
+            let mut ing = ChromeIngestor::default();
+            stream.push(&trace);
+            stream.finish_input();
+            let events = stream.pump(&mut ing, 1024);
+            assert_eq!((stream.format(), stream.error()), (Format::Perfetto, None), "first packet of {len}");
+            assert_eq!(events.len(), 1, "first packet of {len}");
+            assert_eq!(load_byte_by_byte(&trace).map(|e| e.len()), Ok(1), "first packet of {len}, a byte at a time");
+        }
+    }
+
+    #[test]
+    fn json_after_a_blank_line_is_still_json() {
+        let long = format!(
+            r#"{{"traceEvents":[{{"name":"{}","ph":"i","ts":1,"pid":1,"tid":1}}]}}"#,
+            "n".repeat(300)
+        );
+        for body in [std::str::from_utf8(ONE_INSTANT).unwrap(), r#"{"traceEvents":[]}"#, long.as_str()] {
+            for lead in ["\n", "\n\n", "\n  ", "\r\n", " \n"] {
+                let text = format!("{lead}{body}");
+                let mut stream = ChromeStream::default();
+                let mut ing = ChromeIngestor::default();
+                stream.push(text.as_bytes());
+                stream.finish_input();
+                let _ = stream.pump(&mut ing, 1024);
+                assert_eq!((stream.format(), stream.error()), (Format::Json, None), "{text:?}");
+                assert!(load_byte_by_byte(text.as_bytes()).is_ok(), "{text:?}, a byte at a time");
+            }
+        }
     }
 
     #[test]

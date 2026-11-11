@@ -133,6 +133,18 @@ pub fn fields(buf: &[u8]) -> Fields<'_> {
     Fields { buf, pos: 0 }
 }
 
+/// Whether `buf` is fields from its first byte to its last, with nothing
+/// malformed or cut short: what a message is and what other bytes almost
+/// never are.
+pub fn is_message(buf: &[u8]) -> bool {
+    let mut walk = fields(buf);
+    let mut end = 0;
+    while walk.next().is_some() {
+        end = walk.pos;
+    }
+    end == buf.len()
+}
+
 impl<'a> Iterator for Fields<'a> {
     type Item = (u32, Val<'a>);
 
@@ -296,6 +308,18 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(varint(&[0x80, 0x80], 0), None);
         assert_eq!(varint(&[0xac, 0x02], 0), Some((300, 2)));
+    }
+
+    #[test]
+    fn a_message_is_fields_from_end_to_end() {
+        let mut m = Encoder::new();
+        m.varint(1, 1).string(2, "abcdef").fixed64(3, 9);
+        assert!(is_message(&m.buf));
+        assert!(is_message(&[]));
+        assert!(!is_message(&m.buf[..m.buf.len() - 2]), "cut inside a field");
+        assert!(!is_message(&[0x0b, 0x00]), "a group");
+        assert!(!is_message(&[0x00, 0x00]), "field number 0");
+        assert!(!is_message(br#"{"traceEvents":[]}"#));
     }
 
     #[test]

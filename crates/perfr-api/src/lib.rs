@@ -24,7 +24,7 @@ use perfr_scope_ring::shm::now_monotonic_ns;
 use perfr_scope_ring::text::continuations;
 use perfr_scope_ring::{ring_for_thread, ScopeEvent, ScopeRingWriter};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 
 pub use perfr_scope_ring::event::level;
 
@@ -237,7 +237,41 @@ pub fn shutdown() {
 struct ThreadState {
     tid: u32,
     ring: usize,
+    /// Which of the process's recording threads this is, counting from
+    /// one: the top half of its handles.
+    instance: u32,
     counter: u32,
+}
+
+/// How many threads have recorded so far.
+static THREAD_INSTANCES: AtomicU32 = AtomicU32::new(0);
+
+impl ThreadState {
+    /// The state of a thread whose id is `raw_tid`, as it records for the
+    /// first time.
+    fn new(raw_tid: u64, ring_count: usize) -> ThreadState {
+        ThreadState {
+            tid: raw_tid as u32,
+            ring: ring_for_thread(raw_tid, ring_count),
+            instance: THREAD_INSTANCES.fetch_add(1, Ordering::Relaxed).wrapping_add(1),
+            counter: 0,
+        }
+    }
+
+    /// The thread's next handle.
+    ///
+    /// The top half says which thread, and is not the thread id: the
+    /// operating system gives an id out again once its thread has exited,
+    /// and the new thread's counter starts again at one, so the two halves
+    /// together came round to handles the old thread had issued and might
+    /// still have open. Nothing reads a thread out of a handle; a record
+    /// carries its thread id in a field of its own.
+    #[inline]
+    fn bump(&mut self) -> Handle {
+        // Zero is "no event", so the counter starts at one.
+        self.counter = self.counter.wrapping_add(1).max(1);
+        (u64::from(self.instance) << 32) | u64::from(self.counter)
+    }
 }
 
 thread_local! {
@@ -245,25 +279,32 @@ thread_local! {
 }
 
 #[inline]
-fn with_thread<R>(ring_count: usize, f: impl FnOnce(&mut ThreadState) -> R) -> R {
+fn with_thread<R>(ring_count: usize, f: impl FnOnce(&ThreadState) -> R) -> R {
     THREAD.with(|cell| {
-        let mut state = cell.get().unwrap_or_else(|| {
+        let state = cell.get().unwrap_or_else(|| {
             // The one OS call, paid once per thread rather than per scope.
-            let raw = perfr_scope_ring::platform::thread_id();
-            let tid = raw as u32;
-            ThreadState { tid, ring: ring_for_thread(raw, ring_count), counter: 0 }
+            let state = ThreadState::new(perfr_scope_ring::platform::thread_id(), ring_count);
+            cell.set(Some(state));
+            state
         });
-        let out = f(&mut state);
-        cell.set(Some(state));
-        out
+        f(&state)
     })
 }
 
+/// A fresh handle for the calling thread, whose state is `state`.
+///
+/// The counter is read from the thread's cell and put back at once, before
+/// anything is pushed. Kept in a copy until the call had finished, it gave
+/// a signal handler that recorded a scope while its thread was inside a
+/// call the handle that call was about to use.
 #[inline]
-fn next_handle(state: &mut ThreadState) -> Handle {
-    // Zero is "no event", so the counter starts at one.
-    state.counter = state.counter.wrapping_add(1).max(1);
-    (u64::from(state.tid) << 32) | u64::from(state.counter)
+fn next_handle(state: &ThreadState) -> Handle {
+    THREAD.with(|cell| {
+        let mut current = cell.get().unwrap_or(*state);
+        let handle = current.bump();
+        cell.set(Some(current));
+        handle
+    })
 }
 
 fn push_named(writer: &ScopeRingWriter, state: &ThreadState, mut head: ScopeEvent, name: &[u8]) {
@@ -821,7 +862,8 @@ mod tests {
         service.set_capturing(true);
         let in_parent = start(b"in the parent");
         assert_ne!(in_parent, 0);
-        let written = service.rings().write_cursor(ring_for_thread(in_parent >> 32, service.rings().ring_count()));
+        let my_ring = ring_for_thread(perfr_scope_ring::platform::thread_id(), service.rings().ring_count());
+        let written = service.rings().write_cursor(my_ring);
 
         // SAFETY: fork in a process whose other thread is the idle test
         // harness. The child only runs the checks below and exits.
@@ -842,16 +884,15 @@ mod tests {
                 let service = ScopeRingReader::open(me).map_err(|_| "the child's segment does not open")?;
                 service.set_capturing(true);
                 let handle = start(b"in the child");
-                if handle >> 32 != u64::from(me) {
-                    return Err("the child's handle does not carry its own thread id");
-                }
                 stop(handle);
                 let events: Vec<ScopeEvent> = {
                     let mut cursors = Cursors::for_rings(service.rings().ring_count());
                     drain(service.rings(), &mut cursors, 0).slices.into_iter().flat_map(|s| s.events).collect()
                 };
+                // The forking thread is the child's only thread, and its
+                // id is the child's pid, not what the parent had cached.
                 if events.iter().filter(|e| e.scope_id == handle && e.tid == me).count() != 2 {
-                    return Err("the child's scope is not in the child's segment");
+                    return Err("the child's scope is not in its segment under its own thread id");
                 }
                 Ok(())
             })();
@@ -870,7 +911,7 @@ mod tests {
         assert!(!segment_file(forked as u32).exists(), "the child's segment went with it");
         assert!(segment_file(parent).exists(), "the child's exit removed its parent's segment");
         assert_eq!(
-            service.rings().write_cursor(ring_for_thread(in_parent >> 32, service.rings().ring_count())),
+            service.rings().write_cursor(my_ring),
             written,
             "the child wrote into its parent's rings"
         );
@@ -1030,16 +1071,37 @@ mod tests {
     }
 
     #[test]
-    fn handles_encode_the_starting_thread() {
+    fn a_thread_given_the_id_of_one_that_exited_does_not_reissue_its_handles() {
+        // The operating system hands a thread id out again once its thread
+        // is gone, Windows readily and Linux when the ids wrap. The new
+        // thread's counter starts again at one. With the id as the top half
+        // of a handle, its first scope had the handle of the old thread's
+        // first, and if that one was still open (an async scope stopped
+        // later from elsewhere), the old stop closed the new scope.
+        let ring_count = perfr_scope_ring::DEFAULT_RING_COUNT;
+        let mut exited = ThreadState::new(4242, ring_count);
+        let mut reusing_its_id = ThreadState::new(4242, ring_count);
+        assert_eq!(exited.tid, reusing_its_id.tid);
+        assert_eq!(exited.ring, reusing_its_id.ring, "the ring is still the thread id's");
+        let old: Vec<Handle> = (0..3).map(|_| exited.bump()).collect();
+        let new: Vec<Handle> = (0..3).map(|_| reusing_its_id.bump()).collect();
+        assert!(old.iter().all(|handle| !new.contains(handle)), "{old:x?} and {new:x?} share a handle");
+        assert!(old.iter().chain(&new).all(|handle| *handle != 0), "zero is reserved for no event");
+    }
+
+    #[test]
+    fn a_record_carries_its_thread_whatever_its_handle_says() {
         let _serial = WRITES.lock().unwrap_or_else(|p| p.into_inner());
         init().expect("init");
         let service = ScopeRingReader::open(std::process::id()).unwrap();
         service.set_capturing(true);
         let h = start(b"h");
-        let tid = perfr_scope_ring::platform::thread_id() & 0xFFFF_FFFF;
-        assert_eq!(h >> 32, tid);
-        assert_ne!(h & 0xFFFF_FFFF, 0, "zero is reserved for no event");
+        assert_ne!(h, 0);
         stop(h);
+        let tid = perfr_scope_ring::platform::thread_id() as u32;
+        let mine: Vec<ScopeEvent> = all_events().into_iter().filter(|e| e.scope_id == h).collect();
+        assert_eq!(mine.len(), 2);
+        assert!(mine.iter().all(|e| e.tid == tid));
     }
 
     #[test]

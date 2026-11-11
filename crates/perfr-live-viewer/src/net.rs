@@ -394,6 +394,71 @@ impl Inbox {
     }
 }
 
+/// The one Share upload that may be on its way, so it can be stopped.
+///
+/// `H` is the handle that aborts the request once it is being sent (the
+/// browser's `XMLHttpRequest`); between the click and the first byte there
+/// is a session check, during which there is no handle yet and stopping
+/// means never sending.
+pub struct ShareUpload<H> {
+    /// The share generation the upload belongs to; `None` when there is
+    /// none, or it was stopped.
+    gen: Option<u64>,
+    handle: Option<H>,
+}
+
+impl<H> Default for ShareUpload<H> {
+    fn default() -> Self {
+        Self { gen: None, handle: None }
+    }
+}
+
+impl<H> ShareUpload<H> {
+    /// An upload for `gen` starts. Returns the handle of one still being
+    /// sent for another generation, for the caller to abort.
+    pub fn begin(&mut self, gen: u64) -> Option<H> {
+        let stale = self.stop_unless(gen);
+        self.gen = Some(gen);
+        stale
+    }
+
+    /// The request for `gen` is about to be sent with `handle`. False when
+    /// the upload was stopped or replaced meanwhile: it must not be sent.
+    pub fn sending(&mut self, gen: u64, handle: H) -> bool {
+        if self.gen != Some(gen) {
+            return false;
+        }
+        self.handle = Some(handle);
+        true
+    }
+
+    /// Stops the upload, whatever its generation. Returns the handle to
+    /// abort when the request was already being sent.
+    pub fn stop(&mut self) -> Option<H> {
+        self.gen = None;
+        self.handle.take()
+    }
+
+    /// A share call for `gen` arrived. The app moves to a new generation
+    /// only by forgetting the capture the old one was about, so an upload
+    /// of any other generation is one nobody is waiting for.
+    pub fn stop_unless(&mut self, gen: u64) -> Option<H> {
+        if self.gen.is_some_and(|g| g != gen) {
+            self.stop()
+        } else {
+            None
+        }
+    }
+
+    /// The request for `gen` ended, one way or another.
+    pub fn finish(&mut self, gen: u64) {
+        if self.gen == Some(gen) {
+            self.gen = None;
+            self.handle = None;
+        }
+    }
+}
+
 #[allow(dead_code)] // used from the wasm Net impl
 pub fn parse_status_json(text: &str) -> Result<StatusJson, String> {
     serde_json::from_str(text).map_err(|e| format!("/api/status: {e}"))
@@ -631,6 +696,8 @@ mod wasm_impl {
         /// A capture file was opened instead of a service: no socket, and
         /// every request that would go to the service is dropped.
         offline: bool,
+        /// The Share upload in flight, kept so it can be aborted.
+        upload: Arc<Mutex<ShareUpload<web_sys::XmlHttpRequest>>>,
     }
 
     impl Net {
@@ -648,6 +715,7 @@ mod wasm_impl {
                 self_busy: Arc::new(AtomicBool::new(false)),
                 ws,
                 offline: false,
+                upload: Arc::default(),
             }
         }
 
@@ -679,6 +747,7 @@ mod wasm_impl {
                 self_busy: Arc::new(AtomicBool::new(false)),
                 ws: Arc::new(Mutex::new(None)),
                 offline: true,
+                upload: Arc::default(),
             }
         }
 
@@ -747,6 +816,7 @@ mod wasm_impl {
 
         /// `GET /api/me` with the session cookie and, when we have one, the bearer.
         pub fn check_share_session(&self, gen: u64, url: String, token: Option<String>) {
+            self.abort_share_unless(gen);
             let inbox = self.inbox.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let check = fetch_session(&url, token.as_deref()).await;
@@ -779,6 +849,7 @@ mod wasm_impl {
         /// Reads a `.perfr.stream` from the service so the dialog can show
         /// its size. Does not post it.
         pub fn prepare_share(&self, gen: u64, path: String) {
+            self.abort_share_unless(gen);
             let inbox = self.inbox.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 push_share(&inbox, gen, crate::share::ShareNoteKind::Reading);
@@ -814,7 +885,10 @@ mod wasm_impl {
             token: Option<String>,
             bytes: Vec<u8>,
         ) {
+            let stale = self.upload.lock().unwrap_or_else(|e| e.into_inner()).begin(gen);
+            abort_upload(stale);
             let inbox = self.inbox.clone();
+            let upload = self.upload.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 if bytes.is_empty() {
                     push_share(
@@ -878,20 +952,44 @@ mod wasm_impl {
                         total: bytes.len() as u64,
                     },
                 );
-                let result = post_share_xhr(&endpoint, &bytes, token.as_deref(), &inbox, gen).await;
+                let result = post_share_xhr(&endpoint, &bytes, token.as_deref(), &inbox, gen, &upload).await;
+                upload.lock().unwrap_or_else(|e| e.into_inner()).finish(gen);
                 let kind = match result {
-                    Ok(text) => match crate::share::parse_share_reply(&text) {
+                    Posted::Reply(text) => match crate::share::parse_share_reply(&text) {
                         Ok(link) => crate::share::ShareNoteKind::Done(link),
                         Err(e) => crate::share::ShareNoteKind::Failed(
                             crate::share::ShareFailure::message(e),
                         ),
                     },
-                    Err((status, body)) => crate::share::ShareNoteKind::Failed(
+                    Posted::Failed(status, body) => crate::share::ShareNoteKind::Failed(
                         crate::share::share_failure(status, &body),
+                    ),
+                    // Whoever stopped it has usually moved to another
+                    // share generation and never sees this note. When they
+                    // have not, it is what takes the dialog out of
+                    // "Uploading".
+                    Posted::Stopped => crate::share::ShareNoteKind::Failed(
+                        crate::share::ShareFailure::message("The upload was stopped."),
                     ),
                 };
                 push_share(&inbox, gen, kind);
             });
+        }
+
+        /// Stops the Share upload in flight, if any: the request is aborted,
+        /// or never sent when it had not started. For when the capture it
+        /// was reading is replaced or the user thinks better of it; without
+        /// this the bytes went to the share server to the end whatever
+        /// happened in the page, and the capture stayed there under a link
+        /// nobody was shown.
+        pub fn abort_share(&self) {
+            let handle = self.upload.lock().unwrap_or_else(|e| e.into_inner()).stop();
+            abort_upload(handle);
+        }
+
+        fn abort_share_unless(&self, gen: u64) {
+            let handle = self.upload.lock().unwrap_or_else(|e| e.into_inner()).stop_unless(gen);
+            abort_upload(handle);
         }
 
         /// Reads a `.perfr.stream` the user opened and hands the bytes to the app.
@@ -1092,6 +1190,9 @@ mod wasm_impl {
         }
 
         pub fn start_capture(&self, req: &CaptureStart) {
+            // A new capture replaces the one being shared; the app has
+            // dropped that share and would throw the link away.
+            self.abort_share();
             if self.offline {
                 return;
             }
@@ -1374,6 +1475,7 @@ mod wasm_impl {
         }
 
         pub fn start_demo(&self) {
+            self.abort_share();
             if self.offline {
                 return;
             }
@@ -1394,6 +1496,7 @@ mod wasm_impl {
         /// Empties the capture on the service; the ring's reset comes back
         /// over the WebSocket.
         pub fn clear_capture(&self) {
+            self.abort_share();
             if self.offline {
                 return;
             }
@@ -1687,23 +1790,51 @@ mod wasm_impl {
         onmessage.forget();
     }
 
+    /// How a Share upload ended.
+    enum Posted {
+        /// A 2xx answer and its body.
+        Reply(String),
+        /// The status (0 when the host was not reached) and the body.
+        Failed(u16, String),
+        /// Aborted through `Net::abort_share`, or never sent because of it.
+        Stopped,
+    }
+
+    /// Aborts a request handed back by `ShareUpload`. Called with the
+    /// upload's lock released: `abort` runs the request's handlers before it
+    /// returns.
+    fn abort_upload(handle: Option<web_sys::XmlHttpRequest>) {
+        if let Some(xhr) = handle {
+            log::info!(target: "perfr_live_viewer::net", "share upload aborted");
+            let _ = xhr.abort();
+        }
+    }
+
     async fn post_share_xhr(
         url: &str,
         bytes: &[u8],
         token: Option<&str>,
         inbox: &Arc<Mutex<Inbox>>,
         gen: u64,
-    ) -> Result<String, (u16, String)> {
-        let xhr = web_sys::XmlHttpRequest::new().map_err(|e| (0, js_err(e)))?;
-        xhr.open_with_async("POST", url, true)
-            .map_err(|e| (0, js_err(e)))?;
+        upload: &Arc<Mutex<ShareUpload<web_sys::XmlHttpRequest>>>,
+    ) -> Posted {
+        let failed = |e: JsValue| Posted::Failed(0, js_err(e));
+        let xhr = match web_sys::XmlHttpRequest::new() {
+            Ok(xhr) => xhr,
+            Err(e) => return failed(e),
+        };
+        if let Err(e) = xhr.open_with_async("POST", url, true) {
+            return failed(e);
+        }
         // Credentialed cross-origin upload. Same-origin cookies are sent either way.
         xhr.set_with_credentials(crate::share::SHARE_CREDENTIALS == "include");
-        xhr.set_request_header("content-type", crate::share::SHARE_CONTENT_TYPE)
-            .map_err(|e| (0, js_err(e)))?;
+        if let Err(e) = xhr.set_request_header("content-type", crate::share::SHARE_CONTENT_TYPE) {
+            return failed(e);
+        }
         if let Some(token) = token.and_then(crate::share::usable_share_token) {
-            xhr.set_request_header("authorization", &crate::share::bearer_value(&token))
-                .map_err(|e| (0, js_err(e)))?;
+            if let Err(e) = xhr.set_request_header("authorization", &crate::share::bearer_value(&token)) {
+                return failed(e);
+            }
         }
         let progress_inbox = inbox.clone();
         let onprogress = Closure::wrap(Box::new(move |ev: web_sys::ProgressEvent| {
@@ -1727,6 +1858,7 @@ mod wasm_impl {
         onprogress.forget();
 
         let xhr_done = xhr.clone();
+        let stopped = std::rc::Rc::new(std::cell::Cell::new(false));
         let promise = js_sys::Promise::new(&mut |resolve, _reject| {
             let resolve_ok = resolve.clone();
             let onload = Closure::wrap(Box::new(move || {
@@ -1734,26 +1866,44 @@ mod wasm_impl {
             }) as Box<dyn FnMut()>);
             xhr_done.set_onload(Some(onload.as_ref().unchecked_ref()));
             onload.forget();
-            let resolve_err = resolve;
+            let resolve_err = resolve.clone();
             let onerror = Closure::wrap(Box::new(move || {
                 let _ = resolve_err.call1(&JsValue::NULL, &JsValue::UNDEFINED);
             }) as Box<dyn FnMut()>);
             xhr_done.set_onerror(Some(onerror.as_ref().unchecked_ref()));
             onerror.forget();
+            // An aborted request fires neither of the two above: without
+            // this the future would wait for ever.
+            let resolve_abort = resolve;
+            let stopped_abort = stopped.clone();
+            let onabort = Closure::wrap(Box::new(move || {
+                stopped_abort.set(true);
+                let _ = resolve_abort.call1(&JsValue::NULL, &JsValue::UNDEFINED);
+            }) as Box<dyn FnMut()>);
+            xhr_done.set_onabort(Some(onabort.as_ref().unchecked_ref()));
+            onabort.forget();
         });
+        // Stopped while the session was being checked: nothing leaves.
+        if !upload.lock().unwrap_or_else(|e| e.into_inner()).sending(gen, xhr.clone()) {
+            return Posted::Stopped;
+        }
         // A copy in its own ArrayBuffer. The threaded build's wasm memory is a
         // SharedArrayBuffer, and XMLHttpRequest refuses to send a view of one.
         let copied = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
         copied.copy_from(bytes);
-        xhr.send_with_opt_js_u8_array(Some(&copied))
-            .map_err(|e| (0, js_err(e)))?;
+        if let Err(e) = xhr.send_with_opt_js_u8_array(Some(&copied)) {
+            return failed(e);
+        }
         let _ = JsFuture::from(promise).await;
+        if stopped.get() {
+            return Posted::Stopped;
+        }
         let status = xhr.status().unwrap_or(0);
         let text = xhr.response_text().ok().flatten().unwrap_or_default();
         if (200..300).contains(&status) {
-            Ok(text)
+            Posted::Reply(text)
         } else {
-            Err((status, text))
+            Posted::Failed(status, text)
         }
     }
 
@@ -1958,6 +2108,7 @@ mod native_impl {
             _bytes: Vec<u8>,
         ) {
         }
+        pub fn abort_share(&self) {}
         pub fn stored_share_auth() -> (Option<String>, bool) {
             (None, false)
         }
@@ -2196,6 +2347,56 @@ mod tests {
             assert_eq!(inbox.queue_frame(message.clone(), true), Queued::Kept);
             assert_eq!(inbox.take_frames().len(), 2);
         }
+    }
+
+    #[test]
+    fn a_share_stopped_before_its_request_exists_is_never_sent() {
+        // Between the click and the first byte the session is checked
+        // again; a Clear during that wait must mean no upload at all.
+        let mut upload: ShareUpload<&str> = ShareUpload::default();
+        assert_eq!(upload.begin(4), None);
+        assert_eq!(upload.stop(), None, "nothing to abort yet");
+        assert!(!upload.sending(4, "xhr"), "a stopped upload was sent");
+    }
+
+    #[test]
+    fn a_share_being_sent_is_handed_back_to_be_aborted_once() {
+        let mut upload: ShareUpload<&str> = ShareUpload::default();
+        upload.begin(4);
+        assert!(upload.sending(4, "xhr"));
+        assert_eq!(upload.stop(), Some("xhr"));
+        assert_eq!(upload.stop(), None);
+    }
+
+    #[test]
+    fn a_share_call_of_another_generation_stops_the_upload_and_its_own_does_not() {
+        let mut upload: ShareUpload<&str> = ShareUpload::default();
+        upload.begin(4);
+        assert!(upload.sending(4, "xhr"));
+        // The session poll of the dialog that is uploading.
+        assert_eq!(upload.stop_unless(4), None);
+        // The capture was replaced and Share opened again.
+        assert_eq!(upload.stop_unless(6), Some("xhr"));
+        assert_eq!(upload.stop_unless(6), None);
+        // An upload replaced while its session check was still out.
+        upload.begin(6);
+        assert_eq!(upload.begin(7), None);
+        assert!(!upload.sending(6, "old"));
+        assert!(upload.sending(7, "new"));
+    }
+
+    #[test]
+    fn an_upload_that_ended_leaves_nothing_to_abort_and_keeps_a_newer_one() {
+        let mut upload: ShareUpload<&str> = ShareUpload::default();
+        upload.begin(4);
+        assert!(upload.sending(4, "xhr"));
+        upload.finish(4);
+        assert_eq!(upload.stop(), None);
+        // A late end of generation 4 does not clear generation 5.
+        upload.begin(5);
+        assert!(upload.sending(5, "next"));
+        upload.finish(4);
+        assert_eq!(upload.stop(), Some("next"));
     }
 
     #[test]

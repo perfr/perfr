@@ -12646,7 +12646,8 @@ impl UiTweaks {
             let i = text.find(&format!("\"{key}\":"))? + key.len() + 3;
             let rest = &text[i..];
             let end = rest.find(|c: char| c == ',' || c == '}').unwrap_or(rest.len());
-            rest[..end].trim().parse().ok()
+            // `NaN` parses, and `clamp` hands a NaN back as it came.
+            rest[..end].trim().parse().ok().filter(|v: &f32| !v.is_nan())
         };
         if let Some(v) = field("report_row_gap") {
             t.report_row_gap = v.clamp(0.0, 16.0);

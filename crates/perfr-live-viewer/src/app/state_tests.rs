@@ -1757,3 +1757,22 @@ fn share_range_times() {
         start.elapsed().as_secs_f64() * 1000.0 / 20.0
     );
 }
+
+#[test]
+fn a_saved_knob_that_is_not_a_number_falls_back_to_its_default() {
+    let defaults = UiTweaks::default();
+    // `NaN` parses as a float and passes through `clamp` unchanged: it
+    // reached the font size of every report row.
+    for text in [r#"{"report_font":NaN}"#, r#"{"report_font":nan,"report_row_gap":4}"#, r#"{"report_font":-NaN}"#] {
+        let loaded = UiTweaks::from_json(text);
+        assert_eq!(loaded.report_font, defaults.report_font, "{text}");
+    }
+    assert_eq!(UiTweaks::from_json(r#"{"report_font":nan,"report_row_gap":4}"#).report_row_gap, 4.0);
+    // Infinities are numbers out of range, and clamp like any other.
+    assert_eq!(UiTweaks::from_json(r#"{"report_font":inf}"#).report_font, 18.0);
+    assert_eq!(UiTweaks::from_json(r#"{"report_indent":-inf}"#).report_indent, 0.0);
+    for knob in ["report_row_gap", "report_col_gap", "report_font", "report_bar_w", "report_indent", "track_sort_every_s"] {
+        let loaded = UiTweaks::from_json(&format!("{{\"{knob}\":NaN}}"));
+        assert_eq!(loaded, defaults, "{knob}");
+    }
+}

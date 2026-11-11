@@ -641,23 +641,12 @@ impl ScopeRingReader {
         }
     }
 
-    /// Frees the slots of readers that exited while capturing, returning
-    /// their counts. Each slot is freed by exactly one compare-exchange.
     fn free_dead_leases(&self) {
-        for pid in &self.leases().pids {
-            let holder = pid.load(Ordering::Acquire);
-            if holder != 0
-                && !crate::platform::process_alive(holder)
-                && pid.compare_exchange(holder, 0, Ordering::AcqRel, Ordering::Relaxed).is_ok()
-            {
-                self.drop_count();
-            }
-        }
+        self.leases().free_dead(&self.header().capturing);
     }
 
-    /// Never below zero: a reader built before the count may have reset it.
     fn drop_count(&self) {
-        let _ = self.header().capturing.fetch_update(Ordering::Release, Ordering::Relaxed, |n| n.checked_sub(1));
+        ring::drop_count(&self.header().capturing);
     }
 
     pub fn rings(&self) -> &Rings {

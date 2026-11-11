@@ -135,6 +135,37 @@ pub struct ReaderLeases {
     pub pids: [AtomicU32; READER_SLOTS],
 }
 
+impl ReaderLeases {
+    /// Frees the slots of readers that exited while capturing, returning
+    /// their counts to `capturing`. Each slot is freed by exactly one
+    /// compare-exchange, so a count is returned once however many parties
+    /// sweep at the same time.
+    pub(crate) fn free_dead(&self, capturing: &AtomicU32) {
+        for pid in &self.pids {
+            let holder = pid.load(Ordering::Acquire);
+            if holder != 0
+                && !crate::platform::process_alive(holder)
+                && pid.compare_exchange(holder, 0, Ordering::AcqRel, Ordering::Relaxed).is_ok()
+            {
+                drop_count(capturing);
+            }
+        }
+    }
+}
+
+/// Takes one reader's count out of `capturing`. Never below zero: a reader
+/// built before the count (a plain store of 0 or 1) may have reset it under
+/// the leases.
+pub(crate) fn drop_count(capturing: &AtomicU32) {
+    let _ = capturing.fetch_update(Ordering::Release, Ordering::Relaxed, |n| n.checked_sub(1));
+}
+
+/// How many claims a ring hands out between a producer's looks at whether
+/// its readers are still alive: often enough that a process is not left
+/// recording for a dead service for long, rarely enough that the liveness
+/// check, a system call per reader, is nothing against the records between.
+const REAP_EVERY: u64 = 1 << 16;
+
 /// Readers that can hold a lease at once. More than that still capture;
 /// they just count without a slot, so a crash of theirs is not undone.
 pub const READER_SLOTS: usize = 64;
@@ -458,6 +489,9 @@ impl Rings {
     pub fn push(&self, ring: usize, event: ScopeEvent) {
         let ring = ring.min(self.ring_count.saturating_sub(1));
         let claim = self.claim(ring);
+        if claim % REAP_EVERY == REAP_EVERY - 1 {
+            self.free_dead_readers();
+        }
         self.note_overwrite(ring, claim);
         let slot = self.slot(ring, claim);
         if self.take_slot(slot, ring, claim, event.tid, event.kind) {
@@ -475,6 +509,23 @@ impl Rings {
         // argument. On x86-64 every ordering is the same `lock xadd`; on
         // aarch64 this is `ldaddal` where a relaxed bump would be `ldadd`.
         self.ring_header(ring).write_cursor.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Takes back the count of every reader that has died. A service
+    /// killed mid-capture cannot return its own, and until now only the
+    /// next reader to start capturing this segment did it: with no such
+    /// reader, every process the dead service had been reading went on
+    /// recording at full cost for the rest of its life.
+    #[cold]
+    fn free_dead_readers(&self) {
+        // SAFETY: only a producer pushes, its mapping is writable, and the
+        // header and the lease table are on its control page.
+        let (header, leases) = unsafe {
+            (&*self.base.cast::<Header>(), &*self.base.add(READER_LEASES_OFFSET).cast::<ReaderLeases>())
+        };
+        if header.capturing.load(Ordering::Relaxed) != 0 {
+            leases.free_dead(&header.capturing);
+        }
     }
 
     /// Makes `slot`, which is the slot of `claim`, this producer's to
@@ -841,6 +892,40 @@ mod tests {
         assert_eq!(rings.committed(0, 1).unwrap().timestamp_ns, 1, "claim 1 is still whole");
         rings.publish_reserved_for_test(0, lapping, event(4, 1));
         assert_eq!(rings.committed(0, 4).unwrap().timestamp_ns, 4);
+    }
+
+    #[test]
+    fn a_producer_stops_writing_for_a_reader_that_died() {
+        let region = Region::new(1, 8);
+        let rings = region.rings();
+        let header = unsafe { &*rings.base.cast::<Header>() };
+        let leases = unsafe { &*rings.base.add(READER_LEASES_OFFSET).cast::<ReaderLeases>() };
+        // Two services capturing: this process, and one that is then
+        // killed, leaving its lease and its count behind.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        leases.pids[0].store(std::process::id(), Ordering::Release);
+        leases.pids[5].store(dead, Ordering::Release);
+        header.capturing.store(2, Ordering::Release);
+
+        // Nothing on the machine starts another capture, which was the only
+        // thing that ever took a dead reader's count back. The producer
+        // looks for itself now and then as it writes.
+        for n in 0..REAP_EVERY {
+            rings.push(0, event(n, 1));
+        }
+        assert_eq!(leases.pids[5].load(Ordering::Acquire), 0, "the dead reader still holds a lease");
+        assert_eq!(leases.pids[0].load(Ordering::Acquire), std::process::id(), "a live reader keeps its own");
+        assert_eq!(header.capturing.load(Ordering::Acquire), 1);
+
+        // With the live one gone too, the count reaches zero and the
+        // process is back to a load and a branch per call.
+        leases.pids[0].store(dead, Ordering::Release);
+        for n in 0..REAP_EVERY {
+            rings.push(0, event(n, 1));
+        }
+        assert_eq!(header.capturing.load(Ordering::Acquire), 0);
     }
 
     #[test]

@@ -46,6 +46,8 @@ pub struct VisibleProcesses {
     target: u32,
     allowed: HashSet<u32>,
     last_refresh: std::time::Instant,
+    /// A rebuild of the descendant set that is under way on another thread.
+    refreshing: Option<std::sync::mpsc::Receiver<HashSet<u32>>>,
 }
 
 impl VisibleProcesses {
@@ -57,6 +59,7 @@ impl VisibleProcesses {
             target,
             allowed: HashSet::new(),
             last_refresh: std::time::Instant::now(),
+            refreshing: None,
         };
         visible.refresh_now();
         visible
@@ -87,11 +90,44 @@ impl VisibleProcesses {
 
     /// Rebuilds the descendant set if enough time has passed. Cheap to call
     /// every loop iteration.
+    ///
+    /// The rebuild reads the parent of every process on the machine, which
+    /// is milliseconds for a few hundred of them and tens for a few
+    /// thousand, and the caller is the capture thread: the one that has to
+    /// be back at the kernel's rings every few milliseconds. So the walk
+    /// runs on a thread of its own and this takes its result on a later
+    /// pass; a new child gets its row that much later, well inside the
+    /// second it could already wait.
     pub fn maybe_refresh(&mut self) {
+        if let Some(result) = &self.refreshing {
+            match result.try_recv() {
+                Ok(descendants) => {
+                    self.refreshing = None;
+                    self.allow(descendants);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                // The walk died without an answer; the next one is due on
+                // the usual schedule.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.refreshing = None,
+            }
+        }
         if self.last_refresh.elapsed() < REFRESH_INTERVAL {
             return;
         }
-        self.refresh_now();
+        self.last_refresh = std::time::Instant::now();
+        if self.target == 0 {
+            return;
+        }
+        let target = self.target;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let walk = std::thread::Builder::new().name("perfr-visible".to_string()).spawn(move || {
+            let _ = sender.send(descendants_of(target, &read_parent_map()));
+        });
+        match walk {
+            Ok(_) => self.refreshing = Some(receiver),
+            // No thread to be had: do it here, as it used to be done.
+            Err(_) => self.refresh_now(),
+        }
     }
 
     fn refresh_now(&mut self) {
@@ -99,9 +135,13 @@ impl VisibleProcesses {
         if self.target == 0 {
             return;
         }
-        // Instrumented pids added by hand must survive a refresh; only the
-        // descendant half is recomputed.
         let descendants = descendants_of(self.target, &read_parent_map());
+        self.allow(descendants);
+    }
+
+    /// Instrumented pids added by hand must survive a refresh; only the
+    /// descendant half is recomputed, and it only ever grows.
+    fn allow(&mut self, descendants: HashSet<u32>) {
         self.allowed.extend(descendants);
         self.allowed.insert(self.target);
     }
@@ -207,6 +247,45 @@ mod tests {
         visible.last_refresh = std::time::Instant::now() - REFRESH_INTERVAL * 2;
         visible.maybe_refresh();
         assert!(visible.contains(4_242), "hand-added pids are not recomputed away");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_started_during_the_capture_becomes_visible_within_a_refresh() {
+        let me = std::process::id();
+        let mut visible = VisibleProcesses::new(me as i32, false);
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        assert!(!visible.contains(child.id()), "it did not exist when the set was built");
+        // The capture loop calls this every pass; a refresh comes due once a
+        // second. A few passes after one is due, the child is there.
+        visible.last_refresh = std::time::Instant::now() - REFRESH_INTERVAL * 2;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !visible.contains(child.id()) && std::time::Instant::now() < deadline {
+            visible.maybe_refresh();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let seen = visible.contains(child.id());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(seen, "a process the target spawned never got its row");
+    }
+
+    /// What a pass pays when a refresh is due:
+    /// `cargo test --release -p perfr -- --ignored --nocapture cost_of_a_refresh`
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn cost_of_a_refresh_that_is_due() {
+        let mut visible = VisibleProcesses::new(std::process::id() as i32, false);
+        let processes = read_parent_map().len();
+        for _ in 0..5 {
+            visible.last_refresh = std::time::Instant::now() - REFRESH_INTERVAL * 2;
+            let start = std::time::Instant::now();
+            visible.maybe_refresh();
+            eprintln!("maybe_refresh with {processes} processes on the machine: {:?} on the calling thread", start.elapsed());
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            visible.maybe_refresh();
+        }
     }
 
     #[test]

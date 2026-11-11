@@ -407,16 +407,9 @@ impl Module {
             return 0;
         }
         let file_address = address.wrapping_sub(self.bias);
-        let symbols = self.symbols();
-        let index = symbols.partition_point(|(start, _, _)| *start <= file_address);
-        let Some((start, size, _)) = index.checked_sub(1).and_then(|i| symbols.get(i)) else {
+        let Some((start, _, _)) = symbol_at(self.symbols(), file_address) else {
             return 0;
         };
-        // `file_address - start`, as in `find_symbol`: the sum can overflow.
-        let inside = if *size == 0 { *start == file_address } else { file_address - start < *size };
-        if !inside {
-            return 0;
-        }
         file_offset_of(&self.file.segments, *start)
             .map(|offset| function_id(&self.path, offset))
             .unwrap_or(0)
@@ -463,19 +456,38 @@ fn image_base(segments: &[ObjectSegment]) -> u64 {
         .unwrap_or(0)
 }
 
-/// The last symbol starting at or before `address`, when the address falls
-/// inside it. Sizes of zero are common (assembly stubs), so a zero-sized
-/// symbol only matches its exact address.
+/// The name of the symbol `address` is in; see [`symbol_at`].
 fn find_symbol(symbols: &[(u64, u64, String)], address: u64) -> Option<&str> {
+    symbol_at(symbols, address).map(|(_, _, name)| name.as_str())
+}
+
+/// How many symbols before the last one starting at or below an address
+/// are also asked whether they contain it.
+const ENCLOSING_SYMBOLS: usize = 4;
+
+/// The symbol containing `address`, of a table in [`sort_symbols`] order:
+/// the last one starting at or before the address when the address falls
+/// inside it, else the nearest before that one which reaches the address.
+/// Sizes of zero are common (assembly stubs), so a zero-sized symbol only
+/// matches its exact address.
+///
+/// The step back is for hand-written assembly, where a label with its own
+/// symbol sits inside a function: an address past the label's short extent
+/// is still in the function around it. It is a few entries, not a search,
+/// because a symbol further back that reached this far would overlap
+/// everything in between.
+fn symbol_at(symbols: &[(u64, u64, String)], address: u64) -> Option<&(u64, u64, String)> {
     let index = symbols.partition_point(|(start, _, _)| *start <= address);
-    let (start, size, name) = symbols.get(index.checked_sub(1)?)?;
-    if *size == 0 {
-        (*start == address).then_some(name.as_str())
-    } else {
-        // Not `address < start + size`: the size is the file's `st_size`,
-        // and the sum of a hostile one overflows. `start <= address` here.
-        (address - start < *size).then_some(name.as_str())
-    }
+    symbols[..index].iter().rev().take(1 + ENCLOSING_SYMBOLS).find(|(start, size, _)| {
+        if *size == 0 {
+            *start == address
+        } else {
+            // Not `address < start + size`: the size is the file's
+            // `st_size`, and the sum of a hostile one overflows.
+            // `start <= address` here.
+            address - start < *size
+        }
+    })
 }
 
 /// Rust and Itanium C++ names made readable, lazily and memoized; see
@@ -639,8 +651,18 @@ fn sorted_symbols(bytes: &[u8], path: Option<&str>) -> Vec<(u64, u64, String)> {
         .filter(|symbol| symbol.address != 0)
         .map(|symbol| (symbol.address, symbol.size, symbol.mangled_name))
         .collect();
-    symbols.sort_by_key(|(address, _, _)| *address);
+    sort_symbols(&mut symbols);
     symbols
+}
+
+/// By address, and by size where several symbols share one: the lookup
+/// asks the last symbol at or below an address first, and of two names for
+/// one entry point that has to be the one with the extent. A zero-sized
+/// alias sorted after the function it labels matched only the entry
+/// address and left the rest of the function without a name. Symbols equal
+/// in both keep the file's order.
+fn sort_symbols(symbols: &mut [(u64, u64, String)]) {
+    symbols.sort_by_key(|(address, size, _)| (*address, *size));
 }
 
 /// This process's vDSO image, copied out of its own mapping. Every process
@@ -704,6 +726,48 @@ mod tests {
         let module = Module { start: 0, end: u64::MAX, bias: 0, name: "x".into(), path: "/t/x".into(), file };
         let frame = Symbolizer { modules: vec![module] }.resolve_frame(0x5000);
         assert_eq!((frame.name.as_str(), frame.function_id), ("endless", 0));
+    }
+
+    /// The file's order, as `load_symbols` hands the table over.
+    fn sorted(mut symbols: Vec<(u64, u64, String)>) -> Vec<(u64, u64, String)> {
+        sort_symbols(&mut symbols);
+        symbols
+    }
+
+    #[test]
+    fn a_zero_sized_alias_does_not_hide_the_function_it_labels() {
+        // An assembly entry label after the function it is the start of:
+        // sorted by address alone, the label stayed last and was the only
+        // candidate for every address in the function.
+        for order in [[0usize, 1], [1, 0]] {
+            let table = [(0x1000u64, 0x100u64, "copy".to_string()), (0x1000, 0, "copy_entry".to_string())];
+            let symbols = sorted(order.iter().map(|&i| table[i].clone()).collect());
+            assert_eq!(find_symbol(&symbols, 0x1080), Some("copy"), "file order {order:?}");
+            assert_eq!(find_symbol(&symbols, 0x1000), Some("copy"), "file order {order:?}");
+            assert_eq!(find_symbol(&symbols, 0x1100), None);
+        }
+    }
+
+    #[test]
+    fn an_address_past_a_nested_symbol_falls_back_to_the_one_around_it() {
+        let symbols = sorted(vec![
+            (0x1000, 0x100, "outer".to_string()),
+            (0x1010, 0x10, "inner".to_string()),
+            (0x3000, 0x50, "beta".to_string()),
+        ]);
+        assert_eq!(find_symbol(&symbols, 0x1018), Some("inner"));
+        assert_eq!(find_symbol(&symbols, 0x1050), Some("outer"));
+        assert_eq!(find_symbol(&symbols, 0x1100), None);
+        // Stepping back is for an enclosing symbol, not for the previous
+        // function: beta's neighbour does not reach it.
+        assert_eq!(find_symbol(&symbols, 0x2fff), None);
+        // The function id agrees with the name.
+        let segments = vec![ObjectSegment { offset_in_file: 0, size_in_file: 0x4000, address: 0, size_in_memory: 0x4000 }];
+        let file = Arc::new(LoadedFile { segments, symbols, image_base: 0 });
+        let module = Module { start: 0, end: 0x4000, bias: 0, name: "x".into(), path: "/t/x".into(), file };
+        assert_eq!(module.function_id_at(0x1050), function_id("/t/x", 0x1000));
+        assert_eq!(module.function_id_at(0x1018), function_id("/t/x", 0x1010));
+        assert_eq!(module.function_id_at(0x1100), 0);
     }
 
     #[test]

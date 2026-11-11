@@ -165,9 +165,9 @@ helper and agent beside it, and serves the viewer:
 
 It needs a Rust toolchain and nothing else; `rust-toolchain.toml` pins the
 version. The viewer pack is committed, so the front end builds only when you
-change it (`crates/perfr-live-viewer/build_wasm.sh`); rebuild it on `main`
-after a viewer change merges, since a pack built on a branch misses whatever
-merged behind it.
+change it (`crates/perfr-live-viewer/build_wasm.sh`); rebuild it in that
+change, and again on `main` if another viewer change merged behind the
+branch. CI rejects a pull request that leaves the committed pack stale.
 
 Linux x86-64, static binary, with the Frida files beside it:
 

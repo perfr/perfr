@@ -42,3 +42,17 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y shellcheck
     - name: Test the release script
       run: tools/release/test_release.sh
+
+  # perfr.dev refuses a viewer pack whose source id does not match the
+  # checkout. Catch that on the pull request, including a source change
+  # that only rewrites viewer-dist/VERSION and leaves the wasm behind.
+  viewer-pack:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: '0'
+    - name: Check the committed viewer pack matches its sources
+      run: python3 .github/scripts/check-viewer-pack.py
+      shell: bash

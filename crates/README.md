@@ -217,7 +217,7 @@ removed. That is why some module docs and test comments name C++ files
 None of that C++ is in this repository, and nothing here reads a
 `PERFR_*_BACKEND` variable any more. The C++ tree, the switches that ran both
 implementations side by side and the differential tools are on the `cpp`
-branch of the author's Orbit fork, `github.com/pierricgimmig/orbit`; the
+branch of the Orbit fork this project grew out of; the
 plan and the per-step write-ups are at
 [perfr.dev/rust-port-plan.html](https://perfr.dev/rust-port-plan.html) and
 on [the blog](https://perfr.dev/blog/).

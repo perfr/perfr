@@ -3434,7 +3434,10 @@ pub fn run_on(
                         scopes,
                         capture_start_ns,
                         symbols,
-                    )
+                    );
+                    // However the capture ended: its hook journal has done
+                    // its job unless a crash report now points at it.
+                    crate::hook_journal::discard_journal(pid);
                 })
                 .map_err(|error| {
                     capture_running.store(false, Ordering::SeqCst);

@@ -650,7 +650,7 @@ enum ShareUi {
 /// Where the bytes in a confirm dialog came from.
 #[derive(Clone, Debug)]
 enum ShareSource {
-    /// `stream_bytes` already held by the viewer (a file or `?capture=`).
+    /// The stream already held by the viewer (a file or `?capture=`).
     Loaded,
     /// Read from the service for this confirm. Not posted yet.
     Fetched(Vec<u8>),
@@ -818,14 +818,9 @@ pub struct PerfrLiveApp {
     /// Capture story: steps, camera, overlays. Empty until a `?story=`
     /// URL loads one or the reader opens Story from More.
     story: crate::story::StorySession,
-    /// Bytes of a `.perfr.stream` loaded from a file or URL. Share posts
-    /// these. A live session leaves this empty and exports from the service.
-    stream_bytes: Option<Vec<u8>>,
-    /// Set while those bytes are being ingested, so a frame inside the file
-    /// does not throw them away.
-    loading_stream: bool,
-    /// The open capture is that file. Later socket frames are not mixed in.
-    local_stream: bool,
+    /// The `.perfr.stream` behind what is on screen, if it came from a file
+    /// or URL: what Share posts, and why socket frames are not mixed in.
+    held_stream: crate::share::HeldStream,
     share_open: bool,
     /// Bumped when a share starts and when the capture is replaced, so a
     /// reply for an older click is dropped.
@@ -1882,9 +1877,7 @@ impl PerfrLiveApp {
             in_self_pane: false,
             static_capture: static_capture.clone(),
             story,
-            stream_bytes: None,
-            loading_stream: false,
-            local_stream: false,
+            held_stream: crate::share::HeldStream::default(),
             share_open: false,
             share_gen: 0,
             share_ui: ShareUi::Idle,
@@ -2336,10 +2329,7 @@ impl PerfrLiveApp {
         self.trace_flows.clear();
         self.thread_names.clear();
         self.trace_processes.clear();
-        if !self.loading_stream {
-            self.stream_bytes = None;
-            self.local_stream = false;
-        }
+        self.held_stream.forget();
         self.forget_share();
     }
 
@@ -2359,7 +2349,7 @@ impl PerfrLiveApp {
 
     /// Ingest a `.perfr.stream` and keep the bytes so Share can post them.
     fn accept_stream(&mut self, bytes: Vec<u8>) {
-        self.loading_stream = true;
+        self.held_stream.begin_load();
         self.clear_file_trace();
         self.index.clear();
         self.live_all.clear();
@@ -2372,9 +2362,7 @@ impl PerfrLiveApp {
         self.sample_sels.clear();
         self.stop_record();
         self.ingest(&bytes);
-        self.loading_stream = false;
-        self.stream_bytes = Some(bytes);
-        self.local_stream = true;
+        self.held_stream.loaded(bytes);
         self.follow = false;
         self.user_set_view = false;
         if self.index.event_count() > 0 {
@@ -2386,10 +2374,11 @@ impl PerfrLiveApp {
     }
 
     fn can_share(&self) -> bool {
-        if self.stream_bytes.as_ref().is_some_and(|b| !b.is_empty()) {
-            return true;
-        }
-        self.static_capture.is_none() && !self.local_stream && self.index.event_count() > 0
+        self.held_stream.can_share(
+            self.static_capture.is_some(),
+            self.trace_name.is_some(),
+            self.index.event_count(),
+        )
     }
 
     /// Open the confirm dialog. A file the page already holds can show its
@@ -2414,7 +2403,7 @@ impl PerfrLiveApp {
         self.share_login_waiting = false;
         self.share_login_probe = false;
         self.share_login_returned = false;
-        if self.stream_bytes.as_ref().is_some_and(|b| !b.is_empty()) {
+        if self.held_stream.has_bytes() {
             self.share_draft = Some(ShareDraft::loaded());
             self.share_ui = ShareUi::Confirm;
         } else {
@@ -2479,7 +2468,7 @@ impl PerfrLiveApp {
             Some(true)
         );
         if loaded {
-            return self.stream_bytes.clone();
+            return self.held_stream.bytes().cloned();
         }
         match &self.share_draft {
             Some(ShareDraft { source: ShareSource::Fetched(bytes), .. }) => Some(bytes.clone()),
@@ -2510,7 +2499,7 @@ impl PerfrLiveApp {
             Some(true)
         );
         let whole = if loaded {
-            self.stream_bytes.clone()
+            self.held_stream.bytes().cloned()
         } else {
             match &self.share_draft {
                 Some(ShareDraft { source: ShareSource::Fetched(bytes), .. }) => Some(bytes.clone()),
@@ -2663,6 +2652,7 @@ impl PerfrLiveApp {
         self.trace_flows.clear();
         self.thread_names.clear();
         self.trace_processes.clear();
+        self.held_stream.trace_opened();
         self.forget_share();
         self.trace_name = Some(load.name.clone());
         self.live_edge_ns = 0;
@@ -3330,7 +3320,7 @@ impl PerfrLiveApp {
             }
             self.error = e;
         }
-        if self.local_stream {
+        if self.held_stream.is_local() {
             // The file is the capture. Frames still arriving from a service
             // would draw on top of it.
             self.ws_queue.clear();
@@ -4073,7 +4063,9 @@ impl PerfrLiveApp {
         let enabled = self.can_share();
         let tip = if enabled {
             "Upload this capture and get a link. Sign-in is required; the size is shown before anything is sent."
-        } else if self.static_capture.is_some() && self.stream_bytes.is_none() {
+        } else if self.trace_name.is_some() {
+            "An imported Chrome or Perfetto trace cannot be shared yet."
+        } else if self.static_capture.is_some() && self.held_stream.bytes().is_none() {
             "The capture is still loading."
         } else {
             "Nothing to share yet."
@@ -4245,7 +4237,7 @@ impl PerfrLiveApp {
                         ShareSource::Loaded => None,
                     };
                     let whole_len = fetched_len.unwrap_or_else(|| {
-                        self.stream_bytes.as_ref().map(|b| b.len()).unwrap_or(0)
+                        self.held_stream.bytes().map(|b| b.len()).unwrap_or(0)
                     });
                     let range = draft.range.as_ref().filter(|r| Some(r.span) == span);
                     (
@@ -10234,7 +10226,7 @@ impl PerfrLiveApp {
     /// The story's `capture` URL, when the page did not already pass
     /// `?capture=`, a file is not already open, and nothing is recording.
     fn story_maybe_fetch_capture(&mut self) {
-        if self.static_capture.is_some() || self.local_stream || self.recording || self.status.capturing {
+        if self.static_capture.is_some() || self.held_stream.is_local() || self.recording || self.status.capturing {
             let _ = self.story.take_capture_url();
             return;
         }

@@ -890,6 +890,19 @@ mod wasm_impl {
             }
         }
 
+        /// Closes the event socket. Its `onclose` empties the slot, after
+        /// which `reconnect_ws_if_closed` opens a new one; the slot is left
+        /// alone here so a socket still closing is not replaced and then
+        /// forgotten by its own late `onclose`. A closing socket delivers no
+        /// further messages.
+        pub fn close_ws(&self) {
+            if let Ok(slot) = self.ws.lock() {
+                if let Some(ws) = slot.as_ref() {
+                    let _ = ws.close();
+                }
+            }
+        }
+
         /// Opens a new WebSocket if the last one closed -- a service that was
         /// restarted comes back without a page reload. Cheap when connected.
         pub fn reconnect_ws_if_closed(&self) {
@@ -1888,6 +1901,7 @@ mod native_impl {
         pub fn get_settings(&self) {}
         pub fn put_settings(&self, _settings: &serde_json::Value) {}
         pub fn set_auto_profile(&self, _on: bool) {}
+        pub fn close_ws(&self) {}
         pub fn reconnect_ws_if_closed(&self) {}
         pub fn get_sampling_report(&self, _ranges: &[(u64, u64, Option<u32>)]) {}
         pub fn get_sampling_report_scope(&self, _name_id: u32) {}

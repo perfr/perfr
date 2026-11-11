@@ -274,6 +274,13 @@ extern "system" {
     pub fn CloseTrace(handle: TRACEHANDLE) -> u32;
 }
 
+#[link(name = "kernel32")]
+extern "system" {
+    pub fn CreateMutexW(attributes: *const c_void, initial_owner: i32, name: *const u16) -> HANDLE;
+    pub fn CloseHandle(handle: HANDLE) -> i32;
+    pub fn GetLastError() -> u32;
+}
+
 /// A Rust string as a NUL-terminated UTF-16 buffer.
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()

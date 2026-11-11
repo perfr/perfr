@@ -4,10 +4,16 @@
 
 //! The controller: starts and stops the NT Kernel Logger.
 //!
-//! One session per machine, by name. A stale one left by a crashed
-//! controller is stopped before starting; a second service starting while
-//! the first captures gets a clear refusal rather than silently stealing
-//! the session. Flags select what the kernel logs: thread and process
+//! One session per machine, by name, shared with every other tool that
+//! uses the kernel logger. Two perfr services are kept apart by a named
+//! kernel object the capturing one holds ([`OwnerMark`]): a second service
+//! starting while the first captures gets a clear refusal rather than
+//! silently stealing the session. A session that no live perfr holds is
+//! stopped before starting, because a controller that died leaves its
+//! session running and the name taken; that session can also be another
+//! tool's (xperf, PerfView, UIforETW), which the name alone cannot tell
+//! apart, so [`KernelSession::replaced_existing`] says when it happened and
+//! the service logs it. Flags select what the kernel logs: thread and process
 //! lifecycle always (the tid-to-pid map depends on them), context switches
 //! and ready-thread events for the scheduler, image loads for the module
 //! list, and the sampled profiler with stack walks when a rate is asked for.
@@ -68,6 +74,55 @@ const DEFAULT_PROFILE_INTERVAL: u32 = 10_000;
 /// The fastest the kernel allows (8192 Hz), in 100 ns units.
 const MIN_PROFILE_INTERVAL: u32 = 1221;
 
+/// The refusal [`KernelSession::start`] gives while another perfr on the
+/// machine holds the kernel logger.
+pub const HELD_BY_ANOTHER_PERFR: &str =
+    "another perfr on this machine is capturing with the kernel logger, and Windows has only one: stop that capture first";
+
+/// The machine-wide name of the object a capturing perfr holds. `Global\`
+/// because the kernel logger is shared across logon sessions; an elevated
+/// token, which the logger needs anyway, may create objects there.
+const OWNER_MARK_NAME: &str = "Global\\perfr-kernel-logger";
+
+/// Proof that this process is the perfr that owns the kernel logger.
+///
+/// A named mutex, used only for its existence: the kernel destroys it when
+/// its last handle closes, which a crash does as surely as [`Drop`], so the
+/// name exists exactly while a live perfr holds the session. Nothing ever
+/// waits on it.
+struct OwnerMark(HANDLE);
+
+impl OwnerMark {
+    /// Claims the mark, or says a live perfr already has it. `None` when
+    /// the object cannot be created at all: the capture then goes ahead
+    /// unguarded, as it did before the mark existed.
+    fn claim() -> Result<Option<OwnerMark>, String> {
+        let name = wide(OWNER_MARK_NAME);
+        // SAFETY: default security, not initially owned, a NUL-terminated name.
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        // SAFETY: reads the calling thread's last-error value, set by the call above.
+        let error = unsafe { GetLastError() };
+        if handle.is_null() {
+            // An object another account created and this token may not
+            // open is still an object a live process holds.
+            return if error == ERROR_ACCESS_DENIED { Err(HELD_BY_ANOTHER_PERFR.into()) } else { Ok(None) };
+        }
+        let mark = OwnerMark(handle);
+        if error == ERROR_ALREADY_EXISTS {
+            // Dropping `mark` closes only this second handle.
+            return Err(HELD_BY_ANOTHER_PERFR.into());
+        }
+        Ok(Some(mark))
+    }
+}
+
+impl Drop for OwnerMark {
+    fn drop(&mut self) {
+        // SAFETY: the handle CreateMutexW returned, closed once.
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
 pub struct KernelSession {
     handle: TRACEHANDLE,
     name: Vec<u16>,
@@ -75,6 +130,10 @@ pub struct KernelSession {
     clock: QpcClock,
     options: SessionOptions,
     stopped: bool,
+    /// Released by `stop`, so the next capture of this or another perfr
+    /// can claim it.
+    owner: Option<OwnerMark>,
+    replaced_existing: bool,
 }
 
 impl KernelSession {
@@ -86,9 +145,11 @@ impl KernelSession {
         // The sampling-interval call below needs it too; enabling it once
         // here covers both.
         crate::token::enable_system_profile_privilege()?;
+        let owner = OwnerMark::claim()?;
         let name = wide(KERNEL_LOGGER_NAME);
-        // A session left behind by a controller that died holds the name.
-        let _ = Self::stop_by_name(&name);
+        // No live perfr holds the logger, so a session under its name was
+        // left behind by a controller that died, or belongs to another tool.
+        let mut replaced_existing = Self::stop_by_name(&name).unwrap_or(false);
 
         let mut properties = SessionProperties::zeroed();
         {
@@ -118,7 +179,7 @@ impl KernelSession {
         // sized by its own Wnode.BufferSize.
         let mut status = unsafe { StartTraceW(&mut handle, name.as_ptr(), &mut properties.properties) };
         if status == ERROR_ALREADY_EXISTS {
-            let _ = Self::stop_by_name(&name);
+            replaced_existing |= Self::stop_by_name(&name).unwrap_or(false);
             status = unsafe { StartTraceW(&mut handle, name.as_ptr(), &mut properties.properties) };
         }
         match status {
@@ -128,7 +189,8 @@ impl KernelSession {
             }
             other => return Err(format!("StartTrace(NT Kernel Logger): {} ({other})", error_text(other))),
         }
-        let mut session = KernelSession { handle, name, properties, clock: QpcClock::host(), options, stopped: false };
+        let mut session =
+            KernelSession { handle, name, properties, clock: QpcClock::host(), options, stopped: false, owner, replaced_existing };
         if options.sampling_hz > 0 {
             if let Err(error) = session.enable_sampling(options.sampling_hz) {
                 let _ = session.stop();
@@ -171,15 +233,22 @@ impl KernelSession {
         Ok(())
     }
 
-    fn stop_by_name(name: &[u16]) -> Result<(), u32> {
+    /// Stops the session called `name`; whether there was one to stop.
+    fn stop_by_name(name: &[u16]) -> Result<bool, u32> {
         let mut properties = SessionProperties::zeroed();
         // SAFETY: a zeroed, sized properties block; stop by name only.
         let status = unsafe { ControlTraceW(0, name.as_ptr(), &mut properties.properties, EVENT_TRACE_CONTROL_STOP) };
-        if status == ERROR_SUCCESS || status == ERROR_WMI_INSTANCE_NOT_FOUND {
-            Ok(())
-        } else {
-            Err(status)
+        match status {
+            ERROR_SUCCESS => Ok(true),
+            ERROR_WMI_INSTANCE_NOT_FOUND => Ok(false),
+            other => Err(other),
         }
+    }
+
+    /// Whether starting stopped a kernel logger session that was already
+    /// running: a crashed perfr's, or another tool's trace, now cut short.
+    pub fn replaced_existing(&self) -> bool {
+        self.replaced_existing
     }
 
     pub fn clock(&self) -> QpcClock {
@@ -231,6 +300,7 @@ impl KernelSession {
         if self.options.sampling_hz > 0 {
             let _ = Self::set_profile_interval(DEFAULT_PROFILE_INTERVAL);
         }
+        self.owner = None;
         if status != ERROR_SUCCESS {
             return Err(format!("ControlTrace(stop): {}", error_text(status)));
         }

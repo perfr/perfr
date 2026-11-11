@@ -488,6 +488,14 @@ fn open_etw(sampling: bool, focus: &[u32], capture_start_ns: u64) -> Result<Etw,
         return Err("Windows: the scheduler and sampling need the kernel logger, which needs an elevated prompt (Run as administrator); manual scopes and Frida hooks still work".into());
     }
     let session = KernelSession::start(SessionOptions { sampling_hz: if sampling { 1000 } else { 0 }, scheduler: true, images: false, ..SessionOptions::default() })?;
+    if session.replaced_existing() {
+        // The name is all Windows gives to tell sessions apart, so this is
+        // said out loud: the other tool's trace ends here, with no error on
+        // its side.
+        log::warn!(
+            "a kernel logger session was already running and was stopped to start this one:              one a crashed perfr left behind, or another tool's (xperf, PerfView, UIforETW), whose trace ends here"
+        );
+    }
     let consumer = Consumer::open_realtime(session.name())?;
     let mut feed = SchedulerFeed::new(session.clock());
     feed.set_focus(focus.iter().copied());
@@ -696,30 +704,38 @@ pub fn capture_loop(
 
     let mut focus: Vec<u32> = visible.pids();
     focus.push(self_pid);
+    // What the status line says about the kernel logger while it is not
+    // feeding the capture; `None` while it is.
+    let mut kernel_logger_problem: Option<&'static str> = None;
     let mut etw = {
         let _phase = perfr_api::scope("open kernel logger");
         match open_etw(has_target, &focus, capture_start_ns) {
             Ok(etw) => Some(etw),
             Err(error) => {
                 log::warn!("{error}");
+                kernel_logger_problem = Some(if error == perfr_etw::session::HELD_BY_ANOTHER_PERFR {
+                    "Windows: another perfr is capturing with the kernel logger: no scheduler, thread states or samples"
+                } else {
+                    "Windows: no kernel logger (needs an elevated prompt): no scheduler, thread states or samples"
+                });
                 None
             }
         }
     };
-    let status_line = |frida: &Option<crate::frida::FridaSession>, scopes: &ScopeSource, etw_ok: bool| -> String {
+    let status_line = |frida: &Option<crate::frida::FridaSession>, scopes: &ScopeSource, kernel_logger_problem: Option<&str>| -> String {
         let mut line = match frida {
             Some(session) => session.status(scopes.events_lost, &scopes.auto_unhooked),
             None => String::new(),
         };
-        if !etw_ok {
+        if let Some(problem) = kernel_logger_problem {
             if !line.is_empty() {
                 line.push_str("; ");
             }
-            line.push_str("Windows: no kernel logger (needs an elevated prompt): no scheduler, thread states or samples");
+            line.push_str(problem);
         }
         line
     };
-    service.set_instrumentation_status(status_line(&frida, &scopes, etw.is_some()));
+    service.set_instrumentation_status(status_line(&frida, &scopes, kernel_logger_problem));
     if has_target && !armed_hooks.is_empty() && frida.is_some() {
         if let Some(path) = crate::hook_journal::write_journal(target_pid, "frida", &armed_hooks) {
             log::info!("hook journal written to {}", path.display());
@@ -781,6 +797,16 @@ pub fn capture_loop(
             }
         }
         if let Some(etw) = etw.as_mut() {
+            // `ProcessTrace` returns when the session stops, and this loop
+            // stops it only after leaving: here something else did, most
+            // likely another tool taking the one kernel logger. Without
+            // this the capture runs on with nothing from the kernel and no
+            // word about why.
+            if kernel_logger_problem.is_none() && etw.consumer.is_finished() {
+                log::warn!("the kernel logger session ended under this capture (another tool taking the NT Kernel Logger does that): no scheduler, thread states or samples from here on");
+                kernel_logger_problem = Some("Windows: the kernel logger session ended mid-capture (taken by another tool?): no scheduler, thread states or samples since");
+                service.set_instrumentation_status(status_line(&frida, &scopes, kernel_logger_problem));
+            }
             if last_focus_refresh.elapsed() >= Duration::from_secs(1) {
                 last_focus_refresh = Instant::now();
                 let mut pids = visible.pids();
@@ -829,7 +855,7 @@ pub fn capture_loop(
         }
         if let Some(session) = frida.as_mut() {
             session.poll();
-            service.set_instrumentation_status(status_line(&frida, &scopes, etw.is_some()));
+            service.set_instrumentation_status(status_line(&frida, &scopes, kernel_logger_problem));
         }
         let now_ns = crate::now_monotonic_ns();
         if now_ns.saturating_sub(last_fill_push_ns) >= FILL_EVERY_NS {
@@ -919,7 +945,7 @@ pub fn capture_loop(
     if let Some(session) = frida.as_mut() {
         session.stop();
         session.poll();
-        service.set_instrumentation_status(status_line(&frida, &scopes, true));
+        service.set_instrumentation_status(status_line(&frida, &scopes, None));
     }
     // A fresh instant, taken after the kernel and Frida stops: the agent's
     // "Frida: detach trampolines" span and the service's own stop scopes are

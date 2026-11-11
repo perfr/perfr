@@ -57,6 +57,8 @@ pub struct Snapshot {
     pub cap_sys_ptrace: bool,
     pub cap_syslog: bool,
     pub tracefs: Option<String>,
+    /// What `/etc/sysctl.d/99-perfr-perf.conf` holds, if it exists.
+    pub persisted: Option<String>,
     pub uprobe_pmu: bool,
     pub debugger_entitlement: bool,
     pub sip_enabled: Option<bool>,
@@ -833,14 +835,22 @@ pub fn run_setup(
         return 0;
     }
     let plan = plan_for(snap, opts.uprobes);
-    if plan.sysctls.is_empty() && plan.setcap.is_none() && plan.notes.is_empty() {
+    // The file is its own question, apart from the runtime plan: a run that
+    // finds every sysctl applied already still has a file to write.
+    let persist_body = persist_body(snap, &plan);
+    let persist_due = !persist_body.is_empty() && snap.persisted.as_deref() != Some(persist_body.as_str());
+    if opts.persist && !persist_body.is_empty() && !persist_due {
+        talk.say(&format!("{SYSCTL_FILE} already holds these settings."));
+    }
+    let write_file = opts.persist && persist_due;
+    if plan.sysctls.is_empty() && plan.setcap.is_none() && plan.notes.is_empty() && !write_file {
         talk.say("nothing to change.");
         return 0;
     }
     for note in &plan.notes {
         talk.say(note);
     }
-    if plan.sysctls.is_empty() && plan.setcap.is_none() {
+    if plan.sysctls.is_empty() && plan.setcap.is_none() && !write_file {
         return 0;
     }
     if !opts.yes && !interactive {
@@ -871,22 +881,21 @@ pub fn run_setup(
                 talk.say(&format!("applied {key}={value}"));
             }
         }
-        let persist = opts.persist
-            || (interactive
-                && talk.confirm(&format!("Write {SYSCTL_FILE} so this survives reboot?")));
-        if persist {
-            let body = plan
-                .sysctls
-                .iter()
-                .map(|(key, value)| format!("{key}={value}\n"))
-                .collect::<String>();
-            let argv = with_sudo(snap, vec!["tee".into(), SYSCTL_FILE.into()]);
-            if let Err(error) = runner.run(&argv, Some(body.as_bytes())) {
-                talk.say(&format!("failed: {error}"));
-                return 2;
-            }
-            talk.say(&format!("wrote {SYSCTL_FILE}"));
+    }
+    // Asked by flag, or offered after a change that would otherwise be gone
+    // at the next boot.
+    let persist = write_file
+        || (persist_due
+            && interactive
+            && !plan.sysctls.is_empty()
+            && talk.confirm(&format!("Write {SYSCTL_FILE} so this survives reboot?")));
+    if persist {
+        let argv = with_sudo(snap, vec!["tee".into(), SYSCTL_FILE.into()]);
+        if let Err(error) = runner.run(&argv, Some(persist_body.as_bytes())) {
+            talk.say(&format!("failed: {error}"));
+            return 2;
         }
+        talk.say(&format!("wrote {SYSCTL_FILE}"));
     }
     if let Some(caps) = &plan.setcap {
         let prompt = if caps.contains("cap_sys_admin") {
@@ -913,6 +922,26 @@ pub fn run_setup(
         }
     }
     0
+}
+
+/// The whole of `/etc/sysctl.d/99-perfr-perf.conf`: every sysctl the plan
+/// changes, and every one that already sits at the value perfr sets. Built
+/// from the plan alone it held only what was still wrong on this run, so a
+/// `--persist` after the sysctls were applied wrote nothing, and one that
+/// found a single key left to change replaced the file with that key.
+/// A value more open than perfr asks for is somebody else's and stays out:
+/// the file sorts last, and a 0 in it would tighten a -1 at the next boot.
+/// So does one this kernel does not have, and one a capability stands in for.
+fn persist_body(snap: &Snapshot, plan: &Plan) -> String {
+    [
+        ("kernel.perf_event_paranoid", snap.paranoid),
+        ("kernel.kptr_restrict", snap.kptr_restrict),
+        ("kernel.yama.ptrace_scope", snap.ptrace_scope),
+    ]
+    .into_iter()
+    .filter(|(key, now)| *now == Some(0) || plan.sysctls.iter().any(|(planned, _)| planned == key))
+    .map(|(key, _)| format!("{key}=0\n"))
+    .collect()
 }
 
 fn with_sudo(snap: &Snapshot, args: Vec<String>) -> Vec<String> {
@@ -986,6 +1015,7 @@ fn linux_probe(binary: String) -> Snapshot {
     snap.kptr_restrict = read_i32("/proc/sys/kernel/kptr_restrict");
     snap.ptrace_scope = read_i32("/proc/sys/kernel/yama/ptrace_scope");
     snap.tracefs = readable_tracefs();
+    snap.persisted = std::fs::read_to_string(SYSCTL_FILE).ok();
     snap.uprobe_pmu = uprobe_pmu();
     snap
 }
@@ -1020,6 +1050,7 @@ impl Snapshot {
             cap_sys_ptrace: false,
             cap_syslog: false,
             tracefs: None,
+            persisted: None,
             uprobe_pmu: false,
             debugger_entitlement: false,
             sip_enabled: None,
@@ -1526,6 +1557,67 @@ mod tests {
         snap.kptr_restrict = Some(2);
         let text = render_warning(&evaluate(&snap), false).unwrap();
         assert!(text.contains(SETUP_HINT) && !text.contains(UPROBES_SETUP_HINT), "{text}");
+    }
+
+    /// `perfr setup --yes --persist` on `snap`: what it said, and the body
+    /// it piped to `sudo tee` if it wrote the file.
+    fn persist(snap: &Snapshot) -> (Vec<String>, Option<String>) {
+        let mut talk = Script { answers: Vec::new(), index: 0, lines: Vec::new() };
+        let mut runner = Rec { calls: Vec::new() };
+        let opts = SetupOpts { check_only: false, yes: true, persist: true, uprobes: false };
+        assert_eq!(run_setup(snap, &evaluate(snap), &opts, false, &mut talk, &mut runner), 0);
+        let tee = format!("sudo tee {SYSCTL_FILE}");
+        let body = runner.calls.into_iter().find(|(command, _)| *command == tee).map(|(_, body)| body.unwrap());
+        (talk.lines.into_iter().skip(1).collect(), body)
+    }
+
+    #[test]
+    fn persist_writes_the_settings_that_are_already_applied() {
+        // Yesterday: `perfr setup --yes`. Today the sysctls are at their
+        // targets and the plan is empty, but nothing holds them past a reboot.
+        let mut snap = locked();
+        snap.paranoid = Some(0);
+        snap.kptr_restrict = Some(0);
+        snap.ptrace_scope = Some(0);
+        snap.tracefs = Some("/sys/kernel/tracing".into());
+        let all = "kernel.perf_event_paranoid=0\nkernel.kptr_restrict=0\nkernel.yama.ptrace_scope=0\n";
+        let (said, body) = persist(&snap);
+        assert_eq!(body.as_deref(), Some(all), "{said:?}");
+        assert!(said.contains(&format!("wrote {SYSCTL_FILE}")), "{said:?}");
+
+        // The other order: a file from an earlier run, and one more key to
+        // change now. The file is written whole, not cut down to that key.
+        snap.persisted = Some("kernel.perf_event_paranoid=0\nkernel.yama.ptrace_scope=0\n".into());
+        snap.kptr_restrict = Some(1);
+        assert_eq!(persist(&snap).1.as_deref(), Some(all));
+
+        // Already in the file: nothing is written.
+        snap.persisted = Some(all.into());
+        snap.kptr_restrict = Some(0);
+        let (said, body) = persist(&snap);
+        assert_eq!(body, None);
+        assert!(said.contains(&format!("{SYSCTL_FILE} already holds these settings.")), "{said:?}");
+    }
+
+    #[test]
+    fn persist_leaves_out_what_perfr_did_not_set() {
+        let mut snap = locked();
+        snap.tracefs = Some("/sys/kernel/tracing".into());
+        // More open than perfr asks for: somebody else's setting, and a 0 in
+        // a file that sorts last would tighten it at the next boot.
+        snap.paranoid = Some(-1);
+        // No Yama in this kernel: a key `sysctl --system` would trip over.
+        snap.ptrace_scope = None;
+        snap.kptr_restrict = Some(1);
+        assert_eq!(persist(&snap).1.as_deref(), Some("kernel.kptr_restrict=0\n"));
+        // Held back by a capability rather than changed: not written either.
+        let mut snap = locked();
+        snap.tracefs = Some("/sys/kernel/tracing".into());
+        snap.cap_perfmon = true;
+        snap.cap_sys_ptrace = true;
+        snap.cap_syslog = true;
+        let (said, body) = persist(&snap);
+        assert_eq!(body, None, "{said:?}");
     }
 
     #[test]

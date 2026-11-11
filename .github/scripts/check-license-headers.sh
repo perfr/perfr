@@ -12,6 +12,11 @@ cd $GITHUB_WORKSPACE
 REFERENCE="origin/${GITHUB_BASE_REF:-main}"
 MERGE_BASE="$(git merge-base $REFERENCE HEAD)" # Merge base is the commit on main this PR was branched from.
 LICENSE_HEADER_MISSED=""
+# The built viewer pack: wasm-bindgen's glue and the snippets it copies out of
+# crates, one of which (wasm-bindgen-rayon's worker helper) is Google's, under
+# Apache-2.0. Requiring our header on these made the pack build write
+# "Copyright The perfr Authors" above another holder's notice.
+GENERATED='^crates/perfr-live-viewer/viewer-dist/(perfr_live_viewer|snippets/)'
 
 echo -e "The following files are missing a license/copyright header:\n"
 while read file; do
@@ -33,7 +38,8 @@ while read file; do
   fi
 
 done <<< $(git diff -U0 --no-color --relative --name-only --diff-filter=r $MERGE_BASE \
-| egrep '\.rs$|\.cpp$|\.c$|\.h$|\.js$|\.py$|\.sh$|\.ps1$')
+| egrep '\.rs$|\.cpp$|\.c$|\.h$|\.js$|\.py$|\.sh$|\.ps1$' \
+| egrep -v "$GENERATED")
 
 if [ -n "$LICENSE_HEADER_MISSED" ]; then
   exit 1

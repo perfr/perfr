@@ -56,59 +56,56 @@ pub fn parse_gnu_debuglink(contents: &[u8]) -> Result<GnuDebugLink, String> {
     })
 }
 
-/// Reflected CRC-32, polynomial 0xEDB88320 -- what `llvm::crc32` computes and
-/// what the ELF specification names for `.gnu_debuglink`.
+/// The debuglink CRC of a whole file: the reflected CRC-32 (polynomial
+/// 0xEDB88320) the ELF specification names for `.gnu_debuglink`, which is
+/// zlib's and `llvm::crc32`'s. Streamed in 4 MiB pieces so a gigabyte of
+/// debug info is never held in memory. None if unreadable.
 ///
-/// Written out rather than pulled from a crate: it is twenty lines, it removes
-/// a dependency, and a table-driven CRC is the kind of code that should be
-/// readable next to the test that pins it.
-pub fn crc32_gnu_debuglink(bytes: &[u8]) -> u32 {
-    crc32_continue(0, bytes)
-}
-
-/// Feeds another chunk into a running checksum, so a large file can be read in
-/// pieces exactly as `CalculateDebuglinkChecksum` does with its 4 MiB buffer.
-pub fn crc32_continue(previous: u32, bytes: &[u8]) -> u32 {
-    // Table-driven: the bit-at-a-time loop took 3.5 s over a gigabyte.
-    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
-    let table = TABLE.get_or_init(|| {
-        let mut table = [0u32; 256];
-        for (i, entry) in table.iter_mut().enumerate() {
-            let mut crc = i as u32;
-            for _ in 0..8 {
-                let mask = (crc & 1).wrapping_neg();
-                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-            }
-            *entry = crc;
+/// `crc32fast` does the arithmetic. It is in the build regardless, and a
+/// byte-at-a-time table loop here took 1.6 s over a game's gigabyte of
+/// debug info where it takes a fraction of that.
+pub fn crc32_file(path: &std::path::Path) -> Option<u32> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buffer = vec![0u8; 4 << 20];
+    let mut hasher = crc32fast::Hasher::new();
+    loop {
+        let n = file.read(&mut buffer).ok()?;
+        if n == 0 {
+            return Some(hasher.finalize());
         }
-        table
-    });
-    let mut crc = !previous;
-    for &byte in bytes {
-        crc = table[((crc ^ u32::from(byte)) & 0xFF) as usize] ^ (crc >> 8);
+        hasher.update(&buffer[..n]);
     }
-    !crc
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn crc32_matches_known_vectors() {
-        // The standard check value: CRC-32 of "123456789" is 0xCBF43926.
-        assert_eq!(crc32_gnu_debuglink(b"123456789"), 0xCBF4_3926);
-        assert_eq!(crc32_gnu_debuglink(b""), 0);
-        assert_eq!(crc32_gnu_debuglink(b"a"), 0xE8B7_BE43);
-        assert_eq!(crc32_gnu_debuglink(b"The quick brown fox jumps over the lazy dog"),
-                   0x414F_A339);
+    fn testdata_path(name: &str) -> std::path::PathBuf {
+        let dir = std::env::var("PERFR_TESTDATA")
+            .unwrap_or_else(|_| format!("{}/testdata", env!("CARGO_MANIFEST_DIR")));
+        std::path::Path::new(&dir).join(name)
     }
 
+    /// The values are zlib's `crc32` of the same files. The PDB is 9.4 MiB,
+    /// so it is read in three pieces: the checksum must carry across them.
     #[test]
-    fn crc32_is_chunkable() {
-        let whole = crc32_gnu_debuglink(b"123456789");
-        let in_pieces = crc32_continue(crc32_continue(crc32_continue(0, b"1234"), b"567"), b"89");
-        assert_eq!(whole, in_pieces);
+    fn a_files_checksum_is_zlibs_crc32_of_it_however_many_pieces_it_is_read_in() {
+        assert_eq!(crc32_file(&testdata_path("textfile.txt")), Some(0xcc37_976b));
+        assert_eq!(crc32_file(&testdata_path("hello_world_elf.debug")), Some(0x2bf8_87bf));
+        assert_eq!(crc32_file(&testdata_path("dllmain.pdb")), Some(0x14fa_84c9));
+        assert_eq!(crc32_file(&testdata_path("no such file")), None);
+    }
+
+    /// What the checksum is for: the link in the stripped file names the
+    /// debug file and carries its CRC.
+    #[test]
+    fn the_checksum_of_a_debug_file_is_the_one_its_debuglink_carries() {
+        let stripped = std::fs::read(testdata_path("hello_world_elf_with_gnu_debuglink")).unwrap();
+        let link = crate::parse_elf_metadata(&stripped, "x").unwrap().gnu_debuglink.expect("a debuglink");
+        assert_eq!(link.path, "hello_world_elf.debug");
+        assert_eq!(crc32_file(&testdata_path(&link.path)), Some(link.crc32_checksum));
     }
 
     #[test]
@@ -145,21 +142,5 @@ mod tests {
             parse_gnu_debuglink(b"aaaaaaaaaa").unwrap_err(),
             "No CRC32 checksum found"
         );
-    }
-}
-
-/// The debuglink CRC of a whole file, streamed in 4 MiB pieces so a
-/// gigabyte of debug info is never held in memory. None if unreadable.
-pub fn crc32_file(path: &std::path::Path) -> Option<u32> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut buffer = vec![0u8; 4 << 20];
-    let mut crc = 0u32;
-    loop {
-        let n = file.read(&mut buffer).ok()?;
-        if n == 0 {
-            return Some(crc);
-        }
-        crc = crc32_continue(crc, &buffer[..n]);
     }
 }

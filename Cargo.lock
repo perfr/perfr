@@ -3136,6 +3136,7 @@ version = "0.1.1"
 name = "perfr-object"
 version = "0.1.1"
 dependencies = [
+ "crc32fast",
  "gimli",
  "msvc-demangler",
  "object",

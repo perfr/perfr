@@ -12,6 +12,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# Already linked: object's "compression" feature brings it in through flate2.
+crc32fast = "1"
 gimli = { version = "0.31", default-features = false, features = ["read", "std"] }
 msvc-demangler = "0.11"
 # Replaces llvm::object. default-features = false keeps the write half, the

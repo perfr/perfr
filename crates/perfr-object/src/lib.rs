@@ -39,7 +39,7 @@ pub use coff_symbols::{
 pub use debugfile::{
     debuginfod_debuginfo, detached_debug_file, detached_debug_file_under, DEFAULT_DEBUG_ROOT,
 };
-pub use debuglink::{crc32_continue, crc32_gnu_debuglink, GnuDebugLink};
+pub use debuglink::GnuDebugLink;
 pub use msvc::demangle_msvc;
 pub use pdb_file::{load_pdb_symbols, pdb_info, PdbInfo, UNKNOWN_SYMBOL_SIZE};
 pub use lineinfo::{line_rows, LineRow};
@@ -523,16 +523,6 @@ mod tests {
     #[test]
     fn is_64_bit() {
         assert!(parse("hello_world_elf").is_64_bit);
-    }
-
-    /// The debuglink checksum the C++ computes with llvm::crc32 must match what
-    /// this crate computes, on the real file the suite uses.
-    #[test]
-    fn debuglink_checksum_matches_the_referenced_file() {
-        let with = parse("hello_world_elf_with_gnu_debuglink");
-        let link = with.gnu_debuglink.expect("should have a debuglink");
-        let debug_file = testdata("hello_world_elf.debug");
-        assert_eq!(crc32_gnu_debuglink(&debug_file), link.crc32_checksum);
     }
 
     fn u64_at(data: &[u8], at: usize) -> u64 {

@@ -42,6 +42,44 @@ pub struct RingBuffer {
 // go through atomics; moving it to another thread is fine.
 unsafe impl Send for RingBuffer {}
 
+/// The event was opened and the kernel then refused to map its ring: the
+/// payload of the error [`RingBuffer::open`] returns for that, so a caller
+/// can tell it from a refused `perf_event_open` (see [`map_refused`]).
+///
+/// The usual reason is memory, not permission to trace. Ring pages are
+/// pinned and charged to a per-user budget (`kernel.perf_event_mlock_kb` per
+/// CPU, shared by everything that user traces) and then to the process's
+/// `RLIMIT_MEMLOCK`; past both the mmap fails with `EPERM` unless
+/// `perf_event_paranoid` is -1 or the process has `CAP_IPC_LOCK`. The first
+/// rings of a capture fit and the later ones do not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RingMapRefused {
+    pub size_kb: u64,
+    pub errno: i32,
+}
+
+impl std::fmt::Display for RingMapRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "mapping the {} kB ring: {}", self.size_kb, io::Error::from_raw_os_error(self.errno))?;
+        if self.errno == libc::EPERM {
+            write!(
+                f,
+                "; the perf mlock budget is spent (kernel.perf_event_mlock_kb per user, then RLIMIT_MEMLOCK): \
+                 raise one of them or grant CAP_IPC_LOCK"
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RingMapRefused {}
+
+/// The refusal behind `error`, when it is a ring that could not be mapped
+/// rather than an event that could not be opened.
+pub fn map_refused(error: &io::Error) -> Option<RingMapRefused> {
+    error.get_ref()?.downcast_ref::<RingMapRefused>().copied()
+}
+
 /// What one [`RingBuffer::drain`] read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Drained {
@@ -69,7 +107,8 @@ impl RingBuffer {
             Ok(mmap) => mmap,
             Err(error) => {
                 sys::close(fd);
-                return Err(error);
+                let refused = RingMapRefused { size_kb, errno: error.raw_os_error().unwrap_or(0) };
+                return Err(io::Error::new(error.kind(), refused));
             }
         };
 
@@ -462,6 +501,25 @@ mod tests {
         bytes.extend_from_slice(&(size as u16).to_le_bytes());
         bytes.extend((8..size).map(|i| seed.wrapping_mul(31).wrapping_add(i as u8)));
         bytes
+    }
+
+    #[test]
+    fn a_ring_the_kernel_will_not_map_is_told_apart_from_an_event_it_will_not_open() {
+        // What `open` returns when perf_event_open succeeded and mmap did
+        // not. Not reproducible on demand: the budget is not enforced at
+        // perf_event_paranoid -1, which is where these tests can run at all.
+        let refused = RingMapRefused { size_kb: 4096, errno: libc::EPERM };
+        let error = io::Error::new(io::Error::from_raw_os_error(libc::EPERM).kind(), refused);
+        assert_eq!(map_refused(&error), Some(refused));
+        let text = error.to_string();
+        assert!(text.contains("4096 kB"), "{text}");
+        assert!(text.contains("perf mlock budget") && text.contains("CAP_IPC_LOCK"), "{text}");
+
+        // A plain refusal to open the event is not one, and neither is
+        // another reason not to map (out of memory says nothing of budgets).
+        assert_eq!(map_refused(&io::Error::from_raw_os_error(libc::EACCES)), None);
+        let enomem = RingMapRefused { size_kb: 64, errno: libc::ENOMEM }.to_string();
+        assert!(!enomem.contains("budget"), "{enomem}");
     }
 
     #[test]

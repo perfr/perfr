@@ -719,6 +719,40 @@ struct SampleCounters {
     named_early: u64,
 }
 
+/// The perf rings of one kind that a capture could not open. Each ring is
+/// an event the kernel may refuse and a mapping it may refuse, per thread or
+/// per CPU, so a capture can run with some of them missing; these used to
+/// fail without a word, and a thread that was not sampled looked idle.
+/// The first failure of each cause is logged where it happens, with the
+/// kernel's reason, and the count goes into the summary lines.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct RingOpenFailures {
+    failed: u64,
+    causes_logged: Vec<Option<i32>>,
+}
+
+#[cfg(target_os = "linux")]
+impl RingOpenFailures {
+    /// Records that `what` could not be opened. A thread that has exited
+    /// since it was listed is not a failure: there is nothing to sample.
+    fn note(&mut self, what: std::fmt::Arguments<'_>, error: &std::io::Error) {
+        let cause =
+            perfr_perf_ring::ring::map_refused(error).map(|refused| refused.errno).or(error.raw_os_error());
+        if cause == Some(libc::ESRCH) {
+            return;
+        }
+        self.failed += 1;
+        // Mapping and opening can fail with the same errno for different
+        // reasons, so they are different causes.
+        let key = cause.map(|errno| if perfr_perf_ring::ring::map_refused(error).is_some() { -errno } else { errno });
+        if !self.causes_logged.contains(&key) {
+            self.causes_logged.push(key);
+            log::warn!("{what} could not be opened: {error}");
+        }
+    }
+}
+
 /// `extra` of a `DROP` marker for a loss that is not of a scope-ring record
 /// kind: here, stack samples the kernel dropped.
 #[cfg(target_os = "linux")]
@@ -1473,17 +1507,35 @@ fn capture_loop(
     // Their sampling is switched on where the loop starts instead. The task
     // rings are enabled here, so no thread born meanwhile goes unnoticed.
     let mut threads: Vec<SampledThread> = Vec::new();
+    // In cells because both closures below report into them.
+    let sample_ring_failures = std::cell::RefCell::new(RingOpenFailures::default());
+    let task_ring_failures = std::cell::RefCell::new(RingOpenFailures::default());
     let sample_thread = |threads: &mut Vec<SampledThread>, tid: i32, sample_now: bool| -> bool {
         if threads.iter().any(|t| t.tid == tid && !t.dead) {
             return false;
         }
-        let Ok(sample) = perfr_perf_ring::ring::open_stack_sample(period_ns, 64_000, tid, -1, 4096) else {
-            return false;
+        let sample = match perfr_perf_ring::ring::open_stack_sample(period_ns, 64_000, tid, -1, 4096) {
+            Ok(sample) => sample,
+            Err(error) => {
+                sample_ring_failures.borrow_mut().note(format_args!("the sampling ring of thread {tid}"), &error);
+                return false;
+            }
         };
-        if sample_now && sample.enable().is_err() {
-            return false;
+        if sample_now {
+            if let Err(error) = sample.enable() {
+                sample_ring_failures.borrow_mut().note(format_args!("the sampling ring of thread {tid}"), &error);
+                return false;
+            }
         }
-        let task = perfr_perf_ring::ring::open_mmap_task(tid, -1, 64).ok();
+        let task = match perfr_perf_ring::ring::open_mmap_task(tid, -1, 64) {
+            Ok(task) => Some(task),
+            Err(error) => {
+                // Sampled all the same; its forks, exit and new code are
+                // then found by the slower /proc scan or not at all.
+                task_ring_failures.borrow_mut().note(format_args!("the task-event ring of thread {tid}"), &error);
+                None
+            }
+        };
         if let Some(task) = &task {
             let _ = task.enable();
         }
@@ -1512,6 +1564,17 @@ fn capture_loop(
     if has_target && threads.is_empty() {
         log::warn!("no sampling rings for pid {target_pid} (permissions?)");
     }
+    {
+        let (unsampled, unfollowed) = (sample_ring_failures.borrow().failed, task_ring_failures.borrow().failed);
+        if unsampled + unfollowed > 0 {
+            log::warn!(
+                "sampling rings opened for {} of {} thread(s) of pid {target_pid}; \
+                 {unfollowed} of those without a task-event ring",
+                threads.len(),
+                threads.len() as u64 + unsampled
+            );
+        }
+    }
     let mut unwinder = {
         let _phase = perfr_api::scope("open unwinder");
         match (has_target, ProcessUnwinder::for_pid(target_pid)) {
@@ -1539,12 +1602,15 @@ fn capture_loop(
         unnamed: Vec::new(),
     };
     let mut switch_rings = Vec::new();
+    let mut switch_ring_failures = RingOpenFailures::default();
     {
         let _phase = perfr_api::scope("open scheduler rings");
         for cpu in 0..crate::num_cpus_hint() as i32 {
-            if let Ok(ring) = perfr_perf_ring::ring::open_context_switch(-1, cpu, 8192) {
-                if ring.enable().is_ok() {
-                    switch_rings.push(ring);
+            match perfr_perf_ring::ring::open_context_switch(-1, cpu, 8192).and_then(|ring| ring.enable().map(|()| ring))
+            {
+                Ok(ring) => switch_rings.push(ring),
+                Err(error) => {
+                    switch_ring_failures.note(format_args!("the context-switch ring of CPU {cpu}"), &error)
                 }
             }
         }
@@ -1553,6 +1619,12 @@ fn capture_loop(
         log::warn!(
             "capture started but no context-switch rings opened \
              (needs perf_event_paranoid <= 0); the timeline will stay empty"
+        );
+    } else if switch_ring_failures.failed > 0 {
+        log::warn!(
+            "context-switch rings opened on {} of {} CPUs; the Scheduler track has no slices for the others",
+            switch_rings.len(),
+            switch_rings.len() as u64 + switch_ring_failures.failed
         );
     }
 
@@ -2600,6 +2672,15 @@ fn capture_loop(
         service.set_instrumentation_status(status);
     }
     log::info!("{} callstack samples recorded", samples.parsed);
+    {
+        let (unsampled, unfollowed) = (sample_ring_failures.borrow().failed, task_ring_failures.borrow().failed);
+        if unsampled + unfollowed > 0 {
+            log::warn!(
+                "{unsampled} thread(s) could not be sampled and {unfollowed} could not be followed \
+                 (their rings did not open; the first failure of each cause is logged above)"
+            );
+        }
+    }
     if modules_mapped_late > 0 {
         log::info!("{modules_mapped_late} module(s) were mapped during the capture and loaded as they appeared");
     }
@@ -3582,6 +3663,26 @@ mod tests {
         bytes.extend_from_slice(&count.to_le_bytes());
         sample_id(&mut bytes, tid, time, cpu);
         bytes
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rings_that_did_not_open_are_counted_and_a_thread_that_exited_is_not_one() {
+        let mut failures = RingOpenFailures::default();
+        let emfile = std::io::Error::from_raw_os_error(libc::EMFILE);
+        failures.note(format_args!("the sampling ring of thread 1"), &emfile);
+        failures.note(format_args!("the sampling ring of thread 2"), &emfile);
+        // Listed in /proc a moment ago, gone by the time its ring is opened.
+        failures.note(format_args!("the sampling ring of thread 3"), &std::io::Error::from_raw_os_error(libc::ESRCH));
+        assert_eq!(failures.failed, 2);
+        assert_eq!(failures.causes_logged, [Some(libc::EMFILE)], "one line per cause, not per thread");
+        // EPERM from mmap (the mlock budget) is another cause than EPERM
+        // from perf_event_open (not allowed to trace at all).
+        let refused = perfr_perf_ring::ring::RingMapRefused { size_kb: 4096, errno: libc::EPERM };
+        failures.note(format_args!("the sampling ring of thread 4"), &std::io::Error::other(refused));
+        failures.note(format_args!("the sampling ring of thread 5"), &std::io::Error::from_raw_os_error(libc::EPERM));
+        assert_eq!(failures.failed, 4);
+        assert_eq!(failures.causes_logged.len(), 3);
     }
 
     #[cfg(target_os = "linux")]

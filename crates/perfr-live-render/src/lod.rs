@@ -429,11 +429,19 @@ pub fn drop_index_for_y(keys: &[LaneKey], moving: LaneKey, y: f32) -> usize {
     rest.len()
 }
 
+/// Lanes whose events are marks, not spans: `duration_ns` holds something
+/// else (a value's bits, a sampling period, a count of lost events, nothing)
+/// and the event draws one pixel wide at every zoom. They never make a view
+/// instanced, whatever that field would come to in pixels.
+fn is_tick_lane(key: LaneKey) -> bool {
+    matches!(key.kind, kind::VALUE | kind::SAMPLE | kind::LOG | kind::DROP)
+}
+
 /// Sample a few lanes. If any overlapping event is ≥ `min_wide_px`, use
 /// instanced SDF quads. Does not walk all scopes.
 ///
 /// Samples the densest lanes (by event count) plus an optional cursor
-/// hint. VALUE lanes are never sampled so f32 bits cannot force Instanced.
+/// hint. Lanes of marks are never asked; see [`is_tick_lane`].
 pub fn choose_lod(
     index: &TrackIndex,
     t0: u64,
@@ -484,18 +492,18 @@ pub fn choose_lod_first8(
     choose_lod_from_keys(index, t0, t1, width, min_wide_px, &keys)
 }
 
-/// Densest non-VALUE lanes (by `Lane::len`) plus `hint`. O(lanes), not O(scopes).
+/// Densest lanes of spans (by `Lane::len`) plus `hint`. O(lanes), not O(scopes).
 pub fn sample_lod_lanes(index: &TrackIndex, hint: Option<LaneKey>) -> Vec<LaneKey> {
     let mut scored: Vec<(usize, LaneKey)> = index
         .lanes()
-        .filter(|(k, _)| k.kind != kind::VALUE)
+        .filter(|(k, _)| !is_tick_lane(*k))
         .map(|(k, lane)| (lane.len(), k))
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     let mut out = Vec::with_capacity(LOD_SAMPLE_LANES + 1);
     let mut hinted = None;
     if let Some(h) = hint {
-        if h.kind != kind::VALUE && index.lane(h).is_some() {
+        if !is_tick_lane(h) && index.lane(h).is_some() {
             out.push(h);
             hinted = Some(h);
         }
@@ -532,7 +540,7 @@ fn choose_lod_from_keys(
     }
     // Fast path. A hit here is conclusive: one wide scope in view is enough.
     for key in keys {
-        if key.kind == kind::VALUE {
+        if is_tick_lane(*key) {
             continue;
         }
         let Some(lane) = index.lane(*key) else {
@@ -553,7 +561,7 @@ fn choose_lod_from_keys(
     // The cost is two binary searches per lane, paid only when the sample
     // already failed to find anything wide.
     for (key, lane) in index.lanes() {
-        if key.kind == kind::VALUE {
+        if is_tick_lane(key) {
             continue;
         }
         if let Some(e) = lane.overlapping(t0, t1) {
@@ -603,6 +611,26 @@ mod value_lod_tests {
             extra: 0,
             _pad: 0,
             name_id: name,
+        }
+    }
+
+    /// A sample tick's `duration_ns` is the sampling period and a drop
+    /// marker's is a count of lost events. Both draw as a one-pixel tick at
+    /// every zoom, so neither is a wide scope, whatever the field says.
+    #[test]
+    fn ticks_do_not_force_instanced_lod_with_the_number_in_their_duration_field() {
+        for tick in [kind::SAMPLE, kind::DROP] {
+            let mut idx = TrackIndex::default();
+            for i in 0..64u64 {
+                idx.insert(scope(i * 20, 8, 1, 1));
+            }
+            // 1 ms of "duration" in a 1 ms window: 200 px, were it a span.
+            idx.insert(LiveEvent { kind: tick, ..scope(500, 1_000_000, 2, 2) });
+            assert_eq!(
+                choose_lod(&idx, 0, 1_000_000, 200, INSTANCE_MIN_PX),
+                TimelineLod::PixelColumns,
+                "kind {tick}"
+            );
         }
     }
 

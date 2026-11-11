@@ -2,9 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! macOS process discovery and manual capture. No task port, root, or private
-//! tracing interfaces are needed. The HTTP server and capture format are shared
-//! with Linux; kernel sampling and dynamic hooks remain separate future work.
+//! macOS process discovery and the capture loop: manual scopes and Frida
+//! hooks. Discovery needs no task port, root, or private tracing interface;
+//! attaching Frida needs a task port. The HTTP server and capture format are
+//! shared with Linux. Kernel sampling and the scheduler are not implemented.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use std::time::{Duration, Instant};
 use crate::hook_journal::ArmedHook;
 use crate::report::SampleStore;
 use crate::scopes::ScopeSource;
+use crate::serve::started_in_capture;
 use crate::visible::VisibleProcesses;
 use perfr_live_server::{LiveService, ServerConfig};
 
@@ -230,7 +232,7 @@ pub fn capture_loop(
     target_pid: i32,
     _store: Arc<SampleStore>,
     gpu_helper: Option<String>,
-    _hooks: Vec<ArmedHook>,
+    hooks: Vec<ArmedHook>,
     show_all_processes: bool,
     _duplicate_filter: bool,
     _max_hook_calls_per_s: u64,
@@ -244,6 +246,15 @@ pub fn capture_loop(
     }
     service.set_instrumentation_status(if frida.is_some() { "Frida: functions armed" } else { "macOS: manual instrumentation; CPU sampling and scheduling are not yet available" });
     service.mark_capture_started(target_pid.max(0) as u32, capture_start_ns);
+    let has_target = target_pid > 0;
+    // Written before anything runs through a hook, as the other two loops
+    // do: if a hook takes the target down, this names what was armed.
+    if has_target && !hooks.is_empty() && frida.is_some() {
+        if let Some(path) = crate::hook_journal::write_journal(target_pid, "frida", &hooks) {
+            log::info!("hook journal written to {}", path.display());
+        }
+    }
+    let mut last_alive_check_ns: u64 = 0;
     let mut visible = VisibleProcesses::new(target_pid, show_all_processes);
     visible.add_instrumented(std::process::id());
     let mut names = crate::names::NameSync::default();
@@ -257,13 +268,29 @@ pub fn capture_loop(
             .clamp(1, 100),
     );
     let mut batch = Vec::with_capacity(256);
+    let mut scope_batch = Vec::with_capacity(256);
     while running.load(Ordering::Acquire) {
         {
             let _pass = perfr_api::scope("capture pass");
             batch.clear();
             let now = crate::now_monotonic_ns();
+            // Without this the capture of a target that has exited runs
+            // until somebody stops it by hand. `kill(pid, 0)`, not the
+            // `/proc` read `hook_journal::process_alive` does on Linux:
+            // there is no `/proc` here.
+            if has_target && now.saturating_sub(last_alive_check_ns) >= 250_000_000 {
+                last_alive_check_ns = now;
+                if !perfr_scope_ring::platform::process_alive(target_pid as u32) {
+                    log::info!("pid {target_pid} exited; the capture ends with it");
+                    break;
+                }
+            }
             visible.maybe_refresh();
-            scopes.poll(&mut visible, now, &mut batch);
+            // An app's ring still holds scopes from before Record; pushed,
+            // they stretch the timeline back into the previous session.
+            scope_batch.clear();
+            scopes.poll(&mut visible, now, &mut scope_batch);
+            batch.extend(scope_batch.iter().copied().filter(|e| started_in_capture(e, capture_start_ns)));
             if let Some(session) = frida.as_mut() {
                 session.poll();
                 service.set_instrumentation_status(session.status(scopes.events_lost, &scopes.auto_unhooked));
@@ -295,8 +322,10 @@ pub fn capture_loop(
         session.poll();
         service.set_instrumentation_status(session.status(scopes.events_lost, &scopes.auto_unhooked));
     }
-    scopes.poll(&mut visible, crate::now_monotonic_ns(), &mut batch);
-    scopes.finish(crate::now_monotonic_ns(), &mut batch);
+    scope_batch.clear();
+    scopes.poll(&mut visible, crate::now_monotonic_ns(), &mut scope_batch);
+    scopes.finish(crate::now_monotonic_ns(), &mut scope_batch);
+    batch.extend(scope_batch.iter().copied().filter(|e| started_in_capture(e, capture_start_ns)));
     names.refresh(
         &visible.pids(),
         |p, n| service.set_process_name(p, n),

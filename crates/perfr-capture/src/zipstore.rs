@@ -4,15 +4,20 @@
 
 //! A small zip writer and reader: store and deflate.
 //!
-//! A self-contained capture is several Arrow tables and a manifest, and it
-//! has to travel as one file: a browser download, an attachment, a thing you
-//! drop back onto the viewer. Zip is the container everyone can open.
-//! Writing it by hand is a few dozen lines; deflate comes from
-//! `miniz_oxide`, pure Rust, already in this crate's tree through parquet,
-//! so no C reaches the static service binary. Deflate matters here: an
-//! events table is mostly zero bytes (64-bit timestamps and durations that
-//! rarely need more than four), and on a real capture it packs about five
-//! to one, so a bundle that would be 127 MB stored is 25 MB.
+//! A self-contained capture is several tables and a manifest, and it has to
+//! travel as one file: a browser download, an attachment, a thing you drop
+//! back onto the viewer. Zip is the container everyone can open, and
+//! writing it by hand is a few dozen lines.
+//!
+//! A bundle is written stored. Its tables are Parquet, whose own encodings
+//! already take the zeros out of the 64-bit columns, and a stored entry can
+//! be read in place: the slice path (`slice.rs`) hands Parquet a range of
+//! the file and reads only the row groups it needs. Deflate is here for two
+//! other reasons. The first bundles held Arrow IPC tables, which are mostly
+//! zero bytes and packed about five to one, and were written deflated:
+//! those still have to open. And `write_zip` with a level is how the worth
+//! of a second compressor over Parquet is measured (little). Deflate comes
+//! from `miniz_oxide`, pure Rust, so no C reaches the static service binary.
 //!
 //! Reads accept methods 0 and 8, no data descriptors, sizes under 4 GiB
 //! (no zip64). Anything else is an error, not a guess.
@@ -82,9 +87,10 @@ fn u32_at(b: &[u8], i: usize) -> u32 {
     u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]])
 }
 
-/// Deflate level for a bundle's tables. Level 6 is a third smaller than
-/// level 1 on Arrow event tables for about four times the time; a 127 MB
-/// capture takes a couple of seconds, once, at Save.
+/// The deflate level the first bundles were written at, kept for whoever
+/// measures against them: no bundle is written deflated now. Level 6 was a
+/// third smaller than level 1 on Arrow event tables for about four times
+/// the time.
 pub const BUNDLE_DEFLATE_LEVEL: u8 = 6;
 
 /// Writes `entries` (name, bytes) as a store-only zip. Names are taken as

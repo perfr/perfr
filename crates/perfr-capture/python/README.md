@@ -40,16 +40,21 @@ before the window is still a real scope with its real duration — so
 `time_bounds_ns` can reach a little outside `slice_ns`. Samples are cut by
 timestamp, and the frame table keeps only the frames those samples use.
 
-The one thing to know before summing numbers: two event kinds reuse the
-`duration_ns` column for something that is **not** a duration —
+The one thing to know before summing numbers: some rows reuse the
+`duration_ns` column for something that is **not** a measured duration —
 
 - `VALUE` (6) stashes a float in the bits (`f32::from_bits`); `open_capture.py`
   has `value_of()` to unpack it.
 - `SAMPLE` (7) stores the sampling period, not a measured span.
+- A `FUNCTION_CALL` (2) with `extra == 1` is one frame of a sampled callstack,
+  a sampling period wide: the period again, not a measurement. A hooked
+  function's call has `extra == 0` and a real duration.
+- `LOG` (8) is an instant (0), and `DROP` (9) holds a count of lost records.
 
-So filter to `API_SCOPE` / `FUNCTION_CALL` (and `SCHEDULING_SLICE`) before you
-add durations up. Every column, and the full kind table, is documented at the
-top of `open_capture.py`.
+So keep to `API_SCOPE`, `API_TRACK`, `SCHEDULING_SLICE` and the `FUNCTION_CALL`
+rows with `extra == 0` before you add durations up; `open_capture.py` has
+`is_span()` for that. Every column, and the full kind table, is documented at
+the top of `open_capture.py`.
 
 ## One file: Arrow IPC or Parquet
 
@@ -59,7 +64,7 @@ The smallest thing that works, once you have the file:
 import pyarrow.ipc as ipc, pyarrow as pa
 table = ipc.open_file(pa.memory_map("capture.arrow")).read_all()
 df = table.to_pandas()          # one row per event, name already resolved
-scopes = df[df.kind == 1]       # API_SCOPE
+scopes = df[df.kind == 1]       # API_SCOPE: manual scopes, a real duration each
 print(scopes.groupby("name").duration_ns.sum().sort_values().tail(10) / 1e6)
 ```
 

@@ -5,7 +5,7 @@
 //! Cutting a time slice out of a bundle on disk without loading it
 //! (TODO item 5).
 //!
-//! A bundle's tables are Parquet in row groups of [`CHUNK_ROWS`] rows, and
+//! A bundle's tables are Parquet in row groups of [`crate::CHUNK_ROWS`] rows, and
 //! Parquet keeps the minimum and maximum of every column per row group in
 //! the file footer. Events are written in the order the ring held them,
 //! which is close to time order, so a row group covers a narrow stretch of
@@ -14,12 +14,13 @@
 //! window (an event may begin before the window and still be in it, so
 //! the group's largest duration is added on), decodes just those, and
 //! filters rows exactly. On a multi-gigabyte capture that is a few
-//! groups out of thousands; the rest of the file is never read past the
-//! footer.
+//! groups out of thousands; the rest of the tables is never decoded.
 //!
 //! The zip is stored, not compressed, so each table's bytes are a
 //! contiguous range of the file: the file is read once and sliced by
-//! offset, no copies, and the Parquet reader works on the slice.
+//! offset, no copies, and the Parquet reader works on the slice. The file
+//! is still read whole into memory first ([`slice_bundle_file`]): what the
+//! footer saves is the decoding, not the read.
 
 use std::path::Path;
 

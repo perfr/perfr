@@ -2,13 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A capture on disk, as Arrow.
+//! A capture on disk, as Arrow tables.
 //!
 //! The viewer's whole model is a flat stream of [`LiveEvent`]s. This writes
-//! that stream as an Arrow IPC file so a capture survives the session and can
-//! be opened straight into pandas or DuckDB -- `pyarrow.ipc.open_file(...)`,
-//! `.read_pandas()`, and every row is there. The same table can also go out as
-//! Parquet ([`write_events_parquet`]) for tools that speak that instead.
+//! that stream as a table so a capture survives the session and can be
+//! opened straight into pandas or DuckDB. What the viewer saves and opens
+//! is a [`CaptureBundle`] (`bundle.rs`): the events, the sampled callstacks
+//! and their frames as three Parquet tables with a manifest, in one stored
+//! zip, which `slice.rs` can cut to a time window without reading the rest.
+//! The functions in this file are the tables themselves: the events table
+//! as Parquet ([`write_events_parquet`]) or as an Arrow IPC file
+//! ([`write_events_ipc`], what `?format=ipc` exports and
+//! `pyarrow.ipc.open_file(...)` reads), and [`write_dataset`], the three
+//! tables as IPC files in a directory for `perfr --out-arrow`.
 //!
 //! One events table, columnar, with the scope name resolved inline next to its
 //! `name_id`: a reader gets human-readable names without carrying a second
@@ -27,8 +33,10 @@
 //!
 //! Compression is deliberately off (no `lz4`/`zstd`/`snap` features): the
 //! service ships as a static musl binary, and those features would drag a C
-//! toolchain into it. Arrow IPC is already a tight columnar layout; a capture
-//! that needs more can be re-encoded by any consumer once it is loaded.
+//! toolchain into it. Parquet's own encodings (delta on the nanosecond
+//! columns, dictionaries on the rest; `parquet_properties`) make an events
+//! table about a fifth of its rows' size with no codec; an IPC file is the
+//! rows as they are, and a consumer that needs less can re-encode it.
 
 pub mod bundle;
 pub mod slice;

@@ -30,19 +30,29 @@ The events table -- one row per event, these columns:
     tid           u32   thread id
     kind          u8    what the row is; see KINDS
     depth         u8    nesting depth of a scope within its thread
-    extra         u8    core id (scheduling slices) or thread-state code
+    extra         u8    core id (scheduling slices), thread-state code, log
+                        level (LOG), or 1 on a FUNCTION_CALL that is one
+                        frame of a sampled callstack
     name_id       u32   interned name id (join key, kept for fidelity)
     name          str   the name already resolved -- use this, no join needed
+    flags         u8    source flags: 0x80 the scope came from a hook, 0x40 a
+                        log line that was cut short. Absent from files written
+                        before the column existed.
 
-Two kinds reuse ``duration_ns`` for something other than a duration, which is
-the one thing worth knowing before you sum it:
+Some rows reuse ``duration_ns`` for something other than a measured duration,
+which is the one thing worth knowing before you sum it:
 
   * VALUE (6): a timestamped scalar. ``duration_ns`` holds the float's bits,
     ``f32::from_bits``. ``value_of()`` below unpacks it.
   * SAMPLE (7): a sampled callstack tick. ``duration_ns`` is the sampling
     period, not a measured duration.
+  * FUNCTION_CALL (2) with ``extra == 1``: one frame of that sampled
+    callstack, drawn a sampling period wide. Also the period, not a
+    measurement; a hooked function's call has ``extra == 0`` and a real one.
+  * LOG (8): an instant; ``duration_ns`` is 0.
+  * DROP (9): a marker for lost records; ``duration_ns`` is how many.
 
-So filter to API_SCOPE / FUNCTION_CALL before you add durations up.
+So keep to ``is_span()`` rows before you add durations up.
 """
 
 import struct
@@ -57,10 +67,22 @@ KINDS = {
     5: "API_TRACK",
     6: "VALUE",
     7: "SAMPLE",
+    8: "LOG",
+    9: "DROP",
 }
 
-# Kinds whose duration_ns really is a span you can sum.
-SPAN_KINDS = {1, 2, 3}  # API_SCOPE, FUNCTION_CALL, SCHEDULING_SLICE
+# Kinds whose duration_ns really is a span you can sum: API_SCOPE,
+# FUNCTION_CALL, SCHEDULING_SLICE and API_TRACK (an async span). A
+# FUNCTION_CALL still needs its `extra` looked at: see is_span().
+SPAN_KINDS = {1, 2, 3, 5}
+FUNCTION_CALL = 2
+# `extra` of a FUNCTION_CALL that is a frame of a sampled callstack.
+SAMPLED_FRAME = 1
+
+
+def is_span(kind: int, extra: int) -> bool:
+    """Whether a row's ``duration_ns`` is a measured span."""
+    return kind in SPAN_KINDS and not (kind == FUNCTION_CALL and extra == SAMPLED_FRAME)
 
 
 def value_of(duration_ns: int) -> float:
@@ -124,6 +146,7 @@ def main(path: str) -> int:
     kinds = table.column("kind").to_pylist()
     names = table.column("name").to_pylist()
     durations = table.column("duration_ns").to_pylist()
+    extras = table.column("extra").to_pylist()
     tids = table.column("tid").to_pylist()
 
     by_kind: dict[str, int] = {}
@@ -133,11 +156,11 @@ def main(path: str) -> int:
     for name, count in sorted(by_kind.items(), key=lambda kv: -kv[1]):
         print(f"  {name:<18} {count:,}")
 
-    # Hottest scopes by total time, summing only the kinds where duration_ns
+    # Hottest scopes by total time, summing only the rows where duration_ns
     # is actually a duration.
     totals: dict[str, int] = {}
-    for k, name, dur in zip(kinds, names, durations):
-        if k in SPAN_KINDS and name:
+    for k, extra, name, dur in zip(kinds, extras, names, durations):
+        if is_span(k, extra) and name:
             totals[name] = totals.get(name, 0) + dur
     if totals:
         print("\ntop scopes by total duration:")
@@ -188,7 +211,8 @@ def main(path: str) -> int:
         return 0
 
     df["kind_name"] = df["kind"].map(KINDS).fillna("?")
-    spans = df[df["kind"].isin(SPAN_KINDS)].copy()
+    sampled = (df["kind"] == FUNCTION_CALL) & (df["extra"] == SAMPLED_FRAME)
+    spans = df[df["kind"].isin(SPAN_KINDS) & ~sampled].copy()
     spans["ms"] = spans["duration_ns"] / 1e6
     print("\npandas: mean scope length per thread (top 5 threads by count)")
     top_threads = spans["tid"].value_counts().head(5).index

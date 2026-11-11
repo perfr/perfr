@@ -666,6 +666,12 @@ fn merge_toml(path: &Path, action: &SkillAction) -> Result<String, String> {
         if next.contains(MCP_BEGIN) {
             next = remove_marked_block(&next);
         }
+        // What is left is a table somebody wrote by hand, and `--force` was
+        // given. Appending beside it would define the table twice, which is
+        // not TOML any more: the agent then loads none of its config.
+        if next.contains("[mcp_servers.perfr]") {
+            next = remove_perfr_tables(&next);
+        }
         if !next.is_empty() && !next.ends_with('\n') {
             next.push('\n');
         }
@@ -680,6 +686,30 @@ fn merge_toml(path: &Path, action: &SkillAction) -> Result<String, String> {
     } else {
         "registered MCP in".to_string()
     })
+}
+
+/// `text` without the `[mcp_servers.perfr]` table and its sub-tables
+/// (`[mcp_servers.perfr.env]`): each from its header to the next header.
+/// Text surgery, as the rest of the TOML handling here: a header is a line
+/// that starts with `[`.
+fn remove_perfr_tables(text: &str) -> String {
+    let mut next = String::new();
+    let mut cutting = false;
+    for line in text.split_inclusive('\n') {
+        let head = line.trim_start();
+        if head.starts_with('[') {
+            cutting = head.starts_with("[mcp_servers.perfr]") || head.starts_with("[mcp_servers.perfr.");
+        }
+        if !cutting {
+            next.push_str(line);
+        }
+    }
+    let kept = next.trim_end_matches('\n').len();
+    next.truncate(kept);
+    if !next.is_empty() {
+        next.push('\n');
+    }
+    next
 }
 
 fn remove_toml(path: &Path, action: &SkillAction) -> String {
@@ -939,5 +969,43 @@ mod tests {
         let replaced = install(&env, &action("claude", false, false, true)).unwrap();
         assert!(replaced.contains("wrote"), "{replaced}");
         assert_eq!(fs::read_to_string(&path).unwrap(), SKILL);
+    }
+
+    #[test]
+    fn force_replaces_a_hand_written_toml_table_instead_of_adding_a_second_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        let config = home.join(".codex/config.toml");
+        let by_hand = "model = \"o3\"\n\n\
+            [mcp_servers.perfr]\n\
+            command = \"/opt/perfr/bin/perfr\"\n\
+            args = [\"mcp\"]\n\n\
+            [mcp_servers.perfr.env]\n\
+            PERFR_LOG = \"debug\"\n\n\
+            [mcp_servers.other]\n\
+            command = \"other\"\n";
+        fs::write(&config, by_hand).unwrap();
+        let env = env_with(&home, &home);
+        let kept = install(&env, &action("codex", false, false, false)).unwrap();
+        assert!(kept.contains("pass --force"), "{kept}");
+        assert_eq!(fs::read_to_string(&config).unwrap(), by_hand);
+
+        let forced = install(&env, &action("codex", false, false, true)).unwrap();
+        assert!(forced.contains("registered MCP in"), "{forced}");
+        let toml = fs::read_to_string(&config).unwrap();
+        // A table defined twice is invalid TOML, and the agent then loads
+        // none of its config.
+        assert_eq!(toml.matches("[mcp_servers.perfr]").count(), 1, "{toml}");
+        assert!(!toml.contains("/opt/perfr/bin/perfr"), "{toml}");
+        assert!(!toml.contains("[mcp_servers.perfr.env]"), "{toml}");
+        assert!(toml.starts_with("model = \"o3\"\n"), "{toml}");
+        assert!(toml.contains("[mcp_servers.other]\ncommand = \"other\"\n"), "{toml}");
+        assert!(toml.ends_with(&toml_block()), "{toml}");
+
+        // And the result is one the next run recognises as its own.
+        let again = install(&env, &action("codex", false, false, false)).unwrap();
+        assert!(again.contains("MCP already registered"), "{again}");
+        assert_eq!(fs::read_to_string(&config).unwrap(), toml);
     }
 }

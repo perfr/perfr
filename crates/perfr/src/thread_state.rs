@@ -28,7 +28,7 @@ use perfr_perf_records::tracepoints::{
     thread_state_from_bits, SchedSwitch, SchedSwitchLayout, SchedWakeup, SchedWakeupLayout,
     TaskNewtask, TaskNewtaskLayout,
 };
-use perfr_perf_records::reader::{parse_record_sample, sample_bits, SampleFlags};
+use perfr_perf_records::reader::parse_tracepoint_sample;
 use perfr_perf_records::record_type;
 use perfr_perf_ring::RingBuffer;
 use perfr_thread_states::{Slice, ThreadStateManager};
@@ -291,17 +291,13 @@ impl ThreadStateTracer {
 
     /// Drains the rings and returns the state slices that can now be closed.
     pub fn poll(&mut self) -> Vec<Slice> {
-        let flags = SampleFlags {
-            sample_type: sample_bits::TID_TIME_STREAMID_CPU | sample_bits::RAW,
-            regs_user_count: 0,
-        };
         for (ring, kind) in self.rings.iter_mut() {
             let read = ring.drain(|record_kind, record| {
                 if record_kind != record_type::SAMPLE {
                     return;
                 }
-                let Some(sample) = parse_record_sample(record, flags, true) else { return };
-                let Some(raw) = sample.raw_data.as_deref() else { return };
+                let Some(sample) = parse_tracepoint_sample(record) else { return };
+                let raw = sample.raw;
                 let payload = match kind {
                     Kind::SchedSwitch => SchedSwitch::parse_with(raw, &self.switch_layout).and_then(|s| {
                         let prev_in = self.focus.contains_tid(s.prev_tid);

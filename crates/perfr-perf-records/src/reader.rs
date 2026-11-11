@@ -268,6 +268,36 @@ pub fn parse_record_sample_with(
     Some(sample)
 }
 
+/// A sample of a tracepoint event (`TID | TIME | STREAM_ID | CPU | RAW`):
+/// who emitted it, when, and the tracepoint's own fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TracepointSample<'a> {
+    pub pid: u32,
+    pub tid: u32,
+    pub time: u64,
+    pub cpu: u32,
+    /// The payload, lent from the record: `tracepoints` gives it shape.
+    pub raw: &'a [u8],
+}
+
+/// Reads a tracepoint sample where it lies. The scheduler's tracepoints
+/// fire for every context switch and wakeup on the machine, and each record
+/// is looked at before any filter can drop it; `parse_record_sample` copies
+/// the payload into a fresh `Vec` for each one.
+pub fn parse_tracepoint_sample(bytes: &[u8]) -> Option<TracepointSample<'_>> {
+    let mut cursor = Cursor { bytes, offset: 0 };
+    let _header: PerfEventHeader = cursor.read()?;
+    let pid = cursor.read()?;
+    let tid = cursor.read()?;
+    let time = cursor.read()?;
+    let _stream_id: u64 = cursor.read()?;
+    let cpu = cursor.read()?;
+    let _res: u32 = cursor.read()?;
+    let raw_size: u32 = cursor.read()?;
+    let raw = cursor.read_bytes(raw_size as usize)?;
+    Some(TracepointSample { pid, tid, time, cpu, raw })
+}
+
 /// `PERF_RECORD_MISC_SWITCH_OUT` in `perf_event_header::misc`: set when a
 /// context-switch record marks the thread switching OUT (cleared for a
 /// switch IN).

@@ -306,11 +306,13 @@ afterwards to pick up a new pack.
 
 A pack built on a branch is built from that branch. Once another viewer
 change has merged, the pack at the top of `main` no longer matches `main`'s
-sources, and whoever embeds or serves it ships the older viewer. So after a
-merge that touches the viewer or a crate it depends on, rebuild the pack on
-`main` and commit it there. perfr.dev checks the id in `VERSION` against the
-checkout it deploys and refuses a pack that does not match (the release
-workflow builds its own pack from the tag).
+sources, and whoever embeds or serves it ships the older viewer. Rebuild
+with `build_wasm.sh` in the change that edits those sources, and again on
+`main` if another viewer change merged behind the branch. perfr.dev checks
+the id in `VERSION` against the checkout it deploys and refuses a pack that
+does not match (the release workflow builds its own pack from the tag).
+Pull requests run `.github/scripts/check-viewer-pack.py`, which fails on
+that mismatch and when those sources changed without a new wasm.
 
 Without a WASM pack, `/` shows a link to `fallback.html` (HTML/JS last-ditch).
 

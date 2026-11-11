@@ -122,9 +122,14 @@ pub struct CompletedCall {
 
 /// One CPU's ring: the leader event owns it, every other probe of that CPU
 /// writes into it (`PERF_EVENT_IOC_SET_OUTPUT`).
+///
+/// This is the one owner of the attached events: dropping an entry closes
+/// it, and nothing else does. `fds_by_function` only borrows the numbers, to
+/// switch a function's probes on and off. Declared before the ring so the
+/// events that write into it are closed before it is.
 struct CpuRing {
+    attached: Vec<std::os::fd::OwnedFd>,
     ring: RingBuffer,
-    attached_fds: Vec<i32>,
 }
 
 /// One second of a function's entries, for the call-rate limit.
@@ -152,14 +157,6 @@ impl CallRate {
         self.entries += 1;
         if !from_target {
             self.from_others += 1;
-        }
-    }
-}
-
-impl Drop for CpuRing {
-    fn drop(&mut self) {
-        for fd in self.attached_fds.drain(..) {
-            perfr_perf_ring::ring::close_fd(fd);
         }
     }
 }
@@ -451,7 +448,7 @@ impl UprobeSession {
                             self.by_stream.insert(id, (hook.function_id, is_return));
                             self.fds_by_function.entry(hook.function_id).or_default().push(ring.fd());
                             self.ring_of_cpu.insert(cpu, self.rings.len());
-                            self.rings.push(CpuRing { ring, attached_fds: Vec::new() });
+                            self.rings.push(CpuRing { attached: Vec::new(), ring });
                             armed_here += 1;
                         }
                         Err(error) => note(format!("open on cpu {cpu}: {error}")),
@@ -460,14 +457,17 @@ impl UprobeSession {
                         let leader = &self.rings[i].ring;
                         match perfr_perf_ring::ring::open_uprobe_attached(&uprobe, -1, cpu, leader) {
                             Ok((fd, id)) => {
+                                // SAFETY: a descriptor `open_uprobe_attached`
+                                // just opened and handed over; nothing else
+                                // holds it.
+                                let event = unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) };
                                 if let Err(error) = perfr_perf_ring::ring::enable_fd(fd) {
                                     note(format!("enable: {error}"));
-                                    perfr_perf_ring::ring::close_fd(fd);
                                     continue;
                                 }
                                 self.by_stream.insert(id, (hook.function_id, is_return));
                                 self.fds_by_function.entry(hook.function_id).or_default().push(fd);
-                                self.rings[i].attached_fds.push(fd);
+                                self.rings[i].attached.push(event);
                                 armed_here += 1;
                             }
                             Err(error) => note(format!("attach on cpu {cpu}: {error}")),
@@ -503,10 +503,10 @@ impl UprobeSession {
                     let _ = perfr_perf_ring::ring::disable_fd(fd);
                 }
                 None => {
+                    use std::os::fd::AsRawFd;
                     for ring in self.rings.iter_mut() {
-                        ring.attached_fds.retain(|f| *f != fd);
+                        ring.attached.retain(|event| event.as_raw_fd() != fd);
                     }
-                    perfr_perf_ring::ring::close_fd(fd);
                 }
             }
         }
@@ -1544,6 +1544,65 @@ mod tests {
         assert!(session.enforce_call_limit(100_000).is_empty());
         assert!(session.pending.is_empty(), "nothing of another process is paired");
         assert_eq!(session.report().unknown_stream, 0, "and nothing of it is counted as this capture's");
+    }
+
+    /// A pipe whose write end stands in for an attached probe event: the
+    /// read end says when the last descriptor of the write end was closed,
+    /// which a recycled fd number cannot fake.
+    fn stand_in_event() -> (i32, i32) {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) }, 0);
+        (fds[0], fds[1])
+    }
+
+    fn is_closed(read_end: i32) -> bool {
+        let mut byte = 0u8;
+        unsafe { libc::read(read_end, std::ptr::from_mut(&mut byte).cast(), 1) == 0 }
+    }
+
+    #[test]
+    fn an_attached_event_is_closed_with_its_hook_and_the_rest_with_the_session() {
+        // Any ring will do for the CPU's leader; this one needs no privilege.
+        let tid = unsafe { libc::gettid() };
+        let ring = match perfr_perf_ring::ring::open_stack_sample(1_000_000, 1024, tid, -1, 64) {
+            Ok(ring) => ring,
+            Err(error) => {
+                eprintln!("skipping: perf_event_open not permitted here ({error})");
+                return;
+            }
+        };
+        let leader = ring.fd();
+        let (watch_a, event_a) = stand_in_event();
+        let (watch_b, event_b) = stand_in_event();
+        let mut session = empty_session();
+        session.rings.push(cpu_ring(ring, &[event_a, event_b]));
+        session.fds_by_function.insert(1, vec![leader, event_a]);
+        session.fds_by_function.insert(2, vec![event_b]);
+
+        // Removing a hook closes its attached event; the leader owns the
+        // ring the other probes of that CPU write into, and stays.
+        assert!(session.remove_hook(1));
+        assert!(is_closed(watch_a));
+        assert!(!is_closed(watch_b));
+        assert_ne!(unsafe { libc::fcntl(leader, libc::F_GETFD) }, -1, "the leader is open");
+        assert_eq!(session.rings.len(), 1);
+
+        // Auto-unhook only switches probes off: the event stays open...
+        session.rates.insert(2, CallRate { window_start_ns: 0, entries: 10, from_others: 0 });
+        assert_eq!(session.enforce_call_limit(5).len(), 1);
+        assert!(!is_closed(watch_b));
+        // ...until the session goes, which closes whatever is left.
+        drop(session);
+        assert!(is_closed(watch_b));
+        unsafe {
+            libc::close(watch_a);
+            libc::close(watch_b);
+        }
+    }
+
+    fn cpu_ring(ring: RingBuffer, attached: &[i32]) -> CpuRing {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        CpuRing { attached: attached.iter().map(|fd| unsafe { OwnedFd::from_raw_fd(*fd) }).collect(), ring }
     }
 
     const TRAMPOLINE: u64 = 0xffff_ffff_ffdf_ffff;

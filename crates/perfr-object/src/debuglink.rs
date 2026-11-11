@@ -81,12 +81,7 @@ pub fn crc32_file(path: &std::path::Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn testdata_path(name: &str) -> std::path::PathBuf {
-        let dir = std::env::var("PERFR_TESTDATA")
-            .unwrap_or_else(|_| format!("{}/testdata", env!("CARGO_MANIFEST_DIR")));
-        std::path::Path::new(&dir).join(name)
-    }
+    use crate::fixtures::path as testdata_path;
 
     /// The values are zlib's `crc32` of the same files. The PDB is 9.4 MiB,
     /// so it is read in three pieces: the checksum must carry across them.

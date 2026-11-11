@@ -188,16 +188,7 @@ pub fn load_pdb_symbols(bytes: &[u8], image_base: u64) -> Result<Vec<Symbol>, St
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn testdata(name: &str) -> Vec<u8> {
-        let dir = std::env::var("PERFR_TESTDATA").unwrap_or_else(|_| {
-            format!(
-                "{}/testdata",
-                env!("CARGO_MANIFEST_DIR")
-            )
-        });
-        std::fs::read(format!("{dir}/{name}")).expect("testdata should be readable")
-    }
+    use crate::fixtures::read as testdata;
 
     /// TYPED_TEST_P(PdbFileTest, LoadDebugSymbols) asserts 5552 distinct
     /// addresses with a load bias of 0x180000000.

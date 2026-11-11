@@ -180,16 +180,7 @@ pub fn no_ranges_error() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn testdata(name: &str) -> Vec<u8> {
-        let dir = std::env::var("PERFR_TESTDATA").unwrap_or_else(|_| {
-            format!(
-                "{}/testdata",
-                env!("CARGO_MANIFEST_DIR")
-            )
-        });
-        std::fs::read(format!("{dir}/{name}")).expect("testdata should be readable")
-    }
+    use crate::fixtures::read as testdata;
 
     fn ranges(name: &str) -> Vec<(String, u64, u64)> {
         load_unwind_ranges(&testdata(name))

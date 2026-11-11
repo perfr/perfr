@@ -120,16 +120,7 @@ pub fn is_pe(data: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn testdata(name: &str) -> Vec<u8> {
-        let dir = std::env::var("PERFR_TESTDATA").unwrap_or_else(|_| {
-            format!(
-                "{}/testdata",
-                env!("CARGO_MANIFEST_DIR")
-            )
-        });
-        std::fs::read(format!("{dir}/{name}")).expect("testdata should be readable")
-    }
+    use crate::fixtures::read as testdata;
 
     fn parse(name: &str) -> CoffMetadata {
         parse_coff_metadata(&testdata(name), name).expect("should parse")

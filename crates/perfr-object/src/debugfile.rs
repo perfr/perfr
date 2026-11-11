@@ -143,13 +143,7 @@ fn build_id_of(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use crate::parse_elf_metadata;
-
-    fn testdata_dir() -> PathBuf {
-        PathBuf::from(
-            std::env::var("PERFR_TESTDATA")
-                .unwrap_or_else(|_| format!("{}/testdata", env!("CARGO_MANIFEST_DIR"))),
-        )
-    }
+    use crate::fixtures::dir as testdata_dir;
 
     #[test]
     fn a_debuglink_candidate_is_judged_by_build_id_before_crc() {

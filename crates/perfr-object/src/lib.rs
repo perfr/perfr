@@ -24,6 +24,8 @@ mod coff;
 mod coff_symbols;
 mod debugfile;
 mod debuglink;
+#[cfg(test)]
+mod fixtures;
 mod msvc;
 mod pdb_file;
 mod pdb_typename;
@@ -380,17 +382,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The fixtures in `testdata/` are the ones the C++ `ObjectUtils` suite
-    /// was judged against (see the `cpp` branch of the Orbit repository), so both implementations
-    /// read the same bytes. `PERFR_TESTDATA` points elsewhere if set.
-    fn testdata(name: &str) -> Vec<u8> {
-        let dir = std::env::var("PERFR_TESTDATA").unwrap_or_else(|_| {
-            format!("{}/testdata", env!("CARGO_MANIFEST_DIR"))
-        });
-        let path = format!("{dir}/{name}");
-        std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
-    }
+    use crate::fixtures::read as testdata;
 
     fn parse(name: &str) -> ElfMetadata {
         parse_elf_metadata(&testdata(name), name).expect("should parse")

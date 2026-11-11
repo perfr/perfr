@@ -338,16 +338,7 @@ fn has_export_table_for<Nt: ImageNtHeaders>(file: &PeFile<'_, Nt>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn testdata(name: &str) -> Vec<u8> {
-        let dir = std::env::var("PERFR_TESTDATA").unwrap_or_else(|_| {
-            format!(
-                "{}/testdata",
-                env!("CARGO_MANIFEST_DIR")
-            )
-        });
-        std::fs::read(format!("{dir}/{name}")).expect("testdata should be readable")
-    }
+    use crate::fixtures::read as testdata;
 
     fn exports(name: &str) -> Vec<(String, u64, u64)> {
         export_table_symbols(&testdata(name))

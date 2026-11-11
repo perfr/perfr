@@ -515,7 +515,6 @@ impl UprobeSession {
         true
     }
 
-    /// Drains every CPU's ring and returns the calls that can now be closed.
     /// Switches off every function whose entries exceeded `max_calls_per_s`
     /// in its current one-second window, and returns one line per function
     /// for the status. A function called a hundred thousand times a second
@@ -567,6 +566,8 @@ impl UprobeSession {
         std::mem::take(&mut self.entry_hits)
     }
 
+    /// Drains every CPU's ring and returns the calls that can now be closed:
+    /// those older than the newest hit seen minus the reorder delay.
     pub fn poll(&mut self) -> Vec<CompletedCall> {
         self.ingest_rings();
         let horizon = self.newest_seen_ns.saturating_sub(REORDER_DELAY_NS);
@@ -900,19 +901,6 @@ fn online_cpus() -> Vec<i32> {
     // SAFETY: sysconf is always safe to call.
     let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
     (0..n.max(1) as i32).collect()
-}
-
-#[allow(dead_code)]
-fn thread_ids(pid: i32) -> Vec<i32> {
-    let mut tids = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/task")) {
-        for entry in entries.flatten() {
-            if let Some(tid) = entry.file_name().to_str().and_then(|s| s.parse().ok()) {
-                tids.push(tid);
-            }
-        }
-    }
-    tids
 }
 
 #[cfg(test)]

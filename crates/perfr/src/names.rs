@@ -227,7 +227,7 @@ mod tests {
                 fn SetThreadDescription(thread: *mut std::ffi::c_void, description: *const u16) -> i32;
                 fn GetCurrentThread() -> *mut std::ffi::c_void;
             }
-            let name: Vec<u16> = "names test ".encode_utf16().collect();
+            let name: Vec<u16> = "names test\0".encode_utf16().collect();
             unsafe { SetThreadDescription(GetCurrentThread(), name.as_ptr()) };
         }
         assert!(thread_comm(me, current).is_some());

@@ -4,16 +4,19 @@
 
 //! Serve mode: run the WASM live viewer and drive captures from its UI.
 //!
-//! Run with no arguments, the service starts the same live-viewer server the
-//! C++ PerfrService embeds (`perfr-live-server`), prints its URL, and waits.
-//! The viewer's Capture strip lists real processes from `/proc`, and its
-//! Record button starts and stops a real capture through this service --
-//! sampling and system-wide scheduling, the same code paths the file-writing
-//! mode uses.
+//! Run with no arguments, the service starts the live-viewer server
+//! (`perfr-live-server`), prints its URL, and waits. The viewer's Capture
+//! strip lists real processes from `/proc`, and its Record button starts and
+//! stops a real capture through this service: stack sampling, system-wide
+//! scheduling, thread states, manual scopes, hooks and GPU telemetry, read
+//! by one loop on a thread of its own (`capture_loop`). The macOS and
+//! Windows file-writing modes run that same loop headless; the Linux one is
+//! a separate, older pipeline (`main.rs`).
 //!
-//! Captured scheduling slices are pushed into the viewer's ring as
-//! `LiveEvent`s, which is what the timeline renders. The mapping is direct:
-//! a slice is a `SCHEDULING_SLICE` on (pid, tid) with the core in `extra`.
+//! Everything captured is pushed into the viewer's ring as `LiveEvent`s,
+//! which is what the timeline renders. The mapping is direct: a scheduling
+//! slice, for one, is a `SCHEDULING_SLICE` on (pid, tid) with the core in
+//! `extra`.
 
 use crate::functions::FunctionIndex;
 use crate::report::{FrameInfo, SampleRange, SampleStore, StoredSample, TreeMode};
@@ -176,9 +179,6 @@ fn gpu_events(event: &WireEvent) -> Vec<LiveEvent> {
     out
 }
 
-/// Interns function names into the viewer's table, handing back the id the
-/// LiveEvent carries. The viewer renders the name; we only allocate ids.
-
 /// Calls per second past which a hooked function is switched off
 /// mid-capture; 0 means never. The persisted user setting (on at 100k by
 /// default; the viewer's Settings and `PUT /api/settings` change it, and it
@@ -192,6 +192,8 @@ pub fn max_hook_calls_per_s(body: &str, service: &LiveService) -> u64 {
     requested.unwrap_or_else(|| service.settings().effective_max_hook_calls_per_s())
 }
 
+/// Interns function names into the viewer's table, handing back the id the
+/// LiveEvent carries. The viewer renders the name; we only allocate ids.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) struct FrameNames {
     service: Arc<LiveService>,
@@ -772,8 +774,8 @@ const AGENT_NAME_ID_BASE: u32 = 0x8000_0000;
 /// sequential allocator and a scope ring's are separate tables that both
 /// start low, so an id handed out here would be overwritten by an
 /// instrumented process's next name; a hash of the text in the top half
-/// of the id space keeps clear of both, and of the frame ids at 2^21.
-
+/// of the id space keeps clear of both, and of the frame ids from 2^20 and
+/// the scope ids from 2^21.
 fn agent_name_id(service: &LiveService, name: &str) -> u32 {
     let mut h: u32 = 0x811C_9DC5;
     for b in name.bytes() {

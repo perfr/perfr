@@ -2,19 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The all-Rust perfr capture service entry point.
+//! The perfr binary: the capture service and the tools around it.
 //!
-//! This is deliberately a real, runnable capture, not a stub: it opens a
-//! stack-sampling perf ring on a target thread, unwinds every sample with
-//! the framehop-based `perfr-unwind`, interns the callstacks, and writes the
-//! result as a pod capture stream (`perfr-wire`). The whole path -- kernel
-//! bytes to pod bytes -- is Rust with no FFI. It exists so the port has an
-//! actual binary to link, and it is what the static musl build produces.
+//! What runs is decided by the first word of the command line (`cli.rs`):
 //!
-//! Usage:
-//!   perfr [--pid <tid>] [--duration-ms <n>] [--freq-hz <n>] [--out <path>]
-//! With no --pid it samples its own busy worker thread, which needs no root
-//! at perf_event_paranoid <= 1.
+//! - nothing, `serve`, or the legacy `--serve` / `--join` / `--connect`
+//!   flags: the service (`serve.rs`). It serves the viewer and drives
+//!   captures from its Record button -- sampling, scheduling, thread states,
+//!   manual scopes, hooks -- into the live ring.
+//! - `capture`, or legacy flags without `--serve`: a capture written to a
+//!   file. On macOS and Windows this runs the service's capture loop
+//!   headless and writes a `.perfr.zip` bundle. On Linux it is still the
+//!   original prototype (`capture_file_linux` below): one stack-sampling
+//!   ring on one thread, per-CPU context switches, no symbols, written as a
+//!   pod stream (`perfr-wire`) that only `perfr-pod-dump` reads. With no
+//!   `--pid` it samples its own busy worker threads.
+//! - `slice`, `mcp`, `skill`, `update`, `doctor`, `setup`, `version`: the
+//!   other commands.
 
 #[cfg(target_os = "macos")]
 mod macos;

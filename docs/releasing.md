@@ -108,6 +108,10 @@ git tag -a perfr-v0.1.0 -m "Release perfr 0.1.0"
 git push origin refs/tags/perfr-v0.1.0
 ```
 
+Both workflows start with `tools/release/check_tag.sh <tag>` and stop when
+the tag is not `perfr-v` followed by the version in `crates/perfr/Cargo.toml`.
+Run it yourself before pushing a tag made by hand.
+
 ## Check
 
 The `linux`, `macos`, `windows` and `publish` jobs should be green, then

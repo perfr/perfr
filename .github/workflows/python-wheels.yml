@@ -63,6 +63,12 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    # The wheel's version is the one stamped in the tree; a tag that names
+    # another version would publish wheels PyPI can never take back.
+    - name: Check the tag against the stamped version
+      if: github.ref_type == 'tag'
+      run: tools/release/check_tag.sh "$GITHUB_REF_NAME"
+
     - name: Rust toolchain
       run: |
         rustup toolchain install 1.88.0 --profile minimal

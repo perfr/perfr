@@ -11,6 +11,7 @@ set -euo pipefail
 
 ROOT=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 RELEASE=$ROOT/tools/release/release.sh
+CHECK_TAG=$ROOT/tools/release/check_tag.sh
 TEST_NAME=""
 output=""
 status=0
@@ -59,6 +60,7 @@ fi
 
 echo "shellcheck"
 shellcheck "$RELEASE"
+shellcheck "$CHECK_TAG"
 shellcheck "$0"
 
 # shellcheck disable=SC1090,SC1091
@@ -653,5 +655,27 @@ assert_has "tag: perfr-v0.1.1-rc.1"
 run_release "$FRESH" --dry-run --version 0.0.9
 assert_fail
 assert_has "older than the version already in the tree"
+
+it "a tag must name the version stamped in the tree"
+TAGGED=$TMP/tagged
+write_tree "$TAGGED" "0.1.1"
+status=0
+output=$("$CHECK_TAG" perfr-v0.1.1 "$TAGGED" 2>&1) || status=$?
+assert_ok
+# The tag that was pushed by hand onto a tree still stamped 0.1.1.
+status=0
+output=$("$CHECK_TAG" perfr-v0.1.2 "$TAGGED" 2>&1) || status=$?
+assert_fail
+assert_has "does not match the stamped version 0.1.1"
+status=0
+output=$("$CHECK_TAG" v0.1.1 "$TAGGED" 2>&1) || status=$?
+assert_fail
+write_tree "$TAGGED" "0.2.0-rc.1"
+status=0
+output=$("$CHECK_TAG" perfr-v0.2.0-rc.1 "$TAGGED" 2>&1) || status=$?
+assert_ok
+status=0
+output=$("$CHECK_TAG" perfr-v0.2.0 "$TAGGED" 2>&1) || status=$?
+assert_fail
 
 echo "ok"

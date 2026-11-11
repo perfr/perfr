@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Standalone live-viewer service (same HTTP stack PerfrService embeds).
+//! Standalone live-viewer service (the HTTP stack `perfr` embeds).
 //!
-//! Useful when you only want the viewer + demo producer, or to exercise the
-//! ring/stream without building the C++ capture stack.
+//! Useful when you only want the viewer and the demo and bench producers,
+//! or to exercise the ring and the stream with no capture behind them.
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -88,11 +88,10 @@ fn print_help() {
          --http-port PORT              listen port (default {DEFAULT_HTTP_PORT})\n\
          --ring-buffer-bytes N[kKmMgG] in-process ring size (default {DEFAULT_RING_BYTES})\n\
          --spill-path DIR              optional overflow serialize directory\n\
-         --dev-self-profile            dogfood: emit viewer/service scopes into the ring\n\
+         --wire raw|packed|deflate     event batch format on the WebSocket (default packed,\n\
+         \x20                             or PERFR_LIVE_WIRE)\n\
          \n\
-         Open http://127.0.0.1:<port>/ and click Demo, or ?dev=1 / Dev in the\n\
-         transport bar to profile the viewer. PERFR_LIVE_DEV=1 is the same as\n\
-         --dev-self-profile. PerfrService can also register control hooks."
+         Open http://127.0.0.1:<port>/ and click Demo."
     );
 }
 

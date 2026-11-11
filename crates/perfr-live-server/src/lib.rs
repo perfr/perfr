@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! HTTP + WebSocket live viewer, served from the same process as perfr Service.
+//! HTTP + WebSocket live viewer, served from the same process as the perfr service.
 
 pub mod bench;
 pub mod demo;
@@ -72,8 +72,6 @@ pub struct ServerConfig {
     pub bind: SocketAddr,
     pub ring_buffer_bytes: u64,
     pub spill_path: Option<PathBuf>,
-    /// `--dev-self-profile` / `PERFR_LIVE_DEV=1`. Self-profile is on by default;
-    /// the viewer Dev pill / `?dev=0` still toggles via `/api/self/*`.
     /// How event batches go out on the WebSocket. `--wire raw|packed|deflate`
     /// / `PERFR_LIVE_WIRE`; packed by default.
     pub wire: WireFormat,
@@ -310,9 +308,6 @@ pub(crate) struct CachedTimeline {
     pub instances: Vec<crate::http::InstanceJson>,
 }
 
-// bytes crate - need to add dependency. I'll use Vec<u8> + broadcast instead.
-// Actually I used bytes::Bytes without adding bytes dep. Let me use Arc<[u8]>.
-
 /// One request on the agent scope interface: what to do on which track.
 /// Tracks are named by the caller ("agent", "ci", a tool's name) and each
 /// is one thread of the agents process in the viewer. A missing timestamp
@@ -457,9 +452,6 @@ impl LiveService {
         Ok(svc)
     }
 
-    /// Installs the sampling-report aggregator used by
-    /// `GET /api/sampling/report`.
-    #[allow(clippy::type_complexity)]
     /// Installs the capture clock. Without one, `now_ns` is the server's
     /// own monotonic reading (`ingest::now_monotonic_ns`).
     pub fn set_clock(&self, clock: Arc<dyn Fn() -> u64 + Send + Sync>) {
@@ -1170,6 +1162,3 @@ fn default_machine_name() -> String {
 
 #[cfg(test)]
 mod tests;
-
-// Fix broadcast type: I declared Sender<bytes::Bytes> then subscribe returns Receiver<Vec<u8>>.
-// I'll consistently use Vec<u8>.

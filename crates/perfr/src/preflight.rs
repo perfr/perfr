@@ -289,6 +289,14 @@ pub fn plan_for(snap: &Snapshot, uprobes: bool) -> Plan {
                     "kernel uprobes are left as they are: arming them needs CAP_SYS_ADMIN, which is root in all but name. Frida hooks do not need it. For the kernel hook engine, run `perfr setup --uprobes`.".into(),
                 );
             }
+            // Nothing above opens tracefs unless it is the uprobe set, and
+            // the capability that does is not one to hand out unasked.
+            let reads_tracefs = plan.setcap.as_deref().is_some_and(|caps| caps.contains("cap_dac_read_search"));
+            if snap.tracefs.is_none() && !snap.is_root && !reads_tracefs {
+                plan.notes.push(
+                    "tracefs stays unreadable, so thread states stay empty: the tracepoint ids are root-only files and neither a sysctl nor CAP_PERFMON opens them. `perfr doctor` lists what does.".into(),
+                );
+            }
             if !snap.uprobe_pmu {
                 plan.notes.push(
                     "this kernel has no uprobe PMU (CONFIG_UPROBE_EVENTS). Use Frida for hooks; setup cannot add the PMU.".into(),
@@ -405,16 +413,22 @@ fn linux_checks(snap: &Snapshot, checks: &mut Vec<Check>) {
         kptr_bad.then(|| sysctl_fix("kernel.kptr_restrict", 0)),
         kptr_bad,
     ));
-    let trace_bad = snap.tracefs.is_none() && !bypass;
+    // Readability is the whole question. The tracepoint id is a file on a
+    // root-only filesystem and reading it is an ordinary permission check:
+    // CAP_PERFMON governs perf_event_open, not file access. With the id
+    // unread no scheduler tracepoint opens and thread states stay empty,
+    // whatever the process may do with perf.
+    let trace_bad = snap.tracefs.is_none();
     checks.push(row(
         "tracefs",
-        if snap.tracefs.is_some() || bypass { Status::Ok } else { Status::Degraded },
+        if trace_bad { Status::Degraded } else { Status::Ok },
         match &snap.tracefs {
             Some(path) => format!("readable at {path}"),
-            None if bypass => "id file not readable; CAP_PERFMON or root is held, so the kernel still decides".into(),
+            None if snap.is_root => "no sched_switch id in /sys/kernel/tracing or /sys/kernel/debug/tracing; tracefs is not mounted".into(),
+            None if snap.cap_perfmon || snap.cap_sys_admin => "sched_switch id is not readable in /sys/kernel/tracing or /sys/kernel/debug/tracing; CAP_PERFMON does not open a root-only file, so thread states stay empty".into(),
             None => "sched_switch id is not readable in /sys/kernel/tracing or /sys/kernel/debug/tracing".into(),
         },
-        trace_bad.then(|| format!("sudo setcap cap_perfmon+ep {}", snap.binary)),
+        trace_bad.then(|| tracefs_fix(snap)),
         trace_bad,
     ));
     let (uprobe_status, uprobe_detail, uprobe_fix, uprobe_warn) = if !snap.uprobe_pmu {
@@ -643,6 +657,20 @@ fn yes(value: bool) -> &'static str {
     } else {
         "no"
     }
+}
+
+/// What makes the tracepoint ids readable. Root reads them; so does
+/// CAP_DAC_READ_SEARCH, which is why the uprobe set carries it.
+fn tracefs_fix(snap: &Snapshot) -> String {
+    if snap.is_root {
+        return "mount -t tracefs nodev /sys/kernel/tracing".into();
+    }
+    format!(
+        "sudo {binary}\n\
+         or: sudo setcap cap_perfmon,cap_dac_read_search+ep {binary}\n\
+         CAP_DAC_READ_SEARCH reads any file on the machine; `perfr setup` grants it only with --uprobes",
+        binary = snap.binary
+    )
 }
 
 fn sysctl_fix(key: &str, value: i32) -> String {
@@ -1391,6 +1419,48 @@ mod tests {
         for text in [render_warning(&report, false).unwrap(), render_doctor(&report, false, "perfr doctor")] {
             assert!(!text.contains("setcap cap_sys_admin"), "{text}");
         }
+    }
+
+    #[test]
+    fn cap_perfmon_does_not_make_an_unreadable_tracefs_ok() {
+        // What `perfr setup` leaves behind: the sysctls open, CAP_PERFMON on
+        // the binary, and tracefs still root-only.
+        let mut snap = locked();
+        snap.paranoid = Some(0);
+        snap.kptr_restrict = Some(0);
+        snap.ptrace_scope = Some(0);
+        snap.cap_perfmon = true;
+        snap.cap_sys_ptrace = true;
+        let report = evaluate(&snap);
+        let tracefs = report.checks.iter().find(|check| check.label == "tracefs").unwrap();
+        assert_eq!(tracefs.status, Status::Degraded, "{tracefs:?}");
+        assert!(tracefs.warn, "thread states are empty: say so at launch");
+        assert!(tracefs.detail.contains("CAP_PERFMON does not"), "{tracefs:?}");
+        let fix = tracefs.fix.as_deref().unwrap();
+        assert!(fix.contains("cap_dac_read_search"), "{fix}");
+        assert!(fix.contains("reads any file"), "{fix}");
+        // The fix that was printed, and that leaves the file unreadable.
+        for snap in [&snap, &locked()] {
+            let text = render_doctor(&evaluate(snap), false, "perfr doctor");
+            assert!(!text.contains("setcap cap_perfmon+ep"), "{text}");
+        }
+        // Setup grants nothing that opens it, and says so rather than
+        // leaving the row to be found degraded afterwards.
+        let plan = plan_for(&locked(), false);
+        assert!(plan.notes.iter().any(|note| note.contains("tracefs")), "{:?}", plan.notes);
+        assert!(!plan_for(&locked(), true).notes.iter().any(|note| note.contains("tracefs")));
+
+        // Readable is ok whoever reads it; root that cannot read it has no tracefs.
+        snap.tracefs = Some("/sys/kernel/tracing".into());
+        let report = evaluate(&snap);
+        assert_eq!(report.checks.iter().find(|check| check.label == "tracefs").unwrap().status, Status::Ok);
+        snap.tracefs = None;
+        snap.is_root = true;
+        let report = evaluate(&snap);
+        let tracefs = report.checks.iter().find(|check| check.label == "tracefs").unwrap();
+        assert_eq!(tracefs.status, Status::Degraded);
+        assert!(tracefs.fix.as_deref().unwrap().contains("mount -t tracefs"), "{tracefs:?}");
+        assert!(!plan_for(&snap, false).notes.iter().any(|note| note.contains("tracefs")));
     }
 
     #[test]

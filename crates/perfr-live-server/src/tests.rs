@@ -1394,3 +1394,46 @@ fn a_request_that_takes_long_does_not_hold_up_the_others() {
     });
     assert!(waited < SLOW / 3, "the status waited {waited:?} behind two slow requests");
 }
+
+/// How long the capture thread would wait to intern a name while
+/// `/api/capture/targets` is answered over a large capture. Run with
+/// `cargo test --release -p perfr-live-server -- --ignored --nocapture targets_bench`.
+#[test]
+#[ignore]
+fn targets_bench() {
+    let (svc, served) = serve_with(ServerConfig { ring_buffer_bytes: 128 << 20, ..ServerConfig::default() });
+    let events: Vec<LiveEvent> = (0..4_000_000u64)
+        .map(|i| LiveEvent { tid: 1 + (i % 64) as u32, depth: (i % 8) as u8, name_id: (i % 5_000) as u32, ..ev(i) })
+        .collect();
+    for chunk in events.chunks(1 << 16) {
+        svc.push_events(chunk);
+    }
+    for id in 0..5_000u32 {
+        svc.intern_id(id, &format!("scope::number_{id}"));
+    }
+    // Built once; the requests below are served from the cached index.
+    svc.cached_index();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| {
+            let mut longest = std::time::Duration::ZERO;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let asked = std::time::Instant::now();
+                drop(svc.intern.lock());
+                longest = longest.max(asked.elapsed());
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+            longest
+        });
+        let asked = std::time::Instant::now();
+        for _ in 0..5 {
+            assert_eq!(get(&served, "/api/capture/targets?q=number_4").0, 200);
+        }
+        let per_request = asked.elapsed() / 5;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        eprintln!(
+            "targets over 4,000,000 events: {per_request:?} a request; the intern table was held for up to {:?}",
+            waiter.join().unwrap()
+        );
+    });
+}

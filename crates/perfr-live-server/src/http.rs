@@ -589,9 +589,11 @@ fn capture_targets_body(svc: &LiveService, q: TargetsQuery) -> Json<serde_json::
         (None, Some(b)) if b > start => (start, b),
         (None, _) => (start, end),
     };
-    let intern = svc.intern.lock();
+    // The walk first, the names after: see `targets::Scan`.
+    let scan = super::targets::scan(&index, t0, t1);
     let (threads, processes) = svc.capture_names();
-    Json(super::targets::summarize(&index, &intern, &threads, &processes, t0, t1, &q.q))
+    let intern = svc.intern.lock();
+    Json(super::targets::describe(scan, &intern, &threads, &processes, &q.q))
 }
 
 /// `GET /api/capture/export?format=ipc|parquet|bundle|stream&t0=..&t1=..` --

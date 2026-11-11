@@ -3953,20 +3953,27 @@ impl PerfrLiveApp {
         }
     }
 
+    /// The file picker behind Open, More's "Open…" and Ctrl+O. The browser's
+    /// hands the file over later, through `pending_file`; the native one
+    /// blocks until a file is picked and loads it here.
+    fn open_file_dialog(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        chrome_load::start_open_dialog(&self.pending_file);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(pick) = chrome_load::start_open_dialog() {
+            match pick {
+                chrome_load::OpenPick::Trace(load) => self.begin_trace_load(load),
+                chrome_load::OpenPick::Stream(bytes) => self.accept_stream(bytes),
+            }
+        }
+    }
+
     fn transport_open(&mut self, ui: &mut Ui) {
         if pill(ui, "Open", false)
             .on_hover_text("Open a saved capture (.perfr.zip, .perfr.stream), a Chrome trace (.json / .json.gz) or a Perfetto trace (.pftrace / .pb) — or drop the file on the page")
             .clicked()
         {
-            #[cfg(target_arch = "wasm32")]
-            chrome_load::start_open_dialog(&self.pending_file);
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(pick) = chrome_load::start_open_dialog() {
-                match pick {
-                    chrome_load::OpenPick::Trace(load) => self.begin_trace_load(load),
-                    chrome_load::OpenPick::Stream(bytes) => self.accept_stream(bytes),
-                }
-            }
+            self.open_file_dialog();
         }
     }
 
@@ -4002,15 +4009,7 @@ impl PerfrLiveApp {
             .on_hover_text("Open a saved capture (.perfr.zip, .perfr.stream), a Chrome trace (.json / .json.gz) or a Perfetto trace (.pftrace / .pb) — or drop the file on the page")
             .clicked()
         {
-            #[cfg(target_arch = "wasm32")]
-            chrome_load::start_open_dialog(&self.pending_file);
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(pick) = chrome_load::start_open_dialog() {
-                match pick {
-                    chrome_load::OpenPick::Trace(load) => self.begin_trace_load(load),
-                    chrome_load::OpenPick::Stream(bytes) => self.accept_stream(bytes),
-                }
-            }
+            self.open_file_dialog();
             ui.close();
         }
         if ui
@@ -7388,15 +7387,7 @@ impl PerfrLiveApp {
             self.needs_repaint = true;
         }
         if !self.in_self_pane && ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(Key::O)) {
-            #[cfg(target_arch = "wasm32")]
-            chrome_load::start_open_dialog(&self.pending_file);
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(pick) = chrome_load::start_open_dialog() {
-                match pick {
-                    chrome_load::OpenPick::Trace(load) => self.begin_trace_load(load),
-                    chrome_load::OpenPick::Stream(bytes) => self.accept_stream(bytes),
-                }
-            }
+            self.open_file_dialog();
         }
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             // Everything that narrows the view goes at once: the name

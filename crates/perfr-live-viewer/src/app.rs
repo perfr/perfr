@@ -750,8 +750,12 @@ pub struct PerfrLiveApp {
     /// `error` cannot carry these: every status answer clears it, four
     /// times a second, and it is drawn only in the Inspector tab.
     notice: Option<String>,
+    /// The Inspector's Ring bytes and Spill path boxes. They show what the
+    /// service reports until one is typed in; from then until Apply they
+    /// are the reader's, and a status answer leaves them alone.
     ring_bytes: String,
     spill_path: String,
+    config_edited: bool,
     t0: f64,
     t1: f64,
     follow: bool,
@@ -1737,6 +1741,7 @@ impl PerfrLiveApp {
             notice: None,
             ring_bytes: "67108864".into(),
             spill_path: String::new(),
+            config_edited: false,
             t0: 0.0,
             t1: FOLLOW_NS,
             follow: true,
@@ -3235,9 +3240,13 @@ impl PerfrLiveApp {
                 self.selected_pid = default_pid_for_first_list(true, s.hooks, s.capturing, s.target_pid, has_one);
             }
         }
-        self.ring_bytes = s.ring_bytes.to_string();
-        if let Some(p) = &s.spill_path {
-            self.spill_path = p.clone();
+        // Every answer rewrote the two boxes, four times a second: what
+        // was typed in them was gone before Apply could be reached.
+        if !self.config_edited {
+            self.ring_bytes = s.ring_bytes.to_string();
+            if let Some(p) = &s.spill_path {
+                self.spill_path = p.clone();
+            }
         }
         if s.live_end_ns > 0 {
             self.live_edge_ns = self.live_edge_ns.max(s.live_end_ns);
@@ -5398,7 +5407,7 @@ impl PerfrLiveApp {
 
         section(ui, "RING / SPILL");
         ui.label(RichText::new("Ring bytes").size(11.0).color(muted()));
-        ui.add(
+        let ring = ui.add(
             egui::TextEdit::singleline(&mut self.ring_bytes)
                 .desired_width(ui.available_width())
                 .font(FontId::monospace(12.0))
@@ -5406,19 +5415,24 @@ impl PerfrLiveApp {
         );
         ui.add_space(4.0);
         ui.label(RichText::new("Spill path").size(11.0).color(muted()));
-        ui.add(
+        let spill = ui.add(
             egui::TextEdit::singleline(&mut self.spill_path)
                 .desired_width(ui.available_width())
                 .hint_text("/tmp/perfr-spill")
                 .font(FontId::proportional(12.5))
                 .background_color(theme::INPUT()),
         );
+        if ring.changed() || spill.changed() {
+            self.config_edited = true;
+        }
         ui.add_space(6.0);
         if pill(ui, "Apply", false).clicked() {
             match self.ring_bytes.trim().parse::<u64>() {
                 Ok(n) => {
                     self.clear_errors();
                     self.net.apply_config(n, self.spill_path.trim());
+                    // Sent: the boxes go back to showing what the service has.
+                    self.config_edited = false;
                 }
                 Err(_) => self.fail("Ring bytes: expected an integer.".into()),
             }

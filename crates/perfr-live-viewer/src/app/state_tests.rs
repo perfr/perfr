@@ -33,6 +33,8 @@ pub(super) struct Page {
     size: Vec2,
     /// Every piece of text the last frame painted.
     texts: Vec<String>,
+    /// And where each was painted.
+    text_rects: Vec<Rect>,
 }
 
 impl Page {
@@ -52,6 +54,7 @@ impl Page {
             time: 0.0,
             size: Vec2::new(1280.0, 800.0),
             texts: Vec::new(),
+            text_rects: Vec::new(),
         }
     }
 
@@ -86,10 +89,21 @@ impl Page {
         let (app, frame) = (&mut self.app, &mut self.frame);
         let out = self.ctx.run(input, |ctx| eframe::App::update(app, ctx, frame));
         self.texts.clear();
+        self.text_rects.clear();
         for clipped in &out.shapes {
-            collect_texts(&clipped.shape, &mut self.texts);
+            collect_texts(&clipped.shape, &mut self.texts, &mut self.text_rects);
         }
         out
+    }
+
+    /// Where the last frame painted exactly this text.
+    pub fn text_rect(&self, text: &str) -> Option<Rect> {
+        self.texts.iter().position(|t| t == text).map(|i| self.text_rects[i])
+    }
+
+    /// Types into whatever has the keyboard focus.
+    pub fn type_text(&mut self, text: &str) {
+        self.frame(vec![Event::Text(text.into())]);
     }
 
     /// Whether the last frame painted exactly this text somewhere: a menu
@@ -146,10 +160,13 @@ impl Page {
     }
 }
 
-fn collect_texts(shape: &Shape, out: &mut Vec<String>) {
+fn collect_texts(shape: &Shape, texts: &mut Vec<String>, rects: &mut Vec<Rect>) {
     match shape {
-        Shape::Vec(shapes) => shapes.iter().for_each(|s| collect_texts(s, out)),
-        Shape::Text(text) => out.push(text.galley.text().to_string()),
+        Shape::Vec(shapes) => shapes.iter().for_each(|s| collect_texts(s, texts, rects)),
+        Shape::Text(text) => {
+            texts.push(text.galley.text().to_string());
+            rects.push(text.visual_bounding_rect());
+        }
         _ => {}
     }
 }
@@ -910,4 +927,70 @@ fn the_tree_tab_walks_what_is_expanded_in_sorted_order() {
     page.app.tree_sort = (1, false);
     page.frames(2);
     assert_eq!(tree_rows(&page)[0], "Thread 2");
+}
+
+/// A connected page with the Inspector tab open and the service's ring
+/// size in its box.
+fn inspector_page() -> Page {
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.open_right_tab(ReportTab::Inspector);
+    });
+    page.frames(3);
+    assert_eq!(page.app.ring_bytes, "67108864");
+    page
+}
+
+#[test]
+fn a_ring_size_being_typed_survives_the_status_polls() {
+    let mut page = inspector_page();
+    let ring_box = page.text_rect("67108864").expect("the Inspector shows the ring size in its box");
+    page.click(ring_box.center());
+    page.type_text("0");
+    assert_eq!(page.app.ring_bytes.len(), 9, "the click put the caret in the box: {:?}", page.app.ring_bytes);
+    let typed = page.app.ring_bytes.clone();
+    // The service answers four times a second, and pushes its stats over
+    // the socket besides.
+    for _ in 0..8 {
+        page.app.apply_status(service_status(false));
+        page.app.apply_frame(status_frame(false, false));
+        page.frames(15);
+    }
+    assert_eq!(page.app.ring_bytes, typed, "a status answer put the service's value back over what was typed");
+}
+
+#[test]
+fn a_spill_path_being_typed_survives_the_status_polls() {
+    let mut page = inspector_page();
+    let hint = page.text_rect("/tmp/perfr-spill").expect("the empty spill path box shows its hint");
+    page.click(hint.center());
+    page.type_text("/data/spill");
+    assert_eq!(page.app.spill_path, "/data/spill");
+    page.app.apply_status(StatusJson { spill_path: Some("/var/old".into()), ..service_status(false) });
+    page.frames(2);
+    assert_eq!(page.app.spill_path, "/data/spill");
+}
+
+#[test]
+fn the_ring_and_spill_boxes_follow_the_service_until_they_are_edited_and_again_after_apply() {
+    let mut page = inspector_page();
+    // Untouched, the boxes show what the service reports.
+    page.app.apply_status(StatusJson { ring_bytes: 1 << 20, spill_path: Some("/var/spill".into()), ..service_status(false) });
+    page.frames(2);
+    assert_eq!((page.app.ring_bytes.as_str(), page.app.spill_path.as_str()), ("1048576", "/var/spill"));
+
+    let ring_box = page.text_rect("1048576").expect("the ring size");
+    page.click(ring_box.center());
+    page.type_text("0");
+    let typed = page.app.ring_bytes.clone();
+    page.app.apply_status(StatusJson { ring_bytes: 1 << 20, ..service_status(false) });
+    page.frames(2);
+    assert_eq!(page.app.ring_bytes, typed);
+
+    // Apply sends it; from then on the box shows what the service made of it.
+    let apply = page.rect_of("Apply").expect("the Inspector has Apply");
+    page.click(apply.center());
+    page.app.apply_status(StatusJson { ring_bytes: 1 << 24, ..service_status(false) });
+    page.frames(2);
+    assert_eq!(page.app.ring_bytes, "16777216");
 }

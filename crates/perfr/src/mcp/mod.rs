@@ -1050,6 +1050,95 @@ mod tests {
     }
 
     #[test]
+    fn a_story_edit_that_leaves_the_story_invalid_is_undone() {
+        let url = spawn_service(Arc::new(Mutex::new(Vec::new())));
+        let mcp = mcp(&url);
+        let step = |id: &str, duration_ms: u32| {
+            json!({"id": id, "kind": "evidence", "title": id, "body": "", "duration_ms": duration_ms,
+                   "view": { "fit": "content", "focused": [{ "kind": "scheduler" }] }})
+        };
+        let callout = |id: &str, time_frac: f64| {
+            json!({"kind": "callout", "id": id, "text": "here",
+                   "anchor": { "time_frac": time_frac, "track": { "kind": "scheduler" }, "y": 0.2 }})
+        };
+        // Every tool that needs a story says which tools make one.
+        for (name, args) in [
+            ("perfr_story_get", json!({})),
+            ("perfr_story_add_step", json!({"step": step("a", 1000)})),
+            ("perfr_story_update_step", json!({"id": "a", "title": "t"})),
+            ("perfr_story_remove_step", json!({"id": "a"})),
+            ("perfr_story_set_view", json!({"id": "a", "view": {"fit": "content"}})),
+            ("perfr_story_add_overlay", json!({"step_id": "a", "overlay": callout("n", 0.5)})),
+            ("perfr_story_remove_overlay", json!({"step_id": "a", "overlay_id": "n"})),
+            ("perfr_story_reorder", json!({"id": "a", "index": 0})),
+            ("perfr_story_validate", json!({})),
+            ("perfr_story_export", json!({})),
+        ] {
+            let error = refused(&mcp, name, args);
+            assert_eq!(error, "no story loaded; call perfr_story_create or perfr_story_load", "{name}");
+        }
+        tool(&mcp, 1, "perfr_story_create", json!({"title": "t"}));
+        tool(&mcp, 2, "perfr_story_add_step", json!({"step": step("a", 1000)}));
+        tool(&mcp, 3, "perfr_story_add_step", json!({"step": step("b", 2000)}));
+        tool(&mcp, 4, "perfr_story_add_overlay", json!({"step_id": "a", "overlay": callout("n", 0.5)}));
+        let before = tool(&mcp, 5, "perfr_story_get", json!({}))["story"].clone();
+        assert_eq!(before["steps"].as_array().unwrap().len(), 2);
+
+        // Each of these parses, applies, and fails validation: the story is as it was.
+        for (name, args, says) in [
+            ("perfr_story_add_step", json!({"step": step("c", 0)}), "steps[2].duration_ms: expected 1..=120000"),
+            ("perfr_story_add_step", json!({"step": step("c", 0), "index": 0}), "steps[0].duration_ms: expected 1..=120000"),
+            ("perfr_story_update_step", json!({"id": "b", "title": "changed", "duration_ms": 0}), "steps[1].duration_ms: expected 1..=120000"),
+            ("perfr_story_set_view", json!({"id": "a", "view": {"fit": "content", "t0_frac": 2.0}}), "steps[0].view.t0_frac: expected a fraction from 0 to 1"),
+            ("perfr_story_add_overlay", json!({"step_id": "b", "overlay": callout("m", 7.0)}), "steps[1].overlays[0]"),
+        ] {
+            let error = refused(&mcp, name, args);
+            assert!(error.contains(says), "{name}: {error}");
+            assert_eq!(tool(&mcp, 6, "perfr_story_get", json!({}))["story"], before, "{name}");
+        }
+        // An edit the story itself refuses changes nothing either.
+        for (name, args, says) in [
+            ("perfr_story_add_step", json!({"step": step("a", 1000)}), "step id a is already used"),
+            ("perfr_story_update_step", json!({"id": "zz", "title": "t"}), "no step zz"),
+            ("perfr_story_remove_step", json!({"id": "zz"}), "no step zz"),
+            ("perfr_story_reorder", json!({"id": "zz", "index": 0}), "no step zz"),
+        ] {
+            let error = refused(&mcp, name, args);
+            assert_eq!(error, says, "{name}");
+            assert_eq!(tool(&mcp, 7, "perfr_story_get", json!({}))["story"], before, "{name}");
+        }
+
+        // And the edits that are fine go through, each answering with the story.
+        let updated = tool(&mcp, 8, "perfr_story_update_step", json!({"id": "b", "title": "changed", "duration_ms": 500}));
+        assert_eq!(updated["steps"][1]["title"], "changed");
+        assert_eq!(updated["steps"][1]["duration_ms"], 500);
+        let moved = tool(&mcp, 9, "perfr_story_reorder", json!({"id": "b", "index": 0}));
+        assert_eq!(moved["steps"][0]["id"], "b");
+        let bare = tool(&mcp, 10, "perfr_story_remove_overlay", json!({"step_id": "a", "overlay_id": "n"}));
+        assert_eq!(bare["steps"][1]["overlays"], 0);
+        let one = tool(&mcp, 11, "perfr_story_remove_step", json!({"id": "a"}));
+        assert_eq!(one["steps"].as_array().unwrap().len(), 1);
+        assert_eq!(one["story"]["steps"][0]["id"], "b");
+    }
+
+    #[test]
+    fn the_sampling_report_and_the_story_hotspots_page_the_same_rows() {
+        let url = spawn_service(Arc::new(Mutex::new(Vec::new())));
+        let mcp = mcp(&url);
+        let report = tool(&mcp, 1, "perfr_sampling_report", json!({"limit": 1}));
+        let mut hotspots = tool(&mcp, 2, "perfr_story_hotspots", json!({"limit": 1}));
+        assert_eq!(report["supported"], true);
+        assert_eq!(report["limit"], 1);
+        assert_eq!(report["hotspots"].as_array().unwrap().len(), 1);
+        assert!(report["hotspots"][0]["self_percent"].is_number(), "{report}");
+        // The story tool adds a note; the rest is the same reading.
+        assert!(hotspots.as_object_mut().unwrap().remove("note").is_some());
+        assert_eq!(report, hotspots);
+        let keys: Vec<&String> = report.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["hotspots", "limit", "offset", "samples", "supported", "total_functions"]);
+    }
+
+    #[test]
     fn remote_url_and_remote_bind_are_refused() {
         match Mcp::connect("http://10.1.2.3:44766", false, tools::Platform::linux()) {
             Err(error) => assert!(error.contains("not loopback"), "{error}"),

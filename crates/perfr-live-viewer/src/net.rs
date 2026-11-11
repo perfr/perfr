@@ -92,13 +92,16 @@ pub struct ProcessJson {
 }
 
 /// One row of `GET /api/sampling/report`.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct SamplingRow {
     pub name: String,
     /// The binary the function came from. Two static functions can share a
     /// name; the module is what tells them apart.
     pub module: String,
+    #[serde(rename = "self")]
     pub self_count: u64,
+    #[serde(rename = "inclusive")]
     pub inclusive_count: u64,
     pub self_percent: f32,
     pub inclusive_percent: f32,
@@ -107,7 +110,8 @@ pub struct SamplingRow {
 }
 
 /// The whole report for one selection.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct SamplingReport {
     pub samples: u64,
     pub start_ns: u64,
@@ -117,6 +121,7 @@ pub struct SamplingReport {
     pub range_count: u64,
     /// The scope's name for a scope-scoped report; empty otherwise.
     pub scope: String,
+    #[serde(rename = "functions")]
     pub rows: Vec<SamplingRow>,
 }
 
@@ -572,89 +577,11 @@ pub fn urlencoding_lite(s: &str) -> String {
     out
 }
 
-/// Parses the sampling report. Hand-rolled for the same reason the other
-/// responses are: the wasm bundle does not carry a JSON library.
+/// Parses the sampling report. Text that is not a report (an older
+/// service's plain "not provided" body) reads as an empty one: the panel
+/// then shows no rows instead of the previous selection's.
 pub fn parse_sampling_report_json(text: &str) -> Result<SamplingReport, String> {
-    /// The string value following `key`, up to the closing quote. Names and
-    /// module paths here are plain -- the service writes them through serde --
-    /// so an escaped quote is not expected and not handled.
-    fn string_after(hay: &str, key: &str) -> Option<String> {
-        let at = hay.find(key)? + key.len();
-        let rest = &hay[at..];
-        let end = rest.find('"')?;
-        Some(rest[..end].to_string())
-    }
-
-    fn number_after(hay: &str, key: &str) -> Option<f64> {
-        let at = hay.find(key)? + key.len();
-        let rest = &hay[at..];
-        let start = rest.find(|c: char| c.is_ascii_digit() || c == '-')?;
-        let tail = &rest[start..];
-        let end = tail
-            .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
-            .unwrap_or(tail.len());
-        tail[..end].parse().ok()
-    }
-    let mut report = SamplingReport {
-        samples: number_after(text, "\"samples\":").unwrap_or(0.0) as u64,
-        start_ns: number_after(text, "\"start_ns\":").unwrap_or(0.0) as u64,
-        end_ns: number_after(text, "\"end_ns\":").unwrap_or(0.0) as u64,
-        range_count: number_after(text, "\"range_count\":").unwrap_or(0.0) as u64,
-        scope: string_after(text, "\"scope\":\"").unwrap_or_default(),
-        rows: Vec::new(),
-    };
-    // The rows are the objects of the "functions" array. Each is cut out by
-    // brace depth, skipping over strings, so neither the key order (the
-    // service writes keys sorted) nor a brace in a function name matters.
-    let Some(at) = text.find("\"functions\":[") else { return Ok(report) };
-    let list = &text[at + "\"functions\":[".len()..];
-    let mut depth = 0usize;
-    let mut in_str = false;
-    let mut escaped = false;
-    let mut start = None;
-    for (i, ch) in list.char_indices() {
-        if in_str {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_str = true,
-            '{' => {
-                if depth == 0 {
-                    start = Some(i);
-                }
-                depth += 1;
-            }
-            '}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    if let Some(s0) = start.take() {
-                        let row_text = &list[s0..=i];
-                        report.rows.push(SamplingRow {
-                            name: string_after(row_text, "\"name\":\"").unwrap_or_default(),
-                            module: string_after(row_text, "\"module\":\"").unwrap_or_default(),
-                            self_count: number_after(row_text, "\"self\":").unwrap_or(0.0) as u64,
-                            inclusive_count: number_after(row_text, "\"inclusive\":").unwrap_or(0.0) as u64,
-                            self_percent: number_after(row_text, "\"self_percent\":").unwrap_or(0.0) as f32,
-                            inclusive_percent: number_after(row_text, "\"inclusive_percent\":").unwrap_or(0.0)
-                                as f32,
-                            // 48-bit ids: exact through the f64 the number parser hands back.
-                            function_id: number_after(row_text, "\"function_id\":").unwrap_or(0.0) as u64,
-                        });
-                    }
-                }
-            }
-            ']' if depth == 0 => break,
-            _ => {}
-        }
-    }
-    Ok(report)
+    Ok(serde_json::from_str(text).unwrap_or_default())
 }
 
 pub fn parse_symbols_status_json(text: &str) -> Result<SymbolsStatusJson, String> {
@@ -2339,6 +2266,23 @@ mod tests {
         assert_eq!(r.rows[1].name, "work");
         assert_eq!(r.rows[1].self_count, 800);
         assert!((r.rows[1].inclusive_percent - 75.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_name_with_json_escapes_comes_out_as_the_name() {
+        // A C++ user-defined literal, a Windows path, a non-ASCII name the
+        // service chose to escape, and an exponent where a count could be.
+        let json = r#"{"samples":3,"scope":"say \"hi\"","functions":[
+            {"name":"operator\"\" _km(long double)","module":"C:\\bin\\app.exe","self":2,"inclusive":3,"self_percent":66.6,"inclusive_percent":1e2},
+            {"name":"caf\u00e9::brew","module":"","self":1,"inclusive":1,"self_percent":3.33e1,"inclusive_percent":33.3}]}"#;
+        let r = parse_sampling_report_json(json).unwrap();
+        assert_eq!(r.scope, "say \"hi\"");
+        assert_eq!(r.rows.len(), 2, "got {:?}", r.rows);
+        assert_eq!(r.rows[0].name, "operator\"\" _km(long double)");
+        assert_eq!(r.rows[0].module, "C:\\bin\\app.exe");
+        assert!((r.rows[0].inclusive_percent - 100.0).abs() < 0.01);
+        assert_eq!(r.rows[1].name, "café::brew");
+        assert!((r.rows[1].self_percent - 33.3).abs() < 0.01);
     }
 
     #[test]

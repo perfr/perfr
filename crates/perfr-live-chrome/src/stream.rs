@@ -89,6 +89,9 @@ pub struct ChromeStream {
     pub bytes_decoded: u64,
     /// JSON events or Perfetto packets decoded so far (the progress line).
     pub events_seen: u64,
+    /// Bytes of a JSON trace that were given up on: a last value the file
+    /// ends in the middle of, or anything after the closing bracket.
+    pub dropped_tail_bytes: u64,
     error: Option<String>,
 }
 
@@ -107,6 +110,7 @@ impl Default for ChromeStream {
             bytes_in: 0,
             bytes_decoded: 0,
             events_seen: 0,
+            dropped_tail_bytes: 0,
             error: None,
         }
     }
@@ -117,8 +121,10 @@ impl ChromeStream {
         self.error.as_deref()
     }
 
+    /// The input has ended and all of it has been parsed or given up on:
+    /// no later [`Self::pump`] returns anything. Also true after an error.
     pub fn is_done(&self) -> bool {
-        self.phase == Phase::Done && self.pos >= skip_ws(&self.raw, self.pos)
+        self.error.is_some() || (self.eof && self.phase == Phase::Done)
     }
 
     /// Sniffed from the first decoded bytes; `Unknown` until they arrive.
@@ -329,12 +335,30 @@ impl ChromeStream {
         }
         for _ in 0..budget {
             match self.step(ing, &mut out) {
-                Step::NeedBytes | Step::Done => break,
                 Step::Event => {}
+                Step::Done => break,
+                Step::NeedBytes => {
+                    // No more bytes are coming. What is left is a value the
+                    // file ends inside of (the writer crashed or was killed)
+                    // or one the scanner cannot read. Left in the buffer it
+                    // kept the load unfinished for good: the open scopes,
+                    // which are what such a trace is for, were never closed
+                    // and drawn. The Perfetto path drops its own tail.
+                    if self.eof {
+                        self.drop_tail();
+                    }
+                    break;
+                }
             }
         }
         self.compact();
         out
+    }
+
+    fn drop_tail(&mut self) {
+        self.dropped_tail_bytes += self.pending_bytes() as u64;
+        self.pos = self.raw.len();
+        self.phase = Phase::Done;
     }
 
     fn compact(&mut self) {
@@ -394,7 +418,11 @@ impl ChromeStream {
             Phase::ObjectKey => self.step_object_key(),
             Phase::ObjectColon => self.step_object_colon(ing, out),
             Phase::AfterValue => self.step_after_value(),
-            Phase::Done => Step::Done,
+            Phase::Done => {
+                // The document is closed; whatever follows is not part of it.
+                self.drop_tail();
+                Step::Done
+            }
         }
     }
 
@@ -795,4 +823,85 @@ pub fn ingest_collect(bytes: &[u8]) -> Result<(ChromeIngestor, Vec<perfr_live_ev
     let max_end = events.iter().map(|e| e.end_ns()).max().unwrap_or(0).max(seen_end).max(1);
     events.extend(ing.finish(max_end));
     Ok((ing, events))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drive a stream the way the viewer does: push, signal the end, pump,
+    /// and call the load finished when the input is at its end and nothing
+    /// is left to parse. Returns `None` when that never happens.
+    fn load_like_the_viewer(bytes: &[u8]) -> Option<(ChromeIngestor, Vec<perfr_live_event::LiveEvent>)> {
+        let mut stream = ChromeStream::default();
+        let mut ing = ChromeIngestor::default();
+        let mut events = Vec::new();
+        stream.push(bytes);
+        stream.finish_input();
+        for _ in 0..64 {
+            assert_eq!(stream.error(), None);
+            events.extend(stream.pump(&mut ing, 48_000));
+            if stream.pending_bytes() == 0 {
+                let more = stream.pump(&mut ing, 48_000);
+                if more.is_empty() {
+                    events.extend(ing.finish(1));
+                    return Some((ing, events));
+                }
+                events.extend(more);
+            }
+        }
+        None
+    }
+
+    const OPEN_STACK: &str = r#"{"traceEvents":[
+        {"name":"outer","ph":"B","ts":10,"pid":1,"tid":1},
+        {"name":"inner","ph":"B","ts":20,"pid":1,"tid":1},
+        {"name":"mark","ph":"i","ts":30,"pid":1,"tid":1,"args":{"text":"a ] } \" , b"}},
+        {"name":"inner","ph":"E","ts":40,"pid":1,"tid":1},
+        {"name":"last","ph":"B","ts":50,"pid":1,"tid":1}
+    ],"displayTimeUnit":"ms","other":[1,2,{"k":"v"}]}"#;
+
+    #[test]
+    fn a_json_trace_cut_anywhere_still_finishes_and_shows_its_open_scopes() {
+        let bytes = OPEN_STACK.as_bytes();
+        let whole = load_like_the_viewer(bytes).expect("the whole file loads").1.len();
+        assert_eq!(whole, 4, "outer, inner, mark, last");
+        let outer_begins = OPEN_STACK.find(r#"{"name":"inner""#).unwrap();
+        for cut in 0..bytes.len() {
+            let Some((ing, events)) = load_like_the_viewer(&bytes[..cut]) else {
+                panic!("cut at byte {cut}: the load never finishes");
+            };
+            // A process that died mid-write leaves exactly this: the scopes
+            // it had open are what the trace is for.
+            if cut >= outer_begins {
+                assert!(
+                    events.iter().any(|e| ing.intern.get(e.name_id) == Some("outer")),
+                    "cut at byte {cut}: the open scope is missing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bytes_after_the_closing_bracket_do_not_keep_a_load_open() {
+        for tail in ["\n\n", " garbage", "]", "}{", "\0\0\0"] {
+            let text = format!(r#"[{{"name":"a","ph":"i","ts":1,"pid":1,"tid":1}}]{tail}"#);
+            let (_, events) = load_like_the_viewer(text.as_bytes())
+                .unwrap_or_else(|| panic!("tail {tail:?}: the load never finishes"));
+            assert_eq!(events.len(), 1, "tail {tail:?}");
+        }
+    }
+
+    #[test]
+    fn a_value_the_scanner_cannot_read_ends_the_trace_instead_of_hanging_it() {
+        // NaN is not JSON; neither is a single-quoted string.
+        for bad in ["NaN", "'x'"] {
+            let text = format!(
+                r#"{{"traceEvents":[{{"name":"a","ph":"i","ts":1,"pid":1,"tid":1}}],"meta":{bad},"more":1}}"#
+            );
+            let (_, events) = load_like_the_viewer(text.as_bytes())
+                .unwrap_or_else(|| panic!("{bad}: the load never finishes"));
+            assert_eq!(events.len(), 1, "{bad}");
+        }
+    }
 }

@@ -188,7 +188,7 @@ fn a_dead_producer_stalls_only_its_own_ring() {
     let rings = region.rings();
 
     rings.push(0, ScopeEvent { timestamp_ns: 10, ..Default::default() });
-    rings.reserve_for_test(0, 20); // claimed, never published
+    rings.reserve_for_test(0); // claimed, never published
     rings.push(0, ScopeEvent { timestamp_ns: 30, ..Default::default() });
     rings.push(1, ScopeEvent { timestamp_ns: 40, ..Default::default() });
 
@@ -214,7 +214,7 @@ fn a_live_but_stalled_producer_keeps_its_event() {
     let region = Region::new(2, 16);
     let rings = region.rings();
     rings.push(0, ScopeEvent { timestamp_ns: 10, ..Default::default() });
-    rings.reserve_for_test(0, 20);
+    rings.reserve_for_test(0);
 
     let mut cursors = Cursors::for_rings(2);
     let start = 1_000_000_000;
@@ -237,7 +237,7 @@ fn a_live_but_stalled_producer_keeps_its_event() {
 fn a_claim_stuck_past_the_backstop_is_eventually_released() {
     let region = Region::new(2, 16);
     let rings = region.rings();
-    rings.reserve_for_test(0, 50);
+    rings.reserve_for_test(0);
     rings.push(0, ScopeEvent { timestamp_ns: 60, ..Default::default() });
 
     let mut cursors = Cursors::for_rings(2);

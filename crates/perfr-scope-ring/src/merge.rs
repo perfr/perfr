@@ -35,14 +35,14 @@ use crate::ring::{Claimed, Rings};
 #[derive(Clone, Debug, Default)]
 pub struct RingSlice {
     pub events: Vec<ScopeEvent>,
-    /// Claims whose slots were overwritten before they were read.
-    pub dropped: u64,
 }
 
 /// A drain pass over every ring, plus where each cursor now stands.
 #[derive(Debug, Default)]
 pub struct Drain {
     pub slices: Vec<RingSlice>,
+    /// Claims this pass could not read, on any ring: overwritten before the
+    /// reader reached them, or given up by a producer that is gone.
     pub dropped: u64,
 }
 
@@ -254,9 +254,7 @@ pub fn drain_from(
             }
         }
         cursors.read[ring] = read;
-
-
-        out.slices.push(RingSlice { events, dropped: 0 });
+        out.slices.push(RingSlice { events });
     }
     out
 }

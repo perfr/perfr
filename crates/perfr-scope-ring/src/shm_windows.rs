@@ -57,10 +57,6 @@ pub const DEFAULT_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_SLOTS_PER_RING: usize =
     crate::ring::slots_for_budget(DEFAULT_RING_COUNT, DEFAULT_BUDGET_BYTES);
 
-/// Kept for callers that name the Linux directory; on Windows the segments
-/// live under [`segment_directory`].
-pub const SHM_DIR: &str = "/dev/shm";
-
 /// Where this user's segments live: `%LOCALAPPDATA%\perfr\scopes`, falling
 /// back to `%TEMP%\perfr-scopes`. Per user by construction, which is the
 /// same boundary the POSIX module draws with mode 0600: an elevated
@@ -229,7 +225,6 @@ extern "system" {
         bytes_high: u32,
         overlapped: *mut Overlapped,
     ) -> i32;
-    fn GetCurrentProcessorNumber() -> u32;
 }
 
 const PAGE_READONLY: u32 = 0x02;
@@ -352,12 +347,6 @@ impl ScopeRingWriter {
     /// Creates this process's segment at the default budget.
     pub fn create_default() -> io::Result<ScopeRingWriter> {
         ScopeRingWriter::create(DEFAULT_RING_COUNT, DEFAULT_SLOTS_PER_RING)
-    }
-
-    /// Creates this process's segment sized to a total memory budget.
-    pub fn create_with_budget(threads: usize, total_bytes: usize) -> io::Result<ScopeRingWriter> {
-        let rings = crate::ring::ring_count_for_threads(threads);
-        ScopeRingWriter::create(rings, crate::ring::slots_for_budget(rings, total_bytes))
     }
 
     /// Creates (or replaces) this process's segment.
@@ -653,12 +642,6 @@ impl Drop for ScopeRingReader {
 /// one timeline.
 pub fn now_monotonic_ns() -> u64 {
     crate::platform::monotonic_ns()
-}
-
-/// The core this thread is running on.
-pub fn current_cpu() -> usize {
-    // SAFETY: no arguments, cannot fail.
-    unsafe { GetCurrentProcessorNumber() as usize }
 }
 
 #[cfg(test)]

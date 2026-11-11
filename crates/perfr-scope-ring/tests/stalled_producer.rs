@@ -82,7 +82,7 @@ fn a_producer_that_slept_through_a_lap_leaves_the_record_in_its_slot_alone() {
 
     // Claim 0 is handed out and its thread stops before storing a byte. The
     // ring goes round: claim 8 is written, and committed, into the same slot.
-    let stale = rings.reserve_for_test(0, 0);
+    let stale = rings.reserve_for_test(0);
     assert_eq!(stale, 0);
     for n in 1..=SLOTS {
         rings.push(0, stamped(n));
@@ -122,11 +122,11 @@ fn a_producer_that_wakes_while_its_slot_is_being_rewritten_stores_nothing() {
     // with claim 8 has taken the slot and is part way through its record
     // when claim 0 wakes: two threads storing into one slot left it holding
     // bytes of both, committed as claim 8.
-    let stale = rings.reserve_for_test(0, 0);
+    let stale = rings.reserve_for_test(0);
     for n in 1..SLOTS {
         rings.push(0, stamped(n));
     }
-    let lapping = rings.reserve_for_test(0, 0);
+    let lapping = rings.reserve_for_test(0);
     assert_eq!(lapping, SLOTS);
     assert!(rings.take_reserved_for_test(0, lapping, &stamped(lapping)));
 
@@ -146,7 +146,7 @@ fn a_claim_whose_slot_a_stopped_producer_still_holds_is_given_up_and_not_waited_
     rings.publish_read_cursors(&cursors.read);
 
     // Claim 0 has taken its slot and stops part way through its record.
-    let stopped = rings.reserve_for_test(0, 0);
+    let stopped = rings.reserve_for_test(0);
     assert!(rings.take_reserved_for_test(0, stopped, &stamped(stopped)));
     for n in 1..SLOTS {
         rings.push(0, stamped(n));
@@ -187,7 +187,7 @@ fn a_claim_given_up_does_not_stop_the_reader_waiting_for_a_later_one() {
     let rings = region.rings();
     let mut cursors = Cursors::for_rings(1);
 
-    let stopped = rings.reserve_for_test(0, 0);
+    let stopped = rings.reserve_for_test(0);
     assert!(rings.take_reserved_for_test(0, stopped, &stamped(stopped)));
     for n in 1..=SLOTS {
         rings.push(0, stamped(n)); // claim 8 is given up
@@ -197,7 +197,7 @@ fn a_claim_given_up_does_not_stop_the_reader_waiting_for_a_later_one() {
 
     // An ordinary producer, slow between its claim and its record: the
     // reader waits for it as it always did, and gets the record.
-    let slow = rings.reserve_for_test(0, 0);
+    let slow = rings.reserve_for_test(0);
     rings.push(0, stamped(slow + 1));
     assert_eq!(pass(&rings, &mut cursors), (vec![], 0), "claim 9 is still coming");
     assert!(rings.publish_reserved_for_test(0, slow, stamped(slow)));
@@ -211,9 +211,9 @@ fn a_claim_in_flight_since_before_one_was_given_up_is_let_go_with_it() {
     let mut cursors = Cursors::for_rings(1);
 
     // Claim 0 holds its slot; claim 1 has not got as far as taking its own.
-    let stopped = rings.reserve_for_test(0, 0);
+    let stopped = rings.reserve_for_test(0);
     assert!(rings.take_reserved_for_test(0, stopped, &stamped(stopped)));
-    let slow = rings.reserve_for_test(0, 0);
+    let slow = rings.reserve_for_test(0);
     for n in 2..=SLOTS {
         rings.push(0, stamped(n)); // claim 8 is given up
     }
@@ -302,7 +302,7 @@ fn producers_stopping_mid_push_on_a_lapping_ring_never_corrupt_it_or_stall_the_r
                 let mut seq = 0;
                 while !stop.load(Ordering::Relaxed) {
                     let event = of_thread(thread, seq);
-                    let claim = rings.reserve_for_test(0, 0);
+                    let claim = rings.reserve_for_test(0);
                     let written = if seq % 2 == 0 {
                         std::thread::yield_now();
                         rings.publish_reserved_for_test(0, claim, event)

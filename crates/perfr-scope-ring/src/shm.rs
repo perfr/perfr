@@ -269,12 +269,6 @@ impl ScopeRingWriter {
         ScopeRingWriter::create(DEFAULT_RING_COUNT, DEFAULT_SLOTS_PER_RING)
     }
 
-    /// Creates this process's segment sized to a total memory budget.
-    pub fn create_with_budget(threads: usize, total_bytes: usize) -> io::Result<ScopeRingWriter> {
-        let rings = crate::ring::ring_count_for_threads(threads);
-        ScopeRingWriter::create(rings, crate::ring::slots_for_budget(rings, total_bytes))
-    }
-
     /// Creates (or replaces) this process's segment.
     pub fn create(ring_count: usize, slots_per_ring: usize) -> io::Result<ScopeRingWriter> {
         prepare_directory()?;
@@ -675,25 +669,6 @@ fn process_owner(pid: u32) -> Option<u32> {
 pub fn now_monotonic_ns() -> u64 {
     crate::platform::monotonic_ns()
 }
-
-/// The core this thread is running on.
-///
-/// No longer used to pick a ring -- rings follow threads, which is what made
-/// the design portable. Kept because it is the cheapest way to record which
-/// core a scope ran on, should that ever be wanted.
-#[cfg(target_os = "linux")]
-pub fn current_cpu() -> usize {
-    // SAFETY: sched_getcpu takes no arguments and cannot fail meaningfully.
-    let cpu = unsafe { libc::sched_getcpu() };
-    if cpu < 0 {
-        0
-    } else {
-        cpu as usize
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub fn current_cpu() -> usize { 0 }
 
 #[cfg(test)]
 mod tests {

@@ -140,6 +140,42 @@ pub fn callchain_sample(period_ns: u64, stack_dump_size: u16) -> PerfEventAttr {
 
 pub const PERF_TYPE_TRACEPOINT: u32 = 2;
 
+/// The numbers of the CPUs that are online, for opening one event per CPU.
+///
+/// Not `0..count`: CPU numbers have holes wherever a CPU is offline or was
+/// never there (cores 0, 2 and 3 online is a count of 3, and counting opens
+/// 0, 1 and 2: one open fails and CPU 3 is never traced). The kernel lists
+/// them in `/sys/devices/system/cpu/online`; where that cannot be read the
+/// count is all there is, and `fallback_count` is used as before.
+pub fn online_cpus(fallback_count: usize) -> Vec<i32> {
+    std::fs::read_to_string("/sys/devices/system/cpu/online")
+        .ok()
+        .and_then(|list| parse_cpu_list(&list))
+        .unwrap_or_else(|| (0..fallback_count as i32).collect())
+}
+
+/// A kernel cpulist such as `0-3,8-11` or `0,2-3`, as the CPU numbers it
+/// names. `None` for anything else, an empty list included.
+fn parse_cpu_list(list: &str) -> Option<Vec<i32>> {
+    let mut cpus = Vec::new();
+    for part in list.trim().split(',') {
+        let (first, last) = match part.split_once('-') {
+            Some((first, last)) => (first.trim().parse::<i32>().ok()?, last.trim().parse::<i32>().ok()?),
+            None => {
+                let cpu = part.trim().parse::<i32>().ok()?;
+                (cpu, cpu)
+            }
+        };
+        // A machine has thousands of CPUs at most; a range beyond that is
+        // not a list to allocate for.
+        if first < 0 || last < first || last - first > 65_536 {
+            return None;
+        }
+        cpus.extend(first..=last);
+    }
+    (!cpus.is_empty()).then_some(cpus)
+}
+
 /// The numeric id of a kernel tracepoint, from tracefs.
 ///
 /// Two mount points are tried because distributions disagree: the modern one
@@ -355,6 +391,31 @@ mod tests {
         assert_ne!(attr.flags & flag::MMAP, 0);
         assert_ne!(attr.flags & flag::TASK, 0);
         assert_eq!(attr.flags & flag::MMAP_DATA, 0, "data mappings flood the ring and are never read");
+    }
+
+    #[test]
+    fn a_cpu_list_with_holes_names_the_cpus_that_are_there() {
+        assert_eq!(parse_cpu_list("0-3\n"), Some(vec![0, 1, 2, 3]));
+        // CPU 1 offline: three CPUs, and the last of them is number 3.
+        assert_eq!(parse_cpu_list("0,2-3\n"), Some(vec![0, 2, 3]));
+        assert_eq!(parse_cpu_list("0-3,8-11"), Some(vec![0, 1, 2, 3, 8, 9, 10, 11]));
+        assert_eq!(parse_cpu_list("5"), Some(vec![5]));
+    }
+
+    #[test]
+    fn a_cpu_list_that_is_not_one_is_refused() {
+        for bad in ["", "\n", "a-b", "3-1", "0-", "-1", "0,,2", "0-99999999"] {
+            assert_eq!(parse_cpu_list(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_online_cpus_of_this_machine_are_as_many_as_the_kernel_counts() {
+        // SAFETY: sysconf is always safe to call.
+        let count = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as usize;
+        let cpus = online_cpus(count);
+        assert_eq!(cpus.len(), count);
+        assert!(cpus.windows(2).all(|pair| pair[0] < pair[1]), "ascending, no repeats: {cpus:?}");
     }
 
     #[test]

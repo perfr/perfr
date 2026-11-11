@@ -161,13 +161,15 @@ pub struct ThreadStateTracer {
 }
 
 impl ThreadStateTracer {
-    /// Opens the scheduling tracepoints on every CPU.
+    /// Opens the scheduling tracepoints on every CPU in `cpus`, the online
+    /// ones by number.
     ///
     /// Per CPU rather than per task, and system-wide rather than scoped to the
     /// target: a thread's state changes are emitted by whichever core makes
     /// the change, and a wakeup is emitted by the *waking* thread, which
     /// routinely belongs to another process.
-    pub fn open(cpu_count: usize) -> (Option<ThreadStateTracer>, TracepointReport) {
+    pub fn open(cpus: &[i32]) -> (Option<ThreadStateTracer>, TracepointReport) {
+        let cpu_count = cpus.len();
         let mut report = TracepointReport::default();
         let mut rings = Vec::new();
         // Field offsets from each tracepoint's `format`, falling back to the
@@ -207,7 +209,7 @@ impl ThreadStateTracer {
             };
             let mut opened = 0usize;
             let mut reason = String::new();
-            for cpu in 0..cpu_count as i32 {
+            for cpu in cpus.iter().copied() {
                 match perfr_perf_ring::ring::open_tracepoint(id, -1, cpu, 512) {
                     Ok(ring) => match ring.enable() {
                         Ok(()) => {

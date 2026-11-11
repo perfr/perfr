@@ -1437,3 +1437,105 @@ fn targets_bench() {
         );
     });
 }
+
+// -------------------------------------------------- the server-side index ---
+
+/// The index a request is served from, flattened for comparison: per lane,
+/// its events in order.
+fn index_contents(index: &perfr_live_render::TrackIndex) -> (usize, Option<(u64, u64)>, Vec<(String, Vec<LiveEvent>)>) {
+    let lanes = index.lanes().map(|(key, lane)| (format!("{key:?}"), lane.events().to_vec())).collect();
+    (index.event_count(), index.time_bounds(), lanes)
+}
+
+fn index_from_scratch(svc: &LiveService) -> perfr_live_render::TrackIndex {
+    let mut index = perfr_live_render::TrackIndex::default();
+    index.set_extent_floor(svc.capture_start_ns());
+    index.extend(svc.ring().snapshot().1);
+    index
+}
+
+#[test]
+fn the_index_kept_between_requests_is_the_index_built_from_the_ring() {
+    // A ring of 4096 events, so that the sequence below also runs it full.
+    let svc = LiveService::new(ServerConfig { ring_buffer_bytes: (LIVE_EVENT_SIZE * 4096) as u64, ..ServerConfig::default() }).unwrap();
+    let check = |what: &str| {
+        let kept = svc.cached_index();
+        assert_eq!(index_contents(&kept), index_contents(&index_from_scratch(&svc)), "{what}");
+        kept
+    };
+    let batch = |from: u64, n: u64| -> Vec<LiveEvent> {
+        (from..from + n).map(|i| LiveEvent { tid: 1 + (i % 5) as u32, depth: (i % 3) as u8, ..ev(i) }).collect()
+    };
+    check("empty");
+    svc.push_events(&batch(0, 100));
+    check("the first build");
+    // More arrives between requests, a little at a time, as in a capture.
+    let mut next = 100;
+    for step in 0..40 {
+        svc.push_events(&batch(next, 37));
+        next += 37;
+        // An event that starts earlier than what is held: sorted in.
+        svc.push_event(LiveEvent { tid: 2, ..ev(next / 2) });
+        check(&format!("step {step}"));
+    }
+    // A request still reading the index it was given is not disturbed by
+    // the next one growing it.
+    let held = check("held");
+    let held_before = index_contents(&held);
+    svc.push_events(&batch(next, 50));
+    next += 50;
+    check("grown while another request holds the old one");
+    assert_eq!(index_contents(&held), held_before);
+    // The capture's start moves the extent floor.
+    svc.mark_capture_started(7, next * 10);
+    check("a capture started");
+    svc.push_events(&batch(next, 10));
+    next += 10;
+    check("events of the capture");
+    // The ring runs full and evicts: what left the ring leaves the index.
+    for step in 0..6 {
+        svc.push_events(&batch(next, 1500));
+        next += 1500;
+        let kept = check(&format!("full ring, step {step}"));
+        assert!(kept.event_count() <= 4096);
+    }
+    assert_eq!(svc.stats().events_live, 4096);
+    // A new ring, and a cleared capture.
+    svc.clear_ring().unwrap();
+    assert_eq!(check("a new ring").event_count(), 0);
+    svc.push_events(&batch(next, 20));
+    assert_eq!(check("the new ring's events").event_count(), 20);
+    svc.clear_capture().unwrap();
+    svc.push_events(&batch(0, 3));
+    assert_eq!(check("after a clear").event_count(), 3);
+}
+
+/// What the server-side timeline, frame and targets routes pay for their
+/// index during a capture. Run with
+/// `cargo test --release -p perfr-live-server -- --ignored --nocapture index_bench`.
+#[test]
+#[ignore]
+fn index_bench() {
+    let svc = LiveService::new(ServerConfig { ring_buffer_bytes: 256 << 20, ..ServerConfig::default() }).unwrap();
+    let event = |i: u64| LiveEvent { tid: 1 + (i % 64) as u32, depth: (i % 8) as u8, name_id: (i % 5_000) as u32, ..ev(i) };
+    let held: Vec<LiveEvent> = (0..4_000_000u64).map(event).collect();
+    for chunk in held.chunks(1 << 16) {
+        svc.push_events(chunk);
+    }
+    let asked = std::time::Instant::now();
+    svc.cached_index();
+    let first = asked.elapsed();
+    // A request a drain pass: 2000 more events each time.
+    let mut next = 4_000_000u64;
+    let asked = std::time::Instant::now();
+    for _ in 0..20 {
+        let more: Vec<LiveEvent> = (next..next + 2_000).map(event).collect();
+        next += 2_000;
+        svc.push_events(&more);
+        assert_eq!(svc.cached_index().event_count() as u64, next);
+    }
+    eprintln!(
+        "index over 4,000,000 events: {first:?} to build; {:?} a request with 2,000 new events each",
+        asked.elapsed() / 20
+    );
+}

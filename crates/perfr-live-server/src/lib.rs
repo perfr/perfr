@@ -285,6 +285,14 @@ pub struct LiveService {
 struct CachedIndex {
     data_gen: u64,
     index: Arc<TrackIndex>,
+    /// What the index was built from, so that it can be grown rather than
+    /// rebuilt: the ring (by identity; a replaced ring starts its numbers
+    /// over), the ring's oldest event then, the position read up to, and
+    /// the extent floor it was given.
+    ring: std::sync::Weak<EventRing>,
+    tail: u64,
+    cursor: u64,
+    floor: u64,
 }
 
 pub(crate) struct CachedTimeline {
@@ -1032,14 +1040,40 @@ impl LiveService {
                 return Arc::clone(&c.index);
             }
         }
-        let (_, events) = self.ring().snapshot();
+        let ring = self.ring();
+        let floor = self.capture_start_ns();
+        // The generation moves with every push, so during a capture every
+        // request found the index stale, and rebuilding it is a pass over
+        // the whole ring. While the ring only grows, the index built last
+        // time is still right for everything it holds: add what was pushed
+        // since. Once the ring is full each push also evicts, the index
+        // has no way to forget an event, and it is rebuilt as before.
+        if let Some(c) = cache.as_mut() {
+            if std::ptr::eq(c.ring.as_ptr(), Arc::as_ptr(&ring)) && c.floor == floor {
+                let mut appended = Vec::new();
+                if let Some(cursor) = ring.read_appended(c.tail, c.cursor, &mut appended) {
+                    // In place unless a request still reads the old index,
+                    // which then keeps it and this one grows a copy.
+                    Arc::make_mut(&mut c.index).extend(appended);
+                    c.cursor = cursor;
+                    c.data_gen = data;
+                    return Arc::clone(&c.index);
+                }
+            }
+        }
+        let (tail, events) = ring.snapshot();
+        let cursor = tail + events.len() as u64;
         let mut index = TrackIndex::default();
-        index.set_extent_floor(self.capture_start_ns());
+        index.set_extent_floor(floor);
         index.extend(events);
         let index = Arc::new(index);
         *cache = Some(CachedIndex {
             data_gen: data,
             index: Arc::clone(&index),
+            ring: Arc::downgrade(&ring),
+            tail,
+            cursor,
+            floor,
         });
         index
     }

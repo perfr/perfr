@@ -222,6 +222,25 @@ impl EventRing {
         end
     }
 
+    /// Copies the events appended since `cursor` into `out` and returns the
+    /// new cursor, for a reader that keeps what it has read and wants only
+    /// what is new. `None`, with nothing copied, when what it has read is no
+    /// longer what the ring holds before `cursor`: the oldest event is not
+    /// the one at `tail` any more (events were evicted since), or `cursor`
+    /// is not a position of this ring. The reader then starts over from a
+    /// [`Self::snapshot`], whose tail and length give its `tail` and `cursor`.
+    pub fn read_appended(&self, tail: u64, cursor: u64, out: &mut Vec<LiveEvent>) -> Option<u64> {
+        let inner = self.inner.lock();
+        if inner.tail != tail || cursor < tail || cursor > inner.head {
+            return None;
+        }
+        out.reserve((inner.head - cursor) as usize);
+        for seq in cursor..inner.head {
+            out.push(inner.buf[inner.slot(seq)]);
+        }
+        Some(inner.head)
+    }
+
     /// Snapshot of every live event in time/sequence order, plus the tail seq.
     pub fn snapshot(&self) -> (u64, Vec<LiveEvent>) {
         let inner = self.inner.lock();
@@ -371,6 +390,34 @@ mod tests {
         let stats = ring.stats();
         assert_eq!(stats.dropped, 2);
         assert_eq!(stats.events_live, 3);
+    }
+
+    #[test]
+    fn appended_events_are_read_once_until_the_ring_evicts() {
+        let ring = EventRing::with_bytes((LIVE_EVENT_SIZE * 4) as u64, None).unwrap();
+        ring.push_many(&[ev(0), ev(1)]);
+        let (tail, held) = ring.snapshot();
+        let mut cursor = tail + held.len() as u64;
+        let mut fresh = Vec::new();
+        // Nothing new: the cursor stays.
+        assert_eq!(ring.read_appended(tail, cursor, &mut fresh), Some(cursor));
+        assert!(fresh.is_empty());
+        ring.push_many(&[ev(2), ev(3)]);
+        cursor = ring.read_appended(tail, cursor, &mut fresh).unwrap();
+        assert_eq!(fresh.iter().map(|e| e.name_id).collect::<Vec<_>>(), [2, 3]);
+        assert_eq!(cursor, 4);
+        // One more evicts event 0: what the reader holds is no longer the
+        // ring, and it is told so rather than handed the tail.
+        ring.push(ev(4));
+        fresh.clear();
+        assert_eq!(ring.read_appended(tail, cursor, &mut fresh), None);
+        assert!(fresh.is_empty());
+        // A cursor that is not a position of this ring.
+        let (tail, held) = ring.snapshot();
+        assert_eq!((tail, held.len()), (1, 4));
+        assert_eq!(ring.read_appended(tail, 0, &mut fresh), None, "before the tail");
+        assert_eq!(ring.read_appended(tail, 6, &mut fresh), None, "past the head");
+        assert_eq!(ring.read_appended(tail, 5, &mut fresh), Some(5));
     }
 
     #[test]

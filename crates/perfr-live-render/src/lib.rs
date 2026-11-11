@@ -64,12 +64,20 @@ const SPAN_BLOCK: usize = 64;
 /// perfr live scopes are non-overlapping per lane, so `end_ns` is also
 /// non-decreasing and [`Self::first_ending_after`] is a binary search.
 /// Chrome ingest also places 1 ns instants / marks on the same tid as B/E/X
-/// slices; those break the end order. The cache below tracks that so the
-/// column walk can fall back to a duration-aware linear pass.
+/// slices; those break the end order. `ends_sorted` tracks that, and a lane
+/// that lost it searches `latest_end` instead.
 #[derive(Clone, Debug)]
 pub struct Lane {
     events: Vec<LiveEvent>,
     ends_sorted: bool,
+    /// For a lane whose ends are out of order: the latest end among
+    /// `events[..=k]`, for each `k`. Empty while `ends_sorted`.
+    ///
+    /// It never decreases, so the first event ending after `t` is a binary
+    /// search on it. Without it that was a scan from the lane's first
+    /// event, on every listing, pick and raster, and one instant inside a
+    /// slice anywhere in an imported trace's lane was enough to need it.
+    latest_end: Vec<u64>,
     /// Bumped by every insert and every retain that removed something: the
     /// listing cache's way to know a lane is exactly what it listed before.
     version: u64,
@@ -88,6 +96,7 @@ impl Default for Lane {
         Self {
             events: Vec::new(),
             ends_sorted: true,
+            latest_end: Vec::new(),
             version: 0,
             block_span: Vec::new(),
         }
@@ -130,11 +139,25 @@ impl Lane {
             self.events.insert(i, event);
             i
         };
+        let end = self.events[i].end_ns();
         if self.ends_sorted {
-            let end = self.events[i].end_ns();
             let prev_ok = i == 0 || self.events[i - 1].end_ns() <= end;
             let next_ok = i + 1 >= self.events.len() || end <= self.events[i + 1].end_ns();
             self.ends_sorted = prev_ok && next_ok;
+            if !self.ends_sorted {
+                self.rebuild_latest_end();
+            }
+        } else {
+            let before = if i == 0 { 0 } else { self.latest_end[i - 1] };
+            self.latest_end.insert(i, before.max(end));
+            // Every later entry now covers the new event too. They only
+            // grow, so the first that is already as late ends the fix-up.
+            for latest in &mut self.latest_end[i + 1..] {
+                if *latest >= end {
+                    break;
+                }
+                *latest = end;
+            }
         }
         if i + 1 == self.events.len() {
             let span = event_span_ns(&self.events[i]);
@@ -148,6 +171,18 @@ impl Lane {
             // that tail; reading the tail once more keeps this simple.
             self.rebuild_block_span(i / SPAN_BLOCK);
         }
+    }
+
+    fn rebuild_latest_end(&mut self) {
+        self.latest_end.clear();
+        if self.ends_sorted {
+            return;
+        }
+        let mut latest = 0;
+        self.latest_end.extend(self.events.iter().map(|e| {
+            latest = latest.max(e.end_ns());
+            latest
+        }));
     }
 
     fn rebuild_block_span(&mut self, from_block: usize) {
@@ -175,6 +210,7 @@ impl Lane {
             // a lane that was already unsorted may now be sorted -- recheck so
             // it does not stay on the linear fallback forever.
             self.ends_sorted = self.ends_are_sorted();
+            self.rebuild_latest_end();
             self.rebuild_block_span(0);
         }
     }
@@ -184,16 +220,14 @@ impl Lane {
     /// Non-overlapping start-sorted lanes have non-decreasing `end_ns`
     /// (`e[i].end <= e[i+1].start <= e[i+1].end`), so this is `partition_point`
     /// on `end_ns() <= t`. Chrome 1 ns instants on the same lane break that
-    /// order; then this is a linear scan so a long parent that still covers
-    /// `t` is not skipped.
+    /// order; then the search is on the latest end so far, which finds the
+    /// same event: where that first exceeds `t`, it is that event's own
+    /// end. A long parent that still covers `t` is not skipped.
     pub fn first_ending_after(&self, t: u64) -> usize {
         if self.ends_sorted {
             self.events.partition_point(|e| e.end_ns() <= t)
         } else {
-            self.events
-                .iter()
-                .position(|e| e.end_ns() > t)
-                .unwrap_or(self.events.len())
+            self.latest_end.partition_point(|&latest| latest <= t)
         }
     }
 
@@ -330,8 +364,9 @@ impl Lane {
         out: &mut [u32],
         intern: Option<&InternTable>,
     ) {
-        // Mixed 1 ns + long scopes break the end index; the column walk
-        // would be O(width × n). One duration-aware pass stays linear.
+        // Mixed 1 ns + long scopes break the end order; the column walk
+        // would then visit, for each column, every event since the last
+        // long one. One pass over the events in view stays linear in them.
         if !self.ends_sorted || self.events.len() <= width {
             self.rasterize_naive(t0, t1, width, out, intern);
         } else {
@@ -369,8 +404,10 @@ impl Lane {
         }
     }
 
-    /// Walk every event and fill pixels. O(n) in the number of scopes.
-    /// Used only as a bench/correctness baseline — do not ship as the renderer.
+    /// Walk the events in view and fill their pixels: O(events in view).
+    /// [`Self::rasterize`] uses it for a lane with fewer events than pixels
+    /// and for a lane with overlap; the benches use it as the baseline the
+    /// column walk must beat on a dense lane.
     pub fn rasterize_naive(
         &self,
         t0: u64,
@@ -386,7 +423,10 @@ impl Lane {
         }
         let span = (t1 - t0) as f64;
         let mut owner = vec![None; width];
-        for (ei, e) in self.events.iter().enumerate() {
+        let first = self.first_ending_after(t0);
+        let past = self.events.partition_point(|e| e.start_ns < t1).max(first);
+        for (ei, e) in self.events[first..past].iter().enumerate() {
+            let ei = first + ei;
             if e.end_ns() <= t0 || e.start_ns >= t1 {
                 continue;
             }
@@ -1722,6 +1762,10 @@ mod block_span_tests {
             .collect();
         assert_eq!(lane.block_span, expect);
         assert_eq!(lane.ends_sorted, lane.ends_are_sorted());
+        for t in lane.events().iter().flat_map(|e| [e.start_ns, e.end_ns(), e.end_ns().saturating_sub(1)]) {
+            let walked = lane.events().iter().position(|e| e.end_ns() > t).unwrap_or(lane.len());
+            assert_eq!(lane.first_ending_after(t), walked, "first event ending after {t}");
+        }
         assert!(lane.events().windows(2).all(|w| w[0].start_ns <= w[1].start_ns));
     }
 
@@ -1780,6 +1824,99 @@ mod block_span_tests {
                 check_blocks(&lane);
             }
         }
+    }
+
+    /// The walk a lane with overlap is rastered with, over every event of
+    /// the lane, as it was before it was bounded to the window.
+    fn reference_naive(lane: &Lane, t0: u64, t1: u64, width: usize) -> Vec<u32> {
+        let mut out = vec![chrome::TRACK; width];
+        let mut owner: Vec<Option<usize>> = vec![None; width];
+        let span = (t1 - t0) as f64;
+        for (ei, e) in lane.events().iter().enumerate() {
+            if e.end_ns() <= t0 || e.start_ns >= t1 {
+                continue;
+            }
+            let x0 = (((e.start_ns.max(t0) - t0) as f64 / span) * width as f64).floor() as usize;
+            let x1 = (((e.end_ns().min(t1) - t0) as f64 / span) * width as f64).ceil() as usize;
+            for x in x0.min(width)..x1.max(x0 + 1).min(width) {
+                if owner[x].is_none_or(|p| event_span_ns(e) >= event_span_ns(&lane.events()[p])) {
+                    owner[x] = Some(ei);
+                    out[x] = e.color_for(None);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_lane_with_overlap_is_searched_not_scanned_and_draws_the_same() {
+        let mut rng = Rng(7);
+        for _ in 0..30 {
+            let n = 50 + rng.below(1_500) as usize;
+            let mut lane = Lane::default();
+            let mut t = 0u64;
+            let mut late = Vec::new();
+            for k in 0..n {
+                let gap = 1 + rng.below(30);
+                // Slices, the odd long parent, and instants inside them.
+                let dur = match rng.below(12) {
+                    0 => 2_000 + rng.below(20_000),
+                    1 | 2 => 1,
+                    _ => 1 + rng.below(gap),
+                };
+                let e = ev(t, dur, (k % 251) as u32);
+                if rng.below(6) == 0 {
+                    late.push(e);
+                } else {
+                    lane.insert(e);
+                }
+                t += gap;
+            }
+            for e in late {
+                lane.insert(e);
+            }
+            assert!(!lane.ends_are_sorted(), "fixture is only meaningful with overlap");
+            check_blocks(&lane);
+            for width in [1usize, 9, 200, 2_000] {
+                let t0 = rng.below(t);
+                let t1 = t0 + 1 + rng.below(t);
+                let mut got = vec![0u32; width];
+                lane.rasterize(t0, t1, width, &mut got, None);
+                assert_eq!(got, reference_naive(&lane, t0, t1, width), "{n} events, [{t0}, {t1}) at {width} px");
+            }
+            // Thinned until the overlap is gone, the lane is a plain one again.
+            lane.retain(|e| e.duration_ns < 2_000 && e.duration_ns > 1 && e.name_id % 2 == 0);
+            check_blocks(&lane);
+        }
+    }
+
+    /// The search must not depend on how many events lie before the window.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn a_window_at_the_end_of_a_lane_with_overlap_does_not_pay_for_the_lane() {
+        let build = |n: u64| {
+            let mut lane = Lane::default();
+            lane.insert(ev(0, 30, 1));
+            lane.insert(ev(5, 1, 2));
+            for k in 0..n {
+                lane.insert(ev(100 + k * 10, 8, 3));
+            }
+            lane
+        };
+        let time = |lane: &Lane, n: u64| {
+            let (t0, t1) = (100 + (n - 200) * 10, 100 + n * 10);
+            let mut out = vec![0u32; 256];
+            let start = std::time::Instant::now();
+            for _ in 0..200 {
+                lane.rasterize(t0, t1, 256, &mut out, None);
+                std::hint::black_box(lane.first_ending_after(t0));
+            }
+            start.elapsed().as_nanos().max(1)
+        };
+        let (small, large) = (build(20_000), build(2_000_000));
+        let _ = (time(&small, 20_000), time(&large, 2_000_000));
+        let ratio = time(&large, 2_000_000) as f64 / time(&small, 20_000) as f64;
+        assert!(ratio < 10.0, "100x the events before the window cost {ratio:.1}x");
     }
 
     #[test]

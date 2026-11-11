@@ -283,9 +283,52 @@ fn zoomed_out(c: &mut Criterion) {
     group.finish();
 }
 
+/// A lane an imported trace produces: a million scopes, and near its
+/// start one 1 ns instant inside a longer slice, which is enough to put the
+/// lane's ends out of order. The view is a window of 500 scopes at the end.
+fn overlapping_lane(c: &mut Criterion) {
+    let n = 1_000_000usize;
+    let mut idx = dense_lane(n);
+    idx.insert(LiveEvent {
+        start_ns: 13,
+        duration_ns: 1,
+        tid: 1,
+        pid: 1,
+        kind: kind::API_SCOPE,
+        depth: 0,
+        extra: 0,
+        _pad: 0,
+        name_id: 7,
+    });
+    let (key, lane) = idx.lanes().next().unwrap();
+    assert!(!lane.ends_are_sorted());
+    let layout = stacked_layout(&[key], 0.0);
+    let t1 = n as u64 * 10;
+    let t0 = t1 - 5_000;
+    let mut group = c.benchmark_group("overlapping_lane");
+    group.bench_function("collect_tail_window", |b| {
+        b.iter(|| {
+            black_box(collect_instances_layout_opts(
+                &idx,
+                t0,
+                t1,
+                1920.0,
+                &layout,
+                None,
+                CollectOpts::default(),
+            ))
+        });
+    });
+    group.bench_function("rasterize_tail_window", |b| {
+        b.iter(|| black_box(idx.rasterize_pixel(t0, t1, 1920, None)));
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     zoomed_out,
+    overlapping_lane,
     vs_scopes,
     vs_pixels,
     collect_y_cull,

@@ -558,14 +558,10 @@ fn validate_view(path: &str, view: &View) -> Vec<StoryError> {
                     message: "end must be after start".into(),
                 });
             }
-        } else if view.t0_ns.is_none()
-            && view.t1_ns.is_none()
-            && view.t0_frac.is_none()
-            && view.t1_frac.is_none()
-        {
+        } else if let Some(missing) = missing_end(view.t0_ns, view.t1_ns, view.t0_frac, view.t1_frac) {
             errors.push(StoryError {
                 path: path.to_string(),
-                message: "a span view needs bounds".into(),
+                message: format!("a span view needs {missing}"),
             });
         }
         if let (Some(a), Some(b)) = (view.t0_frac, view.t1_frac) {
@@ -586,6 +582,28 @@ fn validate_view(path: &str, view: &View) -> Vec<StoryError> {
         }
     }
     errors
+}
+
+/// What [`missing_end`] says of a range with neither end.
+const BOTH_ENDS: &str = "bounds";
+
+/// Which end of a time range is not given, as the tail of a message. Each
+/// end is nanoseconds or a fraction of the capture, and the player needs
+/// both to place the range: [`View::resolve_window`] fails without one,
+/// and a view then falls back to the capture's first second while a rect
+/// or a highlight is not drawn, neither with a word to the author.
+fn missing_end(
+    t0_ns: Option<u64>,
+    t1_ns: Option<u64>,
+    t0_frac: Option<f64>,
+    t1_frac: Option<f64>,
+) -> Option<&'static str> {
+    match (t0_ns.is_some() || t0_frac.is_some(), t1_ns.is_some() || t1_frac.is_some()) {
+        (true, true) => None,
+        (false, false) => Some(BOTH_ENDS),
+        (false, true) => Some("a start: t0_ns or t0_frac"),
+        (true, false) => Some("an end: t1_ns or t1_frac"),
+    }
 }
 
 fn validate_overlay(path: &str, overlay: &Overlay) -> Vec<StoryError> {
@@ -618,11 +636,16 @@ fn validate_overlay(path: &str, overlay: &Overlay) -> Vec<StoryError> {
                     });
                 }
             }
-            if t0_ns.is_none() && t1_ns.is_none() && t0_frac.is_none() && t1_frac.is_none() {
-                errors.push(StoryError {
+            match missing_end(*t0_ns, *t1_ns, *t0_frac, *t1_frac) {
+                Some(BOTH_ENDS) => errors.push(StoryError {
                     path: path.into(),
                     message: "a rect needs a time range".into(),
-                });
+                }),
+                Some(missing) => errors.push(StoryError {
+                    path: path.into(),
+                    message: format!("a rect needs {missing}"),
+                }),
+                None => {}
             }
             if label.chars().count() > TITLE_MAX {
                 errors.push(StoryError {
@@ -638,11 +661,16 @@ fn validate_overlay(path: &str, overlay: &Overlay) -> Vec<StoryError> {
                 t0_frac,
                 t1_frac,
             } => {
-                if t0_ns.is_none() && t1_ns.is_none() && t0_frac.is_none() && t1_frac.is_none() {
-                    errors.push(StoryError {
+                match missing_end(*t0_ns, *t1_ns, *t0_frac, *t1_frac) {
+                    Some(BOTH_ENDS) => errors.push(StoryError {
                         path: format!("{path}.target"),
                         message: "a time highlight needs a range".into(),
-                    });
+                    }),
+                    Some(missing) => errors.push(StoryError {
+                        path: format!("{path}.target"),
+                        message: format!("a time highlight needs {missing}"),
+                    }),
+                    None => {}
                 }
                 if let (Some(a), Some(b)) = (t0_ns, t1_ns) {
                     if *b <= *a {
@@ -823,6 +851,52 @@ mod tests {
         assert!(paths.iter().any(|p| p.contains("duration")), "{errors:?}");
         assert!(paths.iter().any(|p| p.contains("t1_ns")), "{errors:?}");
         assert!(parse_story(&story.to_json_pretty().unwrap()).is_err());
+    }
+
+    /// The player resolves a range from both of its ends and shows the
+    /// first second of the capture, or nothing, when it cannot. A range
+    /// with one end has to be caught here, where the author is told.
+    #[test]
+    fn a_range_with_only_one_end_is_rejected_wherever_a_range_is_given() {
+        let text = r#"{"format":"perfr.story","version":1,"steps":[{"id":"a","kind":"evidence","view":{"t0_ns":5000000}}]}"#;
+        let err = parse_story(text).unwrap_err();
+        assert_eq!(err, "steps[0].view: a span view needs an end: t1_ns or t1_frac");
+
+        let mut story = Story::default();
+        story.steps.push(step("a"));
+        story.steps[0].view = View { t1_frac: Some(0.5), ..View::default() };
+        story.steps[0].overlays = vec![
+            Overlay::Rect {
+                id: "r".into(),
+                t0_ns: Some(10),
+                t1_ns: None,
+                t0_frac: None,
+                t1_frac: None,
+                tracks: vec![TrackRef::Scheduler],
+                label: String::new(),
+            },
+            Overlay::Highlight {
+                id: "h".into(),
+                target: Highlight::Time { t0_ns: None, t1_ns: None, t0_frac: None, t1_frac: Some(0.9) },
+            },
+        ];
+        let errors: Vec<String> = validate(&story).iter().map(|e| e.to_string()).collect();
+        assert_eq!(
+            errors,
+            vec![
+                "steps[0].view: a span view needs a start: t0_ns or t0_frac",
+                "steps[0].overlays[0]: a rect needs an end: t1_ns or t1_frac",
+                "steps[0].overlays[1].target: a time highlight needs a start: t0_ns or t0_frac",
+            ]
+        );
+
+        // One end in nanoseconds and the other as a fraction is a range.
+        story.steps[0].view = View { t0_ns: Some(10), t1_frac: Some(0.5), ..View::default() };
+        story.steps[0].overlays.clear();
+        assert!(validate(&story).is_empty(), "{:?}", validate(&story));
+        // No end at all keeps the message it had.
+        story.steps[0].view = View { fit: Some(Fit::Span), ..View::default() };
+        assert_eq!(validate(&story)[0].message, "a span view needs bounds");
     }
 
     #[test]

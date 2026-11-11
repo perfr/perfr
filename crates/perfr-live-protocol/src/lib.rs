@@ -300,22 +300,49 @@ fn unzigzag(v: u64) -> i64 {
     ((v >> 1) as i64) ^ -((v & 1) as i64)
 }
 
-/// The packed payload of a batch: see [`WireFormat::Packed`].
-pub fn pack_events(events: &[LiveEvent]) -> Vec<u8> {
-    // Per-batch thread table, in order of first appearance.
+/// The per-batch thread table, in order of first appearance, and each
+/// event's index into it.
+fn thread_table(events: &[LiveEvent]) -> (Vec<(u32, u32)>, Vec<u32>) {
+    // A table this small is searched; a larger one is looked up. Searched
+    // whatever its size, a system-wide batch with thousands of threads
+    // cost a pass over the table for every event.
+    const SEARCHED: usize = 16;
     let mut threads: Vec<(u32, u32)> = Vec::new();
+    let mut by_thread: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
     let mut index: Vec<u32> = Vec::with_capacity(events.len());
+    let mut last: Option<((u32, u32), u32)> = None;
     for e in events {
         let key = (e.pid, e.tid);
-        let i = match threads.iter().position(|t| *t == key) {
-            Some(i) => i,
-            None => {
-                threads.push(key);
-                threads.len() - 1
+        let i = match last {
+            // Events come in runs on one thread.
+            Some((thread, i)) if thread == key => i,
+            _ => {
+                let known = if threads.len() <= SEARCHED {
+                    threads.iter().position(|t| *t == key).map(|i| i as u32)
+                } else {
+                    by_thread.get(&key).copied()
+                };
+                known.unwrap_or_else(|| {
+                    let i = threads.len() as u32;
+                    threads.push(key);
+                    if threads.len() == SEARCHED + 1 {
+                        by_thread.extend(threads.iter().enumerate().map(|(i, t)| (*t, i as u32)));
+                    } else if threads.len() > SEARCHED {
+                        by_thread.insert(key, i);
+                    }
+                    i
+                })
             }
         };
-        index.push(i as u32);
+        last = Some((key, i));
+        index.push(i);
     }
+    (threads, index)
+}
+
+/// The packed payload of a batch: see [`WireFormat::Packed`].
+pub fn pack_events(events: &[LiveEvent]) -> Vec<u8> {
+    let (threads, index) = thread_table(events);
     let mut out = Vec::with_capacity(events.len() * 12 + threads.len() * 8 + 8);
     put_varint(&mut out, events.len() as u64);
     put_varint(&mut out, threads.len() as u64);
@@ -1053,6 +1080,64 @@ mod tests {
         }
         let direct_us = t.elapsed().as_secs_f64() * 1e6 / iters as f64;
         println!("ENCODE_BENCH batch=10000 events encode_event_batch_us={direct_us:.1} (checksum {total2})");
+    }
+
+    /// The thread table of a packed batch, built the plain way: a search of
+    /// the table for every event.
+    fn thread_table_by_search(events: &[LiveEvent]) -> (Vec<(u32, u32)>, Vec<u32>) {
+        let mut threads: Vec<(u32, u32)> = Vec::new();
+        let mut index = Vec::new();
+        for e in events {
+            let key = (e.pid, e.tid);
+            let i = threads.iter().position(|t| *t == key).unwrap_or_else(|| {
+                threads.push(key);
+                threads.len() - 1
+            });
+            index.push(i as u32);
+        }
+        (threads, index)
+    }
+
+    fn many_thread_batch(n: usize, threads: u32) -> Vec<LiveEvent> {
+        let mut seed = 0x9E37_79B9u32;
+        capture_like_batch(n)
+            .into_iter()
+            .map(|mut e| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let thread = (seed >> 8) % threads;
+                e.tid = 10_000 + thread;
+                e.pid = 100 + thread % 37;
+                e
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_thread_table_is_in_order_of_first_appearance_however_many_threads() {
+        for (n, threads) in [(0, 1), (1, 1), (500, 3), (500, 15), (500, 16), (500, 17), (5_000, 900), (5_000, 5_000)] {
+            let events = many_thread_batch(n, threads);
+            assert_eq!(thread_table(&events), thread_table_by_search(&events), "{n} events on {threads} threads");
+            let packed = pack_events(&events);
+            assert_eq!(unpack_events(&packed).unwrap(), events, "{n} events on {threads} threads");
+        }
+    }
+
+    /// Packing a system-wide batch. Run with
+    /// `cargo test --release -p perfr-live-protocol -- --ignored --nocapture pack_bench`.
+    #[test]
+    #[ignore]
+    fn pack_bench() {
+        for threads in [6u32, 64, 4_000] {
+            let events = many_thread_batch(65_536, threads);
+            let asked = std::time::Instant::now();
+            let mut bytes = 0;
+            for _ in 0..20 {
+                bytes += pack_events(&events).len();
+            }
+            eprintln!("packing 65,536 events on {threads} threads: {:?} a batch ({} B)", asked.elapsed() / 20, bytes / 20);
+        }
     }
 
     #[test]

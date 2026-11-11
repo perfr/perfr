@@ -209,11 +209,13 @@ impl EventRing {
 
     /// Copy events with `seq ∈ [from, head)` into `out`. Returns the new cursor
     /// (`head`). If `from` is behind `tail`, the gap is skipped (those events
-    /// were dropped / spilled).
+    /// were dropped / spilled). A `from` past the head (a cursor from a
+    /// ring that has since been replaced) reads nothing; unclamped, the
+    /// count below underflowed.
     pub fn read_from(&self, from: u64, out: &mut Vec<LiveEvent>) -> u64 {
         let inner = self.inner.lock();
-        let start = from.max(inner.tail);
         let end = inner.head;
+        let start = from.max(inner.tail).min(end);
         let n = (end - start) as usize;
         out.reserve(n);
         for seq in start..end {
@@ -390,6 +392,18 @@ mod tests {
         let stats = ring.stats();
         assert_eq!(stats.dropped, 2);
         assert_eq!(stats.events_live, 3);
+    }
+
+    #[test]
+    fn reading_from_past_the_head_reads_nothing() {
+        let ring = EventRing::with_bytes((LIVE_EVENT_SIZE * 4) as u64, None).unwrap();
+        ring.push_many(&[ev(0), ev(1)]);
+        // A cursor kept from a ring that was since replaced by a new one.
+        let mut out = Vec::new();
+        assert_eq!(ring.read_from(7, &mut out), 2, "the cursor comes back to the head");
+        assert!(out.is_empty());
+        assert_eq!(ring.read_from(u64::MAX, &mut out), 2);
+        assert!(out.is_empty());
     }
 
     #[test]

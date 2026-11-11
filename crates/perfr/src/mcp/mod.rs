@@ -104,30 +104,35 @@ fn parse_args(args: &[String]) -> Result<Option<Options>, String> {
     let mut story_dir: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "--help" | "-h" => return Ok(None),
-            "--no-preflight" => {}
-            "--allow-remote" => allow_remote = true,
-            "--url" => {
+        // clap, which sees the arguments first, takes `--flag=value` as well
+        // as `--flag value`; what it let through must not fail here.
+        let (flag, inline) = match args[i].split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value.to_string())),
+            _ => (args[i].as_str(), None),
+        };
+        match (flag, inline) {
+            ("--help" | "-h", None) => return Ok(None),
+            ("--no-preflight", None) => {}
+            ("--allow-remote", None) => allow_remote = true,
+            ("--url", Some(value)) => url = value,
+            ("--url", None) => {
                 i += 1;
                 url = args.get(i).cloned().ok_or("--url needs http://127.0.0.1:44766")?;
             }
-            "--http" => {
+            ("--http", Some(value)) => http = Some(Some(value)),
+            ("--http", None) => {
                 let next = args.get(i + 1).filter(|s| !s.starts_with('-'));
                 if next.is_some() {
                     i += 1;
                 }
                 http = Some(next.cloned());
             }
-            "--story-dir" => {
+            ("--story-dir", Some(value)) => story_dir = Some(value),
+            ("--story-dir", None) => {
                 i += 1;
                 story_dir = Some(args.get(i).cloned().ok_or("--story-dir needs a directory")?);
             }
-            // clap, which sees the arguments first, takes this spelling too.
-            other if other.starts_with("--story-dir=") => {
-                story_dir = Some(other["--story-dir=".len()..].to_string());
-            }
-            other => return Err(format!("unknown argument {other}")),
+            _ => return Err(format!("unknown argument {}", args[i])),
         }
         i += 1;
     }
@@ -263,6 +268,7 @@ fn handle_http(mut stream: TcpStream, mcp: &Mcp) -> Result<(), String> {
     let method = parts.next().unwrap_or("");
     let path = parts.next().unwrap_or("/");
     let mut content_length = 0usize;
+    let mut chunked = false;
     let mut origin = None;
     let mut host = String::new();
     for line in lines {
@@ -270,6 +276,8 @@ fn handle_http(mut stream: TcpStream, mcp: &Mcp) -> Result<(), String> {
         let value = value.trim();
         if name.eq_ignore_ascii_case("content-length") {
             content_length = value.parse().unwrap_or(0);
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            chunked = value.to_ascii_lowercase().contains("chunked");
         } else if name.eq_ignore_ascii_case("origin") {
             origin = Some(value.to_string());
         } else if name.eq_ignore_ascii_case("host") {
@@ -288,14 +296,35 @@ fn handle_http(mut stream: TcpStream, mcp: &Mcp) -> Result<(), String> {
         return write_status(&mut stream, 413, "body larger than 1MB");
     }
     let mut body = buf[header_end + 4..].to_vec();
-    while body.len() < content_length {
-        let n = stream.read(&mut tmp).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
+    if chunked {
+        // A client that streams its request sends no Content-Length. Read
+        // until the last chunk is in; the framing costs a few bytes a chunk,
+        // so the wire may run somewhat past the body limit.
+        body = loop {
+            match tools::decode_chunks(&body, 1024 * 1024) {
+                Ok(Some(decoded)) => break decoded,
+                Ok(None) if body.len() > 2 * 1024 * 1024 => {
+                    return write_status(&mut stream, 413, "body larger than 1MB");
+                }
+                Ok(None) => {}
+                Err(error) => return write_status(&mut stream, 400, &error),
+            }
+            let n = stream.read(&mut tmp).map_err(|e| e.to_string())?;
+            if n == 0 {
+                return write_status(&mut stream, 400, "the chunked body ended early");
+            }
+            body.extend_from_slice(&tmp[..n]);
+        };
+    } else {
+        while body.len() < content_length {
+            let n = stream.read(&mut tmp).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&tmp[..n]);
         }
-        body.extend_from_slice(&tmp[..n]);
+        body.truncate(content_length);
     }
-    body.truncate(content_length);
     if method == "OPTIONS" {
         return write_bytes(
             &mut stream,
@@ -938,6 +967,86 @@ mod tests {
         assert_eq!(report["supported"], false);
         assert!(!report["message"].as_str().unwrap().contains("macOS"), "{report}");
         assert!(report["message"].as_str().unwrap().contains("perfr_function_stats"), "{report}");
+    }
+
+    #[test]
+    fn a_batch_is_answered_as_a_batch() {
+        let url = spawn_service(Arc::new(Mutex::new(Vec::new())));
+        let mcp = mcp(&url);
+        // The 2025-03-26 revision this server offers allows an array. It has
+        // no id of its own, and used to be dropped as a notification: the
+        // client waited for a reply that never came.
+        let replies = mcp
+            .handle(&json!([
+                {"jsonrpc":"2.0","id":1,"method":"ping"},
+                {"jsonrpc":"2.0","method":"notifications/initialized"},
+                {"jsonrpc":"2.0","id":"b","method":"no/such"},
+            ]))
+            .unwrap();
+        let replies = replies.as_array().unwrap();
+        assert_eq!(replies.len(), 2, "{replies:?}");
+        assert_eq!(replies[0]["id"], 1);
+        assert_eq!(replies[0]["result"], json!({}));
+        assert_eq!(replies[1]["id"], "b");
+        assert_eq!(replies[1]["error"]["code"], -32601);
+        // Only notifications: nothing to say.
+        assert!(mcp.handle(&json!([{"jsonrpc":"2.0","method":"notifications/initialized"}])).is_none());
+        // Not a request at all: said so, rather than left unanswered.
+        for junk in [json!([]), json!(7), json!("ping")] {
+            let reply = mcp.handle(&junk).unwrap();
+            assert_eq!(reply["error"]["code"], -32600, "{junk}: {reply}");
+            assert_eq!(reply["id"], Value::Null);
+        }
+        let mixed = mcp.handle(&json!([7, {"jsonrpc":"2.0","id":3,"method":"ping"}])).unwrap();
+        assert_eq!(mixed[0]["error"]["code"], -32600, "{mixed}");
+        assert_eq!(mixed[1]["id"], 3);
+    }
+
+    #[test]
+    fn the_http_transport_reads_a_chunked_body() {
+        let url = spawn_service(Arc::new(Mutex::new(Vec::new())));
+        let mcp = Arc::new(Mcp::connect(&url, false, tools::Platform::linux()).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(stream) = conn else { continue };
+                let mcp = mcp.clone();
+                thread::spawn(move || {
+                    let _ = handle_http(stream, &mcp);
+                });
+            }
+        });
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"ping"}).to_string();
+        let (head, tail) = body.split_at(9);
+        let chunked = format!("{:x}\r\n{head}\r\n{:x};ext=1\r\n{tail}\r\n0\r\n\r\n", head.len(), tail.len());
+        let headers = "Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n";
+        let ok = http_exchange(port, "POST", "/mcp", headers, Some(&chunked));
+        assert!(ok.contains("200 OK"), "{ok}");
+        assert!(ok.contains("\"result\":{}"), "{ok}");
+        // A chunk size that is not one is refused, not waited on.
+        let bad = http_exchange(port, "POST", "/mcp", headers, Some("zz\r\n{}\r\n0\r\n\r\n"));
+        assert!(bad.contains("400"), "{bad}");
+        // A size no body can have must not take the server down with it.
+        let huge = http_exchange(port, "POST", "/mcp", headers, Some("ffffffffffffffff\r\n{}\r\n0\r\n\r\n"));
+        assert!(huge.contains("413") || huge.contains("400"), "{huge}");
+        let again = http_exchange(port, "POST", "/mcp", headers, Some(&chunked));
+        assert!(again.contains("200 OK"), "{again}");
+    }
+
+    #[test]
+    fn every_flag_takes_its_value_after_an_equals_sign_as_clap_does() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // clap sees the arguments first and accepts these; this parser then
+        // called them unknown.
+        let options = parse_args(&args(&["--url=http://127.0.0.1:9", "--http=127.0.0.1:44767", "--story-dir=s"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(options.url, "http://127.0.0.1:9");
+        assert_eq!(options.http, Some(Some("127.0.0.1:44767".to_string())));
+        assert_eq!(options.story_dir.as_deref(), Some("s"));
+        assert!(parse_args(&args(&["--allow-remote=yes"])).is_err());
+        assert!(parse_args(&args(&["--nope=1"])).is_err());
     }
 
     #[test]

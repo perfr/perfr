@@ -1335,7 +1335,18 @@ mod tests {
         }
         let info = &hub.peers.list()[0];
         assert_eq!(info.host, "box-b");
-        assert!(info.offset_ns.abs() < 2_000_000, "two clocks in one process read {} ns apart", info.offset_ns);
+        // A fit is as good as its round trip: the two legs of a probe can
+        // split it anywhere, and the offset is off by up to half of that
+        // imbalance. On an idle machine the round trip is tens of
+        // microseconds; with the first probe taken while every core is
+        // busy it has been ten milliseconds, and the offset five.
+        let slack = info.rtt_ns.max(2_000_000) as i64;
+        assert!(
+            info.offset_ns.abs() < slack,
+            "two clocks in one process read {} ns apart over a round trip of {} ns",
+            info.offset_ns,
+            info.rtt_ns
+        );
         // The remote names a process and pushes events as a capture would.
         remote.set_process_name(1234, "game");
         let name = remote.intern_string("work");
@@ -1352,7 +1363,7 @@ mod tests {
         };
         assert_eq!(events[0].pid, (1 << 24) | 1234);
         let drift = events[0].start_ns as i64 - now as i64;
-        assert!(drift.abs() < 2_000_000, "stamp moved by {drift} ns on one clock");
+        assert!(drift.abs() < slack, "stamp moved by {drift} ns on one clock");
         assert_eq!(hub.names.lock().processes.get(&((1 << 24) | 1234)).map(String::as_str), Some("game @box-b"));
         // A start on the hub reaches the remote, which has no capture hooks
         // here: the demo producer stands in and marks the capture.

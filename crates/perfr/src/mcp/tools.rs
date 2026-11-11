@@ -189,7 +189,7 @@ impl Mcp {
         json!({
             "protocolVersion": version,
             "capabilities": { "tools": { "listChanged": false } },
-            "serverInfo": { "name": "perfr", "version": "0.1.1" },
+            "serverInfo": { "name": "perfr", "version": crate::build_info::package_version() },
             "instructions": INSTRUCTIONS,
         })
     }
@@ -771,7 +771,7 @@ fn unsupported_feature(feature: &str) -> Value {
         "supported": false,
         "feature": feature,
         "message": format!(
-            "{feature} is not available on this platform. macOS records Frida hooks and manual scopes; read those with perfr_function_stats."
+            "{feature} is not recorded here: this platform, or the one the service runs on, has no support for it. Frida hooks and manual scopes are recorded everywhere; read those with perfr_function_stats."
         ),
     })
 }
@@ -795,9 +795,10 @@ perfr profiles a running process. The service must already be running \
 (default http://127.0.0.1:44766). Call perfr_capabilities first. \
 Typical loop: perfr_list_processes, perfr_attach, perfr_search_functions, \
 perfr_arm_hooks, perfr_start_capture, perfr_stop_capture, then \
-perfr_function_stats and, on Linux, perfr_sampling_report and perfr_callstacks. \
-Change the hook set with perfr_unhook and start again; a running capture \
-keeps the hooks it started with. Sampling and the scheduler are Linux-only; \
+perfr_function_stats and, where the platform samples, perfr_sampling_report \
+and perfr_callstacks. Change the hook set with perfr_unhook and start again; \
+a running capture keeps the hooks it started with. Sampling and the scheduler \
+are recorded on Linux, and on Windows when the service runs elevated; \
 on macOS those tools say so and do not invent an empty profile. \
 This server does not edit source, rebuild, kill processes, or delete files. \
 A capture story is a separate JSON document. perfr_story_create or \
@@ -831,7 +832,7 @@ pub fn tool_specs() -> Vec<Value> {
     vec![
         tool(
             "perfr_capabilities",
-            "Read this first. Platform, which profiling features this machine supports, whether perfr is reachable, and the session (attached pid, armed hooks). Sampling, the scheduler, kernel uprobes and auto-profiling are Linux-only. macOS supports Frida hooks and manual scopes. Does not modify anything.",
+            "Read this first. Platform, which profiling features this machine supports, whether perfr is reachable, and the session (attached pid, armed hooks). Sampling and the scheduler are Linux, and Windows when the service runs elevated; kernel uprobes and auto-profiling are Linux-only. macOS supports Frida hooks and manual scopes. Does not modify anything.",
             json!({
                 "type": "object",
                 "properties": {},
@@ -913,8 +914,8 @@ pub fn tool_specs() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "pid": { "type": "integer", "description": "Defaults to the attached process." },
-                    "sampling": { "type": "boolean", "description": "Call-stack samples. Default on for Linux, unsupported on macOS." },
-                    "scheduler": { "type": "boolean", "description": "Context switches and thread states. Default on for Linux, unsupported on macOS." },
+                    "sampling": { "type": "boolean", "description": "Call-stack samples. Default on for Linux and Windows, unsupported on macOS." },
+                    "scheduler": { "type": "boolean", "description": "Context switches and thread states. Default on for Linux and Windows, unsupported on macOS." },
                     "samples_per_second": { "type": "number", "description": "Sample rate. Default 1000. Clamped to 1..10000." },
                     "instrumentation": { "type": "string", "enum": ["frida", "kernel_uprobes"], "description": "Default frida." },
                     "auto_profile": { "type": "boolean", "description": "Let the service pick hooks. Linux only. Default false." }

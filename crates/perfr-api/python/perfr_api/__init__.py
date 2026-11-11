@@ -260,12 +260,15 @@ class scope:
         return super().__new__(cls)
 
     def __init__(self, name=None, async_=False):
-        self.name = b"" if name is None else _name(name)
+        # None, not b"": as a decorator, no name means the function's, and
+        # that is not known until __call__ is handed the function.
+        self.name = None if name is None else _name(name)
         self.handle = 0
         self._async = async_
 
     def __enter__(self):
-        self.handle = start_async(self.name) if self._async else start(self.name)
+        name = self.name or b""
+        self.handle = start_async(name) if self._async else start(name)
         return self
 
     def __exit__(self, *exc):

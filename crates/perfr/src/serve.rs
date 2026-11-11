@@ -1187,6 +1187,21 @@ impl AutoRun {
     }
 }
 
+/// The GPU helper's command line. It is told the target so it can attribute
+/// GPU memory to it; without a target (a capture of the machine alone) it is
+/// told nothing and reports that figure as unknown.
+#[cfg(target_os = "linux")]
+pub(crate) fn gpu_helper_args(interval_ms: Option<u64>, target_pid: i32) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(ms) = interval_ms {
+        args.extend(["--interval-ms".to_string(), ms.to_string()]);
+    }
+    if target_pid > 0 {
+        args.extend(["--pid".to_string(), target_pid.to_string()]);
+    }
+    args
+}
+
 #[cfg(target_os = "linux")]
 fn capture_loop(
     service: Arc<LiveService>,
@@ -1210,7 +1225,7 @@ fn capture_loop(
     // the static service cannot dlopen NVML, so a helper streams pod events
     // in and they are converted to viewer lanes here.
     let mut telemetry = gpu_helper.as_deref().and_then(|path| {
-        match TelemetryHelper::spawn(path, &["--interval-ms".to_string(), "100".to_string()]) {
+        match TelemetryHelper::spawn(path, &gpu_helper_args(Some(100), target_pid)) {
             Ok(helper) => Some(helper),
             Err(error) => {
                 log::warn!("GPU helper {path} did not start: {error}");
@@ -3013,6 +3028,17 @@ mod tests {
         assert_eq!(by_name(gpu_lane::MEMORY_MIB), Some(3072.0));
         assert_eq!(by_name(gpu_lane::POWER_W), Some(220.0));
         assert_eq!(by_name(gpu_lane::TEMPERATURE_C), Some(71.0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_gpu_helper_is_told_which_process_to_attribute_memory_to() {
+        assert_eq!(gpu_helper_args(Some(100), 4321), ["--interval-ms", "100", "--pid", "4321"]);
+        assert_eq!(gpu_helper_args(None, 4321), ["--pid", "4321"]);
+        // A capture with no target names none, and the helper then reports
+        // the process figure as unknown instead of as zero.
+        assert_eq!(gpu_helper_args(Some(100), 0), ["--interval-ms", "100"]);
+        assert!(gpu_helper_args(None, -1).is_empty());
     }
 
     #[test]

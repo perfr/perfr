@@ -695,6 +695,29 @@ impl ShareDraft {
     }
 }
 
+/// The Functions tab's rows as last filtered and sorted, and what they
+/// were computed from. The list is up to 200,000 functions, and a frame
+/// that filtered, sorted and copied it out for the clipboard again cost
+/// tens of milliseconds for a screenful of rows.
+#[derive(Default)]
+struct FunctionsView {
+    key: Option<FunctionsViewKey>,
+    /// Indices into `functions`, in view order.
+    rows: Vec<usize>,
+    /// `report_view` holds these rows (and not another tab's).
+    in_report_view: bool,
+}
+
+#[derive(PartialEq)]
+struct FunctionsViewKey {
+    /// `functions_gen`: the list itself.
+    list: u64,
+    filter: String,
+    sort: (u8, bool),
+    /// The hooked set, when the rows are sorted by it; 0 otherwise.
+    hooked: u64,
+}
+
 pub struct PerfrLiveApp {
     index: TrackIndex,
     intern: InternTable,
@@ -792,6 +815,8 @@ pub struct PerfrLiveApp {
     report_drag: Option<(f32, std::collections::HashSet<u64>)>,
     /// The rows of the report tab drawn this frame, in view order, so Ctrl+C
     /// and the Copy button can lay the selection (or all of it) out as text.
+    /// Written through `set_report_view`, which is how the Functions tab
+    /// knows its own rows are no longer the ones held.
     report_view: crate::report_copy::ReportView,
     /// Characters the last report copy put on the clipboard, for the
     /// `report_copied` readout the harness asserts on.
@@ -949,7 +974,9 @@ pub struct PerfrLiveApp {
     /// Set when the selection was made on one thread's sample bar.
     /// Which of the four report views is showing.
     report_tab: ReportTab,
-    tree: Option<crate::net::SamplingTree>,
+    /// Shared, not owned: the tree tabs and the flame graph each take a
+    /// handle for the frame they draw, where they used to copy every node.
+    tree: Option<Arc<crate::net::SamplingTree>>,
     /// Expanded tree nodes, keyed by their path of child indices. Kept per
     /// tab so switching top-down/bottom-up does not carry one view's
     /// expansion into the other's very different shape.
@@ -1105,6 +1132,9 @@ pub struct PerfrLiveApp {
     /// Every function the service indexed for `functions_pid`, for the
     /// Functions view.
     functions: Vec<FunctionHit>,
+    /// Bumped whenever `functions` changes.
+    functions_gen: u64,
+    functions_view: FunctionsView,
     functions_pid: Option<u32>,
     /// How many functions the service has for `functions_pid`; more than
     /// `functions.len()` when the list was capped and the rest is reached
@@ -1866,6 +1896,8 @@ impl PerfrLiveApp {
             symbols: SymbolsStatusJson::default(),
             symbols_started_s: 0.0,
             functions: Vec::new(),
+            functions_gen: 0,
+            functions_view: FunctionsView::default(),
             functions_pid: None,
             functions_total: 0,
             functions_server_query: String::new(),
@@ -3408,8 +3440,8 @@ impl PerfrLiveApp {
         if let Some(list) = inbox.function_list {
             if self.selected_pid == Some(list.pid) {
                 self.functions_pid = Some(list.pid);
-                self.functions_total = list.total.max(list.functions.len());
-                self.functions = list.functions;
+                let total = list.total.max(list.functions.len());
+                self.set_functions(list.functions, total);
                 self.functions_requested = false;
                 self.functions_server_query.clear();
             }
@@ -3419,8 +3451,7 @@ impl PerfrLiveApp {
         // other row.
         if let Some(hits) = inbox.function_hits {
             if Some(hits.pid) == self.functions_pid {
-                let known: HashSet<u64> = self.functions.iter().map(|f| f.function_id).collect();
-                self.functions.extend(hits.functions.into_iter().filter(|h| !known.contains(&h.function_id)));
+                self.add_functions(hits.functions);
             }
         }
         for (generation, result) in inbox.preset_functions {
@@ -3509,6 +3540,27 @@ impl PerfrLiveApp {
         }
     }
 
+    /// The function list of `functions_pid`, as the service sent it.
+    fn set_functions(&mut self, functions: Vec<FunctionHit>, total: usize) {
+        self.functions_total = total;
+        self.functions = functions;
+        self.functions_gen += 1;
+    }
+
+    /// Another report tab's rows are what Copy takes now.
+    fn set_report_view(&mut self, view: crate::report_copy::ReportView) {
+        self.report_view = view;
+        self.functions_view.in_report_view = false;
+    }
+
+    /// Functions the service's search found: the ones the list does not
+    /// have join it.
+    fn add_functions(&mut self, hits: Vec<FunctionHit>) {
+        let known: HashSet<u64> = self.functions.iter().map(|f| f.function_id).collect();
+        self.functions.extend(hits.into_iter().filter(|h| !known.contains(&h.function_id)));
+        self.functions_gen += 1;
+    }
+
     /// The service's answers to `request_reports`.
     fn apply_service_reports(
         &mut self,
@@ -3527,7 +3579,7 @@ impl PerfrLiveApp {
             // Open along the hot path, the way C++ perfr's tree arrives:
             // every node over the slider's share of the samples.
             self.tree_expanded = expandable_paths_over(&t.roots, self.tree_expand_threshold);
-            self.tree = Some(t);
+            self.tree = Some(Arc::new(t));
             self.flame_zoom.clear();
         }
     }
@@ -4975,14 +5027,21 @@ impl PerfrLiveApp {
             self.functions_server_query = filter.clone();
             self.net.search_functions(pid, &filter, 500);
         }
-        let mut rows: Vec<usize> = self
-            .functions
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| filter.is_empty() || contains_ci(&f.name, &filter) || contains_ci(&f.module, &filter))
-            .map(|(i, _)| i)
-            .collect();
-        {
+        let key = FunctionsViewKey {
+            list: self.functions_gen,
+            filter,
+            sort: self.functions_sort,
+            hooked: if self.functions_sort.0 == 0 { hooked_fingerprint(&self.selected_hooks) } else { 0 },
+        };
+        if self.functions_view.key.as_ref() != Some(&key) {
+            let filter = &key.filter;
+            let mut rows: Vec<usize> = self
+                .functions
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| filter.is_empty() || contains_ci(&f.name, filter) || contains_ci(&f.module, filter))
+                .map(|(i, _)| i)
+                .collect();
             let (sort_col, sort_desc) = self.functions_sort;
             let hooked_ids: HashSet<u64> = self.selected_hooks.iter().map(|h| h.function_id).collect();
             let functions = &self.functions;
@@ -5002,17 +5061,27 @@ impl PerfrLiveApp {
                     if sort_desc { ord.reverse() } else { ord }
                 });
             }
+            self.functions_view = FunctionsView { key: Some(key), rows, in_report_view: false };
         }
         // Record the rows for Ctrl+C / Copy, in this on-screen order.
-        {
+        if !self.functions_view.in_report_view {
             let mut view = crate::report_copy::ReportView::new(
                 &["function", "size", "module"], &[false, true, false]);
-            for &i in &rows {
+            for &i in &self.functions_view.rows {
                 let f = &self.functions[i];
                 view.push(f.function_id, vec![f.name.clone(), f.size.to_string(), f.module.clone()]);
             }
             self.report_view = view;
+            self.functions_view.in_report_view = true;
         }
+        // Out of `self` while the rows are drawn (they need `&mut self`),
+        // and back at the end.
+        let rows = std::mem::take(&mut self.functions_view.rows);
+        self.function_rows_table(ui, pid, font, &rows);
+        self.functions_view.rows = rows;
+    }
+
+    fn function_rows_table(&mut self, ui: &mut Ui, pid: u32, font: f32, rows: &[usize]) {
         const MAX_ROWS: usize = 500;
         let capped = !self.functions_show_all && rows.len() > MAX_ROWS;
         ui.horizontal(|ui| {
@@ -5265,6 +5334,7 @@ impl PerfrLiveApp {
                     ..Default::default()
                 };
                 self.functions.clear();
+                self.functions_gen += 1;
                 self.functions_pid = None;
                 self.net.load_symbols(pid);
             }
@@ -7975,7 +8045,7 @@ impl PerfrLiveApp {
         self.sampling = Some(crate::local_report::flat_report(&self.index, &self.intern, &ranges, &scope));
         let tree = crate::local_report::call_tree(&self.index, &self.intern, &ranges, self.report_tab.mode());
         self.tree_expanded = expandable_paths_over(&tree.roots, self.tree_expand_threshold);
-        self.tree = Some(tree);
+        self.tree = Some(Arc::new(tree));
         self.needs_repaint = true;
         self.settle_frames = self.settle_frames.max(3);
     }
@@ -8555,7 +8625,7 @@ impl PerfrLiveApp {
                     r.module.clone(),
                 ]);
             }
-            self.report_view = view;
+            self.set_report_view(view);
         }
         // Laid out by hand, like the Functions view: only the rows inside
         // the clip rect become widgets. The egui grid of 200 rows cost
@@ -9404,9 +9474,9 @@ impl PerfrLiveApp {
                 ui.end_row();
                 // Explicit stack rather than recursion: the borrow of the
                 // expansion set has to end before the next row is drawn.
-                let mut stack: Vec<(crate::net::TreeNodeJson, usize, String)> =
+                let mut stack: Vec<(&crate::net::TreeNodeJson, usize, String)> =
                     sorted_tree_indices(&tree.roots, self.tree_sort, &hooked_ids).into_iter().rev()
-                        .map(|i| (tree.roots[i].clone(), 0usize, i.to_string())).collect();
+                        .map(|i| (&tree.roots[i], 0usize, i.to_string())).collect();
                 let mut drawn = 0usize;
                 let filter = self.report_filter.trim().to_lowercase();
                 while let Some((node, depth, path)) = stack.pop() {
@@ -9415,7 +9485,7 @@ impl PerfrLiveApp {
                     }
                     // With a filter, only the paths to matching nodes are
                     // drawn, and they are drawn open.
-                    if !filter.is_empty() && !tree_node_matches(&node, &filter) {
+                    if !filter.is_empty() && !tree_node_matches(node, &filter) {
                         continue;
                     }
                     drawn += 1;
@@ -9513,7 +9583,7 @@ impl PerfrLiveApp {
 
                     if expanded {
                         for i in sorted_tree_indices(&node.children, self.tree_sort, &hooked_ids).into_iter().rev() {
-                            stack.push((node.children[i].clone(), depth + 1, format!("{path}/{i}")));
+                            stack.push((&node.children[i], depth + 1, format!("{path}/{i}")));
                         }
                     }
                 }
@@ -9532,7 +9602,7 @@ impl PerfrLiveApp {
                     module,
                 ]);
             }
-            self.report_view = view;
+            self.set_report_view(view);
         }
         self.select_grid_rows(ui, area, &geom);
         for (action, id, name, module) in tree_actions {
@@ -9622,7 +9692,7 @@ impl PerfrLiveApp {
                 for m in &shown {
                     view.push(0, vec![m.function_count.to_string(), m.name.clone(), m.path.clone()]);
                 }
-                self.report_view = view;
+                self.set_report_view(view);
                 for row in shown {
                     ui.label(
                         RichText::new(row.function_count.to_string())
@@ -11136,6 +11206,17 @@ fn refused_start(error: &str) -> Option<&str> {
         _ => answer,
     };
     Some(reason.trim())
+}
+
+/// The hooked set as one number, whatever its order: what a sort by the
+/// hooked column depends on besides the list.
+fn hooked_fingerprint(hooks: &[FunctionHit]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    hooks.iter().fold(hooks.len() as u64, |sum, hook| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hook.function_id.hash(&mut hasher);
+        sum.wrapping_add(hasher.finish())
+    })
 }
 
 fn section(ui: &mut Ui, label: &str) {

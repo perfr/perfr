@@ -665,3 +665,249 @@ fn a_story_drives_the_captures_timeline_not_the_self_panes() {
     assert!(page.app.self_tl.follow, "the story's camera was written into the Self pane's window");
     assert!(!page.app.follow, "and the capture's timeline is the one a story poses");
 }
+
+/// `n` functions as `/api/functions` lists them for a large binary.
+fn function_list(n: usize) -> Vec<FunctionHit> {
+    (0..n)
+        .map(|i| FunctionHit {
+            function_id: i as u64 + 1,
+            name: format!("engine::subsystem_{:03}::Component::update_stage_{i:06}", i % 311),
+            module: format!("libengine_{}.so", i % 17),
+            size: (i as u64 * 37) % 4096,
+            safety: String::new(),
+            safety_reason: String::new(),
+        })
+        .collect()
+}
+
+/// A connected page showing the Functions tab over `n` listed functions.
+fn functions_page(n: usize) -> Page {
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.selected_pid = Some(100);
+        app.loaded_symbol_pid = Some(100);
+        app.symbols.status = "ready".into();
+        app.functions_pid = Some(100);
+        app.set_functions(function_list(n), n);
+        app.open_right_tab(ReportTab::Functions);
+    });
+    page.frames(3);
+    assert!(page.texts.iter().any(|t| t.contains(&format!("{n} functions"))), "the list is drawn: {:?}", page.texts);
+    page
+}
+
+fn ms_per_frame(page: &mut Page, frames: usize) -> f64 {
+    let start = std::time::Instant::now();
+    page.frames(frames);
+    start.elapsed().as_secs_f64() * 1000.0 / frames as f64
+}
+
+/// Not a check: prints what a frame costs with each report tab's worst
+/// case on screen. `cargo test --release -- --ignored --nocapture report_tab_frame_times`.
+#[test]
+#[ignore]
+fn report_tab_frame_times() {
+    let mut page = functions_page(200_000);
+    println!("functions 200k, no filter:      {:8.2} ms/frame", ms_per_frame(&mut page, 20));
+    page.app.report_filter = "stage_0001".into();
+    page.frames(2);
+    println!("functions 200k, filter:         {:8.2} ms/frame", ms_per_frame(&mut page, 20));
+    page.app.report_filter.clear();
+    page.app.functions_sort = (2, true);
+    page.frames(2);
+    println!("functions 200k, sorted by size: {:8.2} ms/frame", ms_per_frame(&mut page, 20));
+    let mut idle = Page::with(|app| app.apply_status(service_status(false)));
+    idle.frames(3);
+    println!("no report panel:                {:8.2} ms/frame", ms_per_frame(&mut idle, 20));
+
+    // Flat: a report of 20,000 functions.
+    let mut flat = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.sampling = Some(crate::net::SamplingReport {
+            samples: 1_000_000,
+            rows: (0..20_000u64)
+                .map(|i| crate::net::SamplingRow {
+                    name: format!("engine::subsystem::Component::update_stage_{i:06}"),
+                    module: format!("libengine_{}.so", i % 17),
+                    self_count: 20_000 - i,
+                    inclusive_count: 40_000 - i,
+                    self_percent: 0.1,
+                    inclusive_percent: 0.2,
+                    function_id: i + 1,
+                })
+                .collect(),
+            ..Default::default()
+        });
+        app.open_right_tab(ReportTab::Flat);
+    });
+    flat.frames(3);
+    println!("flat 20k rows:                  {:8.2} ms/frame", ms_per_frame(&mut flat, 20));
+
+    // Top-down: 200 threads of 250-deep stacks, 50,000 nodes, roots open.
+    fn chain(depth: usize, tag: usize) -> crate::net::TreeNodeJson {
+        let mut node = crate::net::TreeNodeJson { name: format!("leaf_{tag}"), inclusive: 1, ..Default::default() };
+        for d in 0..depth {
+            node = crate::net::TreeNodeJson {
+                name: format!("frame_{tag}_{d}"),
+                module: "libengine.so".into(),
+                inclusive: 1,
+                children: vec![node],
+                ..Default::default()
+            };
+        }
+        node
+    }
+    let mut tree = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.tree = Some(Arc::new(crate::net::SamplingTree {
+            mode: "top_down".into(),
+            samples: 200,
+            roots: (0..200).map(|t| chain(250, t)).collect(),
+            ..Default::default()
+        }));
+        app.open_right_tab(ReportTab::TopDown);
+    });
+    tree.frames(3);
+    println!("top-down 50k nodes, collapsed:  {:8.2} ms/frame", ms_per_frame(&mut tree, 20));
+
+    // Live: 20,000 distinct scope names.
+    let mut live = Page::with(|app| {
+        app.apply_status(service_status(false));
+        let events: Vec<LiveEvent> = (0..20_000u32).map(|i| scope(100, 101, 1_000 + i as u64 * 10, 5, 1_000 + i)).collect();
+        let mut frames = vec![hello(), LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000 }];
+        frames.extend((0..20_000u32).map(|i| LiveFrame::InternedString { id: 1_000 + i, text: format!("scope_{i:05}") }));
+        frames.push(LiveFrame::EventBatch { events });
+        feed(app, &frames);
+        app.open_right_tab(ReportTab::Live);
+    });
+    live.frames(3);
+    println!("live 20k names:                 {:8.2} ms/frame", ms_per_frame(&mut live, 20));
+}
+
+/// The ids of the rows the Functions tab offers to copy, in view order.
+fn copy_ids(page: &Page) -> Vec<u64> {
+    page.app.report_view.rows.iter().map(|r| r.id).collect()
+}
+
+#[test]
+fn the_functions_tab_follows_its_filter_sort_list_and_hooks() {
+    let mut page = functions_page(40);
+    assert_eq!(copy_ids(&page), (1..=40).collect::<Vec<u64>>(), "the list arrives alphabetical and is shown so");
+    assert_eq!(page.app.report_view.rows[0].cols.len(), 3);
+
+    // A filter narrows the rows, and clearing it brings them back.
+    page.app.report_filter = "stage_00003".into();
+    page.frames(2);
+    assert_eq!(copy_ids(&page), (31..=40).collect::<Vec<u64>>());
+    page.app.report_filter.clear();
+    page.frames(2);
+    assert_eq!(copy_ids(&page).len(), 40);
+
+    // A sort on another column reorders them.
+    page.app.functions_sort = (2, true);
+    page.frames(2);
+    let sizes: Vec<u64> = copy_ids(&page).iter().map(|id| ((id - 1) * 37) % 4096).collect();
+    assert!(sizes.windows(2).all(|w| w[0] >= w[1]), "largest first: {sizes:?}");
+
+    // Sorted by the hooked column, a newly hooked function moves.
+    page.app.functions_sort = (0, true);
+    page.frames(2);
+    let before = copy_ids(&page);
+    let hook = page.app.functions[20].clone();
+    page.app.selected_hooks.push(hook);
+    page.frames(2);
+    assert_eq!(copy_ids(&page)[0], 21, "the hooked function leads");
+    assert_ne!(copy_ids(&page), before);
+
+    // More functions from the service's search join the list.
+    page.app.functions_sort = (1, false);
+    let mut more = function_list(45);
+    more.drain(..40);
+    page.app.add_functions(more);
+    page.frames(2);
+    assert_eq!(copy_ids(&page).len(), 45);
+
+    // Another tab's rows replace the copy view, and coming back restores it.
+    page.app.sampling = Some(crate::net::SamplingReport {
+        samples: 1,
+        rows: vec![crate::net::SamplingRow {
+            name: "hot".into(),
+            module: "m".into(),
+            self_count: 1,
+            inclusive_count: 1,
+            self_percent: 100.0,
+            inclusive_percent: 100.0,
+            function_id: 777,
+        }],
+        ..Default::default()
+    });
+    page.app.report_tab = ReportTab::Flat;
+    page.frames(2);
+    assert_eq!(copy_ids(&page), vec![777]);
+    page.app.report_tab = ReportTab::Functions;
+    page.frames(2);
+    assert_eq!(copy_ids(&page).len(), 45);
+
+    // A new list for the process replaces the old one.
+    page.app.set_functions(function_list(7), 7);
+    page.frames(2);
+    assert_eq!(copy_ids(&page).len(), 7);
+}
+
+/// A top-down tree: two threads, `main` over `work` over a leaf each.
+fn small_tree() -> crate::net::SamplingTree {
+    let node = |name: &str, id: u64, inclusive: u64, children: Vec<crate::net::TreeNodeJson>| crate::net::TreeNodeJson {
+        kind: if id == 0 { "thread".into() } else { "function".into() },
+        name: name.into(),
+        module: "app".into(),
+        function_id: id,
+        inclusive,
+        exclusive: if children.is_empty() { inclusive } else { 0 },
+        inclusive_percent: inclusive as f64,
+        of_parent_percent: 100.0,
+        children,
+        ..Default::default()
+    };
+    crate::net::SamplingTree {
+        mode: "top_down".into(),
+        samples: 100,
+        roots: vec![
+            node("Thread 1", 0, 60, vec![node("main", 1, 60, vec![node("work", 2, 60, vec![node("leaf_a", 3, 60, vec![])])])]),
+            node("Thread 2", 0, 40, vec![node("main", 1, 40, vec![node("idle", 4, 40, vec![])])]),
+        ],
+        ..Default::default()
+    }
+}
+
+/// The names of the rows the tree tab offers to copy, indentation included.
+fn tree_rows(page: &Page) -> Vec<String> {
+    page.app.report_view.rows.iter().map(|r| r.cols[3].clone()).collect()
+}
+
+#[test]
+fn the_tree_tab_walks_what_is_expanded_in_sorted_order() {
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.apply_service_reports(None, Some(small_tree()));
+        app.open_right_tab(ReportTab::TopDown);
+    });
+    page.frames(2);
+    // The tree arrives open along every path (the threshold is 0).
+    assert_eq!(
+        tree_rows(&page),
+        ["Thread 1", "  main", "    work", "      leaf_a", "Thread 2", "  main", "    idle"]
+    );
+    // Folding a node hides what is under it and nothing else.
+    page.app.tree_expanded.remove("0/0");
+    page.frames(2);
+    assert_eq!(tree_rows(&page), ["Thread 1", "  main", "Thread 2", "  main", "    idle"]);
+    // A filter draws the paths to the matches, open.
+    page.app.report_filter = "leaf".into();
+    page.frames(2);
+    assert_eq!(tree_rows(&page), ["Thread 1", "  main", "    work", "      leaf_a"]);
+    // Ascending by inclusive puts the lighter thread first.
+    page.app.report_filter.clear();
+    page.app.tree_sort = (1, false);
+    page.frames(2);
+    assert_eq!(tree_rows(&page)[0], "Thread 2");
+}

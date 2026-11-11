@@ -26,11 +26,13 @@ Instructions for the manual writer:
 ## 1. Getting started
 
 - **One binary.** `perfr --serve 44766` serves the viewer (a WASM
-  page embedded in the binary) and the HTTP/WebSocket API on one port. The
-  banner prints the local URL and every LAN address, so the page opens from
-  another machine on the network. `--host` picks the bind address (default
-  `0.0.0.0`); `--wire raw|packed|deflate` (env `PERFR_LIVE_WIRE`) picks the
-  WebSocket encoding, default `packed`. Screenshot: `01-viewer-idle.png`.
+  page embedded in the binary) and the HTTP/WebSocket API on one port,
+  on this machine only. `--host` picks the bind address (default
+  `127.0.0.1`); with `--host 0.0.0.0` the banner prints every LAN address
+  as well and the page opens from another machine on the network, where
+  nothing authenticates who connects. `--wire raw|packed|deflate` (env
+  `PERFR_LIVE_WIRE`) picks the WebSocket encoding, default `packed`.
+  Screenshot: `01-viewer-idle.png`.
 - **Windows.** The same binary shape (`perfr.exe`, the viewer embedded)
   on x86-64. Sampling, the scheduler and thread states come from the NT
   Kernel Logger and need the service started from an elevated prompt; the

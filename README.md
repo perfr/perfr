@@ -137,6 +137,8 @@ Sampling and the scheduler need an elevated prompt on Windows and are not in the
 One viewer can show the processes of several machines on one timeline. The
 service whose page you open is the hub; on every other machine start the
 service with `--join <hub-host>:44766` (or, from the hub, `--connect host,...`).
+The side that is dialed runs with `--host 0.0.0.0`; without it a service
+listens on its own machine only.
 The hub measures each link's clock offset with round-trip probes and moves
 every remote event onto its own clock; the remotes' processes appear in the
 hub's list as `name @host`, and Record on the hub records everywhere.

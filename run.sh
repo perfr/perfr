@@ -11,6 +11,7 @@
 #
 #   ./run.sh                            # http://127.0.0.1:44766/
 #   ./run.sh --http-port 44768          # when 44766 is already taken
+#   ./run.sh --host 0.0.0.0             # reachable from the network (no authentication)
 #   ./run.sh --static                   # the shippable static musl binary
 #   ./run.sh --sudo                     # root, for system-wide scheduling
 #   ./run.sh -- --pid 1234 --duration-ms 5000 --out /tmp/c.pod   # file mode
@@ -31,7 +32,7 @@ WITH_GPU=0
 PASSTHROUGH=()
 
 usage() {
-  sed -n '6,20p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+  sed -n '6,21p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
   cat <<'USAGE'
 
 Options:

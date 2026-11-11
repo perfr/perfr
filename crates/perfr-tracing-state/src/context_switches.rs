@@ -53,15 +53,18 @@ impl ContextSwitchManager {
         core: u16,
         timestamp_ns: u64,
     ) {
-        // The C++ comment says a stale entry is overwritten, but the code uses
-        // `emplace`, which keeps the existing entry. The code is the spec.
-        self.open_switches_by_core
-            .entry(core)
-            .or_insert(OpenSwitchIn {
+        // An entry still open here means its switch-out was lost. The thread
+        // arriving now is the one on the core, so it replaces the stale
+        // entry: keeping the old one made the next switch-out mismatch as
+        // well, and one lost record cost two slices.
+        self.open_switches_by_core.insert(
+            core,
+            OpenSwitchIn {
                 pid,
                 tid,
                 timestamp_ns,
-            });
+            },
+        );
     }
 
     pub fn process_context_switch_out(
@@ -190,16 +193,23 @@ mod tests {
         assert_eq!(manager.process_context_switch_out(99, -1, 0, 600), SwitchOut::NoSlice);
     }
 
-    /// The emplace quirk: a second switch-in on the same core keeps the first.
+    /// A second switch-in on a core means the switch-out in between was
+    /// lost: the newer thread is the one running there now.
     #[test]
-    fn second_switch_in_on_a_core_is_ignored() {
+    fn second_switch_in_on_a_core_replaces_the_stale_one() {
         let mut manager = ContextSwitchManager::new();
         manager.process_context_switch_in(Some(10), 11, 0, 100);
         manager.process_context_switch_in(Some(20), 21, 0, 150);
-        let SwitchOut::Slice(slice) = manager.process_context_switch_out(10, 11, 0, 200) else {
-            panic!()
-        };
-        assert_eq!(slice.duration_ns, 100);
+        assert_eq!(
+            manager.process_context_switch_out(20, 21, 0, 200),
+            SwitchOut::Slice(SchedulingSlice {
+                pid: 20,
+                tid: 21,
+                core: 0,
+                duration_ns: 50,
+                out_timestamp_ns: 200,
+            })
+        );
     }
 
     #[test]

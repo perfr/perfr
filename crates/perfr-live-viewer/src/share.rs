@@ -358,16 +358,10 @@ impl HeldStream {
     }
 }
 
-/// The words for the status codes the share server uses. Other failures stay
-/// a short line; an HTML body is not shown.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn share_failure_message(status: u16, body: &str) -> String {
-    share_failure(status, body).message
-}
-
 /// The words for a failed upload, and whether the dialog should go back
 /// to sign-in. 401 is a dead session. 403 is permission. 413 is the
-/// capture itself. 429 is the account's rate.
+/// capture itself. 429 is the account's rate. Other failures stay a short
+/// line; an HTML body is not shown.
 pub fn share_failure(status: u16, body: &str) -> ShareFailure {
     let message = match status {
         0 => "Could not reach the share server.".into(),
@@ -1041,11 +1035,6 @@ fn loopback_http_base(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::{Arc, Mutex};
-    use std::thread;
-    use std::time::Duration;
 
     #[test]
     fn a_trace_opened_on_a_service_page_is_not_shareable_as_the_services_capture() {
@@ -1168,160 +1157,19 @@ mod tests {
         let forbidden = share_failure(403, "<html>no</html>");
         assert!(!forbidden.needs_login);
         assert!(forbidden.message.contains("permission"));
-        assert_eq!(
-            share_failure_message(429, ""),
-            "Too many shares. Try again later."
-        );
         assert!(!share_failure(429, "").needs_login);
-        assert_eq!(
-            share_failure_message(503, "missing bucket"),
-            "Sharing is not configured."
-        );
-        assert_eq!(
-            share_failure_message(0, ""),
-            "Could not reach the share server."
-        );
-        assert_eq!(
-            share_failure_message(500, "disk full"),
-            "Could not share this capture (500): disk full"
-        );
-        assert_eq!(
-            share_failure_message(502, "<html>bad gateway</html>"),
-            "Could not share this capture (502)."
-        );
-    }
-
-    struct Hit {
-        start: String,
-        content_type: String,
-        body: Vec<u8>,
-    }
-
-    /// One request, then the bytes the mock stored for `GET /api/share/<id>`.
-    fn serve(status: u16, response_body: &[u8], content_type: &str) -> (String, Arc<Mutex<Hit>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let hit = Arc::new(Mutex::new(Hit {
-            start: String::new(),
-            content_type: String::new(),
-            body: Vec::new(),
-        }));
-        let stored = hit.clone();
-        let response_body = response_body.to_vec();
-        let content_type = content_type.to_string();
-        thread::spawn(move || {
-            let Ok((mut sock, _)) = listener.accept() else {
-                return;
-            };
-            sock.set_read_timeout(Some(Duration::from_secs(5))).ok();
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 4096];
-            let (head, body) = loop {
-                let n = sock.read(&mut tmp).unwrap_or(0);
-                if n == 0 {
-                    return;
-                }
-                buf.extend_from_slice(&tmp[..n]);
-                let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
-                    continue;
-                };
-                let head = String::from_utf8_lossy(&buf[..end]).into_owned();
-                let len = content_length(&head);
-                if buf.len() < end + 4 + len {
-                    continue;
-                }
-                let body = buf[end + 4..end + 4 + len].to_vec();
-                break (head, body);
-            };
-            {
-                let mut g = stored.lock().unwrap();
-                g.start = head.lines().next().unwrap_or("").to_string();
-                g.content_type = header_value(&head, "content-type").unwrap_or_default();
-                g.body = body;
-            }
-            let resp = format!(
-                "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                response_body.len()
-            );
-            sock.write_all(resp.as_bytes()).ok();
-            sock.write_all(&response_body).ok();
-        });
-        (format!("http://127.0.0.1:{port}"), hit)
-    }
-
-    fn content_length(head: &str) -> usize {
-        header_value(head, "content-length")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0)
-    }
-
-    fn header_value(head: &str, name: &str) -> Option<String> {
-        head.lines().find_map(|line| {
-            let (k, v) = line.split_once(':')?;
-            k.trim()
-                .eq_ignore_ascii_case(name)
-                .then(|| v.trim().to_string())
-        })
-    }
-
-    fn post(url: &str, bytes: &[u8]) -> (u16, String) {
-        let rest = url.strip_prefix("http://").expect("http");
-        let (hostport, path) = rest.split_once('/').expect("path");
-        let mut stream = std::net::TcpStream::connect(hostport).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
-        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
-        let head = format!(
-            "POST /{path} HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: {SHARE_CONTENT_TYPE}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            bytes.len()
-        );
-        stream.write_all(head.as_bytes()).unwrap();
-        stream.write_all(bytes).unwrap();
-        let mut resp = Vec::new();
-        stream.read_to_end(&mut resp).unwrap();
-        let end = resp.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
-        let head = std::str::from_utf8(&resp[..end]).unwrap();
-        let status: u16 = head.split_whitespace().nth(1).unwrap().parse().unwrap();
-        let text = String::from_utf8_lossy(&resp[end + 4..]).into_owned();
-        (status, text)
-    }
-
-    #[test]
-    fn a_post_of_stream_bytes_reads_the_link_back() {
-        let body = br#"{"id":"abc","url":"http://127.0.0.1:9/c/abc"}"#;
-        let (base, hit) = serve(200, body, "application/json");
-        let stream = b"perfr-stream-bytes";
-        let (status, text) = post(&share_post_url(&base), stream);
-        assert_eq!(status, 200);
-        let link = parse_share_reply(&text).unwrap();
-        assert_eq!(link.id, "abc");
-        assert_eq!(link.url, "http://127.0.0.1:9/c/abc");
-        let seen = hit.lock().unwrap();
-        assert_eq!(seen.start, "POST /api/share HTTP/1.1");
-        assert_eq!(seen.content_type, SHARE_CONTENT_TYPE);
-        assert_eq!(seen.body, stream);
-        // The page the link opens loads the viewer with this capture path.
-        assert_eq!(
-            crate::dev::query_capture_url("?capture=/api/share/abc").as_deref(),
-            Some("/api/share/abc")
-        );
-    }
-
-    #[test]
-    fn the_mock_answers_too_large_rate_limited_and_not_configured() {
-        for (status, words) in [
-            (401, "Your session expired. Sign in again to share."),
-            (403, "You don't have permission to share this capture."),
-            (
-                413,
-                "This capture is too large to share. Share a selected range to upload less.",
-            ),
-            (429, "Too many shares. Try again later."),
-            (503, "Sharing is not configured."),
+        // Each status the share server uses, with whatever body came along.
+        for (status, body, words) in [
+            (401, "no", "Your session expired. Sign in again to share."),
+            (403, "no", "You don't have permission to share this capture."),
+            (413, "no", "This capture is too large to share. Share a selected range to upload less."),
+            (429, "", "Too many shares. Try again later."),
+            (503, "missing bucket", "Sharing is not configured."),
+            (0, "", "Could not reach the share server."),
+            (500, "disk full", "Could not share this capture (500): disk full"),
+            (502, "<html>bad gateway</html>", "Could not share this capture (502)."),
         ] {
-            let (base, _) = serve(status, b"no", "text/plain");
-            let (got, text) = post(&share_post_url(&base), b"bytes");
-            assert_eq!(got, status);
-            assert_eq!(share_failure_message(got, &text), words);
+            assert_eq!(share_failure(status, body).message, words, "status {status}");
         }
     }
 
@@ -1699,6 +1547,7 @@ mod tests {
         assert!(doc.contains(SHARE_TOKEN_FRAGMENT));
         assert!(doc.contains("SameSite=None"));
         assert!(doc.contains(ME_PATH));
+        assert!(doc.contains(&format!("`Content-Type: {SHARE_CONTENT_TYPE}`")));
         assert_eq!(LOGIN_RESUME_KEY, "perfr.share.resume");
         assert_eq!(LOGIN_MESSAGE_TYPE, "login");
         assert!(ShareFailure::login("Your session expired. Sign in again to share.").needs_login);

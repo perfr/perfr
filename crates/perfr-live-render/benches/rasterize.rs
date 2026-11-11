@@ -233,8 +233,59 @@ fn choose_lod_sample(c: &mut Criterion) {
     group.finish();
 }
 
+/// One lane of `n` back-to-back scopes, 10 ns apart.
+fn dense_lane(n: usize) -> TrackIndex {
+    let mut idx = TrackIndex::default();
+    for i in 0..n {
+        idx.insert(LiveEvent {
+            start_ns: i as u64 * 10,
+            duration_ns: 8,
+            tid: 1,
+            pid: 1,
+            kind: kind::API_SCOPE,
+            depth: 0,
+            extra: 0,
+            _pad: 0,
+            name_id: (i % 97) as u32,
+        });
+    }
+    idx
+}
+
+/// A big capture fully zoomed out: every scope is far under a pixel, so the
+/// verdict is `PixelColumns` and no lane can answer early, and each pixel
+/// column of the raster covers hundreds or thousands of scopes.
+fn zoomed_out(c: &mut Criterion) {
+    let n = 1_000_000usize;
+    let many = build_index(n);
+    let one = dense_lane(n);
+    let one_t1 = n as u64 * 10;
+    assert_eq!(
+        choose_lod(&many, 0, 1_000_000, 1920, INSTANCE_MIN_PX),
+        perfr_live_render::TimelineLod::PixelColumns
+    );
+    assert_eq!(
+        choose_lod(&one, 0, one_t1, 1920, INSTANCE_MIN_PX),
+        perfr_live_render::TimelineLod::PixelColumns
+    );
+    let mut group = c.benchmark_group("zoomed_out");
+    group.bench_function("choose_lod/48_lanes", |b| {
+        b.iter(|| black_box(choose_lod(&many, 0, 1_000_000, 1920, INSTANCE_MIN_PX)));
+    });
+    group.bench_function("choose_lod/1_lane", |b| {
+        b.iter(|| black_box(choose_lod(&one, 0, one_t1, 1920, INSTANCE_MIN_PX)));
+    });
+    for &width in &[256usize, 1920] {
+        group.bench_with_input(BenchmarkId::new("rasterize/1_lane", width), &width, |b, &w| {
+            b.iter(|| black_box(one.rasterize_pixel(0, one_t1, w, None)));
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    zoomed_out,
     vs_scopes,
     vs_pixels,
     collect_y_cull,

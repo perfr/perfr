@@ -538,6 +538,7 @@ fn choose_lod_from_keys(
     if ns_per_px <= 0.0 {
         return TimelineLod::PixelColumns;
     }
+    let wide = |duration_ns: u64| (duration_ns as f64 / ns_per_px) >= min_wide_px as f64;
     // Fast path. A hit here is conclusive: one wide scope in view is enough.
     for key in keys {
         if is_tick_lane(*key) {
@@ -546,10 +547,8 @@ fn choose_lod_from_keys(
         let Some(lane) = index.lane(*key) else {
             continue;
         };
-        if let Some(e) = lane.overlapping(t0, t1) {
-            if (e.duration_ns as f64 / ns_per_px) >= min_wide_px as f64 {
-                return TimelineLod::Instanced;
-            }
+        if lane.any_duration(t0, t1, wide) {
+            return TimelineLod::Instanced;
         }
     }
     // A miss is not conclusive, so finish the question over every lane.
@@ -558,16 +557,15 @@ fn choose_lod_from_keys(
     // depend on which lanes happened to be sampled, and the sample moves: it
     // is ranked by lifetime event count and takes the hovered lane as a hint.
     // Moving the cursor, changing nothing else, could flip instanced to blit.
-    // The cost is two binary searches per lane, paid only when the sample
-    // already failed to find anything wide.
+    // The cost is two binary searches per lane and a comparison per block
+    // of its events in view, paid only when the sample already failed to
+    // find anything wide.
     for (key, lane) in index.lanes() {
         if is_tick_lane(key) {
             continue;
         }
-        if let Some(e) = lane.overlapping(t0, t1) {
-            if (e.duration_ns as f64 / ns_per_px) >= min_wide_px as f64 {
-                return TimelineLod::Instanced;
-            }
+        if lane.any_duration(t0, t1, wide) {
+            return TimelineLod::Instanced;
         }
     }
     TimelineLod::PixelColumns

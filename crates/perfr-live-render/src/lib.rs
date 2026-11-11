@@ -56,6 +56,9 @@ pub use lod::{
 pub use par::{is_parallel, parallelism, set_wasm_pool_threads, WorkerSpan};
 pub use shaders::{BLIT_RECT_WGSL, BLIT_WGSL, INSTANCE_WGSL};
 
+/// Events per entry of [`Lane::block_span`].
+const SPAN_BLOCK: usize = 64;
+
 /// One horizontal lane of intervals, sorted by `start_ns`.
 ///
 /// perfr live scopes are non-overlapping per lane, so `end_ns` is also
@@ -70,6 +73,14 @@ pub struct Lane {
     /// Bumped by every insert and every retain that removed something: the
     /// listing cache's way to know a lane is exactly what it listed before.
     version: u64,
+    /// The longest span among each [`SPAN_BLOCK`] consecutive events.
+    ///
+    /// "The longest event in this range" is asked once per pixel column by
+    /// the raster and once per lane, over the whole window, by the LOD
+    /// decision on every painted frame. Walking the range made both linear
+    /// in the events in view; with this a block that cannot hold the answer
+    /// is passed in one comparison.
+    block_span: Vec<u64>,
 }
 
 impl Default for Lane {
@@ -78,6 +89,7 @@ impl Default for Lane {
             events: Vec::new(),
             ends_sorted: true,
             version: 0,
+            block_span: Vec::new(),
         }
     }
 }
@@ -124,6 +136,27 @@ impl Lane {
             let next_ok = i + 1 >= self.events.len() || end <= self.events[i + 1].end_ns();
             self.ends_sorted = prev_ok && next_ok;
         }
+        if i + 1 == self.events.len() {
+            let span = event_span_ns(&self.events[i]);
+            match self.block_span.get_mut(i / SPAN_BLOCK) {
+                Some(longest) => *longest = (*longest).max(span),
+                None => self.block_span.push(span),
+            }
+        } else {
+            // An insert in the middle moved every later event one place
+            // along, across the block boundaries. It already cost a move of
+            // that tail; reading the tail once more keeps this simple.
+            self.rebuild_block_span(i / SPAN_BLOCK);
+        }
+    }
+
+    fn rebuild_block_span(&mut self, from_block: usize) {
+        self.block_span.truncate(from_block);
+        self.block_span.extend(
+            self.events[(from_block * SPAN_BLOCK).min(self.events.len())..]
+                .chunks(SPAN_BLOCK)
+                .map(|block| block.iter().map(event_span_ns).max().unwrap_or(0)),
+        );
     }
 
     pub fn extend<I: IntoIterator<Item = LiveEvent>>(&mut self, events: I) {
@@ -142,6 +175,7 @@ impl Lane {
             // a lane that was already unsorted may now be sorted -- recheck so
             // it does not stay on the linear fallback forever.
             self.ends_sorted = self.ends_are_sorted();
+            self.rebuild_block_span(0);
         }
     }
 
@@ -170,7 +204,8 @@ impl Lane {
             .all(|w| w[0].end_ns() <= w[1].end_ns())
     }
 
-    /// Event that overlaps `[col0, col1)`, if any. O(log n).
+    /// The event that owns `[col0, col1)`, if any overlaps it; see
+    /// [`Self::last_overlapping`].
     pub fn overlapping(&self, col0: u64, col1: u64) -> Option<&LiveEvent> {
         self.last_overlapping(col0, col1)
     }
@@ -181,9 +216,17 @@ impl Lane {
     /// pixel (or pick) from a longer same-lane scope that occupies the
     /// column. Equal duration keeps last-in-start-order (the previous
     /// last-write-wins tie-break).
+    ///
+    /// Two binary searches, then about one comparison per [`SPAN_BLOCK`]
+    /// events in the range. A lane whose ends are out of order is walked
+    /// event by event: there the range also holds events that ended before
+    /// `col0`, which a block's longest span says nothing about.
     pub fn last_overlapping(&self, col0: u64, col1: u64) -> Option<&LiveEvent> {
         let i = self.first_ending_after(col0);
         let j = self.events.partition_point(|e| e.start_ns < col1);
+        if self.ends_sorted {
+            return self.longest_in(i, j).map(|k| &self.events[k]);
+        }
         let mut best: Option<usize> = None;
         let mut best_dur = 0u64;
         for k in i..j {
@@ -198,6 +241,81 @@ impl Lane {
             }
         }
         best.map(|k| &self.events[k])
+    }
+
+    /// Index of the longest of `events[i..j]`, the last of them when several
+    /// are as long.
+    fn longest_in(&self, i: usize, j: usize) -> Option<usize> {
+        if i >= j {
+            return None;
+        }
+        let scan = |from: usize, to: usize, best: &mut Option<(u64, usize)>| {
+            for k in from..to {
+                let d = event_span_ns(&self.events[k]);
+                if best.is_none_or(|(longest, _)| d >= longest) {
+                    *best = Some((d, k));
+                }
+            }
+        };
+        let mut best = None;
+        // Whole blocks are `first..last`; the ragged ends are walked.
+        let first = i.div_ceil(SPAN_BLOCK);
+        let last = j / SPAN_BLOCK;
+        if first >= last {
+            scan(i, j, &mut best);
+            return best.map(|(_, k)| k);
+        }
+        scan(i, first * SPAN_BLOCK, &mut best);
+        let mut block: Option<(u64, usize)> = None;
+        for b in first..last {
+            let d = self.block_span[b];
+            if block.is_none_or(|(longest, _)| d >= longest) {
+                block = Some((d, b));
+            }
+        }
+        if let Some((d, b)) = block {
+            if best.is_none_or(|(longest, _)| d >= longest) {
+                // Later than anything before it, so it wins a tie; within
+                // the block the last event that long is the one.
+                let k = (b * SPAN_BLOCK..(b + 1) * SPAN_BLOCK)
+                    .rev()
+                    .find(|&k| event_span_ns(&self.events[k]) == d);
+                best = k.map(|k| (d, k)).or(best);
+            }
+        }
+        scan(last * SPAN_BLOCK, j, &mut best);
+        best.map(|(_, k)| k)
+    }
+
+    /// Whether an event overlapping `[t0, t1)` has a duration `wide` accepts.
+    /// `wide` must be monotonic: true for a duration, true for any longer.
+    ///
+    /// The LOD decision asks this of every lane on every painted frame, so
+    /// it stops at the first such event and passes whole blocks that have
+    /// none.
+    pub(crate) fn any_duration(&self, t0: u64, t1: u64, wide: impl Fn(u64) -> bool) -> bool {
+        let i = self.first_ending_after(t0);
+        let j = self.events.partition_point(|e| e.start_ns < t1);
+        let hit = |k: usize| {
+            let e = &self.events[k];
+            e.end_ns() > t0 && wide(e.duration_ns)
+        };
+        let mut k = i;
+        while k < j {
+            if k % SPAN_BLOCK == 0 && k + SPAN_BLOCK <= j {
+                // A span is the duration (1 ns for a duration of zero):
+                // if the longest span is not wide, no duration here is.
+                if !wide(self.block_span[k / SPAN_BLOCK]) {
+                    k += SPAN_BLOCK;
+                    continue;
+                }
+            }
+            if hit(k) {
+                return true;
+            }
+            k += 1;
+        }
+        false
     }
 
     /// Production path: walk events when there are fewer of them than pixels,
@@ -1550,5 +1668,147 @@ mod bounds_tests {
         late.clear();
         late.insert(span(10, 20, 1));
         assert_eq!(late.time_bounds(), Some((10, 20)));
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_rng {
+    /// xorshift64*: enough to drive randomized comparisons against a plain
+    /// reference, the same on every run.
+    pub struct Rng(pub u64);
+
+    impl Rng {
+        pub fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        pub fn below(&mut self, n: u64) -> u64 {
+            self.next() % n.max(1)
+        }
+    }
+}
+
+#[cfg(test)]
+mod block_span_tests {
+    use super::test_rng::Rng;
+    use super::*;
+
+    fn ev(start: u64, dur: u64, name: u32) -> LiveEvent {
+        LiveEvent { start_ns: start, duration_ns: dur, tid: 1, pid: 1, kind: kind::API_SCOPE, depth: 0, extra: 0, _pad: 0, name_id: name }
+    }
+
+    /// What `last_overlapping` did before the blocks: every event in range.
+    fn reference_owner(lane: &Lane, col0: u64, col1: u64) -> Option<LiveEvent> {
+        let mut best: Option<LiveEvent> = None;
+        for e in lane.events() {
+            if e.end_ns() <= col0 || e.start_ns >= col1 {
+                continue;
+            }
+            if best.is_none_or(|b| event_span_ns(e) >= event_span_ns(&b)) {
+                best = Some(*e);
+            }
+        }
+        best
+    }
+
+    fn check_blocks(lane: &Lane) {
+        let expect: Vec<u64> = lane
+            .events()
+            .chunks(SPAN_BLOCK)
+            .map(|b| b.iter().map(event_span_ns).max().unwrap())
+            .collect();
+        assert_eq!(lane.block_span, expect);
+        assert_eq!(lane.ends_sorted, lane.ends_are_sorted());
+        assert!(lane.events().windows(2).all(|w| w[0].start_ns <= w[1].start_ns));
+    }
+
+    /// Lanes built in order, out of order, with ties, with overlap, and
+    /// thinned by `retain`, asked for random windows: the answer through
+    /// the blocks is the answer of the walk they replace.
+    #[test]
+    fn the_longest_event_through_the_blocks_is_the_one_a_walk_finds() {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for round in 0..60 {
+            let n = 1 + rng.below(700) as usize;
+            let overlap = round % 3 == 0;
+            let mut lane = Lane::default();
+            let mut t = 0u64;
+            let mut pending = Vec::new();
+            for k in 0..n {
+                let gap = 1 + rng.below(40);
+                // Few distinct durations, so ties are common.
+                let dur = [0, 1, 1, 5, 5, 30, 400][rng.below(7) as usize];
+                let dur = if overlap && rng.below(10) == 0 { dur + 5_000 } else { dur.min(gap) };
+                pending.push(ev(t, dur, k as u32));
+                t += gap;
+            }
+            // Mostly in order, with some late arrivals.
+            let mut late = Vec::new();
+            for e in pending {
+                if rng.below(8) == 0 {
+                    late.push(e);
+                } else {
+                    lane.insert(e);
+                }
+            }
+            for e in late {
+                lane.insert(e);
+            }
+            check_blocks(&lane);
+            for pass in 0..2 {
+                for _ in 0..200 {
+                    let a = rng.below(t + 50);
+                    let reach = if rng.below(2) == 0 { 60 } else { t + 50 };
+                    let b = a + 1 + rng.below(reach);
+                    assert_eq!(
+                        lane.last_overlapping(a, b).copied(),
+                        reference_owner(&lane, a, b),
+                        "round {round} pass {pass}: [{a}, {b}) over {} events, overlap {overlap}",
+                        lane.len()
+                    );
+                    let min = [1, 2, 6, 31, 401, 6_000][rng.below(6) as usize];
+                    let expect = lane
+                        .events()
+                        .iter()
+                        .any(|e| e.end_ns() > a && e.start_ns < b && e.duration_ns >= min);
+                    assert_eq!(lane.any_duration(a, b, |d| d >= min), expect, "round {round}: [{a}, {b}) min {min}");
+                }
+                lane.retain(|e| e.name_id % 5 != 0);
+                check_blocks(&lane);
+            }
+        }
+    }
+
+    #[test]
+    fn the_column_raster_is_the_naive_raster_on_every_lane_without_overlap() {
+        let mut rng = Rng(42);
+        for _ in 0..20 {
+            let n = 300 + rng.below(3_000) as usize;
+            let mut lane = Lane::default();
+            let mut t = 0u64;
+            for k in 0..n {
+                let gap = 1 + rng.below(20);
+                lane.insert(ev(t, 1 + rng.below(gap), (k % 251) as u32));
+                t += gap;
+            }
+            for width in [1usize, 7, 64, 300] {
+                let t0 = rng.below(t / 2);
+                let t1 = t0 + 1 + rng.below(t);
+                let mut cols = vec![0u32; width];
+                let mut naive = vec![0u32; width];
+                lane.rasterize_pixel_columns(t0, t1, width, &mut cols, None);
+                // The reference for a column is the longest event overlapping it.
+                let dt = (t1 - t0) as f64 / width as f64;
+                for (x, px) in naive.iter_mut().enumerate() {
+                    let col0 = t0.saturating_add((x as f64 * dt) as u64);
+                    let col1 = t0.saturating_add(((x + 1) as f64 * dt) as u64).max(col0 + 1);
+                    *px = reference_owner(&lane, col0, col1).map(|e| e.color_for(None)).unwrap_or(chrome::TRACK);
+                }
+                assert_eq!(cols, naive, "{n} events, [{t0}, {t1}) at {width} px");
+            }
+        }
     }
 }

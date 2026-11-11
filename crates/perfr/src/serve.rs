@@ -3086,6 +3086,7 @@ mod tests {
         let whole = perfr_capture::CaptureBundle {
             target_pid: 7,
             events: vec![
+                row(span(5, 900)),   // spans the window
                 row(span(10, 40)),
                 row(span(50, 150)),  // straddles the left edge
                 row(span(120, 130)), // inside
@@ -3096,12 +3097,16 @@ mod tests {
         };
         let slice = whole.slice(100, 200);
         let stored: Vec<LiveEvent> = slice.events.iter().map(|r| r.event).collect();
-        assert_eq!(stored, [span(50, 150), span(120, 130), span(190, 260)]);
+        assert_eq!(stored, [span(5, 900), span(50, 150), span(120, 130), span(190, 260)]);
 
         open_bundle(&service, &store, &target, slice).unwrap();
         assert_eq!(service.ring().snapshot().1, stored, "what the file holds is what is shown");
         assert_eq!(service.dropped_before_start(), 0);
+        // What was already running at the window's start is shown without
+        // stretching the capture: it still ends where the events that begin
+        // in the window do, not at 900.
         assert_eq!(service.live_end_ns(), 260);
+        assert_eq!(service.cached_index().time_bounds(), Some((120, 260)));
 
         // The window's start is still the capture's start for a live push:
         // only the restore is exempt.

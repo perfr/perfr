@@ -721,6 +721,12 @@ pub struct PerfrLiveApp {
     server_settings: Option<serde_json::Value>,
     status: StatusJson,
     error: String,
+    /// Something the reader asked for failed: a dropped file that is not a
+    /// trace, a stream that cannot be read, a start the service refused.
+    /// Drawn over the timeline until dismissed or until the next attempt.
+    /// `error` cannot carry these: every status answer clears it, four
+    /// times a second, and it is drawn only in the Inspector tab.
+    notice: Option<String>,
     ring_bytes: String,
     spill_path: String,
     t0: f64,
@@ -1698,6 +1704,7 @@ impl PerfrLiveApp {
             server_settings: None,
             status: StatusJson::default(),
             error: String::new(),
+            notice: None,
             ring_bytes: "67108864".into(),
             spill_path: String::new(),
             t0: 0.0,
@@ -2043,6 +2050,55 @@ impl PerfrLiveApp {
         self.static_capture.is_none()
     }
 
+    /// Reports a failure of something the reader asked for. See `notice`.
+    fn fail(&mut self, message: String) {
+        self.error = message.clone();
+        self.notice = Some(message);
+        self.needs_repaint = true;
+    }
+
+    /// A new attempt (Record, a file, Clear): what was said about the last
+    /// one no longer applies.
+    fn clear_errors(&mut self) {
+        self.error.clear();
+        self.notice = None;
+    }
+
+    /// The notice, over the bottom of the page, with a button to dismiss it.
+    fn notice_window(&mut self, ctx: &Context) {
+        let Some(message) = self.notice.clone() else {
+            return;
+        };
+        let max_w = (ctx.screen_rect().width() - 48.0).clamp(120.0, 720.0);
+        let mut dismissed = false;
+        egui::Area::new(egui::Id::new("perfr_notice"))
+            .order(egui::Order::Foreground)
+            .anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -28.0))
+            .show(ctx, |ui| {
+                Frame::new()
+                    .fill(theme::PANEL())
+                    .stroke(Stroke::new(1.0, LINK_RED))
+                    .corner_radius(4)
+                    .inner_margin(Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.set_max_width(max_w);
+                        ui.horizontal(|ui| {
+                            let close = icon_pill(ui, "×", "Dismiss");
+                            note_ui_rect("notice:dismiss", close.rect);
+                            dismissed = close.clicked();
+                            let text = ui.add(
+                                egui::Label::new(RichText::new(&message).size(12.0).color(theme::TEXT())).wrap(),
+                            );
+                            note_ui_rect("notice", text.rect);
+                        });
+                    });
+            });
+        if dismissed {
+            self.notice = None;
+            self.needs_repaint = true;
+        }
+    }
+
     fn start_record(&mut self) {
         // With no service nothing would ever answer, or end, the capture:
         // the page would drop the file it shows (and the stream Share
@@ -2052,7 +2108,7 @@ impl PerfrLiveApp {
             return;
         }
         self.clear_file_trace();
-        self.error.clear();
+        self.clear_errors();
         if self.status.hooks {
             // No selection is a capture without a target: the scheduler, the
             // service, and every instrumented process.
@@ -2076,7 +2132,7 @@ impl PerfrLiveApp {
             return;
         }
         self.clear_file_trace();
-        self.error.clear();
+        self.clear_errors();
         self.begin_recording();
         self.live_edge_ns = DEMO_ORIGIN_NS;
         self.capture_timer = CaptureTimer::default();
@@ -2090,6 +2146,7 @@ impl PerfrLiveApp {
             self.stop_record();
         }
         self.clear_file_trace();
+        self.notice = None;
         self.index.clear();
         self.log_ui.reset_capture();
         self.live_all.clear();
@@ -2156,7 +2213,7 @@ impl PerfrLiveApp {
         if !self.has_service() {
             return;
         }
-        self.error.clear();
+        self.clear_errors();
         if !self.recording && !self.status.capturing && !self.status.demo {
             self.clear_file_trace();
             self.begin_recording();
@@ -2437,13 +2494,14 @@ impl PerfrLiveApp {
         // earlier stream left half-read is not the head of this one, and a
         // frame this one ends in is not completed by the socket's next bytes.
         self.leftover.clear();
+        self.notice = None;
         let read = self
             .ingest(&bytes)
             .and_then(|()| crate::frames::end_of_stream(&mut self.leftover));
         if let Err(fault) = read {
             let message = fault.file_message();
             log::warn!(target: "perfr_live_viewer::net", "{message}");
-            self.error = message;
+            self.fail(message);
         }
         self.held_stream.loaded(bytes);
         self.follow = false;
@@ -2744,7 +2802,7 @@ impl PerfrLiveApp {
         self.content_t0 = None;
         self.content_t1 = None;
         self.user_set_view = false;
-        self.error.clear();
+        self.clear_errors();
         self.trace_load = Some(load);
         self.needs_repaint = true;
     }
@@ -2797,7 +2855,7 @@ impl PerfrLiveApp {
             match load.pump() {
                 Ok(evs) => evs,
                 Err(e) => {
-                    self.error = e;
+                    self.fail(e);
                     self.trace_load = None;
                     return;
                 }
@@ -2875,7 +2933,7 @@ impl PerfrLiveApp {
                             self.story.open = true;
                         }
                     }
-                    Err(_) => self.error = format!("{name}: a story is UTF-8 JSON"),
+                    Err(_) => self.fail(format!("{name}: a story is UTF-8 JSON")),
                 }
                 return;
             }
@@ -2888,7 +2946,7 @@ impl PerfrLiveApp {
                             self.story.open = true;
                         }
                     }
-                    Err(e) => self.error = format!("{name}: {e}"),
+                    Err(e) => self.fail(format!("{name}: {e}")),
                 }
                 return;
             }
@@ -2902,11 +2960,11 @@ impl PerfrLiveApp {
             if let Some(path) = &f.path {
                 match std::fs::read(path) {
                     Ok(bytes) => self.accept_stream(bytes),
-                    Err(e) => self.error = format!("{name}: {e}"),
+                    Err(e) => self.fail(format!("{name}: {e}")),
                 }
                 return;
             }
-            self.error = format!("{name}: could not read the capture");
+            self.fail(format!("{name}: could not read the capture"));
             return;
         }
         if is_bundle_name(&name) {
@@ -2915,12 +2973,12 @@ impl PerfrLiveApp {
                     self.import_pending = true;
                     self.net.import_capture(bytes.to_vec());
                 }
-                None => self.error = format!("{name}: open captures from the web viewer"),
+                None => self.fail(format!("{name}: open captures from the web viewer")),
             }
             return;
         }
         if !chrome_load::is_trace_name(&name) {
-            self.error = format!("Not a Chrome or Perfetto trace: {name}");
+            self.fail(format!("Not a Chrome or Perfetto trace: {name}"));
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -3444,8 +3502,15 @@ impl PerfrLiveApp {
         if e != self.error {
             log::warn!(target: "perfr_live_viewer::net", "{e}");
         }
-        if self.recording && !self.recording_confirmed && is_refused_start(&e) {
-            self.recording_refused();
+        if self.recording && !self.recording_confirmed {
+            if let Some(reason) = refused_start(&e) {
+                self.recording_refused();
+                self.notice = Some(if reason.is_empty() {
+                    "The capture did not start.".to_string()
+                } else {
+                    format!("The capture did not start: {reason}")
+                });
+            }
         }
         self.error = e;
     }
@@ -5238,10 +5303,10 @@ impl PerfrLiveApp {
         if pill(ui, "Apply", false).clicked() {
             match self.ring_bytes.trim().parse::<u64>() {
                 Ok(n) => {
-                    self.error.clear();
+                    self.clear_errors();
                     self.net.apply_config(n, self.spill_path.trim());
                 }
-                Err(_) => self.error = "Ring bytes: expected an integer.".into(),
+                Err(_) => self.fail("Ring bytes: expected an integer.".into()),
             }
         }
 
@@ -10859,6 +10924,7 @@ impl eframe::App for PerfrLiveApp {
             self.about_window(ctx);
             self.maybe_resume_share();
             self.share_window(ctx);
+            self.notice_window(ctx);
             self.story.windows(ctx);
             self.presets_window(ctx);
             self.bench_window(ctx);
@@ -11002,13 +11068,18 @@ impl eframe::App for PerfrLiveApp {
     }
 }
 
-/// Whether `error` is the service's answer to a start it refused. A
-/// request's error is all a refusal sends back: the line `Net` makes of
-/// the path, the HTTP status and the reason.
-fn is_refused_start(error: &str) -> bool {
-    ["/api/capture/start: ", "/api/demo/start: ", "/api/bench/start: "]
+/// The reason the service gave for refusing a start, if `error` is its
+/// answer to one. A request's error is all a refusal sends back: the line
+/// `Net` makes of the path, the HTTP status and the reason.
+fn refused_start(error: &str) -> Option<&str> {
+    let answer = ["/api/capture/start: ", "/api/demo/start: ", "/api/bench/start: "]
         .iter()
-        .any(|path| error.starts_with(path))
+        .find_map(|path| error.strip_prefix(path))?;
+    let reason = match answer.split_once(' ') {
+        Some((status, reason)) if status.len() == 3 && status.bytes().all(|b| b.is_ascii_digit()) => reason,
+        _ => answer,
+    };
+    Some(reason.trim())
 }
 
 fn section(ui: &mut Ui, label: &str) {

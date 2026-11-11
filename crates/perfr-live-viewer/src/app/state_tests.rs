@@ -66,13 +66,22 @@ impl Page {
     }
 
     pub fn frame_with(&mut self, events: Vec<Event>, modifiers: Modifiers) -> egui::FullOutput {
+        self.run(RawInput { modifiers, events, ..Default::default() })
+    }
+
+    /// A file dropped on the page, as the browser hands it over: a name
+    /// and its bytes.
+    pub fn drop_file(&mut self, name: &str, bytes: &[u8]) {
+        let file = egui::DroppedFile { name: name.into(), bytes: Some(bytes.into()), ..Default::default() };
+        self.run(RawInput { dropped_files: vec![file], ..Default::default() });
+    }
+
+    fn run(&mut self, input: RawInput) -> egui::FullOutput {
         self.time += 1.0 / 60.0;
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
             time: Some(self.time),
-            modifiers,
-            events,
-            ..Default::default()
+            ..input
         };
         let (app, frame) = (&mut self.app, &mut self.frame);
         let out = self.ctx.run(input, |ctx| eframe::App::update(app, ctx, frame));
@@ -400,4 +409,95 @@ fn an_error_of_another_request_leaves_a_starting_capture_alone() {
     app.apply_status(service_status(true));
     app.apply_net_error("/api/bench/start: 409 the demo is running; stop it first".into());
     assert!(app.recording);
+}
+
+#[test]
+fn a_dropped_file_that_is_not_a_trace_says_so_where_it_can_be_seen() {
+    let mut page = Page::with(|app| app.apply_status(service_status(false)));
+    page.frames(2);
+    page.drop_file("notes.txt", b"hello");
+    // The service keeps answering, four times a second.
+    page.app.apply_status(service_status(false));
+    page.frames(2);
+    let message = "Not a Chrome or Perfetto trace: notes.txt";
+    assert!(!page.app.report_open, "the Inspector tab is not where this test looks");
+    assert!(page.shows(message), "nothing on screen says the drop failed: {:?}", page.texts);
+    // It stays until dismissed.
+    for _ in 0..20 {
+        page.app.apply_status(service_status(false));
+        page.frames(30);
+    }
+    assert!(page.shows(message));
+    let close = page.rect_of("notice:dismiss").expect("the notice has a dismiss button");
+    assert!(Rect::from_min_size(Pos2::ZERO, page.size).contains_rect(close));
+    page.click(close.center());
+    page.frames(2);
+    assert!(!page.shows(message));
+    assert!(page.app.notice.is_none());
+}
+
+#[test]
+fn a_stream_file_that_cannot_be_read_says_so_and_the_next_file_clears_it() {
+    let mut page = Page::with(|app| app.apply_status(service_status(false)));
+    page.frames(2);
+    let mut cut = capture_stream(status_frame(false, false), vec![scope(100, 101, 5_000, 1_000, 7)]);
+    cut.truncate(cut.len() - 3);
+    page.drop_file("cut.perfr.stream", &cut);
+    page.app.apply_status(service_status(false));
+    page.frames(2);
+    let notice = page.app.notice.clone().expect("a truncated stream is reported");
+    assert!(page.shows(&notice), "{notice:?} is not on screen: {:?}", page.texts);
+    page.drop_file("whole.perfr.stream", &capture_stream(status_frame(false, false), vec![scope(100, 101, 5_000, 1_000, 7)]));
+    page.frames(2);
+    assert!(page.app.notice.is_none(), "{:?}", page.app.notice);
+}
+
+#[test]
+fn a_refused_start_tells_the_reader_why() {
+    let mut page = Page::with(|app| app.apply_status(service_status(false)));
+    page.frames(2);
+    page.app.start_record();
+    page.app.apply_net_error("/api/capture/start: 409 cannot attach to pid 4242: Operation not permitted".into());
+    page.app.apply_status(service_status(false));
+    page.frames(2);
+    assert!(
+        page.texts.iter().any(|t| t.contains("cannot attach to pid 4242")),
+        "the refusal is not on screen: {:?}",
+        page.texts
+    );
+    // The next Record is a new attempt.
+    page.app.start_record();
+    page.frames(2);
+    assert!(page.app.notice.is_none());
+}
+
+#[test]
+fn a_failing_status_poll_is_not_a_notice() {
+    let mut app = connected_app();
+    app.apply_net_error("/api/status: 502 Bad Gateway".into());
+    assert!(app.notice.is_none());
+    assert_eq!(app.error, "/api/status: 502 Bad Gateway");
+}
+
+#[test]
+fn a_long_notice_wraps_inside_a_phone_sized_page() {
+    let mut page = Page::new().sized(390.0, 700.0);
+    page.frames(2);
+    page.app.fail(format!("{}: could not read the capture", "a-very-long-file-name-".repeat(12)));
+    page.frames(3);
+    let screen = Rect::from_min_size(Pos2::ZERO, page.size);
+    for label in ["notice", "notice:dismiss"] {
+        let rect = page.rect_of(label).expect("the notice is drawn");
+        assert!(screen.contains_rect(rect), "{label} at {rect:?} leaves the page");
+    }
+}
+
+#[test]
+fn the_reason_of_a_refused_start_is_what_follows_the_status_code() {
+    assert_eq!(refused_start("/api/capture/start: 409 no such process"), Some("no such process"));
+    assert_eq!(refused_start("/api/demo/start: 409 demo producer is already running"), Some("demo producer is already running"));
+    assert_eq!(refused_start("/api/bench/start: 409 "), Some(""));
+    assert_eq!(refused_start("/api/capture/start: TypeError: Failed to fetch"), Some("TypeError: Failed to fetch"));
+    assert_eq!(refused_start("/api/capture/stop: 409 not capturing"), None);
+    assert_eq!(refused_start("/api/status: 500 x"), None);
 }

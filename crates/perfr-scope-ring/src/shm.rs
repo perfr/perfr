@@ -403,6 +403,13 @@ impl ScopeRingReader {
             let error = io::Error::last_os_error();
             return Err(error);
         }
+        // SAFETY: geteuid cannot fail.
+        if !owner_is_trusted(stat.st_uid, unsafe { libc::geteuid() }, || process_owner(pid)) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "scope segment is not owned by the user whose process it names",
+            ));
+        }
         let len = usize::try_from(stat.st_size).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid segment size"))?;
         if len < ring::CACHE_LINE {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "segment is smaller than its header"));
@@ -603,6 +610,38 @@ impl Drop for ScopeRingReader {
     }
 }
 
+/// Whether a segment file owned by `file_uid` is one to read, for a reader
+/// running as `me` and a pid owned by `process_owner`.
+///
+/// The directory is world-writable on Linux and the name is a pid anyone can
+/// see, so the name alone says nothing about who made the file. Another
+/// user could create `perfr-scopes-<pid>` for a process of ours, with a
+/// valid header and a lock held on it: the service would then draw whatever
+/// that user wrote as our process's scopes, and the Frida agent, which opens
+/// its own process's segment to find the application's API, would call
+/// through the address it found there. A producer creates its segment as
+/// itself, so its file is ours, or, when a service running as root reads
+/// every user's processes, belongs to the user the process runs as.
+fn owner_is_trusted(file_uid: u32, me: u32, process_owner: impl FnOnce() -> Option<u32>) -> bool {
+    file_uid == me || (me == 0 && process_owner() == Some(file_uid))
+}
+
+/// The user `pid` runs as, where the system says without a privilege.
+fn process_owner(pid: u32) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(format!("/proc/{pid}")).ok().map(|meta| meta.uid())
+    }
+    // Segments here live in a directory per user that only that user can
+    // write to, so root finds only its own and never asks.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// `ScopeRingReader::lease` values other than a slot number (1-based).
 const NO_LEASE: u32 = 0;
 const UNSLOTTED_LEASE: u32 = u32::MAX;
@@ -787,6 +826,30 @@ mod tests {
         reader.set_capturing(false);
         assert_eq!(reader.capturing_readers(), 0);
         assert!(!writer.is_capturing());
+    }
+
+    #[test]
+    fn a_segment_made_by_another_user_is_not_read() {
+        let nobody_asked = || -> Option<u32> { panic!("only root looks the process up") };
+        assert!(owner_is_trusted(1000, 1000, nobody_asked), "our own process's segment");
+        // Somebody else's file under the name of our process.
+        assert!(!owner_is_trusted(1001, 1000, nobody_asked));
+        assert!(!owner_is_trusted(0, 1000, nobody_asked));
+        // A service running as root reads every user's processes, and takes
+        // a segment only from the user its process runs as.
+        assert!(owner_is_trusted(0, 0, nobody_asked));
+        assert!(owner_is_trusted(1000, 0, || Some(1000)));
+        assert!(!owner_is_trusted(1001, 0, || Some(1000)), "squatted under a root reader");
+        assert!(!owner_is_trusted(1000, 0, || None), "the process is gone: nobody vouches for the file");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_owner_of_a_process_is_read_from_the_system() {
+        // SAFETY: geteuid cannot fail.
+        assert_eq!(process_owner(std::process::id()), Some(unsafe { libc::geteuid() }));
+        assert_eq!(process_owner(1), Some(0), "init runs as root");
+        assert_eq!(process_owner(4_000_000_000 - 7), None, "no such process");
     }
 
     #[test]

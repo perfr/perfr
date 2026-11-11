@@ -30,6 +30,12 @@ DEFAULT_BASE="https://perfr.dev/download"
 
 set -eu
 
+# Everything below is one brace group. The shell has to read a compound
+# command to its closing brace before it runs any of it, so a download that
+# is cut short (this script is piped into sh) is a syntax error that
+# executes nothing, instead of a prefix that installs the service and stops
+# before the library it must match.
+{
 BASE="${PERFR_INSTALL_BASE:-$DEFAULT_BASE}"
 BASE=${BASE%/}
 if [ -z "${PERFR_INSTALL_BASE:-}" ] && [ -n "${PERFR_VERSION:-}" ]; then
@@ -271,3 +277,4 @@ in the macOS build.
 
 ${instrument_note}
 EOF
+}

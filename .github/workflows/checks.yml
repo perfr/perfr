@@ -35,6 +35,8 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y shellcheck
     - name: Test the release script
       run: tools/release/test_release.sh
+    - name: Test the installer
+      run: tools/install/test_install.sh
 
   # perfr.dev refuses a viewer pack whose source id does not match the
   # checkout. Catch that on the pull request, including a source change

@@ -124,15 +124,16 @@ impl CaptureBundle {
 
         let mut pids: HashSet<u32> = events.iter().map(|r| r.event.pid).collect();
         let mut tids: HashSet<(u32, u32)> = events.iter().map(|r| (r.event.pid, r.event.tid)).collect();
+        // A sample names only its thread; its process is whichever the
+        // thread table says (the first to, if several do), and the target
+        // as a fallback. Looked up, not searched: the table was walked for
+        // every sample, which is samples times threads.
+        let mut thread_pids: HashMap<u32, u32> = HashMap::with_capacity(self.threads.len());
+        for t in &self.threads {
+            thread_pids.entry(t.tid).or_insert(t.pid);
+        }
         for s in &samples {
-            // A sample names only its thread; its process is whichever the
-            // thread table says, and the target as a fallback.
-            let pid = self
-                .threads
-                .iter()
-                .find(|t| t.tid == s.tid)
-                .map(|t| t.pid)
-                .unwrap_or(self.target_pid);
+            let pid = thread_pids.get(&s.tid).copied().unwrap_or(self.target_pid);
             pids.insert(pid);
             tids.insert((pid, s.tid));
         }
@@ -499,6 +500,36 @@ mod tests {
         // The file path cuts the same way.
         let (from_file, _) = crate::slice_bundle_bytes(bytes::Bytes::from(b.to_zip().unwrap()), 2_000, 3_000).unwrap();
         assert_eq!(from_file, s);
+    }
+
+    #[test]
+    fn a_slice_files_each_sample_under_its_threads_process() {
+        let mut b = sample_bundle();
+        // A thread the table does not know is the target's; a tid listed
+        // under two processes goes to the first, as it always did.
+        b.threads.push(ThreadName { pid: 9, tid: 70, name: "Shadow".into() });
+        b.samples.push(SampleRow { timestamp_ns: 130, tid: 4242, frames: vec![1] });
+        b.events.clear();
+        let s = b.slice(110, 600);
+        let threads: Vec<(u32, u32)> = s.threads.iter().map(|t| (t.pid, t.tid)).collect();
+        assert_eq!(threads, vec![(7, 70), (7, 71), (9, 90)]);
+        let processes: Vec<u32> = s.processes.iter().map(|p| p.pid).collect();
+        assert_eq!(processes, vec![7, 9]);
+    }
+
+    /// Cutting a sampled capture with many threads. Run with
+    /// `cargo test --release -p perfr-capture -- --ignored --nocapture slice_bench`.
+    #[test]
+    #[ignore]
+    fn slice_bench() {
+        let mut b = sample_bundle();
+        b.events.clear();
+        b.threads = (0..4_000u32).map(|i| ThreadName { pid: 7, tid: 1_000 + i, name: format!("worker {i}") }).collect();
+        b.samples = (0..400_000u64).map(|i| SampleRow { timestamp_ns: i, tid: 1_000 + (i * 7919 % 4_000) as u32, frames: vec![1, 2] }).collect();
+        let asked = std::time::Instant::now();
+        let s = b.slice(0, 400_000);
+        eprintln!("slicing 400,000 samples on 4,000 threads: {:?}", asked.elapsed());
+        assert_eq!((s.samples.len(), s.threads.len()), (400_000, 4_000));
     }
 
     #[test]

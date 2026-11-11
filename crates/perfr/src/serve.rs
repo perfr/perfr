@@ -264,10 +264,50 @@ impl FrameNames {
     }
 }
 
-/// One running capture: the flag its thread watches, and who it follows.
+/// The newest capture: the flag its thread watches, and who it follows.
 struct CaptureState {
-    running: Arc<AtomicBool>,
+    /// Replaced by every start, see [`CaptureSlot`]. Read by the one
+    /// question that must not wait for the slot: whether a loop is live.
+    running: Arc<Mutex<Arc<AtomicBool>>>,
     target_pid: Arc<AtomicI32>,
+}
+
+/// A capture's thread and the flag that thread watches.
+///
+/// The flag is the capture's own. The loop clears it itself when its target
+/// exits and then looks at it again; with one flag shared by every capture, a
+/// Record that set it in between kept the old loop going, waited for it in
+/// `join`, and had its own capture ended by the old loop's eventual stop.
+///
+/// A cleared flag means the loop was told to stop, not that the thread is
+/// gone: the tail still pushes events and samples (for up to ten seconds
+/// when it waits for symbols). Only the handle says the capture is over.
+struct CaptureSlot {
+    running: Arc<AtomicBool>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+/// The capture slot once nothing is writing into the ring and the sample
+/// store, for Clear, Open and Import, which replace both. `None` while a
+/// capture is running or one is being started or stopped. A capture whose
+/// loop has ended is waited for: emptying the ring under its tail left the
+/// tail's events in the opened capture, with a second "capture finished".
+/// The guard keeps a Record from starting until the caller is done.
+fn idle_capture_slot(worker: &Mutex<Option<CaptureSlot>>) -> Option<std::sync::MutexGuard<'_, Option<CaptureSlot>>> {
+    let mut slot = match worker.try_lock() {
+        Ok(slot) => slot,
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+    };
+    if slot.as_ref().is_some_and(|capture| capture.running.load(Ordering::SeqCst)) {
+        return None;
+    }
+    if let Some(ended) = slot.take() {
+        if ended.handle.join().is_err() {
+            log::warn!("the previous capture worker panicked");
+        }
+    }
+    Some(slot)
 }
 
 /// The function catalogue behind the viewer's hook picker.
@@ -3044,9 +3084,12 @@ pub fn run_on(
     }));
 
     let capture = CaptureState {
-        running: Arc::new(AtomicBool::new(false)),
+        running: Arc::new(Mutex::new(Arc::new(AtomicBool::new(false)))),
         target_pid: Arc::new(AtomicI32::new(0)),
     };
+    // Start and stop are serialized through this, and hold it for as long as
+    // they take.
+    let worker = Arc::new(Mutex::new(None::<CaptureSlot>));
 
     // The ring as a self-contained capture: events with their names, the
     // sample store, thread and process names; with a window, only the slice
@@ -3136,23 +3179,23 @@ pub fn run_on(
     }));
 
     let clear_store = store.clone();
-    let clear_running = capture.running.clone();
+    let clear_worker = worker.clone();
     service.set_capture_clear(Arc::new(move || {
-        if clear_running.load(Ordering::Relaxed) {
+        let Some(_idle) = idle_capture_slot(&clear_worker) else {
             return Err("busy: stop the capture before clearing".to_string());
-        }
+        };
         clear_store.clear();
         Ok(())
     }));
 
     let open_service = service.clone();
     let open_store = store.clone();
-    let open_running = capture.running.clone();
+    let open_worker = worker.clone();
     let open_target = capture.target_pid.clone();
     service.set_capture_open(Arc::new(move |path, window| {
-        if open_running.load(Ordering::Relaxed) {
+        let Some(_idle) = idle_capture_slot(&open_worker) else {
             return Err("busy: stop the capture before opening one".to_string());
-        }
+        };
         let bundle = match window {
             // The file's row-group statistics decide what is read; a slice
             // of a large capture touches a few groups and the footer.
@@ -3167,12 +3210,12 @@ pub fn run_on(
 
     let import_service = service.clone();
     let import_store = store.clone();
-    let import_running = capture.running.clone();
+    let import_worker = worker.clone();
     let import_target = capture.target_pid.clone();
     service.set_capture_import(Arc::new(move |bytes| {
-        if import_running.load(Ordering::Relaxed) {
+        let Some(_idle) = idle_capture_slot(&import_worker) else {
             return Err("busy: stop the capture before opening one".to_string());
-        }
+        };
         let bundle = perfr_capture::CaptureBundle::from_zip(&bytes).map_err(|e| format!("not a capture: {e}"))?;
         open_bundle(&import_service, &import_store, &import_target, bundle)
     }));
@@ -3183,9 +3226,6 @@ pub fn run_on(
     let start_helper = gpu_helper.clone();
     let start_running = capture.running.clone();
     let start_pid = capture.target_pid.clone();
-    let stop_running = capture.running.clone();
-    // Serialize start/stop through final drain, before reusing the running flag.
-    let worker = Arc::new(Mutex::new(None::<std::thread::JoinHandle<()>>));
     let start_worker = worker.clone();
     let stop_worker = worker;
     let start_symbols = symbols.clone();
@@ -3221,12 +3261,16 @@ pub fn run_on(
                 return Err("Auto-profiling is not available on Windows yet; pick functions to hook".into());
             }
             let mut worker = start_worker.lock().map_err(|_| "capture worker poisoned".to_string())?;
-            if start_running.swap(true, Ordering::SeqCst) {
+            if worker.as_ref().is_some_and(|capture| capture.running.load(Ordering::SeqCst)) {
                 return Err("a capture is already running".to_string());
             }
+            let capture_running = Arc::new(AtomicBool::new(true));
+            if let Ok(mut newest) = start_running.lock() {
+                *newest = capture_running.clone();
+            }
             if let Some(previous) = worker.take() {
-                if previous.join().is_err() {
-                    start_running.store(false, Ordering::SeqCst);
+                if previous.handle.join().is_err() {
+                    capture_running.store(false, Ordering::SeqCst);
                     start_service.set_auto_profile_status(serde_json::Value::Null);
                     return Err("previous capture worker panicked".into());
                 }
@@ -3303,7 +3347,7 @@ pub fn run_on(
                 }
             }
             if !ids.is_empty() && hooks.is_empty() {
-                start_running.store(false, Ordering::SeqCst);
+                capture_running.store(false, Ordering::SeqCst);
                 return Err("No selected functions could be resolved".into());
             }
             hooks.truncate(MAX_HOOKS);
@@ -3336,7 +3380,7 @@ pub fn run_on(
                 let label_ids: Vec<u32> =
                     hooks.iter().map(|h| scopes.intern_name(&format!("auto-unhooked: {}", h.name))).collect();
                 let session = crate::frida::FridaSession::arm(pid, &hooks, &name_ids, &label_ids, max_hook_calls_per_s).map_err(|error| {
-                    start_running.store(false, Ordering::SeqCst);
+                    capture_running.store(false, Ordering::SeqCst);
                     start_service.set_instrumentation_status(&error);
                     error
                 })?;
@@ -3346,7 +3390,7 @@ pub fn run_on(
                 Some(session)
             } else { None };
             let service = start_service.clone();
-            let running = start_running.clone();
+            let running = capture_running.clone();
             // A new capture replaces the previous one's samples, so a report
             // describes the capture you are looking at.
             start_store.clear();
@@ -3381,28 +3425,28 @@ pub fn run_on(
                     )
                 })
                 .map_err(|error| {
-                    start_running.store(false, Ordering::SeqCst);
+                    capture_running.store(false, Ordering::SeqCst);
                     error.to_string()
                 })?;
-            *worker = Some(handle);
+            *worker = Some(CaptureSlot { running: capture_running, handle });
             log::info!("capture started (pid {pid})");
             Ok(())
         }),
         stop_capture: Arc::new(move || {
             let mut worker = stop_worker.lock().map_err(|_| "capture worker poisoned".to_string())?;
-            stop_running.store(false, Ordering::SeqCst);
             // A second Stop -- the viewer's, after the worker already ended
             // with its target, or a double click while the first joins --
             // has nothing to stop and nothing to say.
-            if let Some(handle) = worker.take() {
-                handle.join().map_err(|_| "capture worker panicked".to_string())?;
+            if let Some(capture) = worker.take() {
+                capture.running.store(false, Ordering::SeqCst);
+                capture.handle.join().map_err(|_| "capture worker panicked".to_string())?;
                 log::info!("capture stopped");
             }
             Ok(())
         }),
         load_symbols: Arc::new(move |pid| {
             if capture_refuses_symbol_load(
-                load_running.load(Ordering::Relaxed),
+                load_running.lock().map(|newest| newest.load(Ordering::Relaxed)).unwrap_or(false),
                 load_target.load(Ordering::Relaxed),
                 pid,
             ) {
@@ -3518,6 +3562,52 @@ mod tests {
     use perfr_tracing_state::context_switches::SchedulingSlice;
 
     const S: u64 = 1_000_000_000;
+
+    /// A stand-in for a capture thread: loops until its flag clears, then
+    /// spends `tail_ms` in its tail and says so.
+    fn capture_with_a_tail(tail_ms: u64) -> (super::CaptureSlot, Arc<AtomicBool>) {
+        use std::sync::atomic::Ordering;
+        let running = Arc::new(AtomicBool::new(true));
+        let tail_done = Arc::new(AtomicBool::new(false));
+        let (flag, done) = (running.clone(), tail_done.clone());
+        let handle = std::thread::spawn(move || {
+            while flag.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(tail_ms));
+            done.store(true, Ordering::SeqCst);
+        });
+        (super::CaptureSlot { running, handle }, tail_done)
+    }
+
+    #[test]
+    fn an_open_waits_for_the_tail_of_a_capture_whose_loop_has_ended() {
+        use std::sync::atomic::Ordering;
+        let (capture, tail_done) = capture_with_a_tail(150);
+        let running = capture.running.clone();
+        let worker = Mutex::new(Some(capture));
+        assert!(super::idle_capture_slot(&worker).is_none(), "a running capture is busy");
+        // The loop saw its target exit: the flag is clear, the tail has
+        // only begun.
+        running.store(false, Ordering::SeqCst);
+        let slot = super::idle_capture_slot(&worker).expect("a capture that is ending is waited for, not refused");
+        assert!(tail_done.load(Ordering::SeqCst), "nothing is handed out while the tail still writes");
+        assert!(slot.is_none(), "and the capture is gone from the slot");
+    }
+
+    #[test]
+    fn the_slot_is_busy_while_a_start_or_a_stop_holds_it_and_idle_when_empty() {
+        let worker = Mutex::new(None::<super::CaptureSlot>);
+        {
+            let _starting = worker.lock().unwrap();
+            assert!(super::idle_capture_slot(&worker).is_none());
+        }
+        let idle = super::idle_capture_slot(&worker).expect("nothing captured, nothing to wait for");
+        // While an open holds it, a Record waits its turn.
+        assert!(worker.try_lock().is_err());
+        drop(idle);
+        assert!(worker.try_lock().is_ok());
+    }
 
     /// A frame as the symbolizer hands it over, for the name-id tests.
     #[cfg(any(target_os = "linux", target_os = "windows"))]

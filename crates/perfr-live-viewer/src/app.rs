@@ -26,7 +26,7 @@ use perfr_live_event::dev::{
     NAME_POOL_TAIL_US, NAME_LISTING_INLINE, MachineId, TID_NET, TID_RENDER, TID_STATS, TID_UI, VIEWER_PID,
 };
 use perfr_live_event::{kind, InternTable, LaneKey, LiveEvent};
-use perfr_live_protocol::{decode_frame, LiveFrame};
+use perfr_live_protocol::LiveFrame;
 use perfr_live_render::{ThreadFocus, 
     apply_highlight_flags, choose_lod_hint, collect_instances_cached, collect_instances_layout_opts,
     instance_for_event,
@@ -698,7 +698,16 @@ impl ShareDraft {
 pub struct PerfrLiveApp {
     index: TrackIndex,
     intern: InternTable,
+    /// The tail of the stream that is not a whole frame yet. See
+    /// `frames::drain_frames` for what may sit here and for how long.
     leftover: Vec<u8>,
+    /// Frames of a type this build does not know, stepped over so far.
+    frames_skipped: u64,
+    /// Set when the socket was closed because the service speaks another
+    /// protocol version: what to tell the reader, for as long as the page
+    /// lives. Only a reload brings a viewer that matches, so the socket is
+    /// not reopened.
+    ws_incompatible: Option<String>,
     net: Net,
     processes: Vec<ProcessJson>,
     selected_pid: Option<u32>,
@@ -1672,6 +1681,8 @@ impl PerfrLiveApp {
             index: TrackIndex::default(),
             intern,
             leftover: Vec::new(),
+            frames_skipped: 0,
+            ws_incompatible: None,
             net,
             processes: Vec::new(),
             selected_pid: None,
@@ -2361,7 +2372,18 @@ impl PerfrLiveApp {
         self.measure = None;
         self.sample_sels.clear();
         self.stop_record();
-        self.ingest(&bytes);
+        // A file is a stream from its first byte to its last. What an
+        // earlier stream left half-read is not the head of this one, and a
+        // frame this one ends in is not completed by the socket's next bytes.
+        self.leftover.clear();
+        let read = self
+            .ingest(&bytes)
+            .and_then(|()| crate::frames::end_of_stream(&mut self.leftover));
+        if let Err(fault) = read {
+            let message = fault.file_message();
+            log::warn!(target: "perfr_live_viewer::net", "{message}");
+            self.error = message;
+        }
         self.held_stream.loaded(bytes);
         self.follow = false;
         self.user_set_view = false;
@@ -3335,27 +3357,62 @@ impl PerfrLiveApp {
                     break;
                 };
                 ingested = ingested.saturating_add(bytes.len());
-                self.ingest(&bytes);
+                if let Err(fault) = self.ingest(&bytes) {
+                    self.socket_fault(fault);
+                    break;
+                }
+            }
+        }
+        // Every status answer clears `error`, four times a second. This one
+        // does not stop being true, and with the socket left closed it is the
+        // only sign of why the timeline stands still.
+        if self.error.is_empty() {
+            if let Some(message) = &self.ws_incompatible {
+                self.error = message.clone();
             }
         }
     }
 
-    fn ingest(&mut self, bytes: &[u8]) {
-        self.leftover.extend_from_slice(bytes);
-        // Decode by offset and drain once. Draining after every frame moved
-        // the whole remaining buffer each time: a burst of a thousand small
-        // batches in one chunk was a thousand memmoves of the chunk.
-        let mut off = 0usize;
-        loop {
-            match decode_frame(&self.leftover[off..]) {
-                Ok((frame, n)) => {
-                    self.apply_frame(frame);
-                    off += n;
-                }
-                Err(_) => break,
+    /// Feeds stream bytes through the frame buffer. A fault is the caller's
+    /// to report: what it means depends on where the bytes came from.
+    fn ingest(&mut self, bytes: &[u8]) -> Result<(), crate::frames::StreamFault> {
+        // `apply_frame` needs all of `self`, so the buffer steps out while
+        // the frames are applied. Nothing in there reads it.
+        let mut leftover = std::mem::take(&mut self.leftover);
+        let drained = crate::frames::drain_frames(&mut leftover, bytes, |frame| self.apply_frame(frame));
+        self.leftover = leftover;
+        let skipped = drained? as u64;
+        if skipped > 0 {
+            // Said once: a newer service may send its new frame type many
+            // times a second.
+            if self.frames_skipped == 0 {
+                log::warn!(
+                    target: "perfr_live_viewer::net",
+                    "the stream has frames of a type this viewer does not know; they are skipped"
+                );
             }
+            self.frames_skipped += skipped;
         }
-        self.leftover.drain(..off);
+        Ok(())
+    }
+
+    /// The socket's stream cannot be read past this point. Nothing was
+    /// shown for that before: the bad frame stayed at the head of the
+    /// buffer, every later message queued up behind it, and the timeline
+    /// stood still while memory grew.
+    fn socket_fault(&mut self, fault: crate::frames::StreamFault) {
+        let message = fault.socket_message();
+        log::warn!(target: "perfr_live_viewer::net", "{message}");
+        // What is queued continues the stream that just failed.
+        self.ws_queue.clear();
+        if !fault.reconnect_helps() {
+            self.ws_incompatible = Some(message.clone());
+        }
+        self.error = message;
+        // Closing is how the stream is found again: the retry in `update`
+        // opens a new socket, which starts with a Hello and the whole ring,
+        // and that replaces what is held here.
+        self.net.close_ws();
     }
 
     fn apply_frame(&mut self, frame: LiveFrame) {
@@ -3920,7 +3977,13 @@ impl PerfrLiveApp {
         } else {
             detail.push_str("no status yet");
         }
-        detail.push_str(if self.ws_ok { "; event stream open" } else { "; event stream closed, retrying" });
+        detail.push_str(if self.ws_ok {
+            "; event stream open"
+        } else if self.ws_incompatible.is_some() {
+            "; event stream closed: the service speaks another protocol version, reload the page"
+        } else {
+            "; event stream closed, retrying"
+        });
         resp.on_hover_text(format!("{what} — {detail}"));
     }
 
@@ -10595,7 +10658,13 @@ impl eframe::App for PerfrLiveApp {
                 }
                 // A closed WebSocket is retried every couple of seconds, so a
                 // restarted service picks the page back up on its own.
-                if has_service && !self.ws_ok && now - self.last_ws_retry_s > 2.0 {
+                if crate::frames::ws_retry_due(
+                    has_service,
+                    self.ws_ok,
+                    self.ws_incompatible.is_some(),
+                    now,
+                    self.last_ws_retry_s,
+                ) {
                     self.last_ws_retry_s = now;
                     self.net.reconnect_ws_if_closed();
                 }

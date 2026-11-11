@@ -1246,3 +1246,98 @@ fn a_viewer_that_falls_behind_while_a_capture_is_being_opened_has_no_holes() {
     viewer.read_until_quiet(std::time::Duration::from_millis(400));
     assert_the_viewer_holds_the_ring_once(&viewer, &svc);
 }
+
+// ------------------------------------------------------- the viewer's log ---
+
+/// A service whose viewer-log sink collects what it is handed.
+fn serve_collecting_viewer_logs() -> (std::sync::Arc<LiveService>, Served, std::sync::Arc<parking_lot::Mutex<Vec<crate::ViewerLogBatch>>>) {
+    let (svc, served) = serve_small();
+    let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    svc.set_viewer_log(std::sync::Arc::new(move |batch| sink.lock().push(batch)));
+    (svc, served, seen)
+}
+
+fn post_log(served: &Served, body: &serde_json::Value) -> u16 {
+    let host = host_of(served.addr);
+    // As `navigator.sendBeacon` labels it.
+    exchange(served.addr, "POST", "/api/log", &[("Host", &host), ("Content-Type", "text/plain;charset=UTF-8")], Some(body.to_string().as_bytes())).0
+}
+
+#[test]
+fn a_viewer_log_line_cannot_forge_another_or_reach_the_terminal_raw() {
+    let (_svc, served, seen) = serve_collecting_viewer_logs();
+    let status = post_log(
+        &served,
+        &serde_json::json!({"page": "7c1e", "lines": [
+            {"level": "warn", "target": "net",
+             "message": "socket closed\n[2026-01-01T00:00:00.000000] [ERROR] [serve.rs:1] the service was compromised\r\u{1b}[2Jgone"},
+            {"level": "error\n[fake]", "target": "a]\n[2026-01-01T00:00:00.000000] [ERROR] [x] \u{1b}]0;owned\u{7}", "message": "tab\tand \u{9b}31m C1"},
+            {"level": "info", "target": "t".repeat(1 << 20), "message": "a long target"},
+            // What a real panic message looks like: several lines.
+            {"level": "error", "target": "panic", "message": "panicked at src/app.rs:10:5:\nindex out of bounds\n"},
+        ]}),
+    );
+    assert_eq!(status, 204);
+    let seen = seen.lock();
+    let lines = &seen[0].lines;
+    assert_eq!(lines.len(), 4);
+    for line in lines {
+        for text in [&line.level, &line.target, &line.message] {
+            // No character that moves the cursor, clears the screen or sets
+            // the title; and no line of the text starts where a log line's
+            // `[time] [LEVEL]` does.
+            assert!(!text.chars().any(|c| c.is_control() && c != '\n' && c != '\t'), "{text:?}");
+            assert!(!text.contains("\n["), "{text:?}");
+        }
+        assert!(!line.target.contains('\n') && !line.level.contains('\n'), "{line:?}");
+        assert!(line.target.len() <= 128, "a target of {} bytes", line.target.len());
+    }
+    // What was said is still there to read, and a message of several lines
+    // is still several lines.
+    assert_eq!(lines[0].level, "warn");
+    assert!(lines[0].message.starts_with("socket closed\n"), "{:?}", lines[0].message);
+    assert!(lines[0].message.contains("the service was compromised\\r\\x1b[2Jgone"), "{:?}", lines[0].message);
+    assert_eq!(lines[1].level, "info", "a level that is not one is the default");
+    assert_eq!(lines[1].message, "tab\tand \\x9b31m C1");
+    assert!(lines[1].target.starts_with("a]\\n[2026"), "{:?}", lines[1].target);
+    assert_eq!(lines[3].message, "panicked at src/app.rs:10:5:\n    index out of bounds\n    ");
+}
+
+#[test]
+fn viewer_log_lines_past_the_budget_are_dropped_and_counted() {
+    let (_svc, served, seen) = serve_collecting_viewer_logs();
+    let kept = |seen: &parking_lot::Mutex<Vec<crate::ViewerLogBatch>>| -> usize {
+        seen.lock().iter().flat_map(|b| &b.lines).map(|l| l.message.len() + l.target.len()).sum()
+    };
+    // Each request is within the per-request caps; a page that loops sends
+    // many. Six megabytes arrive within the second.
+    let line = serde_json::json!({"level": "info", "target": "loop", "message": "x".repeat(4000)});
+    let body = serde_json::json!({"page": "loop", "lines": vec![line; 380]});
+    for _ in 0..4 {
+        assert_eq!(post_log(&served, &body), 204, "an over-eager page is not an error");
+    }
+    let total = kept(&seen);
+    // (What refills while the test runs is a few kilobytes a second.)
+    assert!(total <= crate::http::VIEWER_LOG_BURST_BYTES + (256 << 10), "{total} bytes of viewer lines reached the log");
+    assert!(total >= crate::http::VIEWER_LOG_BURST_BYTES / 2, "{total}: the budget is not that small");
+}
+
+#[test]
+fn the_viewer_log_budget_refills_and_says_what_it_dropped() {
+    use crate::http::{ViewerLogBudget, VIEWER_LOG_BURST_BYTES, VIEWER_LOG_BYTES_PER_MINUTE};
+    let start = std::time::Instant::now();
+    let at = |secs: u64| start + std::time::Duration::from_secs(secs);
+    let mut budget = ViewerLogBudget::new(start);
+    assert!(budget.take(at(0), VIEWER_LOG_BURST_BYTES));
+    assert!(!budget.take(at(0), 1), "the burst is spent");
+    assert!(!budget.take(at(0), 100));
+    assert_eq!(budget.take_dropped(), 2);
+    assert_eq!(budget.take_dropped(), 0, "reported once");
+    // Half a minute later half a minute's worth is back, and no more.
+    assert!(budget.take(at(30), VIEWER_LOG_BYTES_PER_MINUTE / 2 - 1));
+    assert!(!budget.take(at(30), 4096));
+    // However long nothing is logged, the burst is the most that is saved up.
+    assert!(!budget.take(at(86_400), VIEWER_LOG_BURST_BYTES + 1));
+    assert!(budget.take(at(86_400), VIEWER_LOG_BURST_BYTES));
+}

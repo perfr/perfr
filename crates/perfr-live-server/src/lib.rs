@@ -237,6 +237,8 @@ pub struct LiveService {
     /// the route prints the viewer's warnings and errors to stderr.
     #[allow(clippy::type_complexity)]
     pub viewer_log: Mutex<Option<std::sync::Arc<dyn Fn(ViewerLogBatch) + Send + Sync>>>,
+    /// What is left of the allowance for lines from `POST /api/log`.
+    pub(crate) viewer_log_budget: Mutex<http::ViewerLogBudget>,
     /// The service's log file, for `/api/status`; empty when it has none.
     pub log_path: Mutex<Option<String>>,
     /// Optional: what the service does before the ring is emptied by
@@ -425,6 +427,7 @@ impl LiveService {
             capture_clear: Mutex::new(None),
             agent_scope: Mutex::new(None),
             viewer_log: Mutex::new(None),
+            viewer_log_budget: Mutex::new(http::ViewerLogBudget::new(std::time::Instant::now())),
             log_path: Mutex::new(None),
             names: Mutex::new(CaptureNames::default()),
             demo_stop: Mutex::new(None),

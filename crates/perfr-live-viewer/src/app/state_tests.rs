@@ -501,3 +501,74 @@ fn the_reason_of_a_refused_start_is_what_follows_the_status_code() {
     assert_eq!(refused_start("/api/capture/stop: 409 not capturing"), None);
     assert_eq!(refused_start("/api/status: 500 x"), None);
 }
+
+/// A stream of `n` samples, as a file on disk would hold it.
+fn sampled_stream(n: u64) -> Vec<u8> {
+    capture_stream(status_frame(false, false), (0..n).map(|i| sample(100, 101, 5_000_000 + i * 1_000_000)).collect())
+}
+
+/// What the service last said about its own capture.
+fn service_report() -> crate::net::SamplingReport {
+    crate::net::SamplingReport { samples: 999, ..Default::default() }
+}
+
+#[test]
+fn a_stream_opened_on_a_page_with_a_service_reports_its_own_samples() {
+    let mut app = connected_app();
+    app.sampling = Some(service_report());
+    app.accept_stream(sampled_stream(3));
+    assert!(app.capture_is_local());
+    assert_eq!(
+        app.sampling.as_ref().map(|r| r.samples),
+        Some(3),
+        "the panel still holds the report of the service's capture"
+    );
+    assert!(app.tree.is_some(), "and the call tree is computed with it");
+}
+
+#[test]
+fn a_selection_on_an_opened_stream_is_reported_from_the_file() {
+    let mut page = Page::with(|app| app.apply_status(service_status(false)));
+    page.app.accept_stream(sampled_stream(4));
+    page.frames(2);
+    // Select the first two samples: nothing but this page can answer for
+    // them, and the service is never asked, so its report would never come.
+    page.app.sample_sels.push(TimeMeasure { start_ns: 4_000_000, stop_ns: 6_500_000, label_y: 0.0, sample_tid: None });
+    page.frames(2);
+    assert_eq!(page.app.sampling_ranges.len(), 1);
+    assert_eq!(page.app.sampling.as_ref().map(|r| r.samples), Some(2));
+}
+
+#[test]
+fn a_late_answer_about_the_services_capture_does_not_replace_the_files_report() {
+    let mut app = connected_app();
+    app.accept_stream(sampled_stream(3));
+    app.apply_service_reports(Some(service_report()), None);
+    assert_eq!(app.sampling.as_ref().map(|r| r.samples), Some(3));
+    // Back on the service's capture, its answers count again.
+    app.apply_frame(LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000 });
+    assert!(!app.capture_is_local());
+    app.apply_service_reports(Some(service_report()), None);
+    assert_eq!(app.sampling.as_ref().map(|r| r.samples), Some(999));
+}
+
+#[test]
+fn save_is_off_while_a_file_is_on_screen() {
+    let mut page = Page::with(|app| app.apply_status(service_status(false)));
+    page.frames(2);
+    let save = page.rect_of("Save").expect("the wide bar has Save");
+    page.click(save.center());
+    page.frames(2);
+    assert!(page.shows("Capture (.perfr.zip)"), "Save opens its menu on a live page: {:?}", page.texts);
+    page.key(Key::Escape);
+    page.frames(2);
+    assert!(!page.shows("Capture (.perfr.zip)"));
+
+    // What Save downloads is the service's capture, not the file shown.
+    page.app.accept_stream(sampled_stream(3));
+    page.frames(2);
+    let save = page.rect_of("Save").expect("Save keeps its place");
+    page.click(save.center());
+    page.frames(2);
+    assert!(!page.shows("Capture (.perfr.zip)"), "Save offers the service's capture under a file's timeline");
+}

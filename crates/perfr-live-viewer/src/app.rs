@@ -2044,6 +2044,15 @@ impl PerfrLiveApp {
             || self.story.needs_frames()
     }
 
+    /// Whether what is on screen was read from a file by this page (the
+    /// static site's `?capture=`, a stream or a trace opened or dropped
+    /// here) rather than streamed by the service. Only this page can
+    /// report on such a capture or save it: the service's reports and its
+    /// export are about the service's own capture, whatever is shown here.
+    fn capture_is_local(&self) -> bool {
+        self.static_capture.is_some() || self.held_stream.is_local() || self.trace_name.is_some()
+    }
+
     /// Whether there is a service to ask: a page opened on a capture file
     /// (`?capture=`) has none, and a request it sends goes nowhere.
     fn has_service(&self) -> bool {
@@ -2508,6 +2517,12 @@ impl PerfrLiveApp {
         self.user_set_view = false;
         if self.index.event_count() > 0 {
             self.fit_to_content();
+        }
+        // The static page computes its report at the file's last frame.
+        // With a service the file is only known to be the capture now, and
+        // the report in the panel is still the one of the service's.
+        if self.has_service() {
+            self.show_whole_capture_report();
         }
         self.needs_repaint = true;
         self.settle_frames = 6;
@@ -3331,16 +3346,7 @@ impl PerfrLiveApp {
         if let Some(p) = inbox.processes {
             self.apply_process_list(p);
         }
-        if let Some(r) = inbox.sampling {
-            self.sampling = Some(r);
-        }
-        if let Some(t) = inbox.tree {
-            // Open along the hot path, the way C++ perfr's tree arrives:
-            // every node over the slider's share of the samples.
-            self.tree_expanded = expandable_paths_over(&t.roots, self.tree_expand_threshold);
-            self.tree = Some(t);
-            self.flame_zoom.clear();
-        }
+        self.apply_service_reports(inbox.sampling, inbox.tree);
         if let Some(m) = inbox.modules {
             self.modules = Some(m);
         }
@@ -3491,6 +3497,29 @@ impl PerfrLiveApp {
             if let Some(message) = &self.ws_incompatible {
                 self.error = message.clone();
             }
+        }
+    }
+
+    /// The service's answers to `request_reports`.
+    fn apply_service_reports(
+        &mut self,
+        sampling: Option<crate::net::SamplingReport>,
+        tree: Option<crate::net::SamplingTree>,
+    ) {
+        // Asked before a file took the screen: about another capture than
+        // the one the panel now reports on.
+        if self.capture_is_local() {
+            return;
+        }
+        if let Some(r) = sampling {
+            self.sampling = Some(r);
+        }
+        if let Some(t) = tree {
+            // Open along the hot path, the way C++ perfr's tree arrives:
+            // every node over the slider's share of the samples.
+            self.tree_expanded = expandable_paths_over(&t.roots, self.tree_expand_threshold);
+            self.tree = Some(t);
+            self.flame_zoom.clear();
         }
     }
 
@@ -4239,7 +4268,13 @@ impl PerfrLiveApp {
     /// Save as a small menu: the whole capture, the selected slice when
     /// there is one, or the stream a web page embeds.
     fn transport_save(&mut self, ui: &mut Ui) {
-        let save = icon_button(ui, "Save", "Download the capture", paint_save_icon);
+        // The downloads are the service's exports of its own capture.
+        let save = ui
+            .add_enabled_ui(!self.capture_is_local(), |ui| {
+                icon_button(ui, "Save", "Download the capture", paint_save_icon)
+            })
+            .inner
+            .on_disabled_hover_text("Save downloads the service's capture, and a file is on screen");
         let slice = self.selection_span();
         egui::Popup::menu(&save).show(|ui| {
             ui.set_min_width(240.0);
@@ -7894,7 +7929,7 @@ impl PerfrLiveApp {
     /// before you have selected anything, the answer you want is about
     /// everything you just recorded.
     fn request_reports(&mut self) {
-        if self.static_capture.is_some() {
+        if self.capture_is_local() {
             self.compute_local_reports();
             return;
         }
@@ -8142,7 +8177,7 @@ impl PerfrLiveApp {
                             if !matches!(tab, ReportTab::Inspector | ReportTab::Selection)
                                 && (tab.mode() != was_tree_mode || self.tree.is_none()) {
                                 self.tree_expanded.clear();
-                                if self.static_capture.is_some() {
+                                if self.capture_is_local() {
                                     self.compute_local_reports();
                                 } else {
                                     match &self.scope_report {

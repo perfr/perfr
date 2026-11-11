@@ -2,15 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Per-core lock-free rings for perfr's manual instrumentation.
+//! Lock-free rings for perfr's manual instrumentation.
 //!
-//! An instrumented process writes scope events into its own set of per-core
-//! rings in shared memory; the service maps them, drains each ring, and merges
-//! them into one globally ordered stream. The write path is one atomic
+//! An instrumented process writes scope events into its own set of rings in
+//! shared memory, each thread into the ring its id hashes to; the service
+//! maps them and drains each ring in the order it was written. Nothing is
+//! merged into one ordered stream: see [`merge`]. The write path is one atomic
 //! `fetch_add`, one compare-exchange, a handful of plain stores and one
 //! release store -- no locks, no allocation, no syscall.
 //!
-//! - [`event`] is the 32-byte record.
+//! - [`event`] is the 56-byte record.
 //! - [`ring`] is the shared-memory layout and the write path.
 //! - [`merge`] is the consumer: drain each ring, in claim order.
 //! - [`shm`] creates and opens the mapping.
@@ -23,7 +24,7 @@
 //! `/dev/shm/perfr-scopes-<pid>`, and the rings inside it are that process's
 //! alone. That is the isolation boundary, and it is the one that matters: a
 //! process that dies mid-write, or sits stopped at a breakpoint, can only
-//! ever stall its own rings. Its cursors, its horizon, its merge.
+//! ever stall its own rings.
 //!
 //! What could break that is merging every process into one globally ordered
 //! stream, because a global horizon is the minimum across every input --

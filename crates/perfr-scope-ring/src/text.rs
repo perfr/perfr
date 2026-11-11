@@ -8,7 +8,7 @@
 //! them fit the record; this is for the rest, and for a log line there is
 //! nothing to intern against on the producer either way.
 //!
-//! Twenty bytes ride inline in the record itself, which covers most of them.
+//! Thirty-two bytes ride inline in the record itself, which covers most of them.
 //! Anything longer continues into [`kind::TEXT`] records carrying the same
 //! `(tid, scope_id)`, and the merged stream puts them back in order because
 //! the thread wrote them one after another and timestamps only go forwards.

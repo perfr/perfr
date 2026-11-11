@@ -83,9 +83,8 @@ pub const BACKSTOP_NS: u64 = 30_000_000_000;
 ///
 /// Also carries what the consumer is waiting on, which is what lets it notice
 /// that it has been waiting too long. Without that, one producer killed
-/// between claiming a slot and publishing it stops the entire stream forever:
-/// the slot never commits, the ring's frontier never advances, and the
-/// horizon is the minimum across every ring.
+/// between claiming a slot and publishing it stops its ring forever: the
+/// slot never commits, and claims are read in order.
 #[derive(Clone, Debug, Default)]
 pub struct Cursors {
     pub read: Vec<u64>,
@@ -147,8 +146,8 @@ fn resume_after_lap(read: u64, write: u64, capacity: u64) -> u64 {
 
 /// Copies the committed prefix out of every ring.
 ///
-/// `now_ns` is read once by the caller before scanning, and becomes the
-/// frontier of any ring with nothing in flight.
+/// `now_ns` is read once by the caller before scanning. It is only used to
+/// time how long a ring has been waiting on one uncommitted claim.
 pub fn drain(rings: &Rings, cursors: &mut Cursors, now_ns: u64) -> Drain {
     drain_from(rings, cursors, now_ns, Producer::Alive)
 }
@@ -219,8 +218,8 @@ pub fn drain_from(
                 Claimed::Pending => {
                     // Nothing here waits forever. A slot claimed by a
                     // producer that died before publishing would otherwise
-                    // hold the whole stream: the claim never commits, so this
-                    // ring's frontier never moves, so the horizon never moves.
+                    // hold this ring for good: the claim never commits, and
+                    // nothing behind it can be read past it.
                     if cursors.stalled_at[ring] != read {
                         cursors.stalled_at[ring] = read;
                         cursors.stalled_since_ns[ring] = now_ns;
@@ -240,15 +239,12 @@ pub fn drain_from(
                         continue;
                     }
                     // A claim was handed out but not yet published: a
-                    // producer is mid-write, and the stream has to wait for
-                    // it. How far back depends on when its event is stamped,
-                    // which it announces at claim time -- and that can be
-                    // *older* than events already committed behind it, since
-                    // claim order is not timestamp order in an MPSC ring.
-                    // Stop here: claims are read in order, so the events
-                    // behind this one cannot be delivered without losing it.
-                    // Only this ring waits, which is the whole benefit of
-                    // having no global horizon.
+                    // producer is mid-write, and this ring has to wait for
+                    // it. Stop here: claims are read in order, so the events
+                    // behind this one cannot be delivered without losing it,
+                    // and its thread's later events would arrive ahead of
+                    // it. Only this ring waits, which is the whole benefit
+                    // of having no global horizon.
                     break;
                 }
             }

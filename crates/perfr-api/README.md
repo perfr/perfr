@@ -17,8 +17,8 @@ scope is the way to group lines: click `frame` to read what was logged in it.
 
 Every call is safe from any thread at any time and is a single predictable
 branch until a service is capturing the process. The producer is a lock-free
-shared-memory ring: one `fetch_add`, a few plain stores and one release store,
-about fifteen nanoseconds with the clock read.
+shared-memory ring: one `fetch_add`, one compare-exchange, a few plain stores
+and one release store, about twenty nanoseconds with the clock read.
 
 This crate is also the one implementation behind every other language:
 

@@ -4,19 +4,19 @@
 
 //! The shared-memory layout, and the write path.
 //!
-//! One ring per hardware core, capped, with a thread writing to the ring its
-//! current core owns. Two departures from a textbook per-core SPSC ring, both
-//! forced rather than chosen:
+//! A fixed number of rings, sixteen by default, with a thread writing to the
+//! ring its thread id hashes to, for its whole life ([`ring_for_thread`]).
+//! Departures from a textbook SPSC ring, all forced rather than chosen:
 //!
-//! **Slots are claimed with an atomic bump, not a plain store.** A per-core
-//! ring is only single-producer if a thread cannot be preempted between
+//! **Slots are claimed with an atomic bump, not a plain store.** There are
+//! more threads than rings, so a ring has several producers. An earlier
+//! design had one ring per core, written by whichever thread was on it,
+//! which is only single-producer if a thread cannot be preempted between
 //! reading its core id and writing. In the kernel that is true; in userspace
-//! it is not. A thread can read `cpu_id`, be descheduled, resume on another
-//! core, and store into a ring that a different thread is now writing to.
-//! Linux offers `rseq` for exactly this, but it is Linux-only and intrusive.
-//! One `fetch_add` on the write cursor makes each ring MPSC instead:
-//! still lock-free, ~20 cycles uncontended, and the per-core sharding keeps
-//! contention near zero anyway.
+//! it is not, and `rseq`, which exists for exactly this, is Linux-only and
+//! intrusive. One `fetch_add` on the write cursor makes each ring MPSC
+//! instead: still lock-free, ~20 cycles uncontended, and spreading threads
+//! over sixteen rings keeps contention near zero anyway.
 //!
 //! **A slot is taken before it is written.** The bump hands out a claim, and
 //! a claim is a slot only until the ring has gone round: a thread descheduled
@@ -45,7 +45,9 @@ use crate::event::{ScopeEvent, EVENT_SIZE};
 use std::cell::UnsafeCell;
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 
-pub const MAGIC: u64 = 0x4F52_4249_545F_5347; // "PERFR_SG"
+// The bytes spell "ORBIT_SG", the project's earlier name, which is what a
+// hex dump of a segment shows. Changing them would be a new layout.
+pub const MAGIC: u64 = 0x4F52_4249_545F_5347;
 pub const VERSION: u32 = 2;
 
 /// Cache line, to keep one ring's cursor off another's.

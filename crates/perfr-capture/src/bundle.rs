@@ -97,7 +97,20 @@ impl CaptureBundle {
         let events: Vec<EventRow> = self
             .events
             .iter()
-            .filter(|r| r.event.start_ns <= t1 && r.event.end_ns() >= t0)
+            .filter(|r| {
+                let e = &r.event;
+                if e.kind == perfr_live_event::kind::FUNCTION_CALL && e.extra == perfr_live_event::extra::SAMPLED_FRAME {
+                    // A frame of a sampled stack is its sample drawn, and
+                    // lasts a sampling period only so that it has a width:
+                    // it goes where the sample row and the tick go, by the
+                    // sample's time. Kept by overlap, the stack of a sample
+                    // taken just before the window stood at its left edge
+                    // with no sample under it.
+                    e.start_ns >= t0 && e.start_ns <= t1
+                } else {
+                    e.start_ns <= t1 && e.end_ns() >= t0
+                }
+            })
             .cloned()
             .collect();
         let samples: Vec<SampleRow> = self
@@ -450,6 +463,42 @@ mod tests {
         // And the slice round-trips like the whole.
         let back = CaptureBundle::from_zip(&s.to_zip().unwrap()).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn a_slice_cuts_a_sampled_stack_where_it_cuts_the_sample() {
+        use perfr_live_event::extra::SAMPLED_FRAME;
+        // What a sample leaves in the events: a tick at its timestamp, and
+        // one frame event per level that lasts a sampling period.
+        let period = 1_000;
+        let stack = |timestamp: u64| -> Vec<EventRow> {
+            let frame = |depth: u8, name: &str| {
+                let mut row = ev(timestamp, period, 7, 70, 10 + u32::from(depth), name);
+                row.event.kind = kind::FUNCTION_CALL;
+                row.event.extra = SAMPLED_FRAME;
+                row.event.depth = depth;
+                row
+            };
+            let mut tick = ev(timestamp, period, 7, 70, 11, "tick");
+            tick.event.kind = kind::SAMPLE;
+            vec![tick, frame(0, "main"), frame(1, "tick")]
+        };
+        let mut b = sample_bundle();
+        b.events = [stack(1_900), stack(2_500), stack(2_990), vec![ev(1_900, period, 7, 70, 1, "Tick")]].concat();
+        b.samples = [1_900, 2_500, 2_990].map(|timestamp_ns| SampleRow { timestamp_ns, tid: 70, frames: vec![1, 2] }).to_vec();
+        let s = b.slice(2_000, 3_000);
+        // The sample at 1900 is before the window, and so is its stack,
+        // although its frames last until 2900: drawn without the sample,
+        // it was a stack at the left edge that the report did not count.
+        let sampled: Vec<u64> = s.events.iter().filter(|r| r.event.extra == SAMPLED_FRAME).map(|r| r.event.start_ns).collect();
+        assert_eq!(sampled, vec![2_500, 2_500, 2_990, 2_990]);
+        assert_eq!(s.samples.iter().map(|x| x.timestamp_ns).collect::<Vec<_>>(), vec![2_500, 2_990]);
+        assert_eq!(s.events.iter().filter(|r| r.event.kind == kind::SAMPLE).count(), 2);
+        // A scope that was running at the left edge is another matter: kept whole.
+        assert!(s.events.iter().any(|r| r.name == "Tick" && r.event.start_ns == 1_900));
+        // The file path cuts the same way.
+        let (from_file, _) = crate::slice_bundle_bytes(bytes::Bytes::from(b.to_zip().unwrap()), 2_000, 3_000).unwrap();
+        assert_eq!(from_file, s);
     }
 
     #[test]

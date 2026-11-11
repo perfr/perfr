@@ -733,6 +733,11 @@ impl TrackIndex {
     }
 }
 
+/// A raster pixel (`0xAARRGGBB`) as the four bytes a texture wants.
+fn argb_to_rgba8(p: u32) -> [u8; 4] {
+    [(p >> 16) as u8, (p >> 8) as u8, p as u8, (p >> 24) as u8]
+}
+
 #[derive(Clone, Debug)]
 pub struct RasterizedFrame {
     pub width: usize,
@@ -751,10 +756,7 @@ impl RasterizedFrame {
     pub fn to_rgba8(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.pixels.len() * 4);
         for p in &self.pixels {
-            out.push(((*p >> 16) & 0xFF) as u8);
-            out.push(((*p >> 8) & 0xFF) as u8);
-            out.push((*p & 0xFF) as u8);
-            out.push(((*p >> 24) & 0xFF) as u8);
+            out.extend_from_slice(&argb_to_rgba8(*p));
         }
         out
     }
@@ -845,17 +847,8 @@ impl RasterizedFrame {
                     if o + 3 >= out.len() {
                         break;
                     }
-                    if *p == chrome::TRACK {
-                        out[o] = 0;
-                        out[o + 1] = 0;
-                        out[o + 2] = 0;
-                        out[o + 3] = 0;
-                    } else {
-                        out[o] = ((*p >> 16) & 0xFF) as u8;
-                        out[o + 1] = ((*p >> 8) & 0xFF) as u8;
-                        out[o + 2] = (*p & 0xFF) as u8;
-                        out[o + 3] = ((*p >> 24) & 0xFF) as u8;
-                    }
+                    let rgba = if *p == chrome::TRACK { [0; 4] } else { argb_to_rgba8(*p) };
+                    out[o..o + 4].copy_from_slice(&rgba);
                 }
             }
         }

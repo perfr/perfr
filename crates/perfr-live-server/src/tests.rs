@@ -881,3 +881,79 @@ fn the_host_and_origin_rules_by_case() {
     assert!(!crate::http::request_allowed(None, Some(":44766"), bind, ""));
     assert!(!crate::http::request_allowed(None, Some(""), bind, ""));
 }
+
+// ------------------------------------------------------ starting a capture ---
+
+/// Control hooks that do nothing but start and stop: `start` decides
+/// whether a Record is accepted.
+fn hooks_with_start(start: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static) -> crate::ControlHooks {
+    use std::sync::Arc;
+    crate::ControlHooks {
+        list_processes_json: Arc::new(|| Ok("[]".into())),
+        start_capture: Arc::new(start),
+        stop_capture: Arc::new(|| Ok(())),
+        load_symbols: Arc::new(|_| Ok(())),
+        symbols_status_json: Arc::new(|_| Ok("{}".into())),
+        search_functions_json: Arc::new(|_, _, _| Ok("{}".into())),
+        resolve_functions_json: Arc::new(|_, _| Ok("{}".into())),
+        disassemble_json: Arc::new(|_, _| Ok("{}".into())),
+        source_json: Arc::new(|_| Ok("{}".into())),
+        example_disassembly_json: Arc::new(|| Ok("{}".into())),
+    }
+}
+
+#[test]
+fn a_record_that_is_refused_leaves_the_running_captures_auto_profiling_alone() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (svc, served) = serve_small();
+    // The service's start hook: one capture at a time, and it notes what
+    // the flag said when the capture it accepted began, which is what that
+    // capture's first pass reads.
+    let running = std::sync::Arc::new(AtomicBool::new(false));
+    let seen_at_start = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<bool>::new()));
+    let (hook_running, hook_seen, hook_svc) = (running.clone(), seen_at_start.clone(), svc.clone());
+    svc.set_hooks(hooks_with_start(move |body| {
+        if body.contains(r#""pid":666"#) {
+            return Err("no such process".into());
+        }
+        if hook_running.swap(true, Ordering::SeqCst) {
+            return Err("a capture is already running".into());
+        }
+        hook_seen.lock().push(hook_svc.auto_profile());
+        Ok(())
+    }));
+    let start = |body: &str| send_json(&served, "POST", "/api/capture/start", body);
+
+    // A capture that does not auto-profile is running.
+    assert_eq!(start(r#"{"pid":1}"#).0, 200);
+    assert!(!svc.auto_profile());
+    // A second Record that asks for auto-profiling is turned down, and the
+    // capture that is running does not start hooking on its account.
+    let (status, text) = start(r#"{"pid":1,"auto_profile":true}"#);
+    assert_eq!((status, text.as_str()), (409, "a capture is already running"));
+    assert!(!svc.auto_profile(), "the refused Record switched auto-profiling on");
+
+    // The other way round: the running capture auto-profiles (switched on
+    // from the viewer), and a refused Record without it does not stop that.
+    assert_eq!(send_json(&served, "POST", "/api/auto_profile", r#"{"on":true}"#).0, 200);
+    assert_eq!(start(r#"{"pid":1}"#).0, 409);
+    assert!(svc.auto_profile(), "the refused Record switched auto-profiling off");
+
+    // With nothing running, a Record that fails for a reason of its own
+    // leaves the flag as it found it too.
+    svc.mark_capture_finished();
+    running.store(false, Ordering::SeqCst);
+    assert_eq!(send_json(&served, "POST", "/api/auto_profile", r#"{"on":false}"#).0, 200);
+    assert_eq!(start(r#"{"pid":666,"auto_profile":true}"#).0, 409);
+    assert!(!svc.auto_profile(), "a Record that never started left auto-profiling on");
+
+    // A Record that is accepted has its choice in place before the capture
+    // begins, both ways.
+    assert_eq!(start(r#"{"pid":1,"auto_profile":true}"#).0, 200);
+    assert!(svc.auto_profile());
+    svc.mark_capture_finished();
+    running.store(false, Ordering::SeqCst);
+    assert_eq!(start(r#"{"pid":1}"#).0, 200);
+    assert!(!svc.auto_profile());
+    assert_eq!(*seen_at_start.lock(), vec![false, true, false]);
+}

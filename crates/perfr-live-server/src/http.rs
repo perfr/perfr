@@ -1269,12 +1269,11 @@ async fn capture_start(
         local.auto_profile = false;
     }
     let json = local.to_json();
-    // Each Record says whether its capture auto-profiles; set before the
-    // loop starts so its first pass already knows.
-    svc.set_auto_profile(local.auto_profile);
+    let auto_profile = AutoProfileChoice::propose(&svc, local.auto_profile);
     match hooks_clone(&svc) {
         Some(h) => {
             let result = tokio::task::spawn_blocking(move || (h.start_capture)(&json)).await;
+            auto_profile.settle(&svc, matches!(result, Ok(Ok(()))));
             match result {
                 Ok(Ok(())) => {
                     svc.mark_capture_started(body.pid, 0);
@@ -1287,7 +1286,9 @@ async fn capture_start(
         }
         None => {
             // Rust-only / missing hooks: Record falls back to the demo producer.
-            match crate::demo::start(&svc, 50_000) {
+            let started = crate::demo::start(&svc, 50_000);
+            auto_profile.settle(&svc, started.is_ok());
+            match started {
                 Ok(()) => (
                     StatusCode::OK,
                     Json(serde_json::json!({"demo": true, "reason": "no_hooks"})),
@@ -1299,20 +1300,56 @@ async fn capture_start(
     }
 }
 
+/// Each Record says whether its capture auto-profiles, and the capture loop
+/// reads that from the service on every pass. The choice has to be in place
+/// before the loop's first pass, so it goes in before the start hook runs;
+/// but the hook is also what turns a Record down, and a Record that was
+/// turned down has no say over the capture that is running: with the choice
+/// simply stored up front, a second Record (another tab, an agent that did
+/// not look at the status) answered "a capture is already running" and
+/// switched that capture's hooking on or off all the same.
+struct AutoProfileChoice {
+    wanted: bool,
+    /// What the flag said before this Record put its own choice in; `None`
+    /// when it did not, because a capture was running and the flag was that
+    /// capture's.
+    previous: Option<bool>,
+}
+
+impl AutoProfileChoice {
+    fn propose(svc: &LiveService, wanted: bool) -> Self {
+        if svc.is_capturing() {
+            return Self { wanted, previous: None };
+        }
+        let previous = svc.auto_profile.swap(wanted, std::sync::atomic::Ordering::Relaxed);
+        Self { wanted, previous: Some(previous) }
+    }
+
+    /// The start hook has answered: an accepted Record's choice stands, a
+    /// refused one's is taken back.
+    fn settle(self, svc: &LiveService, accepted: bool) {
+        match (accepted, self.previous) {
+            // Accepted although a capture looked to be running (it ended
+            // between the look and the hook): late, but this capture's.
+            (true, None) => svc.set_auto_profile(self.wanted),
+            (false, Some(previous)) => svc.set_auto_profile(previous),
+            (true, Some(_)) | (false, None) => {}
+        }
+    }
+}
+
 /// Starts a capture of `pid` (0 for none) the way `POST /api/capture/start`
 /// does with every other setting at its default: what a remote does when
 /// its hub presses Record. Blocking.
 pub fn start_capture_pid(svc: &Arc<LiveService>, pid: u32) -> Result<(), String> {
     let body: StartBody = serde_json::from_value(serde_json::json!({"pid": pid})).map_err(|e| e.to_string())?;
-    svc.set_auto_profile(false);
-    match hooks_clone(svc) {
-        Some(h) => {
-            (h.start_capture)(&body.to_json())?;
-            svc.mark_capture_started(pid, 0);
-            Ok(())
-        }
+    let auto_profile = AutoProfileChoice::propose(svc, false);
+    let started = match hooks_clone(svc) {
+        Some(h) => (h.start_capture)(&body.to_json()).map(|()| svc.mark_capture_started(pid, 0)),
         None => crate::demo::start(svc, 50_000),
-    }
+    };
+    auto_profile.settle(svc, started.is_ok());
+    started
 }
 
 /// Stops the capture the way `POST /api/capture/stop` does. Blocking.

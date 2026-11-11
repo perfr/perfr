@@ -1225,11 +1225,14 @@ mod tests {
             remote_end,
             RemoteInfo { host: "box-b".into(), cores: 4, os: "test".into() },
         ));
-        // Wait for the link and a first fit.
+        // Wait for the link and a first fit. One clean probe is a fit:
+        // `probes` counts the round trips within reach of the fastest, and
+        // between two tasks of one busy test process the fastest can stay
+        // out of reach of all but a couple for the whole ten seconds.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             let list = hub.peers.list();
-            if list.len() == 1 && list[0].probes >= 4 {
+            if list.len() == 1 && list[0].probes >= 1 {
                 break;
             }
             assert!(std::time::Instant::now() < deadline, "no fit within 10 s: {list:?}");

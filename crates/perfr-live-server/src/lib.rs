@@ -361,7 +361,8 @@ pub struct ViewerLogLine {
 
 /// The state a viewer starts from (`LiveService::subscribe_with_snapshot`).
 pub struct ViewerSnapshot {
-    /// Hello, every interned string and name, the status: encoded frames.
+    /// Hello, every interned string and name, the status: encoded frames,
+    /// joined into messages (`join_frames`).
     pub head: Vec<Vec<u8>>,
     /// The ring, oldest first. Not encoded: a ring is hundreds of megabytes,
     /// and encoding all of it up front held a second copy for as long as a
@@ -384,6 +385,25 @@ impl ViewerSnapshot {
 
 /// Events per batch frame of a snapshot.
 const SNAPSHOT_BATCH_EVENTS: usize = 2048;
+
+/// About how large a message of joined frames is made.
+const JOINED_MESSAGE_BYTES: usize = 64 << 10;
+
+/// Frames joined back to back into messages of about 64 KiB, in order. A
+/// frame says its own length, so a reader takes a message of several the
+/// way it takes a stream file. Sent one per message, the names of a
+/// sampled capture were tens of thousands of sends for each viewer that
+/// connected or was started over.
+pub fn join_frames(frames: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    let mut messages: Vec<Vec<u8>> = Vec::new();
+    for frame in frames {
+        match messages.last_mut() {
+            Some(last) if last.len() + frame.len() <= JOINED_MESSAGE_BYTES => last.extend_from_slice(&frame),
+            _ => messages.push(frame),
+        }
+    }
+    messages
+}
 
 /// Thread and process names of the current capture.
 #[derive(Default)]
@@ -961,7 +981,7 @@ impl LiveService {
         let mut head = vec![self.hello_frame()];
         head.extend(self.names_and_status_frames());
         let (_, events) = self.ring().snapshot();
-        (rx, ViewerSnapshot { head, events, wire: self.wire() })
+        (rx, ViewerSnapshot { head: join_frames(head), events, wire: self.wire() })
     }
 
     fn hello_frame(&self) -> Vec<u8> {

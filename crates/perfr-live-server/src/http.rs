@@ -2104,8 +2104,8 @@ async fn ws_loop(socket: WebSocket, svc: Arc<LiveService>) {
                                      it continues with a gap"
                                 );
                             }
-                            for frame in svc.names_and_status_frames() {
-                                if !send_frame(&mut sink, frame).await {
+                            for message in crate::join_frames(svc.names_and_status_frames()) {
+                                if !send_frame(&mut sink, message).await {
                                     return;
                                 }
                             }

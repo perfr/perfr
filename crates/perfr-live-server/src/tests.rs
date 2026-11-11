@@ -1026,6 +1026,9 @@ struct Viewer {
     names: std::collections::HashMap<u32, String>,
     hellos: usize,
     finished: usize,
+    statuses: usize,
+    /// WebSocket messages received, whatever they carried.
+    messages: usize,
 }
 
 impl Viewer {
@@ -1039,12 +1042,14 @@ impl Viewer {
         prepare(&stream);
         stream.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
         let (ws, _) = tokio_tungstenite::tungstenite::client(format!("ws://{addr}/ws"), stream).expect("the handshake");
-        Viewer { ws, events: Vec::new(), names: Default::default(), hellos: 0, finished: 0 }
+        Viewer { ws, events: Vec::new(), names: Default::default(), hellos: 0, finished: 0, statuses: 0, messages: 0 }
     }
 
     fn apply(&mut self, bytes: &[u8]) {
+        self.messages += 1;
         for frame in decode_all(bytes).expect("a decodable message") {
             match frame {
+                LiveFrame::Status { .. } => self.statuses += 1,
                 // A Hello starts a snapshot of the whole ring, a
                 // CaptureStarted a new capture: both empty the view.
                 LiveFrame::Hello { .. } => {
@@ -1635,4 +1640,45 @@ fn etag_bench() {
         assert_eq!(revalidate(&etag).0, 304);
     }
     eprintln!("revalidating the wasm: {:?} a request", asked.elapsed() / 50);
+}
+
+#[test]
+fn a_connecting_viewer_gets_its_names_in_a_few_messages_and_in_order() {
+    let (svc, served) = serve_small();
+    // A sampled capture's frame names: tens of thousands of short strings.
+    for i in 0..30_000u32 {
+        svc.intern_id(1_000_000 + i, &format!("module::function_{i}"));
+    }
+    svc.set_thread_name(7, 70, "Main");
+    svc.set_process_name(7, "game");
+    svc.push_events(&[ev(1), ev(2), ev(3)]);
+    let mut viewer = Viewer::connect(served.addr);
+    viewer.read_until("the snapshot", |v| v.events.len() == 3);
+    assert_eq!((viewer.hellos, viewer.statuses), (1, 1));
+    assert_eq!(viewer.names.len(), 30_000);
+    assert_eq!(viewer.names.get(&1_029_999).map(String::as_str), Some("module::function_29999"));
+    // One message per name was thirty thousand sends, and as many scopes
+    // in the service's own profile, for every viewer that connects.
+    assert!(viewer.messages < 100, "{} messages", viewer.messages);
+    eprintln!("a snapshot with 30,000 names: {} messages", viewer.messages);
+}
+
+/// What connecting costs when the capture has many names. Run with
+/// `cargo test --release -p perfr-live-server -- --ignored --nocapture connect_bench`.
+#[test]
+#[ignore]
+fn connect_bench() {
+    let (svc, served) = serve_small();
+    for i in 0..30_000u32 {
+        svc.intern_id(1_000_000 + i, &format!("module::function_{i}"));
+    }
+    svc.push_events(&[ev(1)]);
+    let asked = std::time::Instant::now();
+    let mut messages = 0;
+    for _ in 0..10 {
+        let mut viewer = Viewer::connect(served.addr);
+        viewer.read_until("the snapshot", |v| v.events.len() == 1);
+        messages = viewer.messages;
+    }
+    eprintln!("connecting with 30,000 names held: {:?} and {messages} messages a viewer", asked.elapsed() / 10);
 }

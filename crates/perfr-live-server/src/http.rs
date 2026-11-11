@@ -758,11 +758,37 @@ async fn capture_clear(State(svc): State<Arc<LiveService>>) -> Response {
 /// opens the bundle at that path on the service's machine as the current
 /// capture -- the whole file, or just the window, which the file's
 /// row-group statistics let the service cut without reading the rest.
+/// The path must be a regular file no larger than an import may be.
 #[derive(Deserialize)]
 struct OpenBody {
     path: String,
     t0: Option<u64>,
     t1: Option<u64>,
+}
+
+/// Whether `path` is something the open hook may read whole: a regular
+/// file, not empty, and no larger than `max_len`. The hook reads to the end
+/// of whatever it is given, so a FIFO parks a blocking thread until someone
+/// writes to it, `/dev/zero` is read until memory runs out, and a file under
+/// `/proc` (regular, but of length 0 whatever it produces) can do either;
+/// an empty file is no capture anyway. The file can still change between
+/// this look and the read: this stops a path that was never a capture, not
+/// a race.
+pub(crate) fn check_capture_file(path: &str, max_len: u64) -> Result<(), String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{path}: not a regular file"));
+    }
+    if meta.len() == 0 {
+        return Err(format!("{path}: the file is empty"));
+    }
+    if meta.len() > max_len {
+        return Err(format!(
+            "{path}: {} bytes, and a capture file can be {max_len} at most",
+            meta.len()
+        ));
+    }
+    Ok(())
 }
 
 async fn capture_open(State(svc): State<Arc<LiveService>>, Json(body): Json<OpenBody>) -> Response {
@@ -775,7 +801,11 @@ async fn capture_open(State(svc): State<Arc<LiveService>>, Json(body): Json<Open
         (None, None) => None,
         _ => return (StatusCode::BAD_REQUEST, "give both t0 and t1, or neither").into_response(),
     };
-    match tokio::task::spawn_blocking(move || open(&body.path, window)).await {
+    let opened = tokio::task::spawn_blocking(move || {
+        check_capture_file(&body.path, IMPORT_BODY_LIMIT as u64)?;
+        open(&body.path, window)
+    });
+    match opened.await {
         Ok(Ok(summary)) => ([(header::CONTENT_TYPE, "application/json")], summary).into_response(),
         Ok(Err(error)) => {
             let status = if error.starts_with("busy") { StatusCode::CONFLICT } else { StatusCode::BAD_REQUEST };
@@ -2192,11 +2222,16 @@ mod isolation_tests {
                 .expect("curl");
             String::from_utf8_lossy(&out.stdout).to_string()
         };
-        let ok = post(r#"{"path":"/tmp/x.perfr.zip","t0":900,"t1":100}"#);
-        assert!(ok.contains("/tmp/x.perfr.zip:Some((100, 900))"), "{ok}");
-        let whole = post(r#"{"path":"/tmp/x.perfr.zip"}"#);
-        assert!(whole.contains("/tmp/x.perfr.zip:None"), "{whole}");
-        assert!(post(r#"{"path":"/tmp/x.perfr.zip","t0":5}"#).contains("400"));
+        // The route only passes on a regular file, so there has to be one.
+        let file = std::env::temp_dir().join(format!("perfr-open-hook-test-{}.perfr.zip", std::process::id()));
+        std::fs::write(&file, b"stands in for a bundle").unwrap();
+        let path = file.to_str().unwrap();
+        let ok = post(&serde_json::json!({"path": path, "t0": 900, "t1": 100}).to_string());
+        assert!(ok.contains(&format!("{path}:Some((100, 900))")), "{ok}");
+        let whole = post(&serde_json::json!({"path": path}).to_string());
+        assert!(whole.contains(&format!("{path}:None")), "{whole}");
+        assert!(post(&serde_json::json!({"path": path, "t0": 5}).to_string()).contains("400"));
+        let _ = std::fs::remove_file(&file);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

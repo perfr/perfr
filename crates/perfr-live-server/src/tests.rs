@@ -572,3 +572,63 @@ fn the_largest_ring_is_half_of_memory_up_to_eight_gibibytes() {
     assert!(error.contains("between 1048576 (1 MiB) and 2147483648 (2048 MiB"), "{error}");
     assert!(error.ends_with(&format!("got {}", max + 1)), "{error}");
 }
+
+#[cfg(unix)]
+#[test]
+fn opening_a_path_that_is_not_a_regular_file_is_refused_before_anything_reads_it() {
+    let dir = std::env::temp_dir().join(format!("perfr-open-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let capture = dir.join("capture.perfr.zip");
+    std::fs::write(&capture, b"stands in for a bundle").unwrap();
+    let empty = dir.join("empty.perfr.zip");
+    std::fs::write(&empty, b"").unwrap();
+    let fifo = dir.join("fifo.perfr.zip");
+    let c_fifo = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    // SAFETY: a NUL-terminated path that outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+
+    let (svc, served) = serve_small();
+    // The hook stands in for the service's reader, which reads the whole
+    // file: on a FIFO it would wait for a writer for good, on /dev/zero it
+    // would read until the machine ran out of memory.
+    let opened = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let seen = opened.clone();
+    svc.set_capture_open(std::sync::Arc::new(move |path, _window| {
+        seen.lock().push(path.to_string());
+        Ok("{}".to_string())
+    }));
+    let open = |path: &str| send_json(&served, "POST", "/api/capture/open", &serde_json::json!({ "path": path }).to_string());
+
+    for (path, why) in [
+        (fifo.to_str().unwrap(), "not a regular file"),
+        ("/dev/zero", "not a regular file"),
+        (dir.to_str().unwrap(), "not a regular file"),
+        (empty.to_str().unwrap(), "empty"),
+        (dir.join("missing.perfr.zip").to_str().unwrap(), "missing.perfr.zip"),
+    ] {
+        let (status, text) = open(path);
+        assert_eq!(status, 400, "{path}: {text}");
+        assert!(text.contains(why), "{path}: {text}");
+    }
+    assert!(opened.lock().is_empty(), "the reader was reached: {:?}", opened.lock());
+
+    let (status, text) = open(capture.to_str().unwrap());
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(*opened.lock(), vec![capture.to_str().unwrap().to_string()]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_capture_file_over_the_import_limit_is_refused_by_its_size() {
+    let dir = std::env::temp_dir().join(format!("perfr-open-size-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("capture.perfr.zip");
+    std::fs::write(&path, vec![0u8; 4096]).unwrap();
+    let path = path.to_str().unwrap();
+    assert!(crate::http::check_capture_file(path, 4096).is_ok());
+    let error = crate::http::check_capture_file(path, 4095).unwrap_err();
+    assert!(error.contains("4096 bytes") && error.contains("4095"), "{error}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

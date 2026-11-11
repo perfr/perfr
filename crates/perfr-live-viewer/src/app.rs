@@ -7134,8 +7134,6 @@ impl PerfrLiveApp {
         }
     }
 
-    /// Wheel Y + leftover flick coast. Time zoom / time pan stay in
-    /// `handle_time_nav`; this only moves the track list.
     /// The track list's vertical scrollbar, drawn by the viewer. Its
     /// colour follows the pointer's position and its own drag, never
     /// egui's hover state: egui's bar and the report splitter beside it
@@ -7191,6 +7189,8 @@ impl PerfrLiveApp {
         painter.rect_filled(handle, 2.0, color);
     }
 
+    /// Wheel Y + leftover flick coast. Time zoom / time pan stay in
+    /// `handle_time_nav`; this only moves the track list.
     fn handle_vscroll_gestures(&mut self, ctx: &Context, lanes: Rect, ruler: Rect, dt: f32) {
         let (pressed, press_pos, scroll, zoom, ctrl_like, pinch, steal_keys) = ctx.input(|i| {
             (
@@ -7592,8 +7592,6 @@ impl PerfrLiveApp {
         }
     }
 
-    /// Turn the Select (marquee) mode on or off. Leaving it drops any drawn
-    /// rectangle so the timeline pans normally again.
     /// Begin a Ctrl+left-drag marquee at the pointer. Called from the body
     /// dispatch the frame the drag starts, so it can pre-empt panning.
     fn begin_rect_select(&mut self, response: &egui::Response, body: Rect) {
@@ -7861,12 +7859,6 @@ impl PerfrLiveApp {
         // the pick under the release is not `self.hover`.
     }
 
-    /// The tid of the sample bar at body-local `y`, if that is what is there.
-    ///
-    /// Deliberately only SAMPLE lanes: dragging over a thread's flame graph or
-    /// its state bar is not the same gesture as dragging over its sample bar,
-    /// and quietly scoping the report from either would make the selection
-    /// mean different things in places that look alike.
     /// A shade for the sample bar's background, a touch off the canvas so
     /// the bar reads as its own strip (C++ perfr gives it a lighter row).
     /// Nudged toward mid-grey, which lifts a dark canvas and settles a light
@@ -7916,6 +7908,12 @@ impl PerfrLiveApp {
         })
     }
 
+    /// The tid of the sample bar at body-local `y`, if that is what is there.
+    ///
+    /// Deliberately only SAMPLE lanes: dragging over a thread's flame graph or
+    /// its state bar is not the same gesture as dragging over its sample bar,
+    /// and quietly scoping the report from either would make the selection
+    /// mean different things in places that look alike.
     fn sample_lane_at_y(&self, y: f32) -> Option<u32> {
         let scale = self.tracks.scale.max(0.01);
         self.tracks.layout().iter().find_map(|(key, lane_y)| {
@@ -7966,9 +7964,6 @@ impl PerfrLiveApp {
         .filter(|p| p.kind != kind::VALUE)
     }
 
-    /// Asks the service for a report whenever the selection changes. An
-    /// unchanged selection is not refetched, so dragging the view around does
-    /// not hammer the endpoint.
     /// The committed selections plus any in-progress drag, as report windows.
     /// Empty means the whole capture.
     fn sample_ranges(&self) -> Vec<(u64, u64, Option<u32>)> {
@@ -7987,6 +7982,9 @@ impl PerfrLiveApp {
             .collect()
     }
 
+    /// Asks the service for a report whenever the selection changes. An
+    /// unchanged selection is not refetched, so dragging the view around does
+    /// not hammer the endpoint.
     fn refresh_sampling_report(&mut self, now: f64) {
         let ranges = self.sample_ranges();
         if ranges == self.sampling_ranges {
@@ -8442,9 +8440,6 @@ impl PerfrLiveApp {
         self.after_report_panel(ctx, inner.response.rect);
     }
 
-    /// The report panel's resize handle: a strip on the panel's side of its
-    /// left edge, in a layer of its own above both panels, so neither
-    /// panel's clip nor the timeline's widgets can take the drag from it.
     /// The handle between the timeline and the report, on the panel's left
     /// edge, read straight from the pointer like the lane scrollbar: a
     /// press that lands on it starts the drag, and while the button is
@@ -9211,8 +9206,6 @@ impl PerfrLiveApp {
         }
     }
 
-    /// The line above a report that says what is hooked and what to do
-    /// about it: hooks arm on the next Record, not on the capture in view.
     /// Auto-unhook: a checkbox and the rate, bound to the service's persisted
     /// settings. A change is PUT back at once (the whole object, so other
     /// keys survive) and applies to the next Record.
@@ -9370,6 +9363,8 @@ impl PerfrLiveApp {
         }
     }
 
+    /// The line above a report that says what is hooked and what to do
+    /// about it: hooks arm on the next Record, not on the capture in view.
     fn hooked_hint(&self, ui: &mut Ui) {
         // Always one line, so hooking a row does not shift the rows under
         // it: with nothing hooked the line says so, in the muted colour.
@@ -10471,7 +10466,6 @@ impl PerfrLiveApp {
         self.about_open = open;
     }
 
-    /// The UI knobs window: what the report rows look like, live.
     /// The settings, one window behind the gear: the process and its
     /// symbols, what to collect, unwinding, hooks and what is hooked, then
     /// the interface knobs. What used to be a strip across the top and a
@@ -11279,7 +11273,6 @@ fn row_process_wash(id: RowId, dragging: bool) -> Color32 {
     }
 }
 
-/// Case-insensitive substring test; `needle` is already lower-case.
 /// Case-insensitive, multi-token substring test: every whitespace-separated
 /// token in `needle` must appear somewhere in `hay`. `needle` is assumed
 /// already lower-cased (callers lower-case the filter once). An empty needle
@@ -12031,8 +12024,6 @@ fn set_page_fullscreen(ctx: &Context, on: bool) {
     }
 }
 
-/// Frame rate and, next to it, what the event stream from the service is
-/// delivering right now.
 /// A chip at the top of the lanes naming something that narrows the view,
 /// with a cross; returns its width and whether it was clicked. `right` is
 /// the x its right edge sits at, so several line up leftwards.
@@ -12540,9 +12531,9 @@ fn percent_bar(ui: &mut Ui, percent: f64, strong: bool, width: f32) {
     );
 }
 
-/// How often the Live tab recomputes while events stream in.
 /// How often the Live table re-sorts while a capture runs.
 const LIVE_SORT_EVERY_S: f64 = 1.0;
+/// How often the Live tab recomputes while events stream in.
 const LIVE_STATS_MIN_INTERVAL_S: f64 = 0.25;
 /// The Live table's function names shrink to this before a number column
 /// is pushed out of view.
@@ -12792,7 +12783,6 @@ fn flame_layout(roots: &[crate::net::TreeNodeJson], width: f32) -> Vec<FlameBar>
     out
 }
 
-/// `name` cut to what fits in `width` pixels at `font` size, with an
 /// The htop-like per-core utilization on a scheduler header: a colour-coded
 /// bar (when the header column is wide enough) and the percentage, both
 /// right-aligned so the cores line up.
@@ -12844,6 +12834,7 @@ fn util_color(util: f32) -> Color32 {
     Color32::from_rgb(mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
 }
 
+/// `name` cut to what fits in `width` pixels at `font` size, with an
 /// ellipsis; a rough per-character width is enough for a bar label.
 fn truncate_to_width(name: &str, width: f32, font: f32) -> String {
     let per_char = font * 0.58;

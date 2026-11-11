@@ -7,22 +7,28 @@
 //! Useful when you only want the viewer + demo producer, or to exercise the
 //! ring/stream without building the C++ capture stack.
 
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use perfr_live_server::{http, LiveService, ServerConfig, DEFAULT_HTTP_PORT, DEFAULT_RING_BYTES};
 
-fn parse_args() -> ServerConfig {
+fn parse_args(args: impl IntoIterator<Item = String>) -> ServerConfig {
     let mut cfg = ServerConfig {
-        bind: SocketAddr::from(([0, 0, 0, 0], DEFAULT_HTTP_PORT)),
-        ring_buffer_bytes: DEFAULT_RING_BYTES,
-        spill_path: None,
         wire: perfr_live_server::env_wire(),
+        ..ServerConfig::default()
     };
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--host" => {
+                let host: IpAddr = args
+                    .next()
+                    .expect("missing host")
+                    .parse()
+                    .expect("invalid host: an IP address, 0.0.0.0 for every interface");
+                cfg.bind.set_ip(host);
+            }
             "--http-port" | "--http_port" => {
                 let port: u16 = args
                     .next()
@@ -77,6 +83,8 @@ fn print_help() {
     eprintln!(
         "perfr-live-service — WASM live viewer HTTP server\n\
          \n\
+         --host ADDR                   listen address (default 127.0.0.1; 0.0.0.0 opens the\n\
+         \x20                             service, which has no authentication, to the network)\n\
          --http-port PORT              listen port (default {DEFAULT_HTTP_PORT})\n\
          --ring-buffer-bytes N[kKmMgG] in-process ring size (default {DEFAULT_RING_BYTES})\n\
          --spill-path DIR              optional overflow serialize directory\n\
@@ -90,7 +98,7 @@ fn print_help() {
 
 #[tokio::main]
 async fn main() {
-    let cfg = parse_args();
+    let cfg = parse_args(std::env::args().skip(1));
     eprintln!(
         "perfr live viewer on http://{}/  ring={} bytes  spill={:?}",
         cfg.bind, cfg.ring_buffer_bytes, cfg.spill_path
@@ -107,4 +115,22 @@ async fn main() {
 fn demo_stop_and_exit(svc: &LiveService) {
     perfr_live_server::demo::stop(svc);
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(args: &[&str]) -> ServerConfig {
+        parse_args(args.iter().map(|a| a.to_string()))
+    }
+
+    #[test]
+    fn the_service_listens_on_this_machine_only_unless_told_a_host() {
+        assert_eq!(parsed(&[]).bind.to_string(), format!("127.0.0.1:{DEFAULT_HTTP_PORT}"));
+        // A port alone does not open it up.
+        assert_eq!(parsed(&["--http-port", "9000"]).bind.to_string(), "127.0.0.1:9000");
+        assert_eq!(parsed(&["--host", "0.0.0.0", "--http-port", "9000"]).bind.to_string(), "0.0.0.0:9000");
+        assert_eq!(parsed(&["--host", "::1"]).bind.ip().to_string(), "::1");
+    }
 }

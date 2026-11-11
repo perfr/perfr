@@ -82,7 +82,10 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            bind: SocketAddr::from(([0, 0, 0, 0], DEFAULT_HTTP_PORT)),
+            // This machine only. Nothing behind the port is authenticated,
+            // so every interface is something a caller asks for by name,
+            // never what leaving the field out gets.
+            bind: SocketAddr::from(([127, 0, 0, 1], DEFAULT_HTTP_PORT)),
             ring_buffer_bytes: DEFAULT_RING_BYTES,
             spill_path: None,
             wire: WireFormat::default(),

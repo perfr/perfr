@@ -30,6 +30,13 @@ fn ev(i: u64) -> LiveEvent {
 }
 
 #[test]
+fn a_config_that_names_no_address_binds_this_machine_only() {
+    let bind = ServerConfig::default().bind;
+    assert!(bind.ip().is_loopback(), "{bind}");
+    assert_eq!(bind.port(), crate::DEFAULT_HTTP_PORT);
+}
+
+#[test]
 fn snapshot_frames_are_decodable_hello_status_and_events() {
     let svc = LiveService::new(small_cfg()).unwrap();
     svc.intern_string("main");

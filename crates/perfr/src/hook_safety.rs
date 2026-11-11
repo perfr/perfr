@@ -66,10 +66,29 @@ impl SafetyLevel {
     }
 }
 
+/// What the analysis found at the entry, as a fact code can test. The
+/// `reason` says the same for a person, and its wording is free to change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hazard {
+    /// Nothing, or nothing looked for (a module that was not analysed).
+    None,
+    /// The entry is not code a call would land on: it does not decode, or
+    /// it is a return, padding or a trap.
+    NotAnEntry,
+    /// The function is shorter than a jump: no room for an inline
+    /// trampoline, nor for a return probe.
+    TooSmall,
+    /// A branch, call or return within the bytes an inline trampoline
+    /// overwrites. A hazard for Frida only: a uprobe relocates the one
+    /// instruction it displaces, out of line.
+    BranchInTrampolineWindow,
+}
+
 /// The verdict for one function, with the evidence a person needs to judge it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HookSafety {
     pub level: SafetyLevel,
+    pub hazard: Hazard,
     /// One line saying why, for the tooltip and the crash report.
     pub reason: String,
     /// The first instruction, formatted (empty when it did not decode or was
@@ -80,13 +99,13 @@ pub struct HookSafety {
 }
 
 impl HookSafety {
-    fn new(level: SafetyLevel, reason: impl Into<String>, entry: String, entry_hex: String) -> Self {
-        HookSafety { level, reason: reason.into(), entry, entry_hex }
+    fn new(level: SafetyLevel, hazard: Hazard, reason: impl Into<String>, entry: String, entry_hex: String) -> Self {
+        HookSafety { level, hazard, reason: reason.into(), entry, entry_hex }
     }
 
     /// A module this analyser does not decode.
     pub fn not_analysed() -> Self {
-        HookSafety::new(SafetyLevel::Unknown, "not analysed (non-x86 module)", String::new(), String::new())
+        HookSafety::new(SafetyLevel::Unknown, Hazard::None, "not analysed (non-x86 module)", String::new(), String::new())
     }
 
     pub fn is_safe(&self) -> bool {
@@ -95,14 +114,14 @@ impl HookSafety {
 
     /// Safe to arm with a kernel uprobe. A `risky` verdict whose only hazard
     /// is an inline trampoline (a call or branch in the first five bytes)
-    /// does not apply: uprobes relocate that one instruction out of line, and
-    /// the reason says so. A function too small for a return probe, or one
-    /// this analyser calls unsafe, is not.
+    /// does not apply: uprobes relocate that one instruction out of line. A
+    /// function too small for a return probe, or one this analyser calls
+    /// unsafe, is not.
     pub fn allows_uprobe(&self) -> bool {
         match self.level {
             SafetyLevel::Safe | SafetyLevel::Unknown => true,
             SafetyLevel::Unsafe => false,
-            SafetyLevel::Risky => self.reason.contains("kernel uprobes are unaffected"),
+            SafetyLevel::Risky => self.hazard == Hazard::BranchInTrampolineWindow,
         }
     }
 }
@@ -124,7 +143,7 @@ fn hex(bytes: &[u8]) -> String {
 /// [`HookSafety::not_analysed`].
 pub fn assess(code: &[u8], size: u64, is_64_bit: bool) -> HookSafety {
     if code.is_empty() {
-        return HookSafety::new(SafetyLevel::Unsafe, "no bytes at the function entry", String::new(), String::new());
+        return HookSafety::new(SafetyLevel::Unsafe, Hazard::NotAnEntry, "no bytes at the function entry", String::new(), String::new());
     }
     let entry_hex = hex(&code[..code.len().min(16)]);
     let bitness = if is_64_bit { 64 } else { 32 };
@@ -135,6 +154,7 @@ pub fn assess(code: &[u8], size: u64, is_64_bit: bool) -> HookSafety {
     if inst.is_invalid() {
         return HookSafety::new(
             SafetyLevel::Unsafe,
+            Hazard::NotAnEntry,
             "the entry does not decode as an instruction (the symbol points at data or into the middle of one)",
             String::new(),
             entry_hex,
@@ -148,16 +168,16 @@ pub fn assess(code: &[u8], size: u64, is_64_bit: bool) -> HookSafety {
     // to decode. Hooking it puts the probe where nothing calls, or mid-body.
     match inst.mnemonic() {
         Mnemonic::Ret | Mnemonic::Retf => {
-            return HookSafety::new(SafetyLevel::Unsafe, format!("the entry is `{entry}` -- a return, not a prologue (the symbol likely points past the function)"), entry, entry_hex);
+            return HookSafety::new(SafetyLevel::Unsafe, Hazard::NotAnEntry, format!("the entry is `{entry}` -- a return, not a prologue (the symbol likely points past the function)"), entry, entry_hex);
         }
         Mnemonic::Int3 | Mnemonic::Hlt | Mnemonic::Ud2 => {
-            return HookSafety::new(SafetyLevel::Unsafe, format!("the entry is `{entry}` -- padding or a trap, not code the process runs"), entry, entry_hex);
+            return HookSafety::new(SafetyLevel::Unsafe, Hazard::NotAnEntry, format!("the entry is `{entry}` -- padding or a trap, not code the process runs"), entry, entry_hex);
         }
         _ => {}
     }
 
     if size > 0 && size < TRAMPOLINE_BYTES {
-        return HookSafety::new(SafetyLevel::Risky, format!("the function is only {size} bytes -- too small to place a return probe or an inline trampoline safely"), entry, entry_hex);
+        return HookSafety::new(SafetyLevel::Risky, Hazard::TooSmall, format!("the function is only {size} bytes -- too small to place a return probe or an inline trampoline safely"), entry, entry_hex);
     }
 
     // A relative branch, call or return inside the bytes an inline trampoline
@@ -183,6 +203,7 @@ pub fn assess(code: &[u8], size: u64, is_64_bit: bool) -> HookSafety {
         if hazard {
             return HookSafety::new(
                 SafetyLevel::Risky,
+                Hazard::BranchInTrampolineWindow,
                 format!("`{ins}` is within the first {TRAMPOLINE_BYTES} bytes -- an inline hook (Frida) may relocate its target wrongly; kernel uprobes are unaffected"),
                 entry,
                 entry_hex,
@@ -191,7 +212,7 @@ pub fn assess(code: &[u8], size: u64, is_64_bit: bool) -> HookSafety {
         covered += ins.len() as u64;
     }
 
-    HookSafety::new(SafetyLevel::Safe, format!("clean entry (`{entry}`)"), entry, entry_hex)
+    HookSafety::new(SafetyLevel::Safe, Hazard::None, format!("clean entry (`{entry}`)"), entry, entry_hex)
 }
 
 /// Assess from an ELF module's bytes: slices the entry window at `file_offset`
@@ -202,7 +223,7 @@ pub fn assess_in_module(bytes: &[u8], machine: u16, is_64_bit: bool, file_offset
     }
     let start = file_offset as usize;
     if start >= bytes.len() {
-        return HookSafety::new(SafetyLevel::Unsafe, "the entry offset is past the end of the module file", String::new(), String::new());
+        return HookSafety::new(SafetyLevel::Unsafe, Hazard::NotAnEntry, "the entry offset is past the end of the module file", String::new(), String::new());
     }
     // Enough to decode the entry and scan the trampoline window; the symbol
     // size caps it when it is smaller (so the branch scan does not read into
@@ -301,6 +322,20 @@ mod tests {
         );
         assert!(s.allows_uprobe());
         assert!(!s.is_safe(), "risky stays risky for an inline hook");
+    }
+
+    #[test]
+    fn what_a_uprobe_may_hook_does_not_depend_on_the_wording_of_the_tooltip() {
+        // Auto-profiling hooks whatever `allows_uprobe` lets through. The
+        // reason is prose for a person and gets reworded.
+        let mut call = assess(&[0x55, 0x48, 0x89, 0xe5, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x90], 32, true);
+        assert_eq!(call.level, SafetyLevel::Risky);
+        call.reason = "a call sits where an inline hook would be written".to_string();
+        assert!(call.allows_uprobe());
+        let mut tiny = assess(&[0x55, 0x5d], 2, true);
+        assert_eq!(tiny.level, SafetyLevel::Risky);
+        tiny.reason = "two bytes; kernel uprobes are unaffected by trampolines".to_string();
+        assert!(!tiny.allows_uprobe());
     }
 
     #[test]

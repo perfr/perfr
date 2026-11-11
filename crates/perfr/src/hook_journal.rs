@@ -581,7 +581,13 @@ mod tests {
         ArmedHook {
             spec: HookSpec { function_id: offset, module_path: "/lib/libfoo.so".into(), file_offset: offset, name: name.into() },
             size,
-            safety: HookSafety { level, reason: format!("{level:?}"), entry: String::new(), entry_hex: String::new() },
+            safety: HookSafety {
+                level,
+                hazard: crate::hook_safety::Hazard::None,
+                reason: format!("{level:?}"),
+                entry: String::new(),
+                entry_hex: String::new(),
+            },
         }
     }
 

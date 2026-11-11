@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The pod-style capture wire format (Phase 7), the "dead simple" transport
-//! that replaces protobuf/gRPC for the high-frequency capture events.
+//! The pod wire format: what the GPU helper streams to the service over a
+//! pipe, and what `perfr capture` writes to a `.pod` file.
 //!
 //! Every event is a one-byte tag followed by its fields in a fixed
 //! little-endian layout -- no field tags, no varints, no wire-type nibbles,
@@ -12,10 +12,10 @@
 //! just a concatenation of these records; a reader walks them start to end.
 //!
 //! This is not a general-purpose serialization format. It encodes exactly
-//! the events the Rust collector produces, and it is designed to be trivial
-//! to emit from the hot path and trivial to parse, at a fraction of
-//! protobuf's bytes (see the size differential in
-//! `rust/tools/differential/wire_size_differential.cpp`).
+//! the events below, and it is designed to be trivial to emit and trivial
+//! to parse. There is no magic, no version and no per-record length: a
+//! reader that meets a tag it does not know cannot skip the record, so a
+//! writer and a reader have to be of the same build.
 
 #![deny(unsafe_code)]
 

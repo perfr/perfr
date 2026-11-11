@@ -2,20 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Parsing of whole ring-buffer records, dynamic tails included, ported from
-//! `src/LinuxTracing/PerfEventReaders.cpp`.
+//! Parsing of whole ring-buffer records, dynamic tails included.
 //!
-//! `parse_record_sample` is the Rust twin of the C++ `ConsumeRecordSample`:
-//! the same flag-driven cursor walk over the same field order, including its
-//! quirks -- the stack copy takes only `dyn_size` of the `stack_size` bytes,
-//! `dyn_size` itself is read only when stack data is copied while the cursor
-//! still advances past it, and the callchain ips advance the cursor even
-//! when not copied. The one deliberate difference: where the C++ trusts the
-//! kernel and reads unchecked, this returns `None` on a truncated record
-//! instead of reading out of bounds.
+//! `parse_record_sample` is a flag-driven cursor walk over the fields of a
+//! `PERF_RECORD_SAMPLE` in the order the perf ABI fixes. Three things about
+//! it are deliberate: the stack copy takes only `dyn_size` of the
+//! `stack_size` bytes the kernel reserves, `dyn_size` itself is read only
+//! when stack data is copied while the cursor still advances past it, and
+//! the callchain ips advance the cursor even when not copied. Every read is
+//! bounds-checked: a truncated record is `None`, never a read past the end.
 //!
-//! Byte-for-byte agreement with the C++ consumers on kernel-produced records
-//! is checked by `rust/tools/differential/perf_reader_differential.cpp`.
+//! The walk came from the C++ tracer's `ConsumeRecordSample` and was once
+//! compared with it record for record; that comparison is gone with the
+//! C++, and what holds these parsers now is their unit tests, which build
+//! each record shape by hand, and the live tests of the crates that read
+//! real rings.
 
 use crate::{
     FromLe, MmapUpToPgoff, PerfEventHeader, SampleIdTidTimeStreamidCpu,

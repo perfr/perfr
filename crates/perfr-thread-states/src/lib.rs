@@ -2,12 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The per-thread state machine over sched tracepoints, replacing
-//! `src/LinuxTracing/ThreadStateManager.cpp`.
+//! The per-thread state machine over scheduler events: the Linux sched
+//! tracepoints, and on Windows the ETW context-switch records.
 //!
 //! One open state per thread; each transition may close it, yielding a
-//! `Slice` the caller turns into a `ThreadStateSlice` protobuf. The quirks
-//! are the point, and each is reproduced deliberately:
+//! `Slice` the caller turns into a state bar on the thread's row. The
+//! rules came with the C++ `ThreadStateManager` this was ported from, and
+//! each is deliberate:
 //!
 //!  - Initial states are retrieved *after* the tracepoints are enabled, so
 //!    early tracepoints can carry timestamps below the recorded begin; those
@@ -18,8 +19,10 @@
 //!  - A switch-out slice never carries a callstack status; wakeup and
 //!    switch-in slices carry the status of the state they close.
 //!
-//! Unlike the C++, nothing logs here: the manager reports what happened and
-//! the shim owns the `PERFR_ERROR` text, so the log lines stay identical.
+//!  - A new task on the tid of a thread that has exited is a new thread.
+//!
+//! Nothing logs here: the manager reports what happened ([`Warning`]) and
+//! the caller decides what is worth a line.
 
 #![deny(unsafe_code)]
 
@@ -56,8 +59,8 @@ pub struct Slice {
     pub waiting_for_callstack: bool,
 }
 
-/// The conditions the C++ reports with `PERFR_ERROR`. Returned alongside the
-/// result so the shim can emit the exact same lines.
+/// What a transition found amiss. Returned alongside the result, for the
+/// caller to log or not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Warning {
     /// `task:task_newtask` for a thread that was already known.

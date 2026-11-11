@@ -2,22 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Parsing of `/proc/[pid]/maps`.
+//! Parsing of `/proc/[pid]/maps`, and the load bias of an image mapped
+//! there ([`load_bias`]), which the unwinder and the symbolizer share.
 //!
-//! A byte-for-byte port of `perfr_module_utils::ParseMaps` from
-//! `src/ModuleUtils/ReadLinuxMaps.cpp`. The C++ remains in the tree and is
-//! still the default; `PERFR_MAPS_BACKEND` selects between them, and `both`
-//! runs the two and compares. See `docs/rust-port-plan.html`.
+//! The parser began as a port of the C++ `ParseMaps` and keeps its rules
+//! for which lines are skipped; it is the only implementation now, and its
+//! tests are what hold it.
 //!
 //! Everything here operates on bytes rather than `str`. Paths in
-//! `/proc/[pid]/maps` are kernel-supplied and are not guaranteed to be UTF-8,
-//! and the C++ this replaces used `std::string_view`, so decoding would both
-//! change behaviour and add a failure mode the original does not have.
+//! `/proc/[pid]/maps` are kernel-supplied and are not guaranteed to be
+//! UTF-8, so decoding would add a failure mode for no gain.
 
 #![deny(unsafe_code)]
 
-/// `PROT_READ` from `<sys/mman.h>`. The C++ shim `static_assert`s these
-/// against the real values rather than trusting this comment.
+/// `PROT_READ` from `<sys/mman.h>`.
 pub const PROT_READ: u64 = 1;
 /// `PROT_WRITE` from `<sys/mman.h>`.
 pub const PROT_WRITE: u64 = 2;
@@ -25,8 +23,6 @@ pub const PROT_WRITE: u64 = 2;
 pub const PROT_EXEC: u64 = 4;
 
 /// One entry of `/proc/[pid]/maps`.
-///
-/// Mirrors `perfr_module_utils::LinuxMemoryMapping`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryMapping {
     pub start_address: u64,

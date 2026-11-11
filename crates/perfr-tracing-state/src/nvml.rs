@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! NVIDIA GPU telemetry via NVML (Phase 7).
+//! NVIDIA GPU telemetry via NVML.
 //!
 //! NVML (`libnvidia-ml`) is the management library behind `nvidia-smi`. It is
 //! a *polling* API, not a tracing one: it reports device gauges -- utilization,
@@ -15,7 +15,8 @@
 //! device reading into a pod `GpuMetrics` event, attributing GPU memory to the
 //! profiled process, handling metrics a device does not support, and
 //! integrating instantaneous power into energy. The live `libnvidia-ml`
-//! binding is deliberately not here -- see the note at the bottom.
+//! binding is not here: it is in `perfr-gpu`, the helper process, because
+//! the service is a static binary and cannot `dlopen`.
 
 use std::time::Duration;
 

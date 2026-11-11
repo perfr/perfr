@@ -3,13 +3,12 @@
 // found in the LICENSE file.
 
 //! The pure arithmetic of reading from a power-of-two ring, kept free of
-//! unsafe so the wrap handling -- the part of `PerfEventRingBuffer.cpp` that
-//! actually has edge cases -- is unit-testable without a kernel.
+//! unsafe so the wrap handling -- the part of a ring reader that actually
+//! has edge cases -- is unit-testable without a kernel.
 
 /// Where in the ring `count` bytes starting at absolute position `index`
-/// live: a first segment, and a second one when the read wraps. Mirrors the
-/// two-copy split in `PerfEventRingBuffer::ReadAtOffsetFromTail`; like the
-/// C++, a `count` larger than the ring is a caller bug.
+/// live: a first segment, and a second one when the read wraps. A `count`
+/// larger than the ring is a caller bug.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Split {
     pub first_start: usize,

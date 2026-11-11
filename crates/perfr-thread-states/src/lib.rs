@@ -118,9 +118,11 @@ impl OpenState {
     }
 }
 
-/// An FxHash-style multiply-xor hasher, as in `perfr-perf-merge` and for the
-/// same reason: the keys are thread ids, this map is hit once per sched
-/// tracepoint, and SipHash's DoS resistance buys nothing here.
+/// An FxHash-style multiply-xor hasher. `std`'s default SipHash is designed
+/// for untrusted keys; these are thread ids, this map is hit once per sched
+/// tracepoint, and the DoS resistance buys nothing here. Written out rather
+/// than pulled from a crate: it is nine lines and this crate has no
+/// dependencies.
 #[derive(Default)]
 pub struct TidHasher {
     state: u64,

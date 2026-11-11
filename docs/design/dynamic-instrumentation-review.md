@@ -1,5 +1,10 @@
 **User-space dynamic instrumentation: implementation review and Linux options**
 
+> Historical. The review's recommendation was followed: hooks are kernel uprobes
+> and Frida Gum. The `perfr-ptrace` and `perfr-trampoline` crates it examines were
+> never linked into a shipped binary and have been removed; the links to their
+> sources below resolve only at the reviewed commit.
+
 Reviewed 2026-09-06 at commit `0ae0eacd431db966a7c1221f3c4a28ff83e5a29e`.
 Scope: source inspection of this checkout's C++ and Rust implementations, current primary-source documentation for alternatives, existing trampoline unit tests, and small independent builder/codegen reproductions. This checkout contains local evolution of upstream Orbit; descriptions below refer to this tree, not an assertion that upstream google/orbit has identical code today. ARM means Linux AArch64 unless explicitly stated; 32-bit ARM/Thumb is a separate backend.
 

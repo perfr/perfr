@@ -177,34 +177,10 @@ attr construction, and the mmap ring-buffer protocol, with unsafe confined
 to its `sys` module and one dependency (`libc`). Verified against the C++
 path by `rust/tools/differential/perf_ring_differential.cpp`.
 
-`crates/perfr-collector` is the event loop: TracerImpl's round-robin and
-delayed ordered processing, composing the ported crates natively -- the
-first FFI-free path from kernel bytes to ordered records.
-
 `crates/perfr-unwind` replaces libunwindstack with framehop + object for
 offline DWARF unwinding, adopting libunwindstack's adjusted-pc convention;
 `rust/tools/differential/stack_unwind_differential.cpp` holds the frames
-identical against the C++ on live samples. The two formerly
-libunwindstack-welded classes (`UprobesReturnAddressManager`,
-`LeafFunctionCallManager`) run their logic in `perfr-tracing-state` behind
-the shared backend switch, engines reached through callbacks.
-
-`crates/perfr-ptrace` is the ptrace substrate of user-space instrumentation:
-attach/detach a process, read and write a tracee's memory, find an
-executable region, back up and restore its registers, inject syscalls, and
-allocate/protect/free memory inside it (MemoryInTracee). Verified by live
-round trips and a behavioral differential against the C++ MemoryInTracee; it
-returns idiomatic io::Errors rather than reproducing PerfrBase's error
-strings.
-
-`crates/perfr-trampoline` is the trampoline machinery: the taken-range map
-and free-slot search (placement), the instruction relocation that rewrites
-RIP-relative operands and relative branches when moving a prologue
-(relocate, on iced-x86), and the fixed register-save/payload-call/restore
-code sequences (codegen), and the whole-trampoline assembly (builder). The
-relocation is byte-for-byte identical with the C++ across 888,154 real
-instructions; whole trampolines are byte-identical across 93,696 real
-function starts.
+identical against the C++ on live samples.
 
 `crates/perfr` writes a metadata head into every capture
 (`SystemInfo`: CPU model, cores/threads, RAM, kernel, hostname, both clocks;

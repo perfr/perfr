@@ -62,6 +62,11 @@ rustup run "$NIGHTLY" cargo build \
   --features wasm-threads \
   -Z build-std=panic_abort,std
 
+# The snippet directories are named after a hash of the crate that owns
+# them. When that hash changes wasm-bindgen writes a new directory and leaves
+# the old one, which the service would go on embedding and serving.
+rm -rf "$ROOT/viewer-dist/snippets"
+
 wasm-bindgen \
   --target web \
   --out-dir "$ROOT/viewer-dist" \

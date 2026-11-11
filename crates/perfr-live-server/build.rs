@@ -10,6 +10,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn mime_for(name: &str) -> &'static str {
     if name.ends_with(".png") {
@@ -82,11 +83,74 @@ fn find_viewer_dist() -> Option<PathBuf> {
     }
 }
 
+/// The `source=` line of the pack's `VERSION`: the id of the viewer sources
+/// it was built from, as `source_id.py` computed it then.
+fn pack_source_id(dist: &Path) -> Option<String> {
+    let version = fs::read_to_string(dist.join("VERSION")).ok()?;
+    version.lines().find_map(|line| line.strip_prefix("source=")).map(|id| id.trim().to_string())
+}
+
+/// The id of the viewer sources as they are now, and the files it covers
+/// (relative to the checkout), from the viewer crate's `source_id.py`. `None`
+/// when that cannot be asked: no script beside the pack (a pack from
+/// elsewhere), no Python, not a git checkout. Then nothing is checked.
+fn checkout_source_id(viewer: &Path) -> Option<(String, Vec<String>)> {
+    let script = viewer.join("source_id.py");
+    if !script.is_file() {
+        return None;
+    }
+    let output = ["python3", "python"]
+        .iter()
+        .find_map(|python| Command::new(python).arg(&script).arg("--files").output().ok().filter(|o| o.status.success()))?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let id = lines.next()?.to_string();
+    Some((id, lines.map(str::to_string).collect()))
+}
+
+/// Says so when the pack about to be embedded was not built from the viewer
+/// sources of this checkout. Nothing did: a viewer change followed by a
+/// build of the service produced a binary serving the previous viewer, and
+/// the only sign was the change not showing up.
+fn warn_if_pack_is_stale(dist: &Path) {
+    // Resolved first: the pack is found as `<this crate>/../perfr-live-viewer/
+    // viewer-dist`, and the parent of a path ending in `..` is not the
+    // directory above it.
+    let Ok(dist) = dist.canonicalize() else {
+        return;
+    };
+    let Some(viewer) = dist.parent() else {
+        return;
+    };
+    let Some((now, files)) = checkout_source_id(viewer) else {
+        return;
+    };
+    // The script is the viewer crate's, two below the checkout's root.
+    if let Some(root) = viewer.parent().and_then(Path::parent) {
+        // Without these cargo would not run this script again after a
+        // viewer source changed, and the warning would never be seen.
+        for file in &files {
+            println!("cargo:rerun-if-changed={}", root.join(file).display());
+        }
+    }
+    let Some(built) = pack_source_id(&dist) else {
+        return;
+    };
+    if built != now {
+        println!(
+            "cargo:warning=the viewer pack in {} is stale: it was built from viewer sources {built}, this checkout's are {now}. \
+             The service will serve the old viewer; run crates/perfr-live-viewer/build_wasm.sh and build again.",
+            dist.display()
+        );
+    }
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=PERFR_VIEWER_DIST");
     let dist = find_viewer_dist();
     if let Some(dist) = &dist {
         println!("cargo:rerun-if-changed={}", dist.display());
+        warn_if_pack_is_stale(dist);
     }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());

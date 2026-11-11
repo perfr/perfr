@@ -17,7 +17,12 @@ Cargo.lock is left out on purpose: a lock change for a server-only crate must
 not demand a viewer rebuild. A dependency bump that matters shows up in the
 viewer's Cargo.toml.
 
-    python3 crates/perfr-live-viewer/source_id.py [perfr checkout]
+    python3 crates/perfr-live-viewer/source_id.py [--files] [perfr checkout]
+
+With --files the id is followed by the files it was computed over, one per
+line, relative to the checkout: perfr-live-server's build script asks for
+them so that cargo runs it again, and it can say the embedded pack is stale,
+when one of them changes.
 """
 import hashlib
 import os
@@ -50,27 +55,42 @@ def crates(root):
     return sorted(seen)
 
 
-def source_id(root):
+def source_files(root):
+    """The files the id covers, sorted, relative to `root`."""
     paths = [f"crates/{name}" for name in crates(root)]
     listing = subprocess.run(
         ["git", "ls-files", "-z", "--", *paths],
         cwd=root, capture_output=True, check=True,
     ).stdout
-    digest = hashlib.sha256()
+    files = []
     for rel in sorted(p.decode() for p in listing.split(b"\0") if p):
-        path = os.path.join(root, rel)
-        if not counts(rel) or not os.path.isfile(path):
+        if not counts(rel) or not os.path.isfile(os.path.join(root, rel)):
             continue  # excluded, or tracked but deleted in the working copy
+        files.append(rel)
+    return files
+
+
+def source_id(root, files=None):
+    digest = hashlib.sha256()
+    for rel in source_files(root) if files is None else files:
         digest.update(rel.encode() + b"\0")
-        with open(path, "rb") as handle:
+        with open(os.path.join(root, rel), "rb") as handle:
             digest.update(handle.read())
         digest.update(b"\0")
     return digest.hexdigest()[:16]
 
 
 def main():
-    root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
-    print(source_id(os.path.abspath(root)))
+    args = sys.argv[1:]
+    list_files = "--files" in args
+    args = [a for a in args if a != "--files"]
+    root = args[0] if args else os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+    root = os.path.abspath(root)
+    files = source_files(root)
+    print(source_id(root, files))
+    if list_files:
+        for rel in files:
+            print(rel)
 
 
 if __name__ == "__main__":

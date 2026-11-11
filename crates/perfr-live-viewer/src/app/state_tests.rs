@@ -1835,3 +1835,26 @@ fn the_shaders_clock_keeps_its_precision_after_a_day() {
         }
     }
 }
+
+#[test]
+fn hovering_a_flame_bar_names_it_with_its_samples() {
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.apply_service_reports(None, Some(small_tree()));
+        app.open_right_tab(ReportTab::Flame);
+    });
+    page.frames(3);
+    let bar = page
+        .labels()
+        .iter()
+        .find(|l| l.starts_with("flame:") && l.contains("leaf_a"))
+        .and_then(|l| page.rect_of(l))
+        .expect("the flame graph draws a bar for leaf_a");
+    page.frame(vec![Event::PointerMoved(bar.center())]);
+    page.frames(2);
+    assert!(
+        page.shows("leaf_a\n60 samples, 60.0% of the selection"),
+        "no tooltip over the hovered bar: {:?}",
+        page.texts
+    );
+}

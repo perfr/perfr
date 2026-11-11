@@ -10062,7 +10062,6 @@ impl PerfrLiveApp {
     /// samples and share; a click highlights that function's instances on
     /// the timeline (and again to clear); the timeline's selected scope
     /// outlines the bars with its name.
-    #[allow(deprecated)] // show_tooltip_at_pointer: the bars are painted, not widgets
     fn flame_rows(&mut self, ui: &mut Ui) {
         let font = self.ui_tweaks.report_font;
         let Some(tree) = self.tree.clone() else {
@@ -10222,7 +10221,16 @@ impl PerfrLiveApp {
         }
         if let Some(bar) = hovered {
             let text = format!("{}\n{} samples, {:.1}% of the selection", bar.name, bar.samples, bar.percent);
-            egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("perfr_flame_tip"), |ui| {
+            // The bars are painted, not widgets, so there is no response to
+            // hang a tooltip on: one at the pointer, as the scope tooltip.
+            let _ = egui::Tooltip::always_open(
+                ui.ctx().clone(),
+                ui.layer_id(),
+                egui::Id::new("perfr_flame_tip"),
+                egui::PopupAnchor::Pointer,
+            )
+            .gap(12.0)
+            .show(|ui| {
                 ui.set_max_width(hover_box_width(ui.ctx().screen_rect().width()));
                 ui.label(RichText::new(text).size(font));
             });

@@ -114,11 +114,17 @@ impl NameSync {
     }
 }
 
+/// One of the demo producer's made-up processes.
+fn is_demo_process(pid: u32) -> bool {
+    use perfr_live_server::demo::{DEMO_PROCESSES, REMOTE_PROCESSES};
+    DEMO_PROCESSES.iter().chain(REMOTE_PROCESSES).any(|(demo_pid, _)| *demo_pid == pid)
+}
+
 /// The whole capture as a bundle: every ring event with its name resolved,
 /// the sample store's rows and frame table, and a name for every thread and
 /// process that appears -- from what the capture loop learnt, else from
-/// `/proc` if the process is still alive, else the interned name the
-/// producer registered under the tid (the demo does that), else nothing.
+/// `/proc` if the process is still alive, else, for the demo's processes,
+/// the name the demo interned under the tid, else nothing.
 pub fn capture_bundle(
     events: &[LiveEvent],
     intern: &InternTable,
@@ -148,14 +154,20 @@ pub fn capture_bundle(
         known_threads.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let known_p: HashMap<u32, &str> = known_processes.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
-    let mut tids: Vec<(u32, u32)> = events.iter().map(|e| (e.pid, e.tid)).collect::<HashSet<_>>().into_iter().collect();
+    let mut tids: HashSet<(u32, u32)> = events.iter().map(|e| (e.pid, e.tid)).collect();
     // Sample rows can outlive their timeline spans in the bounded ring.
-    // Keep their thread/process names even in a sample-only capture.
-    for sample in &samples {
-        let pid = known_threads.iter().find(|((_, tid), _)| *tid == sample.tid)
-            .map(|((pid, _), _)| *pid).unwrap_or(target_pid);
-        if !tids.contains(&(pid, sample.tid)) { tids.push((pid, sample.tid)); }
+    // Keep their thread/process names even in a sample-only capture. A
+    // sample carries only a tid; its process is the first one that thread
+    // was seen in.
+    let mut pid_of_tid: HashMap<u32, u32> = HashMap::new();
+    for ((pid, tid), _) in known_threads {
+        pid_of_tid.entry(*tid).or_insert(*pid);
     }
+    for sample in &samples {
+        let pid = pid_of_tid.get(&sample.tid).copied().unwrap_or(target_pid);
+        tids.insert((pid, sample.tid));
+    }
+    let mut tids: Vec<(u32, u32)> = tids.into_iter().collect();
     tids.sort_unstable();
     let mut pids: Vec<u32> = tids.iter().map(|(p, _)| *p).collect::<HashSet<_>>().into_iter().collect();
     if target_pid != 0 && !pids.contains(&target_pid) {
@@ -170,7 +182,12 @@ pub fn capture_bundle(
                 .get(&(pid, tid))
                 .map(|s| s.to_string())
                 .or_else(|| thread_comm(pid, tid))
-                .or_else(|| intern.get(tid).map(str::to_string))?;
+                // The demo names its threads by interning the name under
+                // the tid. For any other process a tid is only a number, and
+                // the table holds frame names, scope names and the GPU lanes
+                // under numbers a real tid can equal: an exited thread was
+                // saved as `FEngineLoop::Tick`.
+                .or_else(|| is_demo_process(pid).then(|| intern.get(tid).map(str::to_string)).flatten())?;
             Some(ThreadName { pid, tid, name })
         })
         .collect();
@@ -278,7 +295,56 @@ mod tests {
     }
 
     #[test]
+    fn an_exited_thread_is_not_named_after_whatever_name_shares_its_id() {
+        // Scheduling slices are machine-wide, so the bundle lists threads of
+        // processes nobody tracked; one that has exited has no comm to read.
+        // Its tid is then just a number, and the table of names is full of
+        // numbers: frame names from 2^20 (tids go to 4 million), the GPU
+        // lanes at 4000.
+        let mut intern = InternTable::default();
+        intern.insert_id(100, "Tick");
+        intern.insert_id(1_048_600, "FEngineLoop::Tick");
+        intern.insert_id(4_001, "GPU memory MiB");
+        let slice = |tid: u32| LiveEvent {
+            start_ns: 10,
+            duration_ns: 5,
+            tid,
+            pid: 4_000_000, // no such process
+            kind: kind::SCHEDULING_SLICE,
+            depth: 0,
+            extra: 0,
+            _pad: 0,
+            name_id: 0,
+        };
+        let events = vec![slice(1_048_600), slice(4_001)];
+        let b = capture_bundle(&events, &intern, &SampleStore::new(), &[], &[], 0);
+        assert_eq!(b.threads, Vec::<ThreadName>::new());
+    }
+
+    #[test]
+    fn samples_are_filed_under_the_process_their_thread_was_seen_in() {
+        let store = SampleStore::new();
+        store.record_frame(9, FrameInfo { name: "f".into(), module: "m".into(), address: 9, function_id: 0 });
+        for (i, tid) in [555u32, 556, 555, 999, 556].into_iter().enumerate() {
+            store.push(StoredSample { timestamp_ns: 10 + i as u64, tid, frames: vec![9] });
+        }
+        // 555 is listed under two processes: the first one is its home.
+        let known = vec![
+            ((777, 555), "A".to_string()),
+            ((888, 555), "A-again".to_string()),
+            ((888, 556), "B".to_string()),
+        ];
+        let b = capture_bundle(&[], &InternTable::default(), &store, &known, &[], 4_000_000);
+        let mut threads: Vec<(u32, u32)> = b.threads.iter().map(|t| (t.pid, t.tid)).collect();
+        threads.sort();
+        // 999 is unknown: it is the target's, and has no name to carry.
+        assert_eq!(threads, vec![(777, 555), (888, 556)]);
+        assert_eq!(b.samples.len(), 5);
+    }
+
+    #[test]
     fn the_bundle_names_every_thread_it_can_and_carries_the_samples() {
+        let demo_pid = perfr_live_server::demo::RENDER_PID;
         let mut intern = InternTable::default();
         intern.insert_id(100, "Tick");
         intern.insert_id(555, "DemoThread"); // the demo's convention: name under the tid
@@ -287,7 +353,7 @@ mod tests {
                 start_ns: 10,
                 duration_ns: 5,
                 tid: 555,
-                pid: 4_000_000, // no such process: falls back to the interned name
+                pid: demo_pid, // a demo process: falls back to the interned name
                 kind: kind::API_SCOPE,
                 depth: 0,
                 extra: 0,
@@ -298,7 +364,7 @@ mod tests {
                 start_ns: 20,
                 duration_ns: 5,
                 tid: 777,
-                pid: 4_000_000,
+                pid: demo_pid,
                 kind: kind::API_SCOPE,
                 depth: 0,
                 extra: 0,
@@ -309,8 +375,8 @@ mod tests {
         let store = SampleStore::new();
         store.record_frame(9, FrameInfo { name: "f".into(), module: "m".into(), address: 0x9, function_id: 0 });
         store.push(StoredSample { timestamp_ns: 12, tid: 555, frames: vec![9] });
-        let known = vec![((4_000_000, 777), "Known".to_string())];
-        let b = capture_bundle(&events, &intern, &store, &known, &[(4_000_000, "ghost".into())], 4_000_000);
+        let known = vec![((demo_pid, 777), "Known".to_string())];
+        let b = capture_bundle(&events, &intern, &store, &known, &[(demo_pid, "ghost".into())], demo_pid);
         assert_eq!(b.events.len(), 2);
         assert_eq!(b.events[0].name, "Tick");
         assert_eq!(b.samples.len(), 1);
@@ -319,8 +385,8 @@ mod tests {
         let mut names: Vec<(u32, &str)> = b.threads.iter().map(|t| (t.tid, t.name.as_str())).collect();
         names.sort();
         assert_eq!(names, vec![(555, "DemoThread"), (777, "Known")]);
-        assert_eq!(b.processes, vec![ProcessName { pid: 4_000_000, name: "ghost".into() }]);
-        assert_eq!(b.target_pid, 4_000_000);
+        assert_eq!(b.processes, vec![ProcessName { pid: demo_pid, name: "ghost".into() }]);
+        assert_eq!(b.target_pid, demo_pid);
     }
 }
 

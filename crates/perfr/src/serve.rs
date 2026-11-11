@@ -346,6 +346,137 @@ impl SymbolState {
     }
 }
 
+/// Tells the running capture, if there is one, to stop and waits until
+/// `deadline` for its thread to finish. False when it had not by then, or
+/// when a start or a stop held the slot for that long.
+fn stop_capture_before(worker: &Mutex<Option<CaptureSlot>>, deadline: std::time::Instant) -> bool {
+    let pause = std::time::Duration::from_millis(10);
+    loop {
+        let mut slot = match worker.try_lock() {
+            Ok(slot) => slot,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(pause);
+                continue;
+            }
+        };
+        let Some(capture) = slot.take() else { return true };
+        capture.running.store(false, Ordering::SeqCst);
+        while !capture.handle.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(pause);
+        }
+        let _ = capture.handle.join();
+        return true;
+    }
+}
+
+/// The write end of the pipe the signal handler reports to; -1 until
+/// [`stop_cleanly_on_signals`] has made it.
+#[cfg(unix)]
+static STOP_SIGNAL_PIPE: AtomicI32 = AtomicI32::new(-1);
+
+/// SIGINT and SIGTERM land here. Only what a handler may do: one `write`,
+/// of one byte to a pipe that is empty, which cannot fail and so leaves the
+/// interrupted thread's `errno` alone.
+#[cfg(unix)]
+extern "C" fn on_stop_signal(signal: libc::c_int) {
+    let byte = signal as u8;
+    // SAFETY: `write` is async-signal-safe; the fd is a pipe this process
+    // keeps open for its whole life.
+    unsafe {
+        libc::write(STOP_SIGNAL_PIPE.load(Ordering::Relaxed), std::ptr::from_ref(&byte).cast(), 1);
+    }
+}
+
+/// How long a signalled service gives its capture to wind down: the tail
+/// waits up to ten seconds for symbols and five for Frida to detach.
+#[cfg(unix)]
+const STOP_ON_SIGNAL_WITHIN: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Makes Ctrl-C and `kill` end a running capture the way Stop does before
+/// the process dies. Killed outright, nothing of a capture's tail ran: the
+/// capturing leases on every instrumented process's scope ring stayed taken
+/// (they keep recording until some later service frees them), a Frida target
+/// stayed hooked unless the helper noticed, and the helper processes, the
+/// transport file and the hook journal were left behind.
+///
+/// The process still dies of the signal, so whoever sent it sees the same
+/// exit status as before. The handler is one-shot: a second Ctrl-C while the
+/// capture winds down kills at once.
+#[cfg(unix)]
+fn stop_cleanly_on_signals(worker: Arc<Mutex<Option<CaptureSlot>>>) {
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: plain libc calls on fds this function owns.
+    unsafe {
+        if libc::pipe(fds.as_mut_ptr()) != 0 {
+            log::warn!("no signal handling: {}", std::io::Error::last_os_error());
+            return;
+        }
+        // Not for the helper processes the service spawns.
+        for fd in fds {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+    }
+    let read_fd = fds[0];
+    STOP_SIGNAL_PIPE.store(fds[1], Ordering::SeqCst);
+    let watcher = std::thread::Builder::new().name("perfr-signals".to_string()).spawn(move || {
+        let mut byte = 0u8;
+        loop {
+            // SAFETY: reads one byte into a one-byte buffer.
+            let n = unsafe { libc::read(read_fd, std::ptr::from_mut(&mut byte).cast(), 1) };
+            if n == 1 {
+                break;
+            }
+            if n == 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                return;
+            }
+        }
+        let signal = libc::c_int::from(byte);
+        let capturing = worker.try_lock().map(|slot| slot.is_some()).unwrap_or(true);
+        if capturing {
+            log::info!("signal {signal}: stopping the capture before exiting");
+            if !stop_capture_before(&worker, std::time::Instant::now() + STOP_ON_SIGNAL_WITHIN) {
+                log::warn!("the capture did not stop in time; exiting anyway");
+            }
+        }
+        // SAFETY: restores the default action and delivers the signal again,
+        // which ends the process.
+        unsafe {
+            libc::signal(signal, libc::SIG_DFL);
+            libc::raise(signal);
+        }
+        std::process::exit(128 + signal);
+    });
+    if let Err(error) = watcher {
+        log::warn!("no signal handling: {error}");
+        return;
+    }
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        // SAFETY: installs a handler that only calls `write`.
+        unsafe {
+            // A signal the service was started with ignored stays ignored:
+            // a shell does that to SIGINT for what a script runs with `&`.
+            let mut inherited: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(signal, std::ptr::null(), &mut inherited) == 0
+                && inherited.sa_sigaction == libc::SIG_IGN
+            {
+                continue;
+            }
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = on_stop_signal as extern "C" fn(libc::c_int) as usize;
+            action.sa_flags = libc::SA_RESETHAND | libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(signal, &action, std::ptr::null_mut());
+        }
+    }
+}
+
 /// Drops what the previous capture left on `/api/status` for the next one:
 /// its auto-profiling status and its hook-crash report. The report outlives
 /// the capture that produced it so the operator sees what happened, but only
@@ -3101,6 +3232,8 @@ pub fn run_on(
     // Start and stop are serialized through this, and hold it for as long as
     // they take.
     let worker = Arc::new(Mutex::new(None::<CaptureSlot>));
+    #[cfg(unix)]
+    stop_cleanly_on_signals(worker.clone());
 
     // The ring as a self-contained capture: events with their names, the
     // sample store, thread and process names; with a window, only the slice
@@ -3618,6 +3751,30 @@ mod tests {
         let slot = super::idle_capture_slot(&worker).expect("a capture that is ending is waited for, not refused");
         assert!(tail_done.load(Ordering::SeqCst), "nothing is handed out while the tail still writes");
         assert!(slot.is_none(), "and the capture is gone from the slot");
+    }
+
+    #[test]
+    fn a_signalled_service_lets_the_capture_finish_its_tail_but_not_forever() {
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+        let (capture, tail_done) = capture_with_a_tail(100);
+        let worker = Mutex::new(Some(capture));
+        assert!(super::stop_capture_before(&worker, Instant::now() + Duration::from_secs(10)));
+        assert!(tail_done.load(Ordering::SeqCst), "the tail ran to its end");
+        assert!(worker.lock().unwrap().is_none());
+        // Nothing to stop is done at once.
+        assert!(super::stop_capture_before(&worker, Instant::now()));
+        // A tail that takes too long is given up on, not waited for.
+        let (stuck, tail_done) = capture_with_a_tail(2_000);
+        let worker = Mutex::new(Some(stuck));
+        let started = Instant::now();
+        assert!(!super::stop_capture_before(&worker, started + Duration::from_millis(100)));
+        assert!(started.elapsed() < Duration::from_millis(1_500));
+        assert!(!tail_done.load(Ordering::SeqCst));
+        // And so is a start that holds the slot.
+        let held = Mutex::new(None::<super::CaptureSlot>);
+        let _starting = held.lock().unwrap();
+        assert!(!super::stop_capture_before(&held, Instant::now() + Duration::from_millis(50)));
     }
 
     #[test]

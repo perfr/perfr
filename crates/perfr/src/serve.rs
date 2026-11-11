@@ -42,7 +42,7 @@ use perfr_perf_records::reader::{parse_record_sample_with, SampleFlags, REGS_USE
 #[cfg(target_os = "linux")]
 use perfr_unwind::unwinder::StartRegs;
 #[cfg(target_os = "linux")]
-use perfr_unwind::ProcessUnwinder;
+use perfr_unwind::{ProcessUnwinder, UnwindEnd};
 use std::collections::HashMap;
 use perfr_live_server::{http, ControlHooks, LiveService, ServerConfig};
 #[cfg(target_os = "linux")]
@@ -717,7 +717,18 @@ struct SampleCounters {
     /// Samples named by address because too many were already waiting for
     /// the symbols.
     named_early: u64,
+    /// How the unwinds ended: at the root of the stack, at the frame limit
+    /// with callers still above it, or on an error part-way up.
+    unwound_whole: u64,
+    unwound_cut: u64,
+    unwind_failed: u64,
 }
+
+/// The deepest stack a sample keeps. One timeline event per frame per sample
+/// is what this bounds; a stack deeper than it loses its outermost frames
+/// and is counted (`SampleCounters::unwound_cut`).
+#[cfg(target_os = "linux")]
+const MAX_SAMPLE_FRAMES: usize = 64;
 
 /// The open-file limit a capture asks for. Its rings are descriptors: two
 /// per sampled thread, four per CPU for the scheduler and its tracepoints,
@@ -859,6 +870,8 @@ struct SampleScratch {
     pool: Vec<Vec<u8>>,
     /// Samples unwound before the symbolizer was ready.
     unnamed: Vec<UnnamedSample>,
+    /// The frames of the sample being unwound.
+    frames: Vec<u64>,
 }
 
 #[cfg(target_os = "linux")]
@@ -928,6 +941,7 @@ fn drain_samples(
             batch,
             returns,
             &mut scratch.unnamed,
+            &mut scratch.frames,
         );
         if scratch.pool.len() < STACK_POOL_MAX {
             held.stack.clear();
@@ -990,6 +1004,7 @@ fn drain_samples(
                     batch,
                     returns,
                     &mut scratch.unnamed,
+                    &mut scratch.frames,
                 );
             } else {
                 let mut owned = scratch.pool.pop().unwrap_or_default();
@@ -1060,6 +1075,7 @@ fn push_sample(
     batch: &mut Vec<LiveEvent>,
     returns: Option<&UprobeSession>,
     unnamed: &mut Vec<UnnamedSample>,
+    frames: &mut Vec<u64>,
 ) {
     #[cfg(target_arch = "x86_64")]
     let start = StartRegs { ip: regs[8], sp: regs[7], frame_pointer: regs[6], link: 0 };
@@ -1068,16 +1084,20 @@ fn push_sample(
     if let Some(session) = returns {
         session.patch_user_stack(tid as i32, start.sp, time, stack);
     }
-    let mut outcome = {
+    // frames[0] is the sampled pc.
+    let end = {
         let _unwind = perfr_api::scope("unwind");
-        unwinder.unwind(start, start.sp, stack, 64)
+        unwinder.unwind_into(start, start.sp, stack, MAX_SAMPLE_FRAMES, frames)
     };
-    // frames[0] is the sampled pc; a frame's depth is a u8 on the timeline.
-    outcome.frames.truncate(u8::MAX as usize);
+    match end {
+        UnwindEnd::Root => counters.unwound_whole += 1,
+        UnwindEnd::Truncated => counters.unwound_cut += 1,
+        UnwindEnd::Failed(_) => counters.unwind_failed += 1,
+    }
     if time <= named_through_ns {
-        name_sample(time, tid, &outcome.frames, symbolizer, pc_ids, names, store, target_pid, period_ns, batch);
+        name_sample(time, tid, frames, symbolizer, pc_ids, names, store, target_pid, period_ns, batch);
     } else if unnamed.len() < MAX_UNNAMED_SAMPLES {
-        unnamed.push(UnnamedSample { time, tid, frames: outcome.frames });
+        unnamed.push(UnnamedSample { time, tid, frames: frames.clone() });
     } else {
         if counters.named_early == 0 {
             log::warn!(
@@ -1086,7 +1106,7 @@ fn push_sample(
             );
         }
         counters.named_early += 1;
-        name_sample(time, tid, &outcome.frames, symbolizer, pc_ids, names, store, target_pid, period_ns, batch);
+        name_sample(time, tid, frames, symbolizer, pc_ids, names, store, target_pid, period_ns, batch);
     }
 }
 
@@ -1648,6 +1668,7 @@ fn capture_loop(
         held: Vec::new(),
         pool: Vec::new(),
         unnamed: Vec::new(),
+        frames: Vec::new(),
     };
     let mut switch_rings = Vec::new();
     let mut switch_ring_failures = RingOpenFailures::default();
@@ -2720,6 +2741,18 @@ fn capture_loop(
         service.set_instrumentation_status(status);
     }
     log::info!("{} callstack samples recorded", samples.parsed);
+    // How good the stacks are, which a count of samples does not say: a
+    // stack cut at the limit has lost its outermost frames, and one that
+    // failed stops wherever the unwind tables or the stack copy ran out.
+    if samples.unwound_cut + samples.unwind_failed > 0 {
+        log::info!(
+            "of those, {} unwound to the root of their stack, {} were cut at {MAX_SAMPLE_FRAMES} frames \
+             and {} stopped part-way up",
+            samples.unwound_whole,
+            samples.unwound_cut,
+            samples.unwind_failed
+        );
+    }
     {
         let (unsampled, unfollowed) = (sample_ring_failures.borrow().failed, task_ring_failures.borrow().failed);
         if unsampled + unfollowed > 0 {
@@ -3612,7 +3645,13 @@ mod tests {
                 names: FrameNames::new(service, store.clone()),
                 store,
                 counters: SampleCounters::default(),
-                scratch: SampleScratch { stack: Vec::new(), held: Vec::new(), pool: Vec::new(), unnamed: Vec::new() },
+                scratch: SampleScratch {
+                    stack: Vec::new(),
+                    held: Vec::new(),
+                    pool: Vec::new(),
+                    unnamed: Vec::new(),
+                    frames: Vec::new(),
+                },
             }
         }
 
@@ -3675,8 +3714,14 @@ mod tests {
     /// every user register, then a stack area of which `stack` is in use.
     #[cfg(target_os = "linux")]
     fn stack_sample_record(tid: u32, time: u64, ip: u64, stack: &[u8]) -> Vec<u8> {
-        const STACK_AREA: usize = 256;
-        let size = 8 + 32 + 8 + 8 * REGS_USER_ALL_COUNT + 8 + STACK_AREA + 8;
+        stack_sample_record_with_area(tid, time, ip, stack, 256)
+    }
+
+    /// As `stack_sample_record`, with the size of the stack area the event
+    /// was opened with.
+    #[cfg(target_os = "linux")]
+    fn stack_sample_record_with_area(tid: u32, time: u64, ip: u64, stack: &[u8], area_size: usize) -> Vec<u8> {
+        let size = 8 + 32 + 8 + 8 * REGS_USER_ALL_COUNT + 8 + area_size + 8;
         let mut bytes = perf_header(record_type::SAMPLE, size);
         sample_id(&mut bytes, tid, time, 0);
         bytes.extend_from_slice(&2u64.to_le_bytes()); // PERF_SAMPLE_REGS_ABI_64
@@ -3694,8 +3739,8 @@ mod tests {
         for reg in regs {
             bytes.extend_from_slice(&reg.to_le_bytes());
         }
-        bytes.extend_from_slice(&(STACK_AREA as u64).to_le_bytes());
-        let mut area = [0u8; STACK_AREA];
+        bytes.extend_from_slice(&(area_size as u64).to_le_bytes());
+        let mut area = vec![0u8; area_size];
         area[..stack.len()].copy_from_slice(stack);
         bytes.extend_from_slice(&area);
         bytes.extend_from_slice(&(stack.len() as u64).to_le_bytes());
@@ -3845,6 +3890,32 @@ mod tests {
         retire_dead_threads(&mut rig.threads);
         assert_eq!(batch.iter().filter(|e| e.kind == kind::SAMPLE && e.tid == 4002).count(), 1);
         assert_eq!(rig.threads.iter().map(|t| t.tid).collect::<Vec<_>>(), [4001]);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn a_capture_counts_how_its_unwinds_ended() {
+        let mut rig = SampleRig::new(&[4001]);
+        // No module is loaded, so the unwinder follows frame pointers; the
+        // samples' frame pointer is 0, which is the root at once.
+        assert!(rig.ring(4001).publish(&stack_sample_record(4001, 5_000, 0x401000, &[0u8; 64])));
+        // A stack of 70 frames linked by frame pointers: deeper than a
+        // sample keeps.
+        let mut deep = vec![0u8; 70 * 16];
+        for frame in 0..70u64 {
+            let at = (frame * 16) as usize;
+            let caller = if frame < 69 { 0x7fff_0000_1000 + (frame + 1) * 16 } else { 0 };
+            deep[at..at + 8].copy_from_slice(&caller.to_le_bytes());
+            deep[at + 8..at + 16].copy_from_slice(&(0x402000 + frame * 16).to_le_bytes());
+        }
+        let mut record = stack_sample_record_with_area(4001, 6_000, 0x401000, &deep, 2048);
+        // rbp = the stack pointer the helper sets: the chain starts there.
+        record[8 + 32 + 8 + 6 * 8..][..8].copy_from_slice(&0x7fff_0000_1000u64.to_le_bytes());
+        assert!(rig.ring(4001).publish(&record));
+        let batch = rig.drain(u64::MAX);
+        assert_eq!((rig.counters.unwound_whole, rig.counters.unwound_cut, rig.counters.unwind_failed), (1, 1, 0));
+        let deepest = batch.iter().filter(|e| e.kind == kind::FUNCTION_CALL && e.start_ns == 6_000).count();
+        assert_eq!(deepest, MAX_SAMPLE_FRAMES);
     }
 
     #[cfg(target_os = "linux")]

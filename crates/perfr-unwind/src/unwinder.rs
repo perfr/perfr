@@ -29,22 +29,35 @@ pub struct StartRegs {
     pub link: u64,
 }
 
+/// How a walk up the stack ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnwindEnd {
+    /// At the root: the stack is whole.
+    Root,
+    /// At the frame limit the caller set, with callers still above it. The
+    /// frames are right but the outermost ones are missing, so in a flame
+    /// graph the same function hangs under as many different "roots" as
+    /// there were depths it was cut at.
+    Truncated,
+    /// The unwinder could not get from the last frame to its caller.
+    Failed(framehop::Error),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnwindOutcome {
     /// Frame addresses, outermost last: `frames[0]` is the sampled ip, the
     /// rest are return addresses minus one -- the address INSIDE the call
-    /// instruction, which is libunwindstack's `FrameData::pc` convention and
-    /// what perfr's symbolization consumes. (The differential caught this:
-    /// raw return addresses diverged from the C++ by exactly one on every
-    /// frame past the first.)
+    /// instruction, which is what symbolization consumes: a return address
+    /// can belong to the next line, or the next function.
     pub frames: Vec<u64>,
-    /// None on a clean walk to the root, the framehop error otherwise.
-    pub error: Option<String>,
+    pub end: UnwindEnd,
 }
 
 impl UnwindOutcome {
+    /// No error on the way. A stack cut at the frame limit counts: every
+    /// frame it has is a real one.
     pub fn is_success(&self) -> bool {
-        self.error.is_none()
+        !matches!(self.end, UnwindEnd::Failed(_))
     }
 }
 
@@ -207,7 +220,7 @@ impl ProcessUnwinder {
 
     /// Unwinds from `regs` over the copied stack slice starting at
     /// `stack_base` (the captured stack pointer). Reads outside the slice
-    /// fail, like `offline_memory_only` unwinding in the C++.
+    /// fail: only what was copied with the sample is the stack.
     pub fn unwind(
         &mut self,
         regs: StartRegs,
@@ -215,6 +228,23 @@ impl ProcessUnwinder {
         stack: &[u8],
         max_frames: usize,
     ) -> UnwindOutcome {
+        let mut frames = Vec::new();
+        let end = self.unwind_into(regs, stack_base, stack, max_frames, &mut frames);
+        UnwindOutcome { frames, end }
+    }
+
+    /// As [`ProcessUnwinder::unwind`], into a buffer the caller keeps: a
+    /// sampler unwinds a thousand stacks a second per busy thread and has
+    /// no use for a fresh allocation each time. `frames` is cleared first.
+    pub fn unwind_into(
+        &mut self,
+        regs: StartRegs,
+        stack_base: u64,
+        stack: &[u8],
+        max_frames: usize,
+        frames: &mut Vec<u64>,
+    ) -> UnwindEnd {
+        frames.clear();
         let mut read_stack = |address: u64| -> Result<u64, ()> {
             let offset = address.checked_sub(stack_base).ok_or(())? as usize;
             let bytes = stack.get(offset..offset.checked_add(8).ok_or(())?).ok_or(())?;
@@ -230,23 +260,19 @@ impl ProcessUnwinder {
 
         let mut iterator =
             UnwindIterator::new(&self.unwinder, regs.ip, arch_regs, &mut self.cache, &mut read_stack);
-        let mut outcome = UnwindOutcome { frames: Vec::new(), error: None };
         loop {
             match iterator.next() {
                 Ok(Some(frame)) => {
-                    outcome.frames.push(frame.address_for_lookup());
-                    if outcome.frames.len() >= max_frames {
-                        break;
+                    if frames.len() >= max_frames {
+                        // There was a caller above the last frame kept.
+                        return UnwindEnd::Truncated;
                     }
+                    frames.push(frame.address_for_lookup());
                 }
-                Ok(None) => break,
-                Err(error) => {
-                    outcome.error = Some(error.to_string());
-                    break;
-                }
+                Ok(None) => return UnwindEnd::Root,
+                Err(error) => return UnwindEnd::Failed(error),
             }
         }
-        outcome
     }
 }
 
@@ -370,6 +396,71 @@ mod tests {
         std::fs::copy(std::env::current_exe().unwrap(), &path).unwrap();
         assert_eq!(unwinder.refresh_from_maps_content(maps.as_bytes()), ModulesChange::default());
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// A stack of `depth` frames linked by frame pointers, as code built
+    /// with them leaves it: at each frame pointer the caller's frame pointer,
+    /// then the return address. With no module loaded that chain is all the
+    /// unwinder has, which makes the walk predictable. Returns the start
+    /// registers, the stack's base address and its bytes.
+    fn frame_pointer_chain(depth: usize) -> (StartRegs, u64, Vec<u8>) {
+        const BASE: u64 = 0x7ffd_0000_0000;
+        const FRAME: u64 = 32;
+        let mut stack = vec![0u8; (depth as u64 * FRAME + 16) as usize];
+        for frame in 0..depth as u64 {
+            let at = (frame * FRAME) as usize;
+            let caller_fp = if frame + 1 < depth as u64 { BASE + (frame + 1) * FRAME } else { 0 };
+            stack[at..at + 8].copy_from_slice(&caller_fp.to_le_bytes());
+            stack[at + 8..at + 16].copy_from_slice(&(0x40_1000 + 0x100 * (frame + 1)).to_le_bytes());
+        }
+        let regs = StartRegs { ip: 0x40_1000, sp: BASE, frame_pointer: BASE, link: 0x40_1100 };
+        (regs, BASE, stack)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn a_stack_deeper_than_the_frame_limit_says_it_was_cut() {
+        let mut unwinder = ProcessUnwinder::from_maps_content(b"");
+        let (regs, base, stack) = frame_pointer_chain(10);
+
+        let whole = unwinder.unwind(regs, base, &stack, 64);
+        assert_eq!(whole.frames.len(), 11, "the sampled pc and ten callers: {:x?}", whole.frames);
+        assert_eq!(whole.frames[0], 0x40_1000);
+        assert_eq!(whole.frames[1], 0x40_1100 - 1, "a caller is named by the address inside its call");
+        assert_eq!(whole.end, UnwindEnd::Root);
+
+        let cut = unwinder.unwind(regs, base, &stack, 4);
+        assert_eq!(cut.frames, whole.frames[..4]);
+        assert_eq!(cut.end, UnwindEnd::Truncated, "a stack missing its outer seven frames is not a whole one");
+        assert!(cut.is_success(), "the frames it has are real");
+
+        // Exactly as deep as the limit: nothing is missing.
+        assert_eq!(unwinder.unwind(regs, base, &stack, 11).end, UnwindEnd::Root);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn a_walk_that_runs_off_the_copied_stack_fails_with_the_reason_and_keeps_its_frames() {
+        let mut unwinder = ProcessUnwinder::from_maps_content(b"");
+        let (regs, base, stack) = frame_pointer_chain(10);
+        // Only the first three frames' worth of stack was copied.
+        let outcome = unwinder.unwind(regs, base, &stack[..96], 64);
+        assert!(matches!(outcome.end, UnwindEnd::Failed(framehop::Error::CouldNotReadStack(_))), "{:?}", outcome.end);
+        assert!(!outcome.is_success());
+        assert_eq!(outcome.frames.len(), 4);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn unwinding_into_a_buffer_reuses_it() {
+        let mut unwinder = ProcessUnwinder::from_maps_content(b"");
+        let (regs, base, stack) = frame_pointer_chain(10);
+        let mut frames = vec![0xdead; 40];
+        assert_eq!(unwinder.unwind_into(regs, base, &stack, 64, &mut frames), UnwindEnd::Root);
+        assert_eq!(frames, unwinder.unwind(regs, base, &stack, 64).frames, "what was in the buffer is gone");
+        let capacity = frames.capacity();
+        unwinder.unwind_into(regs, base, &stack, 4, &mut frames);
+        assert_eq!((frames.len(), frames.capacity()), (4, capacity));
     }
 
     #[test]
@@ -512,8 +603,8 @@ mod tests {
             let outcome = unwinder.unwind(start, start.sp, stack, 256);
             if outcome.is_success() {
                 successes += 1;
-            } else if let Some(error) = &outcome.error {
-                *errors.entry((error.clone(), outcome.frames.len().min(3))).or_insert(0u64) += 1;
+            } else if let UnwindEnd::Failed(error) = outcome.end {
+                *errors.entry((error.to_string(), outcome.frames.len().min(3))).or_insert(0u64) += 1;
             }
             if outcome.frames.len() >= 10 {
                 deep += 1;

@@ -287,6 +287,67 @@ impl RingBuffer {
     }
 }
 
+/// A ring with no perf event behind it, for tests here and in the crates
+/// that read rings: a memfd laid out as a perf mapping (the metadata page,
+/// then the data area), so a reader runs over real shared memory fed by
+/// [`RingBuffer::publish`] instead of the kernel.
+#[doc(hidden)]
+pub fn synthetic(ring_size: u64) -> io::Result<RingBuffer> {
+    let page_size = sys::page_size();
+    let length = (page_size + ring_size) as usize;
+    // SAFETY: plain syscalls; the descriptor is owned by the ring from
+    // `from_mapping` on, and closed here on the paths before it.
+    let fd = unsafe { libc::memfd_create(c"perfr-synthetic-ring".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::ftruncate(fd, length as libc::off_t) } != 0 {
+        let error = io::Error::last_os_error();
+        sys::close(fd);
+        return Err(error);
+    }
+    let mmap = match sys::Mmap::ring(fd, length) {
+        Ok(mmap) => mmap,
+        Err(error) => {
+            sys::close(fd);
+            return Err(error);
+        }
+    };
+    // SAFETY: `data_offset` and `data_size`, which the kernel fills at mmap,
+    // inside the first page of a mapping nothing else has seen yet.
+    unsafe {
+        mmap.address.add(std::mem::offset_of!(MetadataPage, data_offset)).cast::<u64>().write(page_size);
+        mmap.address.add(std::mem::offset_of!(MetadataPage, data_size)).cast::<u64>().write(ring_size);
+    }
+    RingBuffer::from_mapping(mmap, ring_size, fd, page_size)
+}
+
+impl RingBuffer {
+    /// The kernel's side of the protocol, for a [`synthetic`] ring: copies
+    /// `bytes` in at `data_head`, wrapping at the end of the data area, and
+    /// publishes the new head. `false`, with nothing written, when they do
+    /// not fit -- where the kernel would count a lost record.
+    #[doc(hidden)]
+    pub fn publish(&self, bytes: &[u8]) -> bool {
+        let head = self.head().load(Ordering::Relaxed);
+        let tail = self.tail().load(Ordering::Acquire);
+        if head - tail + bytes.len() as u64 > self.ring_size {
+            return false;
+        }
+        let split = split_for_read(head, bytes.len(), self.ring_size);
+        let (first, second) = bytes.split_at(split.first_len);
+        // SAFETY: split_for_read confines both segments to the data area,
+        // and the reader does not touch what lies beyond the head.
+        unsafe {
+            let data = self.data().cast_mut();
+            std::ptr::copy_nonoverlapping(first.as_ptr(), data.add(split.first_start), first.len());
+            std::ptr::copy_nonoverlapping(second.as_ptr(), data, second.len());
+        }
+        self.head().store(head + bytes.len() as u64, Ordering::Release);
+        true
+    }
+}
+
 impl Drop for RingBuffer {
     fn drop(&mut self) {
         sys::close(self.fd);
@@ -388,35 +449,8 @@ mod tests {
     use super::*;
     use perfr_perf_records::{record_type, PerfEventHeader};
 
-    /// A ring this test writes the way the kernel does: a memfd laid out as
-    /// a perf mapping (the metadata page, then the data area), so the reader
-    /// runs over real shared memory without a perf event behind it.
     fn synthetic_ring(ring_size: u64) -> RingBuffer {
-        let page_size = sys::page_size();
-        let length = (page_size + ring_size) as usize;
-        let fd = unsafe { libc::memfd_create(c"perfr-ring-test".as_ptr(), libc::MFD_CLOEXEC) };
-        assert!(fd >= 0);
-        assert_eq!(unsafe { libc::ftruncate(fd, length as libc::off_t) }, 0);
-        let mmap = sys::Mmap::ring(fd, length).unwrap();
-        // `data_offset` and `data_size`, which the kernel fills at mmap.
-        unsafe {
-            mmap.address.add(1024 + 16).cast::<u64>().write(page_size);
-            mmap.address.add(1024 + 24).cast::<u64>().write(ring_size);
-        }
-        RingBuffer::from_mapping(mmap, ring_size, fd, page_size).unwrap()
-    }
-
-    /// The kernel's side of the protocol: copy the bytes in at `data_head`,
-    /// wrapping at the end of the data area, then publish the new head.
-    fn publish(ring: &RingBuffer, bytes: &[u8]) {
-        let head = ring.head().load(Ordering::Relaxed);
-        let tail = ring.tail().load(Ordering::Acquire);
-        assert!(head - tail + bytes.len() as u64 <= ring.ring_size, "the test overfilled its ring");
-        for (i, byte) in bytes.iter().enumerate() {
-            let at = ((head + i as u64) & (ring.ring_size - 1)) as usize;
-            unsafe { ring.data().cast_mut().add(at).write(*byte) };
-        }
-        ring.head().store(head + bytes.len() as u64, Ordering::Release);
+        synthetic(ring_size).unwrap()
     }
 
     /// A record of `size` bytes whose payload is a function of `seed`, so a
@@ -428,6 +462,18 @@ mod tests {
         bytes.extend_from_slice(&(size as u16).to_le_bytes());
         bytes.extend((8..size).map(|i| seed.wrapping_mul(31).wrapping_add(i as u8)));
         bytes
+    }
+
+    #[test]
+    fn a_full_synthetic_ring_refuses_a_record_as_the_kernel_would() {
+        let mut ring = synthetic_ring(4096);
+        for i in 0..4 {
+            assert!(ring.publish(&record(record_type::SAMPLE, 1024, i)));
+        }
+        assert!(!ring.publish(&record(record_type::SAMPLE, 8, 9)), "the ring is full");
+        assert_eq!(ring.fill_fraction(), 1.0);
+        assert_eq!(ring.read_record().unwrap().unwrap(), record(record_type::SAMPLE, 1024, 0));
+        assert!(ring.publish(&record(record_type::SAMPLE, 8, 9)), "reading made room");
     }
 
     #[test]
@@ -452,7 +498,7 @@ mod tests {
             if (tail & 4095) + size as u64 > 4096 {
                 wrapped += 1;
             }
-            publish(&ring, &written);
+            assert!(ring.publish(&written));
             assert_eq!(ring.read_record().unwrap().as_deref(), Some(&written[..]), "record {i}");
             assert_eq!(ring.read_record().unwrap(), None);
         }
@@ -463,11 +509,11 @@ mod tests {
     fn several_records_are_read_in_the_order_written() {
         let mut ring = synthetic_ring(4096);
         // Start near the end so the batch itself crosses it.
-        publish(&ring, &record(record_type::SAMPLE, 4000, 0));
+        assert!(ring.publish(&record(record_type::SAMPLE, 4000, 0)));
         ring.read_record().unwrap().unwrap();
         let batch: Vec<Vec<u8>> = (0..20).map(|i| record(record_type::SAMPLE, 24 + 8 * (i % 3), i as u8)).collect();
         for written in &batch {
-            publish(&ring, written);
+            assert!(ring.publish(written));
         }
         assert!(ring.fill_fraction() > 0.0);
         let mut buf = Vec::new();
@@ -484,7 +530,7 @@ mod tests {
         let mut ring = synthetic_ring(4096);
         let mut bad = record(record_type::SAMPLE, 16, 1);
         bad[6..8].copy_from_slice(&4u16.to_le_bytes());
-        publish(&ring, &bad);
+        assert!(ring.publish(&bad));
         assert_eq!(ring.read_record().unwrap_err().kind(), io::ErrorKind::InvalidData);
         assert!(ring.has_new_data(), "an unreadable record must not be skipped silently");
     }
@@ -494,7 +540,7 @@ mod tests {
         let mut ring = synthetic_ring(4096);
         let mut bad = record(record_type::SAMPLE, 16, 1);
         bad[6..8].copy_from_slice(&64u16.to_le_bytes());
-        publish(&ring, &bad);
+        assert!(ring.publish(&bad));
         assert_eq!(ring.read_record().unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
     }
 
@@ -523,7 +569,7 @@ mod tests {
                     wrapped += 1;
                 }
                 at += bytes.len() as u64;
-                publish(&ring, bytes);
+                assert!(ring.publish(bytes));
             }
             let mut read: Vec<(u32, Vec<u8>)> = Vec::new();
             let drained = ring.drain(|kind, bytes| read.push((kind, bytes.to_vec()))).unwrap();
@@ -540,12 +586,12 @@ mod tests {
     #[test]
     fn a_drain_adds_up_what_the_kernel_says_it_dropped() {
         let mut ring = synthetic_ring(4096);
-        publish(&ring, &record(record_type::SAMPLE, 40, 1));
-        publish(&ring, &lost_record(7));
-        publish(&ring, &record(record_type::SAMPLE, 40, 2));
-        publish(&ring, &lost_record(35));
+        assert!(ring.publish(&record(record_type::SAMPLE, 40, 1)));
+        assert!(ring.publish(&lost_record(7)));
+        assert!(ring.publish(&record(record_type::SAMPLE, 40, 2)));
+        assert!(ring.publish(&lost_record(35)));
         // Too short to carry a count: one at least was dropped.
-        publish(&ring, &record(record_type::LOST, 16, 0));
+        assert!(ring.publish(&record(record_type::LOST, 16, 0)));
         let mut kinds = Vec::new();
         let drained = ring.drain(|kind, _| kinds.push(kind)).unwrap();
         assert_eq!(drained, Drained { records: 5, lost: 43 });
@@ -560,10 +606,10 @@ mod tests {
     fn a_drain_that_meets_an_impossible_record_skips_it_and_the_ring_reads_on() {
         for bad_size in [4u16, 64] {
             let mut ring = synthetic_ring(4096);
-            publish(&ring, &record(record_type::SAMPLE, 24, 1));
+            assert!(ring.publish(&record(record_type::SAMPLE, 24, 1)));
             let mut bad = record(record_type::SAMPLE, 16, 2);
             bad[6..8].copy_from_slice(&bad_size.to_le_bytes());
-            publish(&ring, &bad);
+            assert!(ring.publish(&bad));
             let mut seen = 0;
             let error = ring.drain(|_, _| seen += 1).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
@@ -571,7 +617,7 @@ mod tests {
             assert!(!ring.has_new_data(), "a ring left at the bad record would never be read again");
 
             let good = record(record_type::SAMPLE, 32, 3);
-            publish(&ring, &good);
+            assert!(ring.publish(&good));
             let mut read = Vec::new();
             ring.drain(|_, bytes| read.push(bytes.to_vec())).unwrap();
             assert_eq!(read, [good]);
@@ -583,7 +629,7 @@ mod tests {
         let mut ring = synthetic_ring(4096);
         let records: Vec<Vec<u8>> = (0..60).map(|i| record(record_type::SAMPLE, 64, i)).collect();
         for bytes in &records {
-            publish(&ring, bytes);
+            assert!(ring.publish(bytes));
         }
         let tail: *const AtomicU64 = ring.tail();
         let mut freed_during = Vec::new();
@@ -616,7 +662,7 @@ mod tests {
                 let mut reading = std::time::Duration::ZERO;
                 for _ in 0..laps {
                     for _ in 0..count {
-                        publish(&ring, &bytes);
+                        assert!(ring.publish(&bytes));
                     }
                     let start = std::time::Instant::now();
                     sum += read_all(&mut ring);

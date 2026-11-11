@@ -35,9 +35,13 @@
 # manager is reachable (a container, most CI runners) the tests run uncapped
 # and the script says so.
 
+# The step functions are called by name ("step_$step"), which shellcheck
+# cannot see.
+# shellcheck disable=SC2329
+
 set -uo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 command -v cargo >/dev/null 2>&1 || export PATH="$HOME/.cargo/bin:$PATH"
 
 ALL_STEPS=(fmt clippy test musl wasm docs)

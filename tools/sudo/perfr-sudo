@@ -45,7 +45,10 @@ if [ -z "$user" ] || [ -z "$uid" ] || [ "$uid" = 0 ]; then
   echo "perfr-sudo: refused: run it through sudo, as a user" >&2
   exit 126
 fi
-owner=$(stat -c %u -- "$bin")
+# -L: the owner of the file that will run, not of a link to it. The tests
+# above and the exec below all follow a symlink; without -L a link you made
+# to a root-owned program passed as "yours".
+owner=$(stat -L -c %u -- "$bin")
 if [ "$owner" != "$uid" ]; then
   echo "perfr-sudo: refused: $bin is owned by uid $owner, not you" >&2
   exit 126

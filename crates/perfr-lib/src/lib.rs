@@ -6,8 +6,8 @@
 #[cfg(feature = "native")]
 mod native;
 use perfr_frida_transport::Transport;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 // An injected mapping belongs to one process. A fork inherits both it and
 // possibly-held Rust locks; ignore child callbacks before touching those locks.
@@ -33,16 +33,36 @@ type Start = unsafe extern "C" fn(*const libc::c_char, usize) -> u64;
 type Stop = extern "C" fn(u64);
 type Init = extern "C" fn() -> libc::c_int;
 
+/// One capture's way from a hook to the scope API.
 struct Session {
     generation: u32,
-    mapping: Option<Transport>,
-    api: Option<(Start, Stop)>,
+    mapping: Transport,
+    start: Start,
+    stop: Stop,
 }
-static SESSION: RwLock<Session> = RwLock::new(Session {
-    generation: 0,
-    mapping: None,
-    api: None,
-});
+
+/// The capture hooks report to now, or null between captures.
+///
+/// A pointer the hooks load, not a lock they take. Every hooked call on
+/// every thread came through a process-wide `RwLock` twice, on entry and
+/// on return: four atomic updates of one cache line per call, and a stop
+/// waiting to close the session held every caller up behind it. With eight
+/// threads in a hooked function that was 700 ns a call against 24 on one.
+///
+/// Each session is leaked, its 32-byte lease mapping with it, so a call
+/// that loaded the pointer just before a close still reads memory that is
+/// there. That is a page of address space for each capture of the process.
+static SESSION: AtomicPtr<Session> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Serialises open and close, and remembers the last generation given out.
+static GENERATIONS: Mutex<u32> = Mutex::new(0);
+
+#[inline]
+fn session() -> Option<&'static Session> {
+    // SAFETY: only `perfr_frida_open` stores a non-null pointer, to a
+    // leaked box that is never freed.
+    unsafe { SESSION.load(Ordering::Acquire).as_ref() }
+}
 
 /// Returns zero on failure, otherwise a generation identifying this capture.
 /// The path is supplied by our native controller and must be C-terminated.
@@ -72,15 +92,11 @@ pub unsafe extern "C" fn perfr_frida_open(
     let Ok(mapping) = Transport::open(&file, std::process::id()) else {
         return 0;
     };
-    let Ok(mut session) = SESSION.write() else {
+    let Ok(mut last_generation) = GENERATIONS.lock() else {
         return 0;
     };
     // Refuse two collectors rather than silently stealing a running session.
-    if session
-        .mapping
-        .as_ref()
-        .is_some_and(|m| m.active() && m.controller_alive())
-    {
+    if session().is_some_and(|s| s.mapping.active() && s.mapping.controller_alive()) {
         return 0;
     }
     let reader = perfr_scope_ring::ScopeRingReader::open(std::process::id()).ok();
@@ -122,10 +138,15 @@ pub unsafe extern "C" fn perfr_frida_open(
             _ => return 0,
         }
     };
-    session.api = Some(api);
-    session.generation = session.generation.wrapping_add(1).max(1);
-    session.mapping = Some(mapping);
-    session.generation
+    *last_generation = last_generation.wrapping_add(1).max(1);
+    let session = Box::leak(Box::new(Session {
+        generation: *last_generation,
+        mapping,
+        start: api.0,
+        stop: api.1,
+    }));
+    SESSION.store(session, Ordering::Release);
+    *last_generation
 }
 
 #[no_mangle]
@@ -133,9 +154,9 @@ pub extern "C" fn perfr_frida_close(generation: u32) {
     if FORK_CHILD.load(Ordering::Relaxed) {
         return;
     }
-    if let Ok(mut session) = SESSION.write() {
-        if generation == session.generation {
-            session.mapping = None;
+    if let Ok(_control) = GENERATIONS.lock() {
+        if session().is_some_and(|s| s.generation == generation) {
+            SESSION.store(std::ptr::null_mut(), Ordering::Release);
         }
     }
 }
@@ -151,13 +172,9 @@ pub unsafe extern "C" fn perfr_frida_start(
     if FORK_CHILD.load(Ordering::Relaxed) {
         return 0;
     }
-    if let Ok(session) = SESSION.read() {
-        if session.generation == generation
-            && session.mapping.as_ref().is_some_and(Transport::active)
-        {
-            if let Some((start, _)) = session.api {
-                return start(name, len);
-            }
+    if let Some(session) = session() {
+        if session.generation == generation && session.mapping.active() {
+            return (session.start)(name, len);
         }
     }
     0
@@ -168,14 +185,10 @@ pub extern "C" fn perfr_frida_stop(generation: u32, handle: u64) {
     if handle == 0 || FORK_CHILD.load(Ordering::Relaxed) {
         return;
     }
-    if let Ok(session) = SESSION.read() {
-        if session.generation == generation {
-            if let (Some(mapping), Some((_, stop))) = (&session.mapping, session.api) {
-                if mapping.active() {
-                    stop(handle);
-                    mapping.record_call();
-                }
-            }
+    if let Some(session) = session() {
+        if session.generation == generation && session.mapping.active() {
+            (session.stop)(handle);
+            session.mapping.record_call();
         }
     }
 }
@@ -195,8 +208,58 @@ mod tests {
         assert_eq!(h, 42);
         STOPS.fetch_add(1, Ordering::Relaxed);
     }
+    /// The session is one per process, so the tests that open one take turns.
+    static ONE_SESSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    unsafe extern "C" fn quiet_start(_: *const libc::c_char, _: usize) -> u64 {
+        7
+    }
+    extern "C" fn quiet_stop(_: u64) {}
+
+    /// What the hook path adds to a hooked call, beyond the record it
+    /// writes: the stubs above do nothing, so this is the session check and
+    /// the call counter alone, on one thread and on eight.
+    ///
+    /// `cargo test -p perfr-lib --release what_a_hooked_call -- --nocapture`
+    #[test]
+    fn what_a_hooked_call_pays_to_reach_the_api() {
+        let _one = ONE_SESSION.lock().unwrap_or_else(|p| p.into_inner());
+        const CALLS: u64 = 400_000;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let reader = Transport::create(file.as_file(), std::process::id()).unwrap();
+        let path = std::ffi::CString::new(file.path().to_str().unwrap()).unwrap();
+        let generation =
+            unsafe { perfr_frida_open(path.as_ptr(), Some(init), Some(quiet_start), Some(quiet_stop)) };
+        assert_ne!(generation, 0);
+        let mut total = 0;
+        for threads in [1u64, 8] {
+            let best = (0..7)
+                .map(|_| {
+                    let started = std::time::Instant::now();
+                    std::thread::scope(|scope| {
+                        for _ in 0..threads {
+                            scope.spawn(|| {
+                                for _ in 0..CALLS {
+                                    let h = unsafe { perfr_frida_start(generation, std::ptr::null(), 0) };
+                                    perfr_frida_stop(generation, h);
+                                }
+                            });
+                        }
+                    });
+                    total += threads * CALLS;
+                    started.elapsed().as_nanos() as f64 / CALLS as f64
+                })
+                .fold(f64::MAX, f64::min);
+            println!("  start + stop through the session, {threads} thread(s): {best:7.1} ns a call");
+            assert!(best > 0.0 && best.is_finite());
+        }
+        perfr_frida_close(generation);
+        assert_eq!(reader.calls(), total, "every completed call was counted");
+    }
+
     #[test]
     fn late_callbacks_cannot_write_to_the_next_capture() {
+        let _one = ONE_SESSION.lock().unwrap_or_else(|p| p.into_inner());
         let file = tempfile::NamedTempFile::new().unwrap();
         let reader = Transport::create(file.as_file(), std::process::id()).unwrap();
         let path = std::ffi::CString::new(file.path().to_str().unwrap()).unwrap();

@@ -72,6 +72,18 @@ perfr mcp --http 127.0.0.1:44767 --url http://127.0.0.1:44766
 
 `--url http://10.0.0.1:44766` is refused unless you pass `--allow-remote`. That flag means anyone who can reach the service can attach to processes as the user running it.
 
+## Story files
+
+`perfr_story_load` and `perfr_story_export` pass the story as JSON. Each also takes a `path`, and that path is confined to one directory: the one the server was started in, or the one `--story-dir <dir>` names.
+
+```
+perfr mcp --story-dir ~/captures/stories
+```
+
+The path is relative to that directory. An absolute path, or one that leaves the directory through `..` or a symlink, is refused. Export replaces an existing file only if it is already a story; a source file or a config with the same name is left alone.
+
+With `--http` there is no default story directory, because any process on the machine can post to the port. The two tools still exchange JSON; they take a `path` only when `--story-dir` is given.
+
 ## Tools
 
 Call `perfr_capabilities` first. It reports the platform, whether the service is up, and which features this machine can actually record.

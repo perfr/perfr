@@ -473,6 +473,8 @@ fn mcp_cmd() -> Command {
         .after_help(
             "The service has to be running already (`perfr`). JSON-RPC uses stdin.\n\
              --http stays on loopback: the profiling API has no authentication.\n\
+             The story tools read and write files only under --story-dir. With\n\
+             --http they take no path unless --story-dir is given.\n\
              Warnings from the permission check go to stderr, never stdout.\n\n\
              Examples:\n  \
              perfr mcp\n  \
@@ -497,6 +499,12 @@ fn mcp_cmd() -> Command {
                 .long("allow-remote")
                 .action(ArgAction::SetTrue)
                 .help("Allow a non-loopback --url"),
+        )
+        .arg(
+            Arg::new("story-dir")
+                .long("story-dir")
+                .value_name("DIR")
+                .help("Directory the story tools read and write files in [default: the working directory; none with --http]"),
         )
 }
 
@@ -718,6 +726,14 @@ mod tests {
         assert!(mcp.contains("--url"), "{mcp}");
         assert!(mcp.contains("--http"), "{mcp}");
         assert!(mcp.contains("--allow-remote"), "{mcp}");
+        assert!(mcp.contains("--story-dir"), "{mcp}");
+        for spelling in [&["--story-dir", "stories"][..], &["--story-dir=stories"][..]] {
+            let parsed = command()
+                .try_get_matches_from([&["perfr", "mcp"][..], spelling].concat())
+                .unwrap();
+            let (_, sub) = parsed.subcommand().unwrap();
+            assert_eq!(sub.get_one::<String>("story-dir").map(String::as_str), Some("stories"));
+        }
         assert!(mcp.contains("stderr"), "{mcp}");
         let setup = render(&["setup", "--help"]);
         assert!(setup.contains("--check"), "{setup}");

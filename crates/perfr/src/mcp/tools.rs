@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -115,6 +116,11 @@ pub struct Mcp {
     session: Mutex<Session>,
     /// The story being written. It lives in this process, not in the service.
     story: Mutex<Option<perfr_story::Story>>,
+    /// The only directory `perfr_story_load` and `perfr_story_export` read
+    /// and write files in. `None` refuses their `path` argument: the caller
+    /// is an agent, or over HTTP anything on this machine, and the server
+    /// tells both that it does not touch other files.
+    story_dir: Option<PathBuf>,
     platform: Platform,
 }
 
@@ -124,7 +130,31 @@ impl Mcp {
             http: HttpClient::parse(url, allow_remote)?,
             session: Mutex::new(Session { pid: None, hooks: Vec::new(), known: HashMap::new() }),
             story: Mutex::new(None),
+            story_dir: None,
             platform,
+        })
+    }
+
+    pub fn with_story_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.story_dir = dir;
+        self
+    }
+
+    /// The file a story tool may read or write for its `path` argument.
+    fn story_file(&self, path: &str) -> Result<PathBuf, String> {
+        let Some(dir) = &self.story_dir else {
+            return Err(format!(
+                "{path}: this server was started without a story directory, so the story tools take no path. \
+                 Pass the document as json (perfr_story_export returns it), or start `perfr mcp` with --story-dir <dir>."
+            ));
+        };
+        let dir = std::fs::canonicalize(dir).map_err(|e| format!("story directory {}: {e}", dir.display()))?;
+        file_inside(&dir, path).map_err(|why| {
+            format!(
+                "{path}: {why}. Story files are read and written only under {}; pass a path relative to it, \
+                 or start `perfr mcp` with --story-dir <dir>.",
+                dir.display()
+            )
         })
     }
 
@@ -775,6 +805,8 @@ perfr_story_load starts one; perfr_story_find_threads, perfr_story_find_scopes, 
 perfr_story_hotspots and perfr_story_cpu read the capture so a step can name \
 a real track, scope or time range. Numbers from those tools are readings of \
 this capture. perfr_story_export writes the document; it does not change the capture. \
+The story tools read and write files only inside the story directory (where this \
+server was started, or its --story-dir), and replace a file only if it is a story. \
 The HTTP API has no authentication.";
 
 fn tool_ok(payload: &Value) -> Value {
@@ -970,12 +1002,12 @@ pub fn tool_specs() -> Vec<Value> {
         ),
         tool(
             "perfr_story_load",
-            "Replace the in-memory story with a perfr.story JSON document, either the json string or a file at path. The file is read, not modified.",
+            "Replace the in-memory story with a perfr.story JSON document, either the json string or a file at path. The file is read, not modified. path is relative to the story directory: where this server was started, or its --story-dir.",
             json!({
                 "type": "object",
                 "properties": {
                     "json": { "type": "string", "description": "The document." },
-                    "path": { "type": "string", "description": "A UTF-8 file to read." }
+                    "path": { "type": "string", "description": "A UTF-8 file to read, relative to the story directory." }
                 },
                 "additionalProperties": false,
             }),
@@ -1085,11 +1117,11 @@ pub fn tool_specs() -> Vec<Value> {
         ),
         tool(
             "perfr_story_export",
-            "Return the story as JSON. path, when set, also writes that file. The capture is not modified. perfr-web can store this document beside a capture as captures/<id>.perfr.story and open the viewer with ?capture=<stream>&story=<story url>.",
+            "Return the story as JSON. path, when set, also writes that file: a path relative to the story directory (where this server was started, or its --story-dir), and an existing file is replaced only if it is a story. The capture is not modified. perfr-web can store this document beside a capture as captures/<id>.perfr.story and open the viewer with ?capture=<stream>&story=<story url>.",
             json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Where to write the JSON. Omit to only return it." }
+                    "path": { "type": "string", "description": "Where to write the JSON, relative to the story directory. Omit to only return it." }
                 },
                 "additionalProperties": false,
             }),
@@ -1181,7 +1213,8 @@ impl Mcp {
 
     fn story_load(&self, args: &Value) -> Result<Value, String> {
         let text = if let Some(path) = arg_str(args, "path") {
-            std::fs::read_to_string(path).map_err(|e| format!("could not read {path}: {e}"))?
+            let file = self.story_file(path)?;
+            std::fs::read_to_string(file).map_err(|e| format!("could not read {path}: {e}"))?
         } else if let Some(json) = arg_str(args, "json") {
             json.to_string()
         } else {
@@ -1349,12 +1382,23 @@ impl Mcp {
         let text = story.to_json_pretty()?;
         let mut path_out = Value::Null;
         if let Some(path) = arg_str(args, "path") {
-            if let Some(parent) = std::path::Path::new(path).parent() {
-                if !parent.as_os_str().is_empty() {
-                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            let file = self.story_file(path)?;
+            // The one file this server replaces is a story. Anything else
+            // at that name is somebody's source or config.
+            match std::fs::read(&file) {
+                Ok(existing) if is_story_document(&existing) => {}
+                Ok(_) => {
+                    return Err(format!(
+                        "{path} exists and is not a perfr.story document; it was not overwritten. Export to another name."
+                    ))
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{path} exists and could not be read ({e}); it was not overwritten")),
             }
-            std::fs::write(path, &text).map_err(|e| format!("could not write {path}: {e}"))?;
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&file, &text).map_err(|e| format!("could not write {path}: {e}"))?;
             path_out = json!(path);
         }
         Ok(json!({
@@ -1461,6 +1505,60 @@ impl Mcp {
             Err(message) => Err(message),
         }
     }
+}
+
+/// `path`, taken relative to `dir` (canonical), as a file that is inside
+/// `dir` once every symlink on the way is followed. Says why not otherwise.
+fn file_inside(dir: &Path, path: &str) -> Result<PathBuf, String> {
+    let mut names = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(name) => names.push(name),
+            Component::CurDir => {}
+            // Resolved here, on the names, so that what is checked below is
+            // the path that is then opened.
+            Component::ParentDir => {
+                if names.pop().is_none() {
+                    return Err("is outside the story directory".into());
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return Err("is an absolute path".into()),
+        }
+    }
+    if names.is_empty() {
+        return Err("names no file".into());
+    }
+    let mut file = dir.to_path_buf();
+    for (index, name) in names.iter().enumerate() {
+        file.push(name);
+        match std::fs::symlink_metadata(&file) {
+            // `symlink_metadata`, not `exists`: a dangling symlink does not
+            // exist, and a write through it creates the file it names.
+            Ok(_) => {
+                let real = std::fs::canonicalize(&file).map_err(|e| format!("cannot be resolved ({e})"))?;
+                if !real.starts_with(dir) {
+                    return Err("leads outside the story directory".into());
+                }
+                file = real;
+            }
+            // Nothing here, so nothing below it either: the rest is created
+            // as plain directories and a plain file.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                file.extend(&names[index + 1..]);
+                break;
+            }
+            Err(e) => return Err(format!("cannot be resolved ({e})")),
+        }
+    }
+    Ok(file)
+}
+
+/// Whether a file's content is a story, by the marker every story carries.
+/// Not `parse_story`: a story with a step someone broke by hand, or one
+/// from another version of the format, is still a story to replace.
+fn is_story_document(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(bytes)
+        .is_ok_and(|doc| doc.get("format").and_then(|f| f.as_str()) == Some(perfr_story::FORMAT))
 }
 
 fn story_payload(story: &perfr_story::Story) -> Value {

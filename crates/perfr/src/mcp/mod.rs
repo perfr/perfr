@@ -17,6 +17,7 @@ mod tools;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -26,7 +27,7 @@ use serde_json::{json, Value};
 use tools::Mcp;
 
 const HELP: &str = "\
-perfr mcp [--url http://127.0.0.1:44766] [--allow-remote]
+perfr mcp [--url http://127.0.0.1:44766] [--allow-remote] [--story-dir <dir>]
 perfr mcp --http [127.0.0.1:44767] [--url http://127.0.0.1:44766]
 
 Speaks the Model Context Protocol. The default is JSON-RPC on stdin, which
@@ -36,6 +37,11 @@ streamable HTTP and refuses any bind that is not loopback.
 --url is the perfr to drive. It must be loopback unless
 --allow-remote is set. The service has no authentication; remote means
 anyone who can reach it can attach to processes.
+
+--story-dir is the only directory perfr_story_load and perfr_story_export
+read and write files in. The default is the directory the server is started
+in. With --http there is no default: anything on this machine can post to
+the port, so those tools take a path only when --story-dir is given.
 
 The service has to be running already:
     perfr --host 127.0.0.1
@@ -51,18 +57,55 @@ pub fn entry() -> i32 {
     }
 }
 
+struct Options {
+    url: String,
+    allow_remote: bool,
+    http: Option<Option<String>>,
+    story_dir: Option<String>,
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(2).collect();
+    let Some(Options { url, allow_remote, http, story_dir }) = parse_args(&args)? else {
+        eprintln!("{HELP}");
+        return Ok(());
+    };
+    let story_dir = story_dir_for(story_dir.as_deref(), http.is_some())?;
+    let mcp = Arc::new(Mcp::connect(&url, allow_remote, tools::Platform::host())?.with_story_dir(story_dir));
+    if let Some(bind) = http {
+        let addr = parse_loopback(bind.as_deref().unwrap_or("127.0.0.1:44767"))?;
+        serve_http(mcp, addr)?;
+        Ok(())
+    } else {
+        serve_stdio(&mcp)
+    }
+}
+
+/// Where the story tools may read and write files, if anywhere.
+fn story_dir_for(flag: Option<&str>, http: bool) -> Result<Option<PathBuf>, String> {
+    match flag {
+        Some(dir) if Path::new(dir).is_dir() => Ok(Some(PathBuf::from(dir))),
+        Some(dir) => Err(format!("--story-dir {dir} is not a directory")),
+        // No default over HTTP: the port has no authentication, so a default
+        // would let any local process write story files as this user,
+        // wherever the server happened to be started.
+        None if http => Ok(None),
+        // Over stdin the caller is the agent that spawned this process, in
+        // the directory it works in.
+        None => Ok(Some(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))),
+    }
+}
+
+/// `None` when the arguments ask for the help text.
+fn parse_args(args: &[String]) -> Result<Option<Options>, String> {
     let mut url = "http://127.0.0.1:44766".to_string();
     let mut allow_remote = false;
     let mut http: Option<Option<String>> = None;
+    let mut story_dir: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--help" | "-h" => {
-                eprintln!("{HELP}");
-                return Ok(());
-            }
+            "--help" | "-h" => return Ok(None),
             "--no-preflight" => {}
             "--allow-remote" => allow_remote = true,
             "--url" => {
@@ -76,18 +119,19 @@ fn run() -> Result<(), String> {
                 }
                 http = Some(next.cloned());
             }
+            "--story-dir" => {
+                i += 1;
+                story_dir = Some(args.get(i).cloned().ok_or("--story-dir needs a directory")?);
+            }
+            // clap, which sees the arguments first, takes this spelling too.
+            other if other.starts_with("--story-dir=") => {
+                story_dir = Some(other["--story-dir=".len()..].to_string());
+            }
             other => return Err(format!("unknown argument {other}")),
         }
         i += 1;
     }
-    let mcp = Arc::new(Mcp::connect(&url, allow_remote, tools::Platform::host())?);
-    if let Some(bind) = http {
-        let addr = parse_loopback(bind.as_deref().unwrap_or("127.0.0.1:44767"))?;
-        serve_http(mcp, addr)?;
-        Ok(())
-    } else {
-        serve_stdio(&mcp)
-    }
+    Ok(Some(Options { url, allow_remote, http, story_dir }))
 }
 
 fn parse_loopback(text: &str) -> Result<SocketAddr, String> {
@@ -479,6 +523,158 @@ mod tests {
         let result = &response["result"];
         assert_eq!(result["isError"], false, "{result}");
         serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    /// The message of a tool call that has to be refused.
+    fn refused(mcp: &Mcp, name: &str, args: Value) -> String {
+        let response = call(mcp, 1, "tools/call", json!({"name": name, "arguments": args}));
+        let result = &response["result"];
+        assert_eq!(result["isError"], true, "{name} was not refused: {result}");
+        let payload: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        payload["error"].as_str().unwrap().to_string()
+    }
+
+    /// A server whose story directory is `<tmp>/stories`, with one story
+    /// loaded. `<tmp>` itself holds a story and a source file the tools must
+    /// not reach.
+    fn story_server() -> (tempfile::TempDir, std::path::PathBuf, Mcp) {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().to_path_buf();
+        std::fs::create_dir(base.join("stories")).unwrap();
+        std::fs::write(base.join("main.rs"), "fn main() {}\n").unwrap();
+        let url = spawn_service(Arc::new(Mutex::new(Vec::new())));
+        let mcp = mcp(&url).with_story_dir(Some(base.join("stories")));
+        let story = tool(&mcp, 1, "perfr_story_create", json!({"title": "tour"}));
+        std::fs::write(base.join("outside.perfr.story"), story["story"].to_string()).unwrap();
+        (dir, base, mcp)
+    }
+
+    #[test]
+    fn story_files_are_read_and_written_inside_the_story_directory() {
+        let (_dir, base, mcp) = story_server();
+        let exported = tool(&mcp, 2, "perfr_story_export", json!({"path": "tour.perfr.story"}));
+        assert_eq!(exported["path"], "tour.perfr.story");
+        let written = std::fs::read_to_string(base.join("stories/tour.perfr.story")).unwrap();
+        assert_eq!(written, exported["json"].as_str().unwrap());
+        // Parents are still created, and `..` that stays inside is a path
+        // like any other.
+        tool(&mcp, 3, "perfr_story_export", json!({"path": "drafts/v2/tour.json"}));
+        assert!(base.join("stories/drafts/v2/tour.json").is_file());
+        tool(&mcp, 4, "perfr_story_export", json!({"path": "drafts/../again.json"}));
+        assert!(base.join("stories/again.json").is_file());
+        let loaded = tool(&mcp, 5, "perfr_story_load", json!({"path": "drafts/v2/tour.json"}));
+        assert_eq!(loaded["title"], "tour");
+    }
+
+    #[test]
+    fn a_story_path_outside_the_story_directory_is_refused() {
+        let (_dir, base, mcp) = story_server();
+        let source = base.join("main.rs");
+        let outside = base.join("outside.perfr.story");
+        let new_file = base.join("new.json");
+        for path in [
+            source.to_str().unwrap(),
+            new_file.to_str().unwrap(),
+            "../main.rs",
+            "../new.json",
+            "drafts/../../new.json",
+        ] {
+            let error = refused(&mcp, "perfr_story_export", json!({"path": path}));
+            assert!(error.contains("--story-dir"), "{path}: {error}");
+        }
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "fn main() {}\n");
+        assert!(!new_file.exists());
+        for path in [outside.to_str().unwrap(), "../outside.perfr.story"] {
+            let error = refused(&mcp, "perfr_story_load", json!({"path": path}));
+            assert!(error.contains("--story-dir"), "{path}: {error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_in_the_story_directory_does_not_lead_out_of_it() {
+        let (_dir, base, mcp) = story_server();
+        std::os::unix::fs::symlink(&base, base.join("stories/up")).unwrap();
+        // Dangling: writing through it would create the file it names.
+        std::os::unix::fs::symlink(base.join("new.json"), base.join("stories/dangling.json")).unwrap();
+        for path in ["up/main.rs", "up/new.json", "dangling.json"] {
+            let error = refused(&mcp, "perfr_story_export", json!({"path": path}));
+            assert!(error.contains("--story-dir"), "{path}: {error}");
+        }
+        assert_eq!(std::fs::read_to_string(base.join("main.rs")).unwrap(), "fn main() {}\n");
+        assert!(!base.join("new.json").exists());
+        let error = refused(&mcp, "perfr_story_load", json!({"path": "up/outside.perfr.story"}));
+        assert!(error.contains("--story-dir"), "{error}");
+    }
+
+    #[test]
+    fn export_replaces_a_story_and_nothing_else() {
+        let (_dir, base, mcp) = story_server();
+        let stories = base.join("stories");
+        std::fs::write(stories.join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(stories.join("package.json"), "{\"name\": \"x\"}\n").unwrap();
+        std::fs::write(stories.join("notes.bin"), [0xffu8, 0xfe, 0x00]).unwrap();
+        for name in ["main.rs", "package.json", "notes.bin"] {
+            let before = std::fs::read(stories.join(name)).unwrap();
+            let error = refused(&mcp, "perfr_story_export", json!({"path": name}));
+            assert!(error.contains("not a perfr.story"), "{name}: {error}");
+            assert_eq!(std::fs::read(stories.join(name)).unwrap(), before, "{name}");
+        }
+        // An earlier export is what the tool is for replacing, valid or
+        // not: a story someone broke by hand is still a story.
+        tool(&mcp, 2, "perfr_story_export", json!({"path": "tour.perfr.story"}));
+        std::fs::write(stories.join("tour.perfr.story"), "{\"format\": \"perfr.story\", \"version\": 0}").unwrap();
+        let again = tool(&mcp, 3, "perfr_story_export", json!({"path": "tour.perfr.story"}));
+        assert_eq!(
+            std::fs::read_to_string(stories.join("tour.perfr.story")).unwrap(),
+            again["json"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn without_a_story_directory_the_story_tools_take_no_path() {
+        let url = spawn_service(Arc::new(Mutex::new(Vec::new())));
+        let mcp = mcp(&url);
+        let story = tool(&mcp, 1, "perfr_story_create", json!({"title": "tour"}));
+        let name = format!("perfr-mcp-test-{}.perfr.story", std::process::id());
+        let error = refused(&mcp, "perfr_story_export", json!({"path": name}));
+        assert!(error.contains("--story-dir"), "{error}");
+        assert!(!std::path::Path::new(&name).exists());
+        let error = refused(&mcp, "perfr_story_load", json!({"path": "Cargo.toml"}));
+        assert!(error.contains("--story-dir"), "{error}");
+        // The document itself still goes both ways.
+        let exported = tool(&mcp, 2, "perfr_story_export", json!({}));
+        assert_eq!(exported["path"], Value::Null);
+        let loaded = tool(&mcp, 3, "perfr_story_load", json!({"json": story["story"].to_string()}));
+        assert_eq!(loaded["title"], "tour");
+    }
+
+    #[test]
+    fn story_dir_is_a_flag_of_the_stdin_parser_in_both_spellings() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for list in [&["--story-dir", "stories"][..], &["--story-dir=stories"][..]] {
+            let options = parse_args(&args(list)).unwrap().unwrap();
+            assert_eq!(options.story_dir.as_deref(), Some("stories"), "{list:?}");
+        }
+        let options = parse_args(&args(&["--http", "--story-dir", "s", "--url", "http://127.0.0.1:1"])).unwrap().unwrap();
+        assert_eq!(options.http, Some(None));
+        assert_eq!(options.story_dir.as_deref(), Some("s"));
+        assert_eq!(options.url, "http://127.0.0.1:1");
+        assert!(parse_args(&args(&["--story-dir"])).is_err());
+        assert!(parse_args(&args(&[])).unwrap().unwrap().story_dir.is_none());
+    }
+
+    #[test]
+    fn the_http_transport_has_no_story_directory_unless_one_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let named = dir.path().to_str().unwrap();
+        assert_eq!(story_dir_for(None, true).unwrap(), None);
+        assert_eq!(story_dir_for(Some(named), true).unwrap().as_deref(), Some(dir.path()));
+        assert_eq!(story_dir_for(Some(named), false).unwrap().as_deref(), Some(dir.path()));
+        assert_eq!(story_dir_for(None, false).unwrap(), std::env::current_dir().ok());
+        let missing = dir.path().join("missing");
+        let error = story_dir_for(Some(missing.to_str().unwrap()), false).unwrap_err();
+        assert!(error.contains("not a directory"), "{error}");
     }
 
     #[test]

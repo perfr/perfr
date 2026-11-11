@@ -1216,8 +1216,19 @@ pub fn instance_for_event(
     radius: f32,
     intern: Option<&InternTable>,
 ) -> ScopeInstance {
-    let x0 = ((e.start_ns.max(t0) - t0) as f64 / span) * width as f64;
-    let x1 = ((e.end_ns().min(t1) - t0) as f64 / span) * width as f64;
+    let px = |ns: u64| (ns as f64 / span) * width as f64;
+    let (x0, x1) = if e.end_ns() <= t0 {
+        // Ended before the window. The listing never asks for such an
+        // event; the viewer does, for a selection that was panned out of
+        // view. `end - t0` wrapped then, into a bar across the whole row
+        // (and a panic in a debug build). Its place is left of the view:
+        // where it ended, and from there as wide as it is.
+        let x1 = -px(t0 - e.end_ns());
+        let x0 = -px(t0.saturating_sub(e.start_ns));
+        (x0.min(x1 - 1.0), x1)
+    } else {
+        (px(e.start_ns.max(t0) - t0), px(e.end_ns().min(t1) - t0))
+    };
     ScopeInstance {
         x: x0 as f32,
         y,
@@ -1597,6 +1608,30 @@ mod listing_cache_tests {
 #[cfg(test)]
 mod provenance_tests {
     use super::*;
+
+    /// The viewer builds the instance of the selected scope for whatever
+    /// window is on screen, also after the scope has been panned out of it.
+    #[test]
+    fn an_event_outside_the_window_gets_an_instance_outside_the_view() {
+        let event = LiveEvent { start_ns: 100, duration_ns: 50, pid: 1, tid: 2,
+            kind: kind::API_SCOPE, depth: 0, extra: 0, _pad: 0, name_id: 7 };
+        let width = 800.0;
+        let at = |t0: u64, t1: u64| instance_for_event(&event, t0, t1, (t1 - t0) as f64, width, 0.0, 16.0, 2.0, None);
+        // Entirely left of the window: nothing of it may reach x = 0.
+        for (t0, t1) in [(150, 1_150), (151, 1_151), (10_000, 11_000), (u64::MAX - 10, u64::MAX)] {
+            let i = at(t0, t1);
+            assert!(i.x.is_finite() && i.w >= 1.0, "[{t0}, {t1}): {i:?}");
+            assert!(i.x + i.w <= 0.0, "[{t0}, {t1}): drawn at {}..{}", i.x, i.x + i.w);
+        }
+        // Entirely right of it: nothing left of the right edge.
+        let i = at(0, 100);
+        assert!(i.x >= width && i.w >= 1.0, "{i:?}");
+        // Inside or across an edge, as before: clamped to the view.
+        let i = at(0, 1_000);
+        assert_eq!((i.x, i.w), (80.0, 40.0));
+        let i = at(120, 1_120);
+        assert_eq!((i.x, i.w), (0.0, 24.0));
+    }
 
     #[test]
     fn dynamic_origin_survives_both_scope_picking_paths() {

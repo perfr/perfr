@@ -120,8 +120,10 @@ a stable release a minute or two later.
 
 A manual run (Actions, then release-rust, then Run workflow) with an empty
 **tag** builds every artifact and publishes nothing. With **tag** set to an
-existing `perfr-v*` tag, it creates the release for that tag. A manual run of
-python-wheels builds wheels and never publishes.
+existing `perfr-v*` tag, it checks out that tag in every job and creates the
+release for it; the branch chosen under "Use workflow from" only decides
+which copy of the workflow file runs. A manual run of python-wheels builds
+wheels and never publishes.
 
 ## release-rust.yml
 

@@ -11,7 +11,8 @@
 #
 # workflow_dispatch with an empty tag builds the same artifacts and
 # does not create a release or a tag. Set tag to an existing perfr-v*
-# tag to attach a release to it. This workflow never creates a tag.
+# tag to build that tag's commit and attach a release to it, whichever
+# branch the run is started from. This workflow never creates a tag.
 #
 # The viewer job packs crates/perfr-live-viewer/viewer-dist, built for
 # this tag, as perfr-viewer.tar.gz plus perfr-viewer.tar.gz.sha256.
@@ -20,6 +21,10 @@
 env:
   # Empty on a manual run with no tag, so the stamp stays `dev+<hash>`.
   PERFR_RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.tag || '' }}
+  # What every job checks out. A manual run for a tag starts from a branch:
+  # without this it would build the branch and publish the result under the
+  # tag. Empty (the event's own ref) in every other case.
+  PERFR_RELEASE_REF: ${{ github.event.inputs.tag && format('refs/tags/{0}', github.event.inputs.tag) || '' }}
 
 name: release-rust
 
@@ -48,6 +53,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PERFR_RELEASE_REF }}
 
       # This job gates the other three. The binaries take their version from
       # the tree, so a tag that names another version must not publish.
@@ -87,6 +94,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PERFR_RELEASE_REF }}
 
       - name: Pin the build stamp to this commit
         run: |
@@ -154,8 +163,8 @@ jobs:
         run: |
           set -euo pipefail
           pkg=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/perfr/Cargo.toml | head -1)
-          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-            ver="${GITHUB_REF_NAME#perfr-}"
+          if [ -n "${PERFR_RELEASE_TAG:-}" ]; then
+            ver="${PERFR_RELEASE_TAG#perfr-}"
           else
             ver="v${pkg}-dev"
           fi
@@ -224,6 +233,8 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PERFR_RELEASE_REF }}
 
       - name: Pin the build stamp to this commit
         run: |
@@ -261,8 +272,8 @@ jobs:
         run: |
           set -euo pipefail
           pkg=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/perfr/Cargo.toml | head -1)
-          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-            ver="${GITHUB_REF_NAME#perfr-}"
+          if [ -n "${PERFR_RELEASE_TAG:-}" ]; then
+            ver="${PERFR_RELEASE_TAG#perfr-}"
           else
             ver="v${pkg}-dev"
           fi
@@ -337,6 +348,8 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PERFR_RELEASE_REF }}
 
       - name: Pin the build stamp to this commit
         run: |
@@ -382,8 +395,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $pkg = (Select-String -Path crates\perfr\Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
-          if ($env:GITHUB_REF_TYPE -eq 'tag') {
-            $ver = $env:GITHUB_REF_NAME -replace '^perfr-', ''
+          if ($env:PERFR_RELEASE_TAG) {
+            $ver = $env:PERFR_RELEASE_TAG -replace '^perfr-', ''
           } else {
             $ver = "v$pkg-dev"
           }
@@ -453,6 +466,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PERFR_RELEASE_REF }}
 
       - uses: actions/download-artifact@v4
         with:

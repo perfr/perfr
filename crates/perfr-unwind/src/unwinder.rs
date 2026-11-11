@@ -403,6 +403,7 @@ mod tests {
     /// then the return address. With no module loaded that chain is all the
     /// unwinder has, which makes the walk predictable. Returns the start
     /// registers, the stack's base address and its bytes.
+    #[cfg(target_arch = "x86_64")]
     fn frame_pointer_chain(depth: usize) -> (StartRegs, u64, Vec<u8>) {
         const BASE: u64 = 0x7ffd_0000_0000;
         const FRAME: u64 = 32;

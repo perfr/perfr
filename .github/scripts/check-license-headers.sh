@@ -14,7 +14,6 @@ MERGE_BASE="$(git merge-base $REFERENCE HEAD)" # Merge base is the commit on mai
 LICENSE_HEADER_MISSED=""
 
 echo -e "The following files are missing a license/copyright header:\n"
-touch "${GITHUB_WORKSPACE}/missing_license_headers.txt"
 while read file; do
   if [ ! -f "$file" ]; then
     continue
@@ -22,12 +21,20 @@ while read file; do
 
   if ! grep -E 'Copyright \(c\) [0-9]{4} The perfr Authors\. All rights reserved\.' "$file" > /dev/null; then
     echo "$file"
-    echo "$file" >> "${GITHUB_WORKSPACE}/missing_license_headers.txt"
+    # An annotation on the file's first line, printed by this job. It used
+    # to take a second, privileged workflow that downloaded a list this job
+    # uploaded; a workflow command needs neither a token nor an artifact.
+    # %, comma and colon are the characters a property value must escape.
+    escaped=${file//%/%25}
+    escaped=${escaped//,/%2C}
+    escaped=${escaped//:/%3A}
+    echo "::error file=${escaped},line=1,title=Missing license header::The source file must start with a license header."
+    LICENSE_HEADER_MISSED=1
   fi
 
 done <<< $(git diff -U0 --no-color --relative --name-only --diff-filter=r $MERGE_BASE \
 | egrep '\.rs$|\.cpp$|\.c$|\.h$|\.js$|\.py$|\.sh$|\.ps1$')
 
-if [ -s "${GITHUB_WORKSPACE}/missing_license_headers.txt" ]; then
+if [ -n "$LICENSE_HEADER_MISSED" ]; then
   exit 1
 fi

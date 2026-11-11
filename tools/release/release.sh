@@ -457,8 +457,11 @@ require_version_files() {
   done <<EOF
 $(version_files)
 EOF
-  if ! grep -q '^version = 3$' Cargo.lock; then
-    die "Cargo.lock is not lockfile version 3; refusing to edit it"
+  # Formats 3 and 4 lay a [[package]] entry out the same way (4 only
+  # changed how a git source URL is escaped), which is all update_cargo_lock
+  # relies on. A newer format is refused until it has been checked too.
+  if ! grep -q '^version = [34]$' Cargo.lock; then
+    die "Cargo.lock is not lockfile version 3 or 4; refusing to edit it"
   fi
 }
 

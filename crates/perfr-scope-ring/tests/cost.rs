@@ -8,7 +8,7 @@
 //! Run with `cargo test -p perfr-scope-ring --release --test cost -- --nocapture`.
 
 use perfr_scope_ring::event::kind;
-use perfr_scope_ring::ring::{self, Rings, CACHE_LINE};
+use perfr_scope_ring::ring::{self, RingWriter, CACHE_LINE};
 use perfr_scope_ring::shm::now_monotonic_ns;
 use perfr_scope_ring::ScopeEvent;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,7 +34,7 @@ fn what_each_part_of_the_write_path_costs() {
     let slots = 1 << 16;
     let (bytes, offset) = region_n(2, slots);
     // SAFETY: initialised above at these dimensions.
-    let rings = unsafe { Rings::from_raw(bytes.as_ptr().add(offset) as *mut u8, 2, slots) };
+    let rings = unsafe { RingWriter::from_raw(bytes.as_ptr().add(offset) as *mut u8, 2, slots) };
     let event = ScopeEvent { timestamp_ns: 1, kind: kind::INSTANT, ..Default::default() };
     for _ in 0..slots {
         rings.push(0, event); // warm the mapping
@@ -111,7 +111,7 @@ fn what_an_inline_name_costs() {
     let slots = 1 << 16;
     let (bytes, offset) = region_n(2, slots);
     // SAFETY: initialised above at these dimensions.
-    let rings = unsafe { Rings::from_raw(bytes.as_ptr().add(offset) as *mut u8, 2, slots) };
+    let rings = unsafe { RingWriter::from_raw(bytes.as_ptr().add(offset) as *mut u8, 2, slots) };
     let base = ScopeEvent { timestamp_ns: 1, kind: kind::INSTANT, ..Default::default() };
     for _ in 0..slots {
         rings.push(0, base);

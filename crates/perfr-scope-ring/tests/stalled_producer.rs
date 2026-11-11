@@ -14,7 +14,7 @@
 
 use perfr_scope_ring::event::kind;
 use perfr_scope_ring::merge::{drain, Cursors};
-use perfr_scope_ring::ring::{self, Rings};
+use perfr_scope_ring::ring::{self, RingWriter};
 use perfr_scope_ring::{DropTally, ScopeEvent};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -35,10 +35,10 @@ impl Region {
         Region { bytes, offset }
     }
 
-    fn rings(&self) -> Rings {
+    fn rings(&self) -> RingWriter {
         // SAFETY: initialised above at exactly these dimensions.
         unsafe {
-            Rings::from_raw(self.bytes.as_ptr().add(self.offset) as *mut u8, 1, SLOTS as usize)
+            RingWriter::from_raw(self.bytes.as_ptr().add(self.offset) as *mut u8, 1, SLOTS as usize)
         }
     }
 }
@@ -61,7 +61,7 @@ fn stamped(n: u64) -> ScopeEvent {
 
 /// One drain pass: the claims delivered, each checked to be whole, and the
 /// number counted lost.
-fn pass(rings: &Rings, cursors: &mut Cursors) -> (Vec<u64>, u64) {
+fn pass(rings: &RingWriter, cursors: &mut Cursors) -> (Vec<u64>, u64) {
     let pass = drain(rings, cursors, 0);
     let claims = pass.slices[0]
         .events

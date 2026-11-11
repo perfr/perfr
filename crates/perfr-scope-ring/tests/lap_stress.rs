@@ -12,7 +12,7 @@
 //! is that number throughout and nothing else.
 
 use perfr_scope_ring::merge::{drain, Cursors};
-use perfr_scope_ring::ring::{self, Rings};
+use perfr_scope_ring::ring::{self, RingWriter};
 use perfr_scope_ring::ScopeEvent;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -42,9 +42,9 @@ impl Region {
         Region { bytes, offset, slots }
     }
 
-    fn rings(&self) -> Rings {
+    fn rings(&self) -> RingWriter {
         // SAFETY: initialised above at exactly these dimensions.
-        unsafe { Rings::from_raw(self.bytes.as_ptr().add(self.offset) as *mut u8, 1, self.slots) }
+        unsafe { RingWriter::from_raw(self.bytes.as_ptr().add(self.offset) as *mut u8, 1, self.slots) }
     }
 }
 

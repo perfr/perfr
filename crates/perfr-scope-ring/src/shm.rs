@@ -15,7 +15,7 @@
 //! dimensions.
 
 use crate::event::EVENT_SIZE;
-use crate::ring::{self, Header, Rings, MAGIC, MAX_RINGS, VERSION};
+use crate::ring::{self, Header, RingWriter, Rings, MAGIC, MAX_RINGS, VERSION};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::Ordering;
@@ -255,7 +255,7 @@ impl Drop for Mapping {
 pub struct ScopeRingWriter {
     _owner_fd: OwnedFd,
     mapping: Mapping,
-    rings: Rings,
+    rings: RingWriter,
     pid: u32,
 }
 
@@ -326,7 +326,7 @@ impl ScopeRingWriter {
         // every one of them zero.
         unsafe { ring::init_zeroed_region(base, ring_count, slots_per_ring, pid) };
         // SAFETY: the region was just initialised at these dimensions.
-        let rings = unsafe { Rings::from_raw(base, ring_count, slots_per_ring) };
+        let rings = unsafe { RingWriter::from_raw(base, ring_count, slots_per_ring) };
         Ok(ScopeRingWriter { _owner_fd: owner_fd, mapping: Mapping { base, len }, rings, pid })
     }
 
@@ -370,7 +370,7 @@ impl ScopeRingWriter {
         unsafe { &*self.mapping.base.cast::<Header>() }.superseded.store(1, Ordering::Release);
     }
 
-    pub fn rings(&self) -> &Rings {
+    pub fn rings(&self) -> &RingWriter {
         &self.rings
     }
 
@@ -606,8 +606,7 @@ impl ScopeRingReader {
     }
 
     /// Publishes this reader's cursors through the writable control page.
-    /// The ring mapping itself is read-only, so this must not go through
-    /// [`Rings::publish_read_cursors`].
+    /// The ring mapping itself is read-only.
     pub fn publish_read_cursors(&self, reads: &[u64]) {
         for (ring, read) in reads.iter().copied().enumerate() {
             // SAFETY: `control` is the writable mapping of the control page,

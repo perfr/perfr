@@ -7,7 +7,7 @@
 
 use perfr_scope_ring::event::kind;
 use perfr_scope_ring::merge::{drain, drain_from, Cursors, Producer, BACKSTOP_NS};
-use perfr_scope_ring::ring::{ring_count_for_threads, ring_for_thread, Rings};
+use perfr_scope_ring::ring::{ring_count_for_threads, ring_for_thread, RingWriter};
 use perfr_scope_ring::shm::now_monotonic_ns;
 use perfr_scope_ring::{ring, ScopeEvent};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,10 +31,10 @@ impl Region {
         Region { bytes, offset, ring_count, slots }
     }
 
-    fn rings(&self) -> Rings {
+    fn rings(&self) -> RingWriter {
         // SAFETY: initialised above at exactly these dimensions.
         unsafe {
-            Rings::from_raw(
+            RingWriter::from_raw(
                 self.bytes.as_ptr().add(self.offset) as *mut u8,
                 self.ring_count,
                 self.slots,

@@ -419,7 +419,7 @@ pub const fn slots_for_budget(ring_count: usize, total_bytes: usize) -> usize {
     1usize << (usize::BITS - 1 - slots.leading_zeros()) as usize
 }
 
-/// The write path over an already-mapped region.
+/// The rings of an already-mapped region, as a reader sees them.
 ///
 /// # Safety
 /// `base` must point at a mapping of at least `layout_size(ring_count,
@@ -535,163 +535,9 @@ impl Rings {
         unsafe { &*self.slots.add(ring * self.slots_per_ring + index) }
     }
 
-    /// Appends one event. Never blocks and never fails; when the ring is full
-    /// the oldest unread slot is overwritten, which the consumer detects.
-    ///
-    /// The whole write path: one atomic bump for the claim, one
-    /// compare-exchange to take the slot, plain stores, one release store.
-    /// If a consumer has published its read cursor and this claim will
-    /// overwrite a slot at or past it, the event still sitting in that slot
-    /// is counted against its own thread and kind before the bytes are
-    /// replaced. The count lives on the control page, so a lap cannot erase
-    /// what was lost. It is a breakdown for the consumer's own lap count, not
-    /// a second count of the loss: see [`crate::meta`].
-    ///
-    /// The slot is taken, not just written, because the claim alone does not
-    /// make it this producer's. A thread can be descheduled holding claim
-    /// `c` for as long as the rest of its ring needs to go all the way
-    /// round, 33 ms at a million records a second, and wake to find the
-    /// slot given to claim `c + capacity`. Its stores then landed on that
-    /// record, whole or half written, and its commit put the stamp of `c`
-    /// on the slot, which the reader took for "claim `c + capacity` is not
-    /// committed yet" and waited on, holding back everything behind it in
-    /// the ring. So the record is given up instead, in two cases:
-    ///
-    /// * The slot already belongs to a later claim. This one was lapped
-    ///   before it wrote, and the reader counts it with the rest of the lap
-    ///   it has lost, by the cursor.
-    /// * The slot is still being written by an earlier claim, whose thread
-    ///   is the one that stopped. Taking it would mix two records. This
-    ///   claim is not yet a lap behind, so the reader would wait for it:
-    ///   [`RingHeader::abandoned`] tells it not to.
-    pub fn push(&self, ring: usize, event: ScopeEvent) {
-        let ring = ring.min(self.ring_count.saturating_sub(1));
-        let claim = self.claim(ring);
-        if claim % REAP_EVERY == REAP_EVERY - 1 {
-            self.free_dead_readers();
-        }
-        self.note_overwrite(ring, claim);
-        let slot = self.slot(ring, claim);
-        if self.take_slot(slot, ring, claim, event.tid, event.kind) {
-            Rings::commit(slot, claim, event);
-        }
-    }
-
-    #[inline]
-    fn claim(&self, ring: usize) -> u64 {
-        // The strongest ordering, and not for the count's sake: `fetch_add`
-        // hands each claim out once whatever the ordering. It is for the
-        // reader this claim laps, which goes by the cursor to tell that its
-        // slot has been handed on, and has to see the bump no later than
-        // anything this producer does to the slot. `read_claim` has the
-        // argument. On x86-64 every ordering is the same `lock xadd`; on
-        // aarch64 this is `ldaddal` where a relaxed bump would be `ldadd`.
-        self.ring_header(ring).write_cursor.fetch_add(1, Ordering::SeqCst)
-    }
-
-    /// Takes back the count of every reader that has died. A service
-    /// killed mid-capture cannot return its own, and until now only the
-    /// next reader to start capturing this segment did it: with no such
-    /// reader, every process the dead service had been reading went on
-    /// recording at full cost for the rest of its life.
-    #[cold]
-    fn free_dead_readers(&self) {
-        // SAFETY: only a producer pushes, its mapping is writable, and the
-        // header and the lease table are on its control page.
-        let (header, leases) = unsafe {
-            (&*self.base.cast::<Header>(), &*self.base.add(READER_LEASES_OFFSET).cast::<ReaderLeases>())
-        };
-        if header.capturing.load(Ordering::Relaxed) != 0 {
-            leases.free_dead(&header.capturing);
-        }
-    }
-
-    /// Makes `slot`, which is the slot of `claim`, this producer's to
-    /// write, or says it is not to be written. `tid` and `kind` are the
-    /// record's, and are only what to count as lost. They come by value:
-    /// handed the record by reference, the compiler built it on the stack
-    /// for the sake of the one call in a million that reads it, and copied
-    /// it into the slot from there, at 4 ns a record.
-    ///
-    /// A stamp only ever moves to a later claim, and a stamp with
-    /// [`WRITING`] set is changed by nobody but the producer that set it.
-    /// Between them those two rules mean one producer at a time stores into
-    /// a slot, and none stores into one that a later claim has had. The
-    /// loop goes round again only when another claim on this same slot, a
-    /// whole lap away, moved the stamp between the load and the exchange.
-    #[inline]
-    fn take_slot(&self, slot: &Slot, ring: usize, claim: u64, tid: u32, kind: u8) -> bool {
-        let mine = claim + 1;
-        let mut seen = slot.seq.load(Ordering::Relaxed);
-        loop {
-            if (seen & !WRITING) >= mine {
-                return false;
-            }
-            if seen & WRITING != 0 {
-                self.abandon(ring, claim, tid, kind);
-                return false;
-            }
-            // `SeqCst` for the same reason as the claim: on aarch64 it is
-            // what orders the exchange ahead of the record's plain stores.
-            match slot.seq.compare_exchange(seen, mine | WRITING, Ordering::SeqCst, Ordering::Relaxed) {
-                Ok(_) => return true,
-                Err(now) => seen = now,
-            }
-        }
-    }
-
-    /// Gives up a claim whose slot an earlier claim is still writing.
-    #[cold]
-    fn abandon(&self, ring: usize, claim: u64, tid: u32, kind: u8) {
-        // Counted first, so the breakdown is there by the time a reader can
-        // act on the mark below and book the loss.
-        if self.published_read(ring).is_some() {
-            // SAFETY: only a producer gets here, and its mapping is
-            // writable, with the drop table on its control page.
-            unsafe { crate::meta::note_drop(self.base, tid, kind) }
-        }
-        self.ring_header(ring).abandoned.fetch_max(claim + 1, Ordering::SeqCst);
-    }
-
-    /// Writes the record into a slot [`Rings::take_slot`] said was ours.
-    #[inline]
-    fn commit(slot: &Slot, claim: u64, event: ScopeEvent) {
-        // SAFETY: the slot is ours alone until the stamp below says
-        // otherwise, so writing the payload needs no further
-        // synchronisation. The release store is what makes it visible.
-        unsafe {
-            std::ptr::write_volatile(slot.event.get(), event);
-        }
-        slot.seq.store(claim + 1, Ordering::Release);
-    }
-
     /// One past the highest claim on `ring` that was given up unwritten.
     pub(crate) fn abandoned(&self, ring: usize) -> u64 {
         self.ring_header(ring).abandoned.load(Ordering::Acquire)
-    }
-
-    /// Counts the event about to be overwritten, if this claim laps the
-    /// consumer. The producer mapping is writable, which is the only place
-    /// this runs. The old slot is read by its stamp alone: the cursor a
-    /// reader goes by already stands past this claim, and this claim is the
-    /// one that overwrites the slot next.
-    fn note_overwrite(&self, ring: usize, claim: u64) {
-        let Some(read) = self.published_read(ring) else {
-            return;
-        };
-        let capacity = self.slots_per_ring as u64;
-        if capacity == 0 || claim.saturating_sub(read) < capacity {
-            return;
-        }
-        let old_claim = claim - capacity;
-        // SAFETY: `base` is the producer's writable mapping, and the drop
-        // table sits on its control page.
-        unsafe {
-            match self.copy_if_stamped(ring, old_claim) {
-                Some(old) => crate::meta::note_drop(self.base, old.tid, old.kind),
-                None => crate::meta::note_drop(self.base, 0, crate::meta::DROP_KIND_UNKNOWN),
-            }
-        }
     }
 
     /// The consumer's published read claim for `ring`, if it has said.
@@ -700,52 +546,10 @@ impl Rings {
         unsafe { crate::meta::published_read(self.base, ring) }
     }
 
-    /// Publishes read claims. Tests and the producer use this. A service
-    /// reader must publish through its writable control mapping instead:
-    /// its ring mapping is read-only.
-    pub fn publish_read_cursors(&self, reads: &[u64]) {
-        for (ring, read) in reads.iter().copied().enumerate() {
-            // SAFETY: same mapping as `published_read`.
-            unsafe { crate::meta::publish_read_cursor(self.base, ring, read) }
-        }
-    }
-
     /// Drop totals the producer has recorded, per thread and record kind.
     pub fn snapshot_drops(&self) -> Vec<crate::meta::DropTally> {
         // SAFETY: the drop table is on the control page of this mapping.
         unsafe { crate::meta::snapshot_drops(self.base) }
-    }
-
-    /// Claims a slot, but never commits it: a producer descheduled
-    /// mid-write. Test-only, and the only way to construct that
-    /// interleaving deterministically.
-    #[doc(hidden)]
-    pub fn reserve_for_test(&self, ring: usize) -> u64 {
-        self.claim(ring)
-    }
-
-    /// Finishes the push of a claim from `reserve_for_test`, as a producer
-    /// would on waking from whatever stalled it. Says whether the record
-    /// was written. Test-only.
-    #[doc(hidden)]
-    pub fn publish_reserved_for_test(&self, ring: usize, claim: u64, event: ScopeEvent) -> bool {
-        self.take_reserved_for_test(ring, claim, &event)
-            && self.commit_taken_for_test(ring, claim, event)
-    }
-
-    /// The first half of `publish_reserved_for_test`: a producer that got
-    /// as far as taking its slot. Test-only.
-    #[doc(hidden)]
-    pub fn take_reserved_for_test(&self, ring: usize, claim: u64, event: &ScopeEvent) -> bool {
-        self.take_slot(self.slot(ring, claim), ring, claim, event.tid, event.kind)
-    }
-
-    /// The second half, for a claim `take_reserved_for_test` was given the
-    /// slot of. Test-only.
-    #[doc(hidden)]
-    pub fn commit_taken_for_test(&self, ring: usize, claim: u64, event: ScopeEvent) -> bool {
-        Rings::commit(self.slot(ring, claim), claim, event);
-        true
     }
 
     /// The claim counter, for the consumer.
@@ -845,6 +649,227 @@ impl Rings {
     }
 }
 
+/// The write half: a [`Rings`] over a mapping that may be written.
+///
+/// A type of its own because the service's ring mapping is read-only, and
+/// `Rings` used to carry `push` and `publish_read_cursors` for both ends: a
+/// reader that called either stored through that mapping and took the
+/// service down with a fault. The rule lived in a comment. A reader is
+/// handed a `Rings`, which can only look.
+pub struct RingWriter(Rings);
+
+impl std::ops::Deref for RingWriter {
+    type Target = Rings;
+
+    fn deref(&self) -> &Rings {
+        &self.0
+    }
+}
+
+impl RingWriter {
+    /// # Safety
+    /// As [`Rings::from_raw`], and the whole mapping must be writable.
+    pub unsafe fn from_raw(base: *mut u8, ring_count: usize, slots_per_ring: usize) -> RingWriter {
+        RingWriter(Rings::from_raw(base, ring_count, slots_per_ring))
+    }
+
+    /// Appends one event. Never blocks and never fails; when the ring is full
+    /// the oldest unread slot is overwritten, which the consumer detects.
+    ///
+    /// The whole write path: one atomic bump for the claim, one
+    /// compare-exchange to take the slot, plain stores, one release store.
+    /// If a consumer has published its read cursor and this claim will
+    /// overwrite a slot at or past it, the event still sitting in that slot
+    /// is counted against its own thread and kind before the bytes are
+    /// replaced. The count lives on the control page, so a lap cannot erase
+    /// what was lost. It is a breakdown for the consumer's own lap count, not
+    /// a second count of the loss: see [`crate::meta`].
+    ///
+    /// The slot is taken, not just written, because the claim alone does not
+    /// make it this producer's. A thread can be descheduled holding claim
+    /// `c` for as long as the rest of its ring needs to go all the way
+    /// round, 33 ms at a million records a second, and wake to find the
+    /// slot given to claim `c + capacity`. Its stores then landed on that
+    /// record, whole or half written, and its commit put the stamp of `c`
+    /// on the slot, which the reader took for "claim `c + capacity` is not
+    /// committed yet" and waited on, holding back everything behind it in
+    /// the ring. So the record is given up instead, in two cases:
+    ///
+    /// * The slot already belongs to a later claim. This one was lapped
+    ///   before it wrote, and the reader counts it with the rest of the lap
+    ///   it has lost, by the cursor.
+    /// * The slot is still being written by an earlier claim, whose thread
+    ///   is the one that stopped. Taking it would mix two records. This
+    ///   claim is not yet a lap behind, so the reader would wait for it:
+    ///   [`RingHeader::abandoned`] tells it not to.
+    pub fn push(&self, ring: usize, event: ScopeEvent) {
+        let ring = ring.min(self.ring_count.saturating_sub(1));
+        let claim = self.claim(ring);
+        if claim % REAP_EVERY == REAP_EVERY - 1 {
+            self.free_dead_readers();
+        }
+        self.note_overwrite(ring, claim);
+        let slot = self.slot(ring, claim);
+        if self.take_slot(slot, ring, claim, event.tid, event.kind) {
+            RingWriter::commit(slot, claim, event);
+        }
+    }
+
+    #[inline]
+    fn claim(&self, ring: usize) -> u64 {
+        // The strongest ordering, and not for the count's sake: `fetch_add`
+        // hands each claim out once whatever the ordering. It is for the
+        // reader this claim laps, which goes by the cursor to tell that its
+        // slot has been handed on, and has to see the bump no later than
+        // anything this producer does to the slot. `read_claim` has the
+        // argument. On x86-64 every ordering is the same `lock xadd`; on
+        // aarch64 this is `ldaddal` where a relaxed bump would be `ldadd`.
+        self.ring_header(ring).write_cursor.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Takes back the count of every reader that has died. A service
+    /// killed mid-capture cannot return its own, and until now only the
+    /// next reader to start capturing this segment did it: with no such
+    /// reader, every process the dead service had been reading went on
+    /// recording at full cost for the rest of its life.
+    #[cold]
+    fn free_dead_readers(&self) {
+        // SAFETY: only a producer pushes, its mapping is writable, and the
+        // header and the lease table are on its control page.
+        let (header, leases) = unsafe {
+            (&*self.base.cast::<Header>(), &*self.base.add(READER_LEASES_OFFSET).cast::<ReaderLeases>())
+        };
+        if header.capturing.load(Ordering::Relaxed) != 0 {
+            leases.free_dead(&header.capturing);
+        }
+    }
+
+    /// Makes `slot`, which is the slot of `claim`, this producer's to
+    /// write, or says it is not to be written. `tid` and `kind` are the
+    /// record's, and are only what to count as lost. They come by value:
+    /// handed the record by reference, the compiler built it on the stack
+    /// for the sake of the one call in a million that reads it, and copied
+    /// it into the slot from there, at 4 ns a record.
+    ///
+    /// A stamp only ever moves to a later claim, and a stamp with
+    /// [`WRITING`] set is changed by nobody but the producer that set it.
+    /// Between them those two rules mean one producer at a time stores into
+    /// a slot, and none stores into one that a later claim has had. The
+    /// loop goes round again only when another claim on this same slot, a
+    /// whole lap away, moved the stamp between the load and the exchange.
+    #[inline]
+    fn take_slot(&self, slot: &Slot, ring: usize, claim: u64, tid: u32, kind: u8) -> bool {
+        let mine = claim + 1;
+        let mut seen = slot.seq.load(Ordering::Relaxed);
+        loop {
+            if (seen & !WRITING) >= mine {
+                return false;
+            }
+            if seen & WRITING != 0 {
+                self.abandon(ring, claim, tid, kind);
+                return false;
+            }
+            // `SeqCst` for the same reason as the claim: on aarch64 it is
+            // what orders the exchange ahead of the record's plain stores.
+            match slot.seq.compare_exchange(seen, mine | WRITING, Ordering::SeqCst, Ordering::Relaxed) {
+                Ok(_) => return true,
+                Err(now) => seen = now,
+            }
+        }
+    }
+
+    /// Gives up a claim whose slot an earlier claim is still writing.
+    #[cold]
+    fn abandon(&self, ring: usize, claim: u64, tid: u32, kind: u8) {
+        // Counted first, so the breakdown is there by the time a reader can
+        // act on the mark below and book the loss.
+        if self.published_read(ring).is_some() {
+            // SAFETY: only a producer gets here, and its mapping is
+            // writable, with the drop table on its control page.
+            unsafe { crate::meta::note_drop(self.base, tid, kind) }
+        }
+        self.ring_header(ring).abandoned.fetch_max(claim + 1, Ordering::SeqCst);
+    }
+
+    /// Writes the record into a slot [`Rings::take_slot`] said was ours.
+    #[inline]
+    fn commit(slot: &Slot, claim: u64, event: ScopeEvent) {
+        // SAFETY: the slot is ours alone until the stamp below says
+        // otherwise, so writing the payload needs no further
+        // synchronisation. The release store is what makes it visible.
+        unsafe {
+            std::ptr::write_volatile(slot.event.get(), event);
+        }
+        slot.seq.store(claim + 1, Ordering::Release);
+    }
+
+    /// Counts the event about to be overwritten, if this claim laps the
+    /// consumer. The producer mapping is writable, which is the only place
+    /// this runs. The old slot is read by its stamp alone: the cursor a
+    /// reader goes by already stands past this claim, and this claim is the
+    /// one that overwrites the slot next.
+    fn note_overwrite(&self, ring: usize, claim: u64) {
+        let Some(read) = self.published_read(ring) else {
+            return;
+        };
+        let capacity = self.slots_per_ring as u64;
+        if capacity == 0 || claim.saturating_sub(read) < capacity {
+            return;
+        }
+        let old_claim = claim - capacity;
+        // SAFETY: `base` is the producer's writable mapping, and the drop
+        // table sits on its control page.
+        unsafe {
+            match self.copy_if_stamped(ring, old_claim) {
+                Some(old) => crate::meta::note_drop(self.base, old.tid, old.kind),
+                None => crate::meta::note_drop(self.base, 0, crate::meta::DROP_KIND_UNKNOWN),
+            }
+        }
+    }
+
+    /// Publishes read claims, for tests that play both ends over one
+    /// region. A service reader publishes through its writable control
+    /// mapping: its ring mapping is read-only.
+    pub fn publish_read_cursors(&self, reads: &[u64]) {
+        for (ring, read) in reads.iter().copied().enumerate() {
+            // SAFETY: same mapping as `published_read`.
+            unsafe { crate::meta::publish_read_cursor(self.base, ring, read) }
+        }
+    }
+
+    /// Claims a slot, but never commits it: a producer descheduled
+    /// mid-write. Test-only, and the only way to construct that
+    /// interleaving deterministically.
+    #[doc(hidden)]
+    pub fn reserve_for_test(&self, ring: usize) -> u64 {
+        self.claim(ring)
+    }
+
+    /// Finishes the push of a claim from `reserve_for_test`, as a producer
+    /// would on waking from whatever stalled it. Says whether the record
+    /// was written. Test-only.
+    #[doc(hidden)]
+    pub fn publish_reserved_for_test(&self, ring: usize, claim: u64, event: ScopeEvent) -> bool {
+        self.take_reserved_for_test(ring, claim, &event)
+            && self.commit_taken_for_test(ring, claim, event)
+    }
+
+    /// The first half of `publish_reserved_for_test`: a producer that got
+    /// as far as taking its slot. Test-only.
+    #[doc(hidden)]
+    pub fn take_reserved_for_test(&self, ring: usize, claim: u64, event: &ScopeEvent) -> bool {
+        self.take_slot(self.slot(ring, claim), ring, claim, event.tid, event.kind)
+    }
+
+    /// The second half, for a claim `take_reserved_for_test` was given the
+    /// slot of. Test-only.
+    #[doc(hidden)]
+    pub fn commit_taken_for_test(&self, ring: usize, claim: u64, event: ScopeEvent) -> bool {
+        RingWriter::commit(self.slot(ring, claim), claim, event);
+        true
+    }
+}
+
 /// What [`Rings::read_claim`] found at a claim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Claimed {
@@ -881,10 +906,10 @@ mod tests {
             Region { bytes, ring_count, slots }
         }
 
-        fn rings(&self) -> Rings {
+        fn rings(&self) -> RingWriter {
             let offset = self.bytes.as_ptr().align_offset(CACHE_LINE);
             unsafe {
-                Rings::from_raw(
+                RingWriter::from_raw(
                     self.bytes.as_ptr().add(offset) as *mut u8,
                     self.ring_count,
                     self.slots,

@@ -46,6 +46,13 @@ pub const DEFAULT_THREADS: u32 = 16;
 pub const DEFAULT_DEPTH_MIN: u32 = 8;
 pub const DEFAULT_DEPTH_MAX: u32 = 16;
 pub const DEFAULT_RATE: u64 = 1_000_000;
+/// The most events a second the knob goes to. A tick's events are built
+/// in one allocation, and the rate came straight from the request: a rate
+/// of 1e12 asked for 2e10 events in a tick, hundreds of gigabytes, and the
+/// process was killed for memory or aborted on the allocation. This is
+/// 400,000 events a tick, twenty times the default, and more than the ring
+/// and the wire take anyway.
+pub const MAX_RATE: u64 = 20_000_000;
 /// Ticks per second the producer runs at; the tick is the demo's 20 ms.
 const TICKS_PER_SEC: u64 = 1_000_000_000 / DEMO_TICK_NS;
 
@@ -84,11 +91,11 @@ impl Default for BenchParams {
 }
 
 impl BenchParams {
-    fn clamped(self) -> Self {
+    pub(crate) fn clamped(self) -> Self {
         let threads = self.threads.clamp(1, MAX_THREADS);
         let depth_min = self.depth_min.clamp(1, MAX_DEPTH);
         let depth_max = self.depth_max.clamp(depth_min, MAX_DEPTH);
-        BenchParams { threads, depth_min, depth_max, rate: self.rate }
+        BenchParams { threads, depth_min, depth_max, rate: self.rate.min(MAX_RATE) }
     }
 }
 
@@ -108,7 +115,7 @@ pub fn status_json(svc: &LiveService) -> String {
 }
 
 pub fn set_rate(svc: &LiveService, rate: u64) {
-    svc.bench.rate.store(rate, Ordering::Relaxed);
+    svc.bench.rate.store(rate.min(MAX_RATE), Ordering::Relaxed);
 }
 
 pub fn start(svc: &Arc<LiveService>, params: BenchParams) -> Result<(), String> {

@@ -1341,3 +1341,26 @@ fn the_viewer_log_budget_refills_and_says_what_it_dropped() {
     assert!(!budget.take(at(86_400), VIEWER_LOG_BURST_BYTES + 1));
     assert!(budget.take(at(86_400), VIEWER_LOG_BURST_BYTES));
 }
+
+// ------------------------------------------------------------- the bench ---
+
+#[test]
+fn a_bench_rate_beyond_the_ceiling_is_brought_down_to_it() {
+    use crate::bench::{BenchParams, MAX_RATE};
+    let (svc, served) = serve_small();
+    // Not started: the rate is the knob alone. At this rate one 20 ms tick
+    // would be 2e10 events, hundreds of gigabytes, allocated in one go.
+    let (status, text) = send_json(&served, "POST", "/api/bench/rate", r#"{"rate":1000000000000}"#);
+    assert_eq!(status, 200, "{text}");
+    let reported: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(reported["rate"], MAX_RATE, "{text}");
+    assert_eq!(svc.bench.rate.load(std::sync::atomic::Ordering::Relaxed), MAX_RATE);
+    // A rate within reach is taken as it is, down to none at all.
+    for rate in [0u64, 1, 1_000_000, MAX_RATE] {
+        let (_, text) = send_json(&served, "POST", "/api/bench/rate", &format!(r#"{{"rate":{rate}}}"#));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["rate"], rate);
+    }
+    // The start request carries the same field.
+    assert_eq!(BenchParams { rate: u64::MAX, ..BenchParams::default() }.clamped().rate, MAX_RATE);
+    assert_eq!(BenchParams::default().clamped().rate, crate::bench::DEFAULT_RATE);
+}

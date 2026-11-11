@@ -446,7 +446,10 @@ fn read_kmsg_crash(_tids: &[i32], _maps: &str) -> Result<Option<KernelCrash>, i3
 /// *crashed* one that its parent has not reaped is a zombie, whose
 /// `/proc/<pid>` still exists -- so a plain existence check would miss the
 /// very crash we are watching for. Read the state and treat zombie/dead as
-/// not running.
+/// not running -- unless other threads are: `/proc/<pid>/stat` is the main
+/// thread's, and a program whose `main` ends in `pthread_exit` runs on in
+/// its other threads behind a zombie leader. Its capture ended after a
+/// quarter of a second with "target exited".
 #[cfg(windows)]
 pub fn process_alive(pid: i32) -> bool {
     crate::windows::process_alive(pid)
@@ -460,13 +463,21 @@ pub fn process_alive(pid: i32) -> bool {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return false;
     };
+    alive_from_stat(&stat, || thread_ids(pid).iter().any(|tid| *tid != pid))
+}
+
+/// The verdict from the leader's `/proc/<pid>/stat` line; `has_other_threads`
+/// is only asked when the leader is a zombie.
+#[cfg(not(windows))]
+fn alive_from_stat(stat: &str, has_other_threads: impl FnOnce() -> bool) -> bool {
     // `pid (comm) state ...`; comm may hold spaces and parens, so the state
     // is the first token after the final ')'.
     match stat.rfind(')') {
-        Some(paren) => {
-            let state = stat[paren + 1..].trim_start().as_bytes().first().copied().unwrap_or(b'?');
-            state != b'Z' && state != b'X' && state != b'x'
-        }
+        Some(paren) => match stat[paren + 1..].trim_start().as_bytes().first().copied().unwrap_or(b'?') {
+            b'Z' => has_other_threads(),
+            b'X' | b'x' => false,
+            _ => true,
+        },
         None => true,
     }
 }
@@ -738,6 +749,24 @@ mod tests {
         assert!(maps.contains("r-xp"), "the maps snapshot comes back with them");
         // With no journal there is still the pid itself to look for.
         assert_eq!(threads_and_maps(-3).0, vec![-3]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_zombie_leader_is_a_dead_process_only_when_no_other_thread_runs() {
+        let stat = |state: char| format!("4242 (my (odd) prog) {state} 1 4242 4242 0 -1 4194560 100 0 0 0");
+        // Crashed and not yet reaped: nothing else is left in its task list.
+        assert!(!alive_from_stat(&stat('Z'), || false));
+        // `main` called pthread_exit; the workers carry on.
+        assert!(alive_from_stat(&stat('Z'), || true));
+        assert!(!alive_from_stat(&stat('X'), || true));
+        for running in ['R', 'S', 'D', 't'] {
+            assert!(alive_from_stat(&stat(running), || panic!("only a zombie leader needs the task list")));
+        }
+        // This process, and one that cannot exist.
+        assert!(process_alive(std::process::id() as i32));
+        assert!(!process_alive(0));
+        assert!(!process_alive(i32::MAX));
     }
 
     /// A directory of this test's own, so nothing here races the tests

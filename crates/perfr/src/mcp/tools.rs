@@ -158,8 +158,26 @@ impl Mcp {
         })
     }
 
-    /// One JSON-RPC message. `None` when the message is a notification.
+    /// One JSON-RPC message, or a batch of them. `None` when nothing in it
+    /// asks for a reply.
     pub fn handle(&self, message: &Value) -> Option<Value> {
+        match message {
+            // A batch is answered with the replies of its requests, in one
+            // array. It has no id of its own: read as a single message it
+            // looks like a notification, and the client waits for ever.
+            Value::Array(batch) if !batch.is_empty() => {
+                let replies: Vec<Value> = batch.iter().filter_map(|one| self.handle_one(one)).collect();
+                (!replies.is_empty()).then_some(Value::Array(replies))
+            }
+            _ => self.handle_one(message),
+        }
+    }
+
+    fn handle_one(&self, message: &Value) -> Option<Value> {
+        if !message.is_object() {
+            let error = rpc_error(-32600, "a JSON-RPC message is an object, or a non-empty array of them");
+            return Some(json!({ "jsonrpc": "2.0", "id": null, "error": error }));
+        }
         let id = message.get("id").cloned();
         if id.is_none() {
             return None;
@@ -1854,7 +1872,7 @@ fn read_response(stream: &mut TcpStream) -> Result<RawHttp, String> {
                 return Err("response larger than 32MB; narrow the request".into());
             }
         }
-        let decoded = decode_chunks(&body)?;
+        let decoded = decode_chunks(&body, RESPONSE_CAP)?.ok_or("truncated chunk")?;
         return Ok(RawHttp { status, body: String::from_utf8_lossy(&decoded).into_owned() });
     }
     if let Some(len) = content_length {
@@ -1889,24 +1907,37 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 }
 
 fn chunked_complete(buf: &[u8]) -> bool {
-    decode_chunks(buf).is_ok() && buf.windows(5).any(|w| w == b"0\r\n\r\n")
+    matches!(decode_chunks(buf, RESPONSE_CAP), Ok(Some(_))) && buf.windows(5).any(|w| w == b"0\r\n\r\n")
 }
 
-fn decode_chunks(mut buf: &[u8]) -> Result<Vec<u8>, String> {
+/// The most the client reads of one reply from the service.
+const RESPONSE_CAP: usize = 32 * 1024 * 1024;
+
+/// The body of a chunked message: `None` while its last chunk has not
+/// arrived, an error when what is there is not chunked framing or announces
+/// more than `limit` bytes. Used on the service's replies and on requests to
+/// the HTTP transport, so the sizes are whatever the other end wrote.
+pub(super) fn decode_chunks(mut buf: &[u8], limit: usize) -> Result<Option<Vec<u8>>, String> {
     let mut out = Vec::new();
     loop {
         let Some(line_end) = buf.windows(2).position(|w| w == b"\r\n") else {
-            return Err("truncated chunk".into());
+            return Ok(None);
         };
         let line = std::str::from_utf8(&buf[..line_end]).map_err(|_| "chunk size is not utf-8".to_string())?;
         let size = usize::from_str_radix(line.split(';').next().unwrap_or("").trim(), 16)
             .map_err(|_| format!("bad chunk size {line}"))?;
         buf = &buf[line_end + 2..];
         if size == 0 {
-            return Ok(out);
+            return Ok(Some(out));
         }
-        if buf.len() < size + 2 {
-            return Err("truncated chunk".into());
+        // Refused on the announcement, not waited for. And compared by
+        // subtraction: a size near the top of the range would wrap an
+        // addition and then slice past the buffer.
+        if size > limit - out.len().min(limit) {
+            return Err(format!("chunked body larger than {limit} bytes"));
+        }
+        if buf.len() < 2 || buf.len() - 2 < size {
+            return Ok(None);
         }
         out.extend_from_slice(&buf[..size]);
         buf = &buf[size + 2..];

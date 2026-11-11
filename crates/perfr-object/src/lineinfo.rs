@@ -709,6 +709,27 @@ mod tests {
         );
     }
 
+    /// The old GNU spelling of a compressed section: named `.zdebug_*`,
+    /// no `SHF_COMPRESSED`, the contents `ZLIB`, a big-endian size and a
+    /// zlib stream. The fixture is `hello_world_elf_with_debug_info` put
+    /// through `objcopy --compress-debug-sections=zlib-gnu`.
+    #[test]
+    fn line_rows_read_gnu_style_zdebug_sections() {
+        let plain = testdata("hello_world_elf_with_debug_info");
+        let gnu = testdata("hello_world_elf_with_zdebug");
+        let expected = DebugInfo::parse(&plain).unwrap();
+        let info = DebugInfo::parse(&gnu).unwrap();
+        assert_eq!(
+            info.sections.get(gimli::SectionId::DebugInfo),
+            expected.sections.get(gimli::SectionId::DebugInfo),
+            ".zdebug_info inflates to the bytes .debug_info had"
+        );
+        assert_eq!(
+            line_rows(&gnu, 0x1140, 0x1160),
+            vec![row(0x1140, "/ssd/local/hello.cpp", 3), row(0x114f, "/ssd/local/hello.cpp", 4)]
+        );
+    }
+
     /// The code view asks two questions about one function. Opened once,
     /// the file answers both with what the one-shot functions say.
     #[test]

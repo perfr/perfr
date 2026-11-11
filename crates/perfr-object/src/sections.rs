@@ -70,20 +70,30 @@ where
         }
 
         let address: u64 = section.sh_addr(endian).into();
-        return Some((decompressed_bytes(section, endian, data), address));
+        // The spelling that the trim above folds into the plain name is
+        // also what says the contents may be in the old GNU format.
+        let gnu_compressed = name.starts_with(b".zdebug");
+        return Some((decompressed_bytes(section, endian, data, gnu_compressed), address));
     }
     None
 }
 
 /// The section's contents: borrowed from the file as they are, or inflated
-/// into a buffer when `SHF_COMPRESSED` is set. Borrowing matters: a game's
+/// into a buffer when `SHF_COMPRESSED` is set, or when the section is a
+/// `.zdebug_*` one in the format that predates the flag (`gnu_compressed`).
+/// Borrowing matters: a game's
 /// debug file carries a gigabyte of DWARF, and copying it out of a mapping
 /// reads every page of it to answer a question about one function.
 ///
 /// Returns an empty slice rather than an error for anything unreadable: the
 /// callers all treat a section they cannot parse as one that describes
 /// nothing, which is what LLVM does too.
-fn decompressed_bytes<'data, S>(section: &S, endian: Endianness, data: &'data [u8]) -> Cow<'data, [u8]>
+fn decompressed_bytes<'data, S>(
+    section: &S,
+    endian: Endianness,
+    data: &'data [u8],
+    gnu_compressed: bool,
+) -> Cow<'data, [u8]>
 where
     S: SectionHeader<Endian = Endianness>,
 {
@@ -105,9 +115,30 @@ where
                 .and_then(|compressed| compressed.decompress())
                 .unwrap_or_default()
         }
-        Ok(None) => Cow::Borrowed(section.data(endian, data).unwrap_or(&[])),
+        Ok(None) => {
+            let bytes = section.data(endian, data).unwrap_or(&[]);
+            match gnu_compressed.then(|| gnu_zlib(bytes)).flatten() {
+                Some(compressed) => compressed.decompress().unwrap_or_default(),
+                None => Cow::Borrowed(bytes),
+            }
+        }
         Err(_) => Cow::Borrowed(&[]),
     }
+}
+
+/// The contents of a `.zdebug_*` section as binutils wrote them before
+/// `SHF_COMPRESSED` existed: the four bytes `ZLIB`, the uncompressed size
+/// as a big-endian `u64`, then the zlib stream. Handed to gimli as they
+/// are, such a section parses as nothing, with no error to say why. `None`
+/// when the magic is not there: the section is then what its bytes say.
+fn gnu_zlib(bytes: &[u8]) -> Option<object::CompressedData<'_>> {
+    let rest = bytes.strip_prefix(b"ZLIB")?;
+    let (size, stream) = rest.split_first_chunk::<8>()?;
+    Some(object::CompressedData {
+        format: CompressionFormat::Zlib,
+        data: stream,
+        uncompressed_size: u64::from_be_bytes(*size),
+    })
 }
 
 /// The DWARF sections of one file, located once and decompressed where the

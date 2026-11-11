@@ -18,6 +18,12 @@ line_info_test_binary: LineInfoTestBinary.cpp
 line_info_test_binary_compressed: LineInfoTestBinary.cpp
 	${CC} LineInfoTestBinary.cpp -g -gz -O3 -o line_info_test_binary_compressed -fdebug-prefix-map=$(shell pwd)=.
 
+# The debug sections in the format binutils wrote before SHF_COMPRESSED:
+# sections renamed .zdebug_*, contents "ZLIB", a big-endian size, a zlib
+# stream. Only .debug_info is large enough for objcopy to compress.
+hello_world_elf_with_zdebug: hello_world_elf_with_debug_info
+	objcopy --compress-debug-sections=zlib-gnu hello_world_elf_with_debug_info hello_world_elf_with_zdebug
+
 test_library: ../TestLibrary.cpp
 	$(CC) ../TestLibrary.cpp -shared -fPIC -O3 -Wl,-soname,libtest.so -o libtest-1.0.so
 

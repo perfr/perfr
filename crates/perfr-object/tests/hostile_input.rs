@@ -195,6 +195,8 @@ fn dwarf_with_hostile_fields_is_no_line_info_not_a_panic() {
         dwarf(data, 0x1140);
     });
     survive("line_info_test_binary", 1500, |data| dwarf(data, 0x401140));
+    // The pre-SHF_COMPRESSED format, with its own size field to lie in.
+    survive("hello_world_elf_with_zdebug", 1500, |data| dwarf(data, 0x1140));
     // Compressed sections: each round inflates them, so fewer rounds.
     survive("libc.debug", 24, |data| dwarf(data, 0x10a0e0));
 }

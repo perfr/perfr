@@ -119,14 +119,16 @@ if [[ "$WITH_GPU" -eq 1 ]]; then
   PASSTHROUGH+=(--gpu-helper "$HELPER")
 fi
 
-# The service embeds nothing: it serves whatever pack is in viewer-dist, so a
-# stale pack shows a stale page.
+# The service embeds the pack that was in viewer-dist when it was built
+# (perfr-live-server's build script), so a stale pack shows a stale page, and
+# a refreshed pack shows only after the build above has run again.
 PACK="$ROOT/crates/perfr-live-viewer/viewer-dist/perfr_live_viewer_bg.wasm"
 VIEWER_SRC="$ROOT/crates/perfr-live-viewer/src"
 if [[ "$SERVE" -eq 1 && -f "$PACK" && -d "$VIEWER_SRC" ]] &&
    [[ -n "$(find "$VIEWER_SRC" -name '*.rs' -newer "$PACK" -print -quit)" ]]; then
   warn "viewer-dist/ is older than crates/perfr-live-viewer/src — the page will"
-  warn "serve the previous pack. Run crates/perfr-live-viewer/build_wasm.sh to refresh it."
+  warn "serve the previous pack. Run crates/perfr-live-viewer/build_wasm.sh to refresh it,"
+  warn "then this script again: the pack is embedded when the service is built."
 fi
 
 # Scheduling is the one capture feature that needs privilege. Say so up front

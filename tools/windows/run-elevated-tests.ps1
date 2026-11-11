@@ -9,7 +9,7 @@
 #
 #   Start-Process -Verb RunAs -Wait powershell `
 #     -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File', `
-#     'C:\Users\pierr\git\perfr\tools\windows\run-elevated-tests.ps1'
+#     'C:\path\to\perfr\tools\windows\run-elevated-tests.ps1'
 #
 # (one UAC prompt), or from an "Run as administrator" terminal:
 #   powershell -ExecutionPolicy Bypass -File tools\windows\run-elevated-tests.ps1

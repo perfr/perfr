@@ -1,5 +1,10 @@
 # Feature parity with the C++ perfr — audit, 2026-09-01
 
+> Historical. The statuses are as of that date, and the C++ sources the rows
+> are drawn from (`src/GrpcProtos`, `src/DataViews`, `src/PerfrGl`, ...) are not
+> in this repository. `docs/manual` describes what the viewer and the service
+> do today.
+
 Where the Rust port stands against the C++ profiler it is replacing. The
 feature list is not from memory: the capture-side rows are the fields of
 `CaptureOptions` in `src/GrpcProtos/capture.proto`, and the UI rows are the

@@ -639,7 +639,7 @@ with a scope's lifetime.
 Frida Core now handles attachment and Gum native callbacks feed a Rust agent.
 Frida is the default, with Linux uprobes retained explicitly. See
 [the integration guide](frida-instrumentation.md) and the
-[implementation review](design/dynamic-instrumentation-review.md).
+[implementation review](design/archive/dynamic-instrumentation-review.md).
 
 - Evaluate replacing the Python/Frida Core control helper with a direct native
   Core integration if packaging or startup measurements justify it. Recording

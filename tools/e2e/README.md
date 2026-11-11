@@ -114,8 +114,9 @@ scenario reports `skipped` with that hint.
 ## Known skip
 
 `instrumentation` reports `skipped` rather than failing when uprobes cannot be
-armed. The kernel requires CAP_PERFMON in `perf_uprobe_event_init` before
-`perf_event_paranoid` is consulted, so an unprivileged run cannot arm a probe.
+armed. The kernel requires CAP_SYS_ADMIN in `perf_uprobe_event_init` before
+`perf_event_paranoid` is consulted (CAP_PERFMON is not enough), so an
+unprivileged run cannot arm a probe.
 The scenario still asserts that the refusal names the capability, because
 silence there is the actual failure mode.
 

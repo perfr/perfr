@@ -572,3 +572,38 @@ fn save_is_off_while_a_file_is_on_screen() {
     page.frames(2);
     assert!(!page.shows("Capture (.perfr.zip)"), "Save offers the service's capture under a file's timeline");
 }
+
+/// A stream exported while its capture (or the demo) was still running:
+/// the status frame inside says so.
+fn stream_saved_mid_capture(demo: bool) -> Vec<u8> {
+    capture_stream(status_frame(true, demo), vec![scope(100, 101, 5_000_000_000, 1_000_000, 7)])
+}
+
+#[test]
+fn a_stream_saved_mid_capture_is_a_finished_capture_on_a_static_page() {
+    for demo in [false, true] {
+        let mut page = Page::with(|app| {
+            *app = static_app();
+            app.accept_stream(stream_saved_mid_capture(demo));
+        });
+        page.frames(10);
+        let app = &page.app;
+        assert!(!app.status.capturing && !app.status.demo, "the file's status still says a capture runs");
+        assert!(!app.wants_live_repaint(), "the page repaints at display rate for a capture that is over");
+        assert!(!app.capture_timer.running, "the timer counts on");
+        let sel: serde_json::Value = serde_json::from_str(&app.sel_readout).unwrap();
+        assert_eq!(sel["recording"], false);
+    }
+}
+
+#[test]
+fn a_stream_saved_mid_capture_is_not_a_capture_ending_on_a_live_page() {
+    let mut page = Page::with(|app| app.apply_status(service_status(false)));
+    page.frames(2);
+    page.drop_file("mid.perfr.stream", &stream_saved_mid_capture(false));
+    page.frames(2);
+    // The service's next answer: it never captured.
+    page.app.apply_status(service_status(false));
+    page.frames(2);
+    assert!(!page.app.report_open, "the file's stale status read as a capture that just stopped");
+}

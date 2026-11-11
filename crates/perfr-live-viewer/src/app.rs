@@ -2512,6 +2512,15 @@ impl PerfrLiveApp {
             log::warn!(target: "perfr_live_viewer::net", "{message}");
             self.fail(message);
         }
+        // A stream saved while its capture ran carries the status of that
+        // moment, and a file has no later status to correct it: the static
+        // page then "captured" for as long as it stayed open (display-rate
+        // repaints, a timer counting on), and a page with a service took
+        // the service's next answer for a capture that had just stopped.
+        // A file is a finished capture, whatever it says.
+        self.status.capturing = false;
+        self.status.demo = false;
+        self.was_capturing = false;
         self.held_stream.loaded(bytes);
         self.follow = false;
         self.user_set_view = false;

@@ -1552,6 +1552,79 @@ mod listing_cache_tests {
         assert_eq!(g.instances, f.instances);
     }
 
+    /// Frames of a session in any order of events: scopes arriving (in
+    /// order, late, on new lanes), scopes dropped, the window, the width
+    /// and the layout changing or not. Each frame's cached listing must be
+    /// the plain one, and the pooled walk the inline one; the raster of the
+    /// same frame must be each lane's own.
+    #[test]
+    fn the_cached_and_the_pooled_listing_are_the_plain_one_frame_after_frame() {
+        use crate::test_rng::Rng;
+        let mut rng = Rng(0x5EED_5EED_5EED_5EED);
+        let mut idx = index(12, 40);
+        let mut cache = ListingCache::default();
+        let (mut t0, mut t1, mut w) = (0u64, 40_000u64, 800.0f32);
+        let mut cull = None;
+        let mut drop_lane = usize::MAX;
+        let mut reused = 0;
+        for frame in 0..400 {
+            match rng.below(10) {
+                0..=2 => {
+                    for _ in 0..rng.below(20) {
+                        let tid = 1 + rng.below(14) as u32;
+                        let start = rng.below(60_000);
+                        let dur = [1, 1, 30, 600, 5_000][rng.below(5) as usize];
+                        idx.insert(LiveEvent { depth: rng.below(2) as u8, ..scope(start, dur, tid, 1 + rng.below(9) as u32) });
+                    }
+                }
+                3 => idx.retain(|e| e.start_ns % 7 != frame % 7),
+                4 => {
+                    t0 = rng.below(50_000);
+                    t1 = t0 + 1 + rng.below(60_000);
+                }
+                5 => w = [1.0, 64.0, 800.0, 1917.5][rng.below(4) as usize],
+                6 => cull = (rng.below(2) == 0).then(|| YCull::new(rng.below(200) as f32, 60.0 + rng.below(300) as f32)),
+                7 => drop_lane = rng.below(16) as usize,
+                _ => {}
+            }
+            let mut layout = layout_of(&idx);
+            if drop_lane < layout.len() {
+                layout.remove(drop_lane);
+            }
+            let opts = CollectOpts { y_cull: cull, inline: true, ..CollectOpts::default() };
+            let plain = collect_instances_layout_opts(&idx, t0, t1, w, &layout, None, opts);
+            let cached = collect_instances_cached(&idx, t0, t1, w, &layout, None, opts, Some(&mut cache));
+            assert_eq!(cached.instances, plain.instances, "frame {frame}: cached");
+            assert_eq!(cached.lanes_kept, plain.lanes_kept, "frame {frame}");
+            reused += cached.lanes_reused;
+            let pooled = collect_instances_layout_opts(
+                &idx,
+                t0,
+                t1,
+                w,
+                &layout,
+                None,
+                CollectOpts { inline: false, per_lane_spans: frame % 2 == 0, ..opts },
+            );
+            assert_eq!(pooled.instances, plain.instances, "frame {frame}: pooled");
+            // Every instance is an event of its lane, drawn inside the view.
+            for i in &plain.instances {
+                assert!(i.x >= 0.0 && i.x <= w && i.w >= 1.0, "frame {frame}: {i:?}");
+                let lane = idx.lane(ScopePick::from_instance(i).lane_key()).expect("lane");
+                assert!(lane.events().iter().any(|e| e.start_ns == i.start_ns && e.name_id == i.name_id));
+            }
+            let width = w as usize;
+            let keys: Vec<LaneKey> = layout.iter().map(|(k, _)| *k).collect();
+            let raster = idx.rasterize_pixel_layout(t0, t1, width, &keys, Some(&layout), cull, None, frame % 2 == 0);
+            for (row, key) in raster.lanes.iter().enumerate() {
+                let mut own = vec![0u32; width];
+                idx.lane(*key).expect("lane").rasterize(t0, t1, width, &mut own, None);
+                assert_eq!(raster.row(row), own, "frame {frame}: raster row of {key:?}");
+            }
+        }
+        assert!(reused > 0, "the sequence never exercised a reused row");
+    }
+
     /// `cargo test --release -p perfr-live-render listing_cache_bench -- --ignored --nocapture`
     #[test]
     #[ignore]

@@ -2044,6 +2044,123 @@ fn nested_json(ing: &mut ChromeIngestor, data: &[u8]) -> Vec<LiveEvent> {
     out
 }
 
+/// A small trace touching most packet kinds, for the tests that feed the
+/// stream cut, re-chunked or damaged input.
+#[cfg(test)]
+pub(crate) fn test_trace() -> Vec<u8> {
+    use crate::proto::Encoder;
+    fn packet(p: &Encoder) -> Vec<u8> {
+        let mut t = Encoder::new();
+        t.msg(T_PACKET, p);
+        t.buf
+    }
+    let mut trace = Vec::new();
+    // Clocks: BOOTTIME is the trace clock, sequence 9 counts in us.
+    let mut snap = Encoder::new();
+    for (id, ts, inc, mult) in [(CLOCK_BOOTTIME, 1_000u64, false, 1u64), (CLOCK_MONOTONIC, 400, false, 1), (64, 0, true, 1000)] {
+        let mut c = Encoder::new();
+        c.varint(CLK_ID, u64::from(id)).varint(CLK_TIMESTAMP, ts).varint(CLK_IS_INCREMENTAL, u64::from(inc)).varint(CLK_UNIT_MULTIPLIER_NS, mult);
+        snap.msg(CS_CLOCKS, &c);
+    }
+    let mut defaults = Encoder::new();
+    defaults.varint(PDF_TIMESTAMP_CLOCK_ID, 64);
+    let mut name = Encoder::new();
+    name.varint(1, 5).string(2, "interned");
+    let mut interned = Encoder::new();
+    interned.msg(ID_EVENT_NAMES, &name);
+    let mut p = Encoder::new();
+    p.varint(P_SEQUENCE_ID, 9)
+        .varint(P_SEQUENCE_FLAGS, SEQ_INCREMENTAL_STATE_CLEARED)
+        .msg(P_CLOCK_SNAPSHOT, &snap)
+        .msg(P_PACKET_DEFAULTS, &defaults)
+        .msg(P_INTERNED_DATA, &interned);
+    trace.extend(packet(&p));
+    // A process, a thread on it, a named child track and a counter track.
+    let mut pd = Encoder::new();
+    pd.i32(PD_PID, 7).string(PD_NAME, "app");
+    let mut th = Encoder::new();
+    th.i32(THD_PID, 7).i64(THD_TID, 70).string(THD_NAME, "Main");
+    let mut counter = Encoder::new();
+    counter.i64(CD_UNIT_MULTIPLIER, 2);
+    let tracks: [(u64, &dyn Fn(&mut Encoder)); 4] = [
+        (10, &|td| { td.msg(TD_PROCESS, &pd); }),
+        (11, &|td| { td.msg(TD_THREAD, &th); }),
+        (12, &|td| { td.string(TD_NAME, "frames").varint(TD_PARENT_UUID, 10); }),
+        (13, &|td| { td.string(TD_NAME, "load").varint(TD_PARENT_UUID, 10).msg(TD_COUNTER, &counter); }),
+    ];
+    for (uuid, f) in tracks {
+        let mut td = Encoder::new();
+        td.varint(TD_UUID, uuid);
+        f(&mut td);
+        let mut p = Encoder::new();
+        p.msg(P_TRACK_DESCRIPTOR, &td);
+        trace.extend(packet(&p));
+    }
+    // Slices on the thread and on the child track, an instant, a counter.
+    let mut annotation = Encoder::new();
+    annotation.string(DA_NAME, "k").string(DA_STRING, "v\u{e9}");
+    let events: [(u64, &dyn Fn(&mut Encoder)); 8] = [
+        (10, &|e| { e.varint(TE_TYPE, TYPE_SLICE_BEGIN).varint(TE_TRACK_UUID, 11).varint(TE_NAME_IID, 5).msg(TE_DEBUG_ANNOTATIONS, &annotation); }),
+        (5, &|e| { e.varint(TE_TYPE, TYPE_SLICE_BEGIN).varint(TE_TRACK_UUID, 11).string(TE_NAME, "inner"); }),
+        (5, &|e| { e.varint(TE_TYPE, TYPE_SLICE_END).varint(TE_TRACK_UUID, 11); }),
+        (1, &|e| { e.varint(TE_TYPE, TYPE_INSTANT).varint(TE_TRACK_UUID, 11).string(TE_NAME, "tick"); }),
+        (1, &|e| { e.varint(TE_TYPE, TYPE_SLICE_BEGIN).varint(TE_TRACK_UUID, 12).string(TE_NAME, "frame"); }),
+        (4, &|e| { e.varint(TE_TYPE, TYPE_SLICE_END).varint(TE_TRACK_UUID, 12); }),
+        (1, &|e| { e.varint(TE_TYPE, TYPE_COUNTER).varint(TE_TRACK_UUID, 13).i64(TE_COUNTER_VALUE, 21); }),
+        (3, &|e| { e.varint(TE_TYPE, TYPE_SLICE_END).varint(TE_TRACK_UUID, 11); }),
+    ];
+    for (delta, f) in events {
+        let mut e = Encoder::new();
+        f(&mut e);
+        let mut p = Encoder::new();
+        p.varint(P_TIMESTAMP, delta).varint(P_SEQUENCE_ID, 9).msg(P_TRACK_EVENT, &e);
+        trace.extend(packet(&p));
+    }
+    // Scheduling: plain and compact switches, a print mark.
+    let mut bundle = Encoder::new();
+    bundle.varint(FB_CPU, 0);
+    for (ts, prev, next) in [(1_100u64, 0i32, 70i32), (1_400, 70, 0)] {
+        let mut ss = Encoder::new();
+        ss.string(SS_PREV_COMM, "x").i32(SS_PREV_PID, prev).i64(SS_PREV_STATE, 1).string(SS_NEXT_COMM, "Main").i32(SS_NEXT_PID, next);
+        let mut ev = Encoder::new();
+        ev.varint(FE_TIMESTAMP, ts).varint(FE_PID, prev as u64).msg(FE_SCHED_SWITCH, &ss);
+        bundle.msg(FB_EVENT, &ev);
+    }
+    let mut print = Encoder::new();
+    print.string(PR_BUF, "B|7|mark\n");
+    let mut ev = Encoder::new();
+    ev.varint(FE_TIMESTAMP, 1_150).varint(FE_PID, 70).msg(FE_PRINT, &print);
+    bundle.msg(FB_EVENT, &ev);
+    let mut cs = Encoder::new();
+    cs.packed(CS_SWITCH_TIMESTAMP, &[1_500, 200])
+        .packed(CS_SWITCH_PREV_STATE, &[0, 2])
+        .packed(CS_SWITCH_NEXT_PID, &[70, 0])
+        .packed(CS_SWITCH_NEXT_COMM_INDEX, &[0, 0])
+        .string(CS_INTERN_TABLE, "Main");
+    bundle.msg(FB_COMPACT_SCHED, &cs);
+    let mut p = Encoder::new();
+    p.msg(P_FTRACE_EVENTS, &bundle);
+    trace.extend(packet(&p));
+    // Embedded JSON, and a compressed copy of a late packet.
+    let mut json = Encoder::new();
+    json.string(CLJ_DATA, r#"[{"name":"J","ph":"X","ts":1,"dur":2,"pid":8,"tid":8}]"#);
+    let mut b = Encoder::new();
+    b.msg(CE_LEGACY_JSON_TRACE, &json);
+    let mut p = Encoder::new();
+    p.msg(P_CHROME_EVENTS, &b);
+    trace.extend(packet(&p));
+    let mut e = Encoder::new();
+    e.varint(TE_TYPE, TYPE_INSTANT).varint(TE_TRACK_UUID, 11).string(TE_NAME, "packed");
+    let mut p = Encoder::new();
+    p.varint(P_TIMESTAMP, 2).varint(P_SEQUENCE_ID, 9).msg(P_TRACK_EVENT, &e);
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut z, &packet(&p)).unwrap();
+    let mut p = Encoder::new();
+    p.bytes(P_COMPRESSED_PACKETS, &z.finish().unwrap());
+    trace.extend(packet(&p));
+    trace
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

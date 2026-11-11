@@ -47,6 +47,202 @@ pub fn live_event_size() -> usize {
     LIVE_EVENT_SIZE
 }
 
+/// Any input, cut into any chunks: the stream must not panic, must end, and
+/// for input that is a trace must give the events one push gives. The
+/// generator is a fixed xorshift, so a failure names a case that fails again.
+#[cfg(test)]
+mod any_input_tests {
+    use super::*;
+    use perfr_live_event::LiveEvent;
+    use std::io::Write;
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n.max(1) as u64) as usize
+        }
+    }
+
+    fn json_trace() -> Vec<u8> {
+        br#"{"traceEvents":[
+          {"name":"process_name","ph":"M","pid":1,"args":{"name":"Renderer"}},
+          {"name":"outer","cat":"c","ph":"B","ts":100,"pid":1,"tid":10,"args":{"k":1,"s":"\u00e9\"]}"}},
+          {"name":"inner","ph":"X","ts":110,"dur":20,"pid":1,"tid":10},
+          {"name":"leaf","ph":"X","ts":112,"dur":5.5,"pid":1,"tid":10,"bind_id":"0x5","flow_out":true},
+          {"name":"outer","ph":"E","ts":200,"pid":1,"tid":10},
+          {"name":"tick","ph":"i","s":"g","ts":220,"bind_id":"0x5","flow_in":true},
+          {"name":"ram","ph":"C","ts":230,"pid":1,"args":{"a":10,"b":2e1}},
+          {"name":"req","ph":"b","ts":240,"pid":1,"tid":10,"id2":{"local":"0xa"}},
+          {"name":"req","ph":"b","ts":245,"pid":1,"tid":10,"id":7},
+          {"name":"req","ph":"e","ts":250,"pid":1,"tid":10,"id2":{"local":"0xa"}},
+          {"name":"dump","ph":"v","ts":260,"pid":1,"tid":10,"args":{"dumps":{"big":[1,2,3]}}},
+          {"name":"open","ph":"B","ts":270,"pid":1,"tid":11}
+        ],
+        "samples":[{"name":"p","ts":300,"pid":1,"tid":10,"sf":"1"}],
+        "stackFrames":{"1":{"name":"leaf","parent":2},"2":{"name":"root"}},
+        "systemTraceEvents":"x-9 [000] .... 1.5: tracing_mark_write: B|9|F\n x-9 [000] .... 1.6: tracing_mark_write: E|9\n",
+        "metadata":{"n":-1.5e3,"t":true,"z":null}}"#
+            .to_vec()
+    }
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(bytes).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// Push `bytes` in chunks and pump with budgets, both drawn from `rng`
+    /// (one push and a large budget when it is `None`), the way a caller
+    /// does: until the stream says it is done. Panics if it never does.
+    fn load(bytes: &[u8], mut rng: Option<&mut Rng>) -> (ChromeIngestor, Vec<LiveEvent>, Option<String>) {
+        let mut stream = ChromeStream::default();
+        let mut ing = ChromeIngestor::default();
+        let mut events = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            let n = match rng.as_deref_mut() {
+                Some(r) => {
+                    let most = if r.below(4) == 0 { 400 } else { 12 };
+                    1 + r.below(most)
+                }
+                None => bytes.len(),
+            };
+            let end = (at + n).min(bytes.len());
+            stream.push(&bytes[at..end]);
+            at = end;
+            let budget = rng.as_deref_mut().map_or(1 << 20, |r| 1 + r.below(6));
+            events.extend(stream.pump(&mut ing, budget));
+        }
+        stream.finish_input();
+        let mut pumps = 0;
+        while !stream.is_done() {
+            let budget = rng.as_deref_mut().map_or(1 << 20, |r| 1 + r.below(40));
+            events.extend(stream.pump(&mut ing, budget));
+            pumps += 1;
+            assert!(pumps < 1_000_000, "the stream never finishes");
+        }
+        assert!(stream.pump(&mut ing, 1 << 20).is_empty(), "events after the stream was done");
+        let error = stream.error().map(str::to_string);
+        if error.is_none() {
+            assert_eq!(stream.pending_bytes(), 0, "bytes left after the stream was done");
+        }
+        events.extend(ing.finish(1));
+        (ing, events, error)
+    }
+
+    /// Events as text, sorted: `finish` hands them out in hash-map order.
+    fn canonical(ing: &ChromeIngestor, events: &[LiveEvent]) -> Vec<String> {
+        let mut rows: Vec<String> = events
+            .iter()
+            .map(|e| {
+                let args = ing.args.get(&ArgKey::from_event(*e)).and_then(|id| ing.intern.get(*id)).unwrap_or("");
+                let lane = ing.thread_names.get(&(e.pid, e.tid)).map(String::as_str).unwrap_or("");
+                format!(
+                    "{:>12} {:>10} kind {} depth {} extra {} pid {} lane {lane:?} name {:?} args {args}",
+                    e.start_ns,
+                    e.duration_ns,
+                    e.kind,
+                    e.depth,
+                    e.extra,
+                    e.pid,
+                    ing.intern.get(e.name_id).unwrap_or("")
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn any_chunking_gives_the_events_of_one_push() {
+        let json = json_trace();
+        let proto = crate::perfetto::test_trace();
+        let inputs = [
+            ("json", json.clone()),
+            ("json.gz", gzip(&json)),
+            ("perfetto", proto.clone()),
+            ("perfetto.gz", gzip(&proto)),
+        ];
+        let mut rng = Rng(0x0123_4567_89AB_CDEF);
+        for (label, bytes) in &inputs {
+            let (ing, events, error) = load(bytes, None);
+            assert_eq!(error, None, "{label}");
+            let whole = canonical(&ing, &events);
+            assert!(whole.len() >= 10, "{label}: fixture lost its events: {whole:#?}");
+            for round in 0..150 {
+                let (ing, events, error) = load(bytes, Some(&mut rng));
+                assert_eq!(error, None, "{label} round {round}");
+                assert_eq!(canonical(&ing, &events), whole, "{label} round {round}");
+            }
+        }
+        // The two encodings of one trace hold the same events.
+        let plain = load(&inputs[0].1, None);
+        let packed = load(&inputs[1].1, None);
+        assert_eq!(canonical(&plain.0, &plain.1), canonical(&packed.0, &packed.1));
+    }
+
+    #[test]
+    fn damaged_input_never_panics_and_always_ends() {
+        let json = json_trace();
+        let proto = crate::perfetto::test_trace();
+        let seeds = [json.clone(), gzip(&json), proto.clone(), gzip(&proto)];
+        let mut rng = Rng(0xDEAD_BEEF_CAFE_F00D);
+        for round in 0..3_000 {
+            let mut bytes = seeds[round % seeds.len()].clone();
+            for _ in 0..1 + rng.below(4) {
+                if bytes.is_empty() {
+                    break;
+                }
+                let at = rng.below(bytes.len());
+                match rng.below(6) {
+                    0 => bytes[at] ^= 1 << rng.below(8),
+                    1 => bytes[at] = rng.next() as u8,
+                    2 => bytes.truncate(at),
+                    3 => {
+                        bytes.remove(at);
+                    }
+                    4 => bytes.insert(at, [b'"', b'{', b'[', b']', b'}', b',', 0x0a, 0xff][rng.below(8)]),
+                    _ => {
+                        let from = rng.below(bytes.len());
+                        let len = rng.below(40).min(bytes.len() - from);
+                        let piece = bytes[from..from + len].to_vec();
+                        bytes.splice(at..at, piece);
+                    }
+                }
+            }
+            // An error is a fine answer to damaged input; not ending is not.
+            let _ = load(&bytes, Some(&mut rng));
+        }
+    }
+
+    #[test]
+    fn bytes_that_are_no_trace_at_all_end_too() {
+        let mut rng = Rng(99);
+        for round in 0..2_000 {
+            let len = rng.below(300);
+            let mut bytes: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+            // Lean on the bytes the sniffers and the framing look at.
+            let head: &[u8] = match round % 5 {
+                0 => &[0x0a],
+                1 => &[0x1f, 0x8b, 8, 0],
+                2 => b"PK\x03\x04",
+                3 => b"[{",
+                _ => &[],
+            };
+            bytes.splice(0..0, head.iter().copied());
+            let _ = load(&bytes, Some(&mut rng));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

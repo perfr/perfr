@@ -121,7 +121,37 @@ pub fn init() -> Result<(), i32> {
     let writer = Box::leak(Box::new(writer));
     SEGMENT.store(writer, Ordering::Release);
     writer.publish_api_descriptor(&DYNAMIC_API as *const DynamicApiV1 as u64);
+    // The writer is leaked, so its `Drop`, the one place the name was
+    // removed without being asked, never runs. Windows needs no help: the
+    // file there is deleted with its last handle.
+    #[cfg(unix)]
+    {
+        static AT_EXIT: std::sync::Once = std::sync::Once::new();
+        // SAFETY: registering a handler that only reads statics. A refusal
+        // (the table is full) leaves the segment to the service's sweep.
+        AT_EXIT.call_once(|| unsafe {
+            libc::atexit(unlink_at_exit);
+        });
+    }
     Ok(())
+}
+
+/// Removes the segment's name when the process exits by returning from
+/// `main` or calling `exit`. A process that is killed, or leaves through
+/// `_exit`, still leaves its segment to the sweep a service runs.
+///
+/// A forked child that exits runs this too, holding a copy of its parent's
+/// writer: it must not remove the name its parent is still found by.
+#[cfg(unix)]
+extern "C" fn unlink_at_exit() {
+    if FORK_CHILD.load(Ordering::Relaxed) {
+        return;
+    }
+    if let Some(writer) = segment() {
+        if writer.pid() == std::process::id() {
+            writer.unlink();
+        }
+    }
 }
 
 /// Removes the segment's name. The mapping stays until the process exits, so
@@ -575,6 +605,50 @@ mod tests {
         let mut cursors = Cursors::for_rings(rings.ring_count());
         let pass = drain(rings, &mut cursors, now_monotonic_ns());
         pass.slices.into_iter().flat_map(|s| s.events).collect()
+    }
+
+    /// A second copy of this test binary running one test, for what only a
+    /// process of its own can show: what is left behind when it exits.
+    /// `role` is how that test knows it is the child and not an ordinary run.
+    fn run_as_child(test: &str, role: &str) -> (u32, std::process::ExitStatus) {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--test-threads=1", "--nocapture"])
+            .env(CHILD_ROLE, role)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        (pid, child.wait().unwrap())
+    }
+
+    const CHILD_ROLE: &str = "PERFR_API_TEST_CHILD";
+
+    fn child_role_is(role: &str) -> bool {
+        std::env::var(CHILD_ROLE).is_ok_and(|r| r == role)
+    }
+
+    fn segment_file(pid: u32) -> std::path::PathBuf {
+        perfr_scope_ring::shm::segment_directory().join(perfr_scope_ring::shm::shm_file_name(pid))
+    }
+
+    #[test]
+    fn child_that_inits_and_returns_from_main() {
+        if !child_role_is("exit") {
+            return;
+        }
+        init().expect("init");
+        assert!(segment_file(std::process::id()).exists(), "the child has a segment while it runs");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_process_that_exits_normally_takes_its_segment_with_it() {
+        // Nothing removed a segment unless the program called
+        // `perfr_shutdown()`, and most do not: every run left its file in
+        // /dev/shm for the next capture on the machine to sweep.
+        let (pid, status) = run_as_child("tests::child_that_inits_and_returns_from_main", "exit");
+        assert!(status.success(), "the child failed: {status}");
+        assert!(!segment_file(pid).exists(), "{} was left behind", segment_file(pid).display());
     }
 
     /// One segment per process, and these tests share a process, so the

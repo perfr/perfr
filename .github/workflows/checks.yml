@@ -37,6 +37,8 @@ jobs:
       run: tools/release/test_release.sh
     - name: Test the installer
       run: tools/install/test_install.sh
+    - name: Test the debug-info splitter
+      run: python3 tools/release/test_split_debug.py
 
   # perfr.dev refuses a viewer pack whose source id does not match the
   # checkout. Catch that on the pull request, including a source change

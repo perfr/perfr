@@ -1516,7 +1516,7 @@ impl PerfrLiveApp {
         // Same string `perfr --version` prints. A harness reads it as `build`.
         let build = perfr_build_info::version_line();
         let text = format!(
-            "{{\"thread\":{},\"scope\":{},\"focus\":{},\"measure\":{},\"ranges\":[{}],\"report_open\":{},\"tweaks\":{},\"tab\":\"{}\",\"hellos\":{},\"wire\":\"{}\",\"ws_bps\":{:.0},\"report_w\":{:.0},\"report_collapsed\":{},\"scope_menu\":{},\"scope_report\":{},\"view\":[{:.0},{:.0}],\"content\":{},\"events\":{},\"hooks\":[{}],\"capture_start\":{},\"report_filter\":{:?},\"track_filter\":{:?},\"prims\":{},\"flame_zoom\":{},\"selected_pid\":{},\"recording\":{},\"capture_elapsed\":{:.3},\"pointer\":{},\"build\":{:?},\"draw\":{},\"code\":{},\"rect\":{},\"rect_self\":{},\"theme\":{:?},\"renderer\":{:?},\"report_copied\":{},\"report_sel\":{}}}",
+            "{{\"thread\":{},\"scope\":{},\"focus\":{},\"measure\":{},\"ranges\":[{}],\"report_open\":{},\"tweaks\":{},\"tab\":\"{}\",\"hellos\":{},\"wire\":{},\"ws_bps\":{:.0},\"report_w\":{:.0},\"report_collapsed\":{},\"scope_menu\":{},\"scope_report\":{},\"view\":[{:.0},{:.0}],\"content\":{},\"events\":{},\"hooks\":[{}],\"capture_start\":{},\"report_filter\":{},\"track_filter\":{},\"prims\":{},\"flame_zoom\":{},\"selected_pid\":{},\"recording\":{},\"capture_elapsed\":{:.3},\"pointer\":{},\"build\":{},\"draw\":{},\"code\":{},\"rect\":{},\"rect_self\":{},\"theme\":{},\"renderer\":{},\"report_copied\":{},\"report_sel\":{}}}",
             match self.selected_thread {
                 Some((p, t)) => format!("[{p},{t}]"),
                 None => "null".to_string(),
@@ -1542,7 +1542,7 @@ impl PerfrLiveApp {
             self.show_tweaks,
             self.report_tab.label(),
             self.hello_count,
-            self.status.wire,
+            json_str(&self.status.wire),
             self.ws_rate_bps,
             self.report_w_last,
             self.report_collapsed,
@@ -1551,7 +1551,7 @@ impl PerfrLiveApp {
                 None => "null".to_string(),
             },
             match &self.scope_report {
-                Some((id, name)) => format!("[{id},{name:?}]"),
+                Some((id, name)) => format!("[{id},{}]", json_str(name)),
                 None => "null".to_string(),
             },
             self.t0,
@@ -1567,31 +1567,31 @@ impl PerfrLiveApp {
                 .collect::<Vec<_>>()
                 .join(","),
             self.capture_start_ns,
-            self.report_filter,
-            self.track_filter,
+            json_str(&self.report_filter),
+            json_str(&self.track_filter),
             self.last_n_prims,
             self.flame_zoom.len(),
             match self.selected_pid { Some(p) => p.to_string(), None => "null".to_string() },
             self.recording || self.status.capturing,
             self.capture_timer.shown_s,
             self.pointer_readout.clone(),
-            build,
+            json_str(&build),
             if self.draw_readout.is_empty() { "null" } else { self.draw_readout.as_str() },
             format!(
-                "{{\"mode\":\"{}\",\"rows\":{},\"source\":{:?},\"disasm\":{:?},\"instructions\":{},\"error\":{:?},\"loading\":{},\"copied\":{}}}",
+                "{{\"mode\":\"{}\",\"rows\":{},\"source\":{},\"disasm\":{},\"instructions\":{},\"error\":{},\"loading\":{},\"copied\":{}}}",
                 self.code_mode.label(),
                 self.code_rows.len(),
-                self.code_doc.as_ref().map(|d| d.path.as_str()).unwrap_or(""),
-                self.code_disasm.as_ref().map(|d| d.function.name.as_str()).unwrap_or(""),
+                json_str(self.code_doc.as_ref().map(|d| d.path.as_str()).unwrap_or("")),
+                json_str(self.code_disasm.as_ref().map(|d| d.function.name.as_str()).unwrap_or("")),
                 self.code_disasm.as_ref().map(|d| d.lines.len()).unwrap_or(0),
-                self.code_error,
+                json_str(&self.code_error),
                 self.code_loading,
                 self.code_copied_chars,
             ),
             rect_json(&self.rect_result),
             rect_json(&self.self_tl.rect_result),
-            perfr_live_event::theme::active().key,
-            self.gpu_backend,
+            json_str(perfr_live_event::theme::active().key),
+            json_str(self.gpu_backend),
             self.report_copied_chars,
             self.report_selection.len(),
         );
@@ -1612,8 +1612,12 @@ impl PerfrLiveApp {
     /// Hands this frame's pill and track-row rectangles to the page as
     /// `window.__perfr_ui`, a JSON list of `[label, x, y, w, h]`.
     fn publish_ui_rects(&mut self) {
-        let text = take_ui_rects_json();
+        let mut text = take_ui_rects_json();
         if text == self.ui_readout {
+            // Nothing moved: the next frame writes into this buffer rather
+            // than growing a new one to the same size.
+            text.clear();
+            UI_RECTS.with(|v| *v.borrow_mut() = text);
             return;
         }
         self.ui_readout = text;
@@ -6113,15 +6117,14 @@ impl PerfrLiveApp {
             // sees the whole layout; a row below the fold has a y past the
             // canvas, which is its cue to scroll or collapse something.
             if !self.in_self_pane {
-                let label = match row.id {
-                    RowId::Scheduler => "row:scheduler".to_string(),
-                    RowId::Machine(_) => "row:machine".to_string(),
-                    RowId::Process(p) => format!("row:process:{p}"),
-                    RowId::Thread(t) => format!("row:thread:{}:{}", t.pid, t.tid),
-                    RowId::Async(t) => format!("row:async:{}:{}", t.pid, t.tid),
-                    RowId::Lane(l) => format!("row:lane:{}:{}:{}", l.pid, l.tid, l.kind),
-                };
-                note_ui_rect(&label, r);
+                match row.id {
+                    RowId::Scheduler => note_ui_rect("row:scheduler", r),
+                    RowId::Machine(_) => note_ui_rect("row:machine", r),
+                    RowId::Process(p) => note_ui_rect_fmt(format_args!("row:process:{p}"), r),
+                    RowId::Thread(t) => note_ui_rect_fmt(format_args!("row:thread:{}:{}", t.pid, t.tid), r),
+                    RowId::Async(t) => note_ui_rect_fmt(format_args!("row:async:{}:{}", t.pid, t.tid), r),
+                    RowId::Lane(l) => note_ui_rect_fmt(format_args!("row:lane:{}:{}:{}", l.pid, l.tid, l.kind), r),
+                }
                 // A guest row says so too, on screen or not: whose it is and
                 // where it was put.
                 let track = match row.id {
@@ -6132,7 +6135,7 @@ impl PerfrLiveApp {
                 };
                 if let Some(key) = track.filter(|k| self.tracks.is_guest(*k)) {
                     let owner = key.owner();
-                    note_ui_rect(&format!("guest:{}:{}:{}", owner.pid, owner.tid, self.tracks.host_pid(key)), r);
+                    note_ui_rect_fmt(format_args!("guest:{}:{}:{}", owner.pid, owner.tid, self.tracks.host_pid(key)), r);
                 }
             }
             if !header_row_intersects_clip(r.min.y, r.height(), clip.min.y, clip.max.y) {
@@ -11664,7 +11667,46 @@ thread_local! {
     /// `window.__perfr_ui` readout: the headless harness clicks a button or
     /// a thread header by name instead of by a pixel position that moves
     /// whenever the layout does.
-    static UI_RECTS: std::cell::RefCell<Vec<(String, Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
+    ///
+    /// Held as the JSON it is published as, written in place: a list of
+    /// labels and rectangles turned into text at the end of the frame was
+    /// three allocations a row, for every row of the capture, every frame.
+    static UI_RECTS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Writes text into a JSON string literal, escaped as JSON asks. Rust's
+/// debug form, used before, writes `\u{1b}` and `\0` where JSON wants
+/// `\u001b` and `\u0000`: one function name with a control character in
+/// it and the whole readout no longer parsed.
+struct JsonText<'a>(&'a mut String);
+
+impl std::fmt::Write for JsonText<'_> {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        for c in text.chars() {
+            match c {
+                '"' => self.0.push_str("\\\""),
+                '\\' => self.0.push_str("\\\\"),
+                '\n' => self.0.push_str("\\n"),
+                '\r' => self.0.push_str("\\r"),
+                '\t' => self.0.push_str("\\t"),
+                c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                    let _ = write!(self.0, "\\u{:04x}", c as u32);
+                }
+                c => self.0.push(c),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `text` as a JSON string literal, quotes included.
+fn json_str(text: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    let _ = JsonText(&mut out).write_str(text);
+    out.push('"');
+    out
 }
 
 /// A thread-state code (`perfr_live_event::thread_state`) as a short name and
@@ -11722,7 +11764,25 @@ fn about_commit_row(ui: &mut Ui, hash: &str) {
 }
 
 fn note_ui_rect(label: &str, rect: Rect) {
-    UI_RECTS.with(|v| v.borrow_mut().push((label.to_string(), rect)));
+    note_ui_rect_fmt(format_args!("{label}"), rect);
+}
+
+/// [`note_ui_rect`] for a label made of parts, without building it first.
+fn note_ui_rect_fmt(label: std::fmt::Arguments<'_>, rect: Rect) {
+    use std::fmt::Write;
+    UI_RECTS.with(|v| {
+        let out = &mut *v.borrow_mut();
+        out.push_str(if out.is_empty() { "[[\"" } else { ",[\"" });
+        let _ = JsonText(out).write_fmt(label);
+        let _ = write!(
+            out,
+            "\",{:.0},{:.0},{:.0},{:.0}]",
+            rect.left(),
+            rect.top(),
+            rect.width(),
+            rect.height()
+        );
+    });
 }
 
 /// A click on a column header: the same column flips the direction, a new
@@ -11799,20 +11859,9 @@ fn paint_percent_bar(ui: &Ui, rect: Rect, percent: f64, strong: bool) {
 
 /// Empties this frame's rectangles into a JSON text.
 fn take_ui_rects_json() -> String {
-    let rects = UI_RECTS.with(|v| std::mem::take(&mut *v.borrow_mut()));
-    let mut out = String::from("[");
-    for (i, (label, r)) in rects.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str(&format!(
-            "[{:?},{:.0},{:.0},{:.0},{:.0}]",
-            label,
-            r.left(),
-            r.top(),
-            r.width(),
-            r.height()
-        ));
+    let mut out = UI_RECTS.with(|v| std::mem::take(&mut *v.borrow_mut()));
+    if out.is_empty() {
+        out.push('[');
     }
     out.push(']');
     out

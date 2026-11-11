@@ -1294,3 +1294,55 @@ fn timeline_frame_times() {
     let mut page = many_thread_page(5_000);
     println!("5,000 threads, idle frame:      {:8.3} ms/frame", ms_per_frame(&mut page, 200));
 }
+
+#[test]
+fn the_ui_readout_is_the_json_it_always_was() {
+    // What `take_ui_rects_json` wrote before it built the text in place:
+    // Rust's debug form of the label, and whole-number geometry.
+    let reference = |rects: &[(&str, Rect)]| {
+        let items: Vec<String> = rects
+            .iter()
+            .map(|(label, r)| format!("[{:?},{:.0},{:.0},{:.0},{:.0}]", label, r.left(), r.top(), r.width(), r.height()))
+            .collect();
+        format!("[{}]", items.join(","))
+    };
+    let rects = [
+        ("Record", Rect::from_min_size(Pos2::new(21.4, 7.5), Vec2::new(28.0, 22.0))),
+        ("row:thread:100:101", Rect::from_min_size(Pos2::new(0.0, 85.6), Vec2::new(196.0, 21.0))),
+        ("hook:ns::f(const char*, \"x\")", Rect::from_min_size(Pos2::new(-3.6, 1e6), Vec2::new(0.4, 0.5))),
+        ("tree:a\\b\tc\nd", Rect::NOTHING),
+        ("symbols-status:Waiting for symbols…", Rect::from_min_size(Pos2::new(700.0, 9.0), Vec2::new(151.5, 14.0))),
+        ("", Rect::ZERO),
+    ];
+    let _ = take_ui_rects_json();
+    assert_eq!(take_ui_rects_json(), "[]");
+    for (label, rect) in rects {
+        note_ui_rect(label, rect);
+    }
+    assert_eq!(take_ui_rects_json(), reference(&rects));
+    assert_eq!(take_ui_rects_json(), "[]", "taking empties it");
+    note_ui_rect("one", Rect::ZERO);
+    assert_eq!(take_ui_rects_json(), r#"[["one",0,0,0,0]]"#);
+}
+
+#[test]
+fn a_name_with_a_control_character_leaves_the_readouts_parseable() {
+    // A function name with an escape sequence in it, as a mangled or
+    // user-supplied scope name can have.
+    let odd = "paint\u{1b}[31m\u{0}red\u{7f}";
+    let mut tree = small_tree();
+    tree.roots[0].children[0].name = odd.into();
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.apply_service_reports(None, Some(tree));
+        app.open_right_tab(ReportTab::TopDown);
+        app.report_filter = "\u{1b}".into();
+    });
+    page.frames(3);
+    let rects: Vec<serde_json::Value> =
+        serde_json::from_str(&page.app.ui_readout).expect("window.__perfr_ui is JSON whatever the names are");
+    assert!(rects.iter().any(|r| r[0] == format!("tree:{odd}")), "the row is named as it is");
+    let sel: serde_json::Value =
+        serde_json::from_str(&page.app.sel_readout).expect("window.__perfr_sel is JSON whatever was typed");
+    assert_eq!(sel["report_filter"], "\u{1b}");
+}

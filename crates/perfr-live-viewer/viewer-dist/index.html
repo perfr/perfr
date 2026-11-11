@@ -27,7 +27,11 @@
       height: 100dvh;
       min-height: 100%;
       min-height: -webkit-fill-available;
-      background: #0B0C0E;
+      /* Nord canvas (`Theme::canvas`). The page shows before wasm boots;
+         this has to match the default scheme or the first paint flashes
+         the old near-black. A saved perfr_theme repaints once the viewer
+         starts. */
+      background: #2E3440;
       overflow: hidden;
       overscroll-behavior: none;
       touch-action: none;

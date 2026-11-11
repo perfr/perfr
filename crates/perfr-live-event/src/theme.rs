@@ -7,22 +7,23 @@
 //! Every colour the viewer draws -- the chrome (panels, text, accent), the
 //! timeline canvas and track washes, the scope-box palette, the thread-state
 //! bar, and the selection highlights -- comes from the active [`Theme`]. The
-//! default is perfr's original palette, reproduced value for value, so nothing
-//! changes unless the reader picks another scheme.
+//! default is [`NORD`]. perfr's original palette stays in the table, value
+//! for value, for a reader who picks it. A saved choice (`perfr_theme`, or
+//! `?theme=`) wins over the default, including a saved `perfr`.
 //!
 //! The active theme is one process-wide atomic index into [`THEMES`], not a
 //! thread-local: the viewer lists and rasterises lanes on worker threads
 //! (the wasm-bindgen-rayon pool, `std::thread::scope` natively), and a
-//! thread-local there kept perfr's default while the main thread drew the
-//! reader's scheme, so colours flipped with zoom depending on which thread
-//! produced a lane. The service never switches, so it keeps the default and
-//! draws exactly as before. `color.rs` reads the scope and thread-state
-//! colours from here; the viewer's `theme.rs` reads the chrome.
+//! thread-local there kept the process default while the main thread drew
+//! the reader's scheme, so colours flipped with zoom depending on which
+//! thread produced a lane. The service never switches, so it draws the
+//! default. `color.rs` reads the scope and thread-state colours from here;
+//! the viewer's `theme.rs` reads the chrome.
 //!
-//! The non-default schemes are built from well-known terminal palettes
-//! (Dracula, Nord, Gruvbox, Solarized). A terminal palette is already a
-//! curated, harmonious set of accent colours, which is exactly what the
-//! scope boxes need to stay legible against the canvas.
+//! The other schemes are perfr's original palette and well-known terminal
+//! palettes (Dracula, Gruvbox, Solarized, and Nord itself). A terminal
+//! palette is already a curated, harmonious set of accent colours, which is
+//! exactly what the scope boxes need to stay legible against the canvas.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -94,7 +95,8 @@ pub struct Theme {
 
 // ---------------------------------------------------------------------------
 // perfr -- the original palette, reproduced exactly. Do not change these
-// values: the default scheme must draw byte-for-byte as before.
+// values: choosing "perfr" must draw byte-for-byte as the first viewer did.
+// Nord is the default; this scheme is what a reader gets by picking it.
 // ---------------------------------------------------------------------------
 
 /// The original six-colour scope palette: `#E74435 #2B91AF #B975B5 #57A64A
@@ -419,14 +421,30 @@ static GRUVBOX_LIGHT: Theme = Theme {
     process_washes: &[],
 };
 
-/// Every scheme, in the order the picker lists them. perfr leads so the
-/// default is the first thing offered; the light schemes come last.
+/// Every scheme, in the order the picker lists them. perfr still leads (it
+/// is the original palette); Nord is the default. The light schemes come
+/// last.
 pub static THEMES: &[&Theme] =
     &[&PERFR, &DRACULA, &NORD, &GRUVBOX, &SOLARIZED, &SOLARIZED_LIGHT, &GRUVBOX_LIGHT];
 
-/// Index into [`THEMES`]; 0 is perfr's default. Shared by every thread so
+/// Nord's place in [`THEMES`]. The active scheme starts here, before any
+/// saved choice is applied, so the first frame is already Nord.
+const DEFAULT_INDEX: usize = 2;
+
+/// Index into [`THEMES`]. Starts at Nord. Shared by every thread so
 /// worker-produced lanes match what the main thread draws.
-static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE: AtomicUsize = AtomicUsize::new(DEFAULT_INDEX);
+
+/// The scheme used when nothing is saved and `?theme=` is absent. Nord.
+pub fn default_theme() -> &'static Theme {
+    &NORD
+}
+
+/// Switch back to Nord. Tests that select another scheme call this before
+/// releasing the scheme lock.
+pub fn restore_default() {
+    set_active(&NORD);
+}
 
 /// The active scheme. Every colour accessor reads through this.
 pub fn active() -> &'static Theme {
@@ -459,8 +477,8 @@ pub fn set_active_by_key(key: &str) -> bool {
 
 /// The scheme is process-wide, so a test that switches it, and a test that
 /// asserts a colour the default scheme produces, hold this: a switch must
-/// never land mid-assertion on another test thread. Switchers restore the
-/// default before releasing it.
+/// never land mid-assertion on another test thread. Switchers restore Nord
+/// ([`restore_default`]) before releasing it.
 #[cfg(test)]
 pub(crate) fn switch_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -472,20 +490,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_matches_perfrs_original_values() {
-        // The whole promise: the default scheme is byte-for-byte the old
-        // palette. These are the exact constants color.rs and theme.rs held.
+    fn the_default_is_nord() {
+        let _guard = switch_lock();
+        assert_eq!(DEFAULT_INDEX, 2);
+        assert_eq!(THEMES[DEFAULT_INDEX].key, "nord");
+        assert!(core::ptr::eq(default_theme(), &NORD));
+        assert_eq!(active().key, "nord");
+        assert!(!active().light);
+        assert_eq!(active().canvas, 0xFF2E_3440);
+        assert_eq!(active().panel, 0xFF33_3B48);
+        assert_eq!(active().text, 0xFFEC_EFF4);
+        assert_eq!(active().accent, 0xFF88_C0D0);
+        assert_eq!(active().scope.len(), 8);
+        assert_eq!(active().scope[0], 0xFFBF_616A);
+        // A missing preference stays on Nord. An explicit "perfr" still
+        // selects the original palette, and restoring the default comes back.
+        assert!(set_active_by_key("perfr"));
         assert_eq!(active().key, "perfr");
-        assert_eq!(active().scope, &[0xFFE7_4435, 0xFF2B_91AF, 0xFFB9_75B5, 0xFF57_A64A, 0xFFD7_AB69, 0xFFF8_6516]);
-        assert_eq!(active().sample_tick, 0xFFEC_EFF1);
-        assert_eq!(active().selection, 0xFF00_80FF);
-        assert_eq!(active().same_scope, 0xFF64_B5F6);
         assert_eq!(active().canvas, 0xFF0B_0C0E);
-        assert_eq!(active().panel, 0xFF12_141A);
-        assert_eq!(active().text, 0xFFC4_C7CC);
-        assert_eq!(active().accent, 0xFF7A_A4C2);
-        assert_eq!(active().thread_states.running, 0xFF4C_AF50);
-        assert_eq!(active().thread_states.stopped, 0xFFF4_4336);
+        restore_default();
+        assert_eq!(active().key, "nord");
+        assert_eq!(active().canvas, 0xFF2E_3440);
+    }
+
+    #[test]
+    fn perfr_palette_is_the_original_values() {
+        // Choosing "perfr" is byte-for-byte the old palette. These are the
+        // exact constants color.rs and the viewer held before schemes existed.
+        assert_eq!(PERFR.key, "perfr");
+        assert_eq!(PERFR.scope, &[0xFFE7_4435, 0xFF2B_91AF, 0xFFB9_75B5, 0xFF57_A64A, 0xFFD7_AB69, 0xFFF8_6516]);
+        assert_eq!(PERFR.sample_tick, 0xFFEC_EFF1);
+        assert_eq!(PERFR.selection, 0xFF00_80FF);
+        assert_eq!(PERFR.same_scope, 0xFF64_B5F6);
+        assert_eq!(PERFR.canvas, 0xFF0B_0C0E);
+        assert_eq!(PERFR.panel, 0xFF12_141A);
+        assert_eq!(PERFR.text, 0xFFC4_C7CC);
+        assert_eq!(PERFR.accent, 0xFF7A_A4C2);
+        assert_eq!(PERFR.thread_states.running, 0xFF4C_AF50);
+        assert_eq!(PERFR.thread_states.stopped, 0xFFF4_4336);
     }
 
     #[test]
@@ -506,10 +548,11 @@ mod tests {
 
     #[test]
     fn light_schemes_are_flagged_and_bright() {
-        // The default and the terminal-dark schemes are dark; the two light
-        // ones carry the flag and a bright canvas the viewer keys its
+        // Nord (the default) and the other dark schemes stay dark; the two
+        // light ones carry the flag and a bright canvas the viewer keys its
         // grid/playhead/widget inversion off.
         assert!(!PERFR.light);
+        assert!(!NORD.light);
         let light: Vec<&str> = THEMES.iter().filter(|t| t.light).map(|t| t.key).collect();
         assert_eq!(light, ["solarized-light", "gruvbox-light"]);
         for t in THEMES.iter().filter(|t| t.light) {
@@ -522,10 +565,12 @@ mod tests {
     #[test]
     fn switching_is_visible_then_restored() {
         let _guard = switch_lock();
+        assert_eq!(active().key, "nord");
         assert!(set_active_by_key("dracula"));
         assert_eq!(active().key, "dracula");
         assert_ne!(active().scope, &PERFR_SCOPE[..]);
-        set_active(&PERFR);
-        assert_eq!(active().key, "perfr");
+        assert_ne!(active().scope, NORD.scope);
+        restore_default();
+        assert_eq!(active().key, "nord");
     }
 }

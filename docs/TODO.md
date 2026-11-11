@@ -731,8 +731,7 @@ track washes, the scope-box palette, the thread-state bar, the selection
 highlights -- lives in one `Theme` table in `perfr_live_event::theme`, read
 through one process-wide active theme (the service never switches, so it draws
 exactly as before; it was a thread-local until 2026-11-07, which left the
-viewer's worker-thread lanes on the default palette). Five schemes: **perfr** (the original, byte-for-byte the
-default) plus **Dracula**, **Nord**, **Gruvbox** and **Solarized**, whose
+viewer's worker-thread lanes on the default palette). Five schemes: **perfr** (the original palette, byte-for-byte; **Nord** is the default as of 2026-11-11 — a missing `perfr_theme` opens on Nord, and a saved choice including `perfr` still wins) plus **Dracula**, **Nord**, **Gruvbox** and **Solarized**, whose
 scope palettes are each scheme's own harmonious accent set. Pick it in the
 More menu; `?theme=<key>` pins it for a link or screenshot; the choice is
 saved to `localStorage`. Switching rebuilds egui's visuals and drops the

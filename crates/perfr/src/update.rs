@@ -19,6 +19,11 @@
 //! layout are deleted from the install directory. A cargo, Homebrew, or pip
 //! install is not overwritten; the command that owns it is printed instead.
 //!
+//! The files are replaced together or not at all: if one cannot be moved in,
+//! the ones already replaced are put back. File capabilities granted by
+//! `perfr setup` belong to the old binary's inode and do not carry over;
+//! the command says so and names the setup run that grants them again.
+//!
 //! Exit codes: [`EXIT_OK`] (0) the install is current, this build is newer
 //! than the release, or an update was applied; [`EXIT_UPDATE_AVAILABLE`] (1)
 //! `--check` found a newer release; [`EXIT_ERROR`] (2) the download, the
@@ -240,6 +245,8 @@ pub fn run_with(
     verify_checksum(&archive, &String::from_utf8_lossy(&sums), &asset.name)?;
     let files = archive::unpack_named(&asset.name, &archive)?;
     let dest = exe.parent().ok_or("the running binary has no directory")?;
+    // Read before the rename: afterwards the path names the new inode.
+    let capabilities = file_capabilities(exe);
     install_tree(dest, &files, style, platform)?;
     let removed = remove_retired(dest)?;
     let mut text = format!(
@@ -247,6 +254,9 @@ pub fn run_with(
         dest.display()
     );
     text.push_str("restart any running perfr to use the new version\n");
+    if let Some(note) = capabilities_note(capabilities) {
+        text.push_str(&note);
+    }
     for path in &removed {
         text.push_str(&format!("removed {}\n", path.display()));
     }
@@ -564,7 +574,7 @@ pub fn install_tree(
     let nested_header = files.iter().any(|file| {
         archive::install_relative(&file.path).is_some_and(|relative| relative.ends_with("/perfr.h"))
     });
-    let mut staged = Vec::new();
+    let mut staged = Staged(Vec::new());
     for file in files {
         let Some(relative) = archive::install_relative(&file.path) else {
             continue;
@@ -580,7 +590,7 @@ pub fn install_tree(
         let tmp = dest.with_file_name(format!(
             ".{}.new-{}",
             dest.file_name().unwrap_or_default().to_string_lossy(),
-            staged.len()
+            staged.0.len()
         ));
         {
             let mut out = fs::File::create(&tmp)
@@ -589,29 +599,70 @@ pub fn install_tree(
                 .map_err(|error| error.to_string())?;
         }
         set_mode(&tmp, file.executable || is_binary_name(&relative));
-        staged.push((tmp, dest));
+        staged.0.push((tmp, dest));
     }
     if !staged
+        .0
         .iter()
         .any(|(_, dest)| is_binary_name(&dest.file_name().unwrap_or_default().to_string_lossy()))
     {
-        for (tmp, _) in &staged {
-            let _ = fs::remove_file(tmp);
-        }
         return Err("archive has no perfr binary".into());
     }
     // Companions first, the running binary last, so a failure leaves the
     // previous binary in place.
-    staged.sort_by_key(|(_, dest)| {
+    staged.0.sort_by_key(|(_, dest)| {
         is_binary_name(&dest.file_name().unwrap_or_default().to_string_lossy())
     });
-    for (tmp, dest) in staged {
-        if let Err(error) = replace_file(&dest, &tmp, style) {
-            let _ = fs::remove_file(&tmp);
-            return Err(error);
+    // All of it or none of it: the binary, the library and the hook helper
+    // agree on the scope ring's layout, so a new library beside the old
+    // binary is a broken install, not half an update. What each file
+    // replaced is kept until the last one is in, and put back if one fails.
+    let mut replaced: Vec<(&Path, Old)> = Vec::new();
+    for (tmp, dest) in &staged.0 {
+        match replace_keeping_old(dest, tmp, style) {
+            Ok(old) => replaced.push((dest, old)),
+            Err(error) => {
+                for (dest, old) in replaced.into_iter().rev() {
+                    let _ = match old {
+                        Old::Kept(old) => fs::rename(&old, dest),
+                        Old::Absent => fs::remove_file(dest),
+                        Old::Gone => Ok(()),
+                    };
+                }
+                return Err(error);
+            }
+        }
+    }
+    for (_, old) in replaced {
+        if let Old::Kept(old) = old {
+            let _ = fs::remove_file(old);
         }
     }
     Ok(())
+}
+
+/// What became of the file a new one replaced.
+#[derive(Debug, PartialEq, Eq)]
+enum Old {
+    /// There was none: undoing the install deletes the new file.
+    Absent,
+    /// It is here, to delete once the install is whole or to rename back.
+    Kept(PathBuf),
+    /// It was replaced and no copy could be kept. The new file stays.
+    Gone,
+}
+
+/// The files written beside their destinations and not yet moved in.
+/// Dropping it deletes whatever is still there, so no way out of
+/// `install_tree` leaves `.NAME.new-N` files in the install directory.
+struct Staged(Vec<(PathBuf, PathBuf)>);
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        for (tmp, _) in &self.0 {
+            let _ = fs::remove_file(tmp);
+        }
+    }
 }
 
 fn is_binary_name(name: &str) -> bool {
@@ -621,31 +672,63 @@ fn is_binary_name(name: &str) -> bool {
     )
 }
 
-pub fn replace_file(dest: &Path, source: &Path, style: ReplaceStyle) -> Result<(), String> {
+/// Moves `source` into `dest`, keeping the file that was there under another
+/// name for the caller to delete or to rename back.
+fn replace_keeping_old(dest: &Path, source: &Path, style: ReplaceStyle) -> Result<Old, String> {
+    let cannot = |error: std::io::Error| format!("cannot replace {}: {error}", dest.display());
+    if fs::symlink_metadata(dest).is_err() {
+        return fs::rename(source, dest).map(|()| Old::Absent).map_err(cannot);
+    }
     match style {
-        ReplaceStyle::Atomic => fs::rename(source, dest)
-            .map_err(|error| format!("cannot replace {}: {error}", dest.display())),
+        ReplaceStyle::Atomic => {
+            // A second name for the old file, so the rename below stays the
+            // one step in which `dest` changes. A filesystem without hard
+            // links keeps no copy, and the replace goes ahead as it used to.
+            let aside = free_aside_path(dest, true);
+            let old = if fs::hard_link(dest, &aside).is_ok() { Old::Kept(aside) } else { Old::Gone };
+            match fs::rename(source, dest) {
+                Ok(()) => Ok(old),
+                Err(error) => {
+                    if let Old::Kept(aside) = old {
+                        let _ = fs::remove_file(aside);
+                    }
+                    Err(cannot(error))
+                }
+            }
+        }
         ReplaceStyle::WindowsAside => {
-            let aside = aside_path(dest);
-            let _ = fs::remove_file(&aside);
-            if dest.exists() && fs::rename(dest, &aside).is_err() {
-                let _ = fs::remove_file(source);
+            let aside = free_aside_path(dest, false);
+            if fs::rename(dest, &aside).is_err() {
                 return Err(format!("cannot move {} aside", dest.display()));
             }
             if let Err(error) = fs::rename(source, dest) {
                 let _ = fs::rename(&aside, dest);
-                return Err(format!("cannot replace {}: {error}", dest.display()));
+                return Err(cannot(error));
             }
-            let _ = fs::remove_file(&aside);
-            Ok(())
+            Ok(Old::Kept(aside))
         }
     }
 }
 
-fn aside_path(dest: &Path) -> PathBuf {
-    let mut name = dest.file_name().unwrap_or_default().to_os_string();
-    name.push(".old");
-    dest.with_file_name(name)
+/// A name beside `dest` that nothing occupies: `NAME.old`, or `NAME.old-N`
+/// when that one cannot be deleted. On Windows it cannot while a service
+/// started before the previous update still runs from it, and moving the
+/// current binary onto a running image fails; that used to stop the update
+/// after the companions had been replaced. Copies left by earlier updates
+/// are deleted on the way, when they let go.
+fn free_aside_path(dest: &Path, hidden: bool) -> PathBuf {
+    let name = dest.file_name().unwrap_or_default().to_string_lossy();
+    let dot = if hidden { "." } else { "" };
+    let mut free = None;
+    for n in 0..16 {
+        let suffix = if n == 0 { String::new() } else { format!("-{n}") };
+        let aside = dest.with_file_name(format!("{dot}{name}.old{suffix}"));
+        let _ = fs::remove_file(&aside);
+        if free.is_none() && fs::symlink_metadata(&aside).is_err() {
+            free = Some(aside);
+        }
+    }
+    free.unwrap_or_else(|| dest.with_file_name(format!("{dot}{name}.old-{}", std::process::id())))
 }
 
 fn set_mode(path: &Path, executable: bool) {
@@ -659,6 +742,62 @@ fn set_mode(path: &Path, executable: bool) {
     {
         let _ = (path, executable);
     }
+}
+
+/// The permitted set of a `security.capability` value (`struct vfs_cap_data`:
+/// a magic word, then permitted and inheritable, low words then high; the
+/// first revision has the low pair only). `None` for a value cut short or
+/// one that grants nothing.
+#[cfg(any(target_os = "linux", test))]
+fn parse_file_capabilities(value: &[u8]) -> Option<u64> {
+    let word = |at: usize| value.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+    word(8)?;
+    let permitted = u64::from(word(4)?) | (u64::from(word(12).unwrap_or(0)) << 32);
+    (permitted != 0).then_some(permitted)
+}
+
+/// The file capabilities on `path`, as `perfr setup` leaves them on the
+/// binary. They belong to the inode, so a binary renamed into its place
+/// starts without them.
+fn file_capabilities(path: &Path) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut value = [0u8; 64];
+        // SAFETY: both strings are NUL-terminated and the kernel writes at
+        // most `value.len()` bytes into `value`.
+        let len = unsafe {
+            libc::getxattr(
+                path.as_ptr(),
+                c"security.capability".as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+            )
+        };
+        parse_file_capabilities(value.get(..usize::try_from(len).ok()?)?)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// What to tell the user when the binary that was replaced held file
+/// capabilities. Putting them back takes root, so the update says which
+/// command does it rather than leave the next capture to come up without
+/// samples, scheduler or uprobes and no word why.
+fn capabilities_note(permitted: Option<u64>) -> Option<String> {
+    const CAP_SYS_ADMIN: u64 = 1 << 21;
+    let command = if permitted? & CAP_SYS_ADMIN != 0 {
+        "perfr setup --uprobes"
+    } else {
+        "perfr setup"
+    };
+    Some(format!(
+        "the replaced binary held file capabilities and the new one does not; run `{command}` to grant them again\n"
+    ))
 }
 
 /// cargo, Homebrew, or pip, when the path and the package metadata agree.
@@ -1342,6 +1481,129 @@ mod tests {
         );
         assert!(!install.join("perfr.h").exists());
         assert!(!install.join("perfr.exe.old").exists());
+    }
+
+    fn packed(path: &str, bytes: &[u8]) -> PackedFile {
+        PackedFile { path: path.into(), bytes: bytes.to_vec(), executable: false }
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn an_install_that_fails_part_way_puts_the_replaced_files_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path().join("bin");
+        fs::create_dir_all(install.join("blocked")).unwrap();
+        // A directory with something in it: no file can be renamed over it.
+        fs::write(install.join("blocked").join("keep"), b"x").unwrap();
+        fs::write(install.join("perfr"), b"old-binary").unwrap();
+        fs::write(install.join("libperfr.so"), b"old-lib").unwrap();
+        let files = [
+            packed("perfr/libperfr.so", b"new-lib"),
+            packed("perfr/fresh.txt", b"new-file"),
+            packed("perfr/blocked", b"new-blocked"),
+            packed("perfr/perfr", b"new-binary"),
+        ];
+        let platform = Platform { os: "linux", arch: "x86_64" };
+        let error = install_tree(&install, &files, ReplaceStyle::Atomic, platform).unwrap_err();
+        assert!(error.contains("blocked"), "{error}");
+        // The library and the binary are a pair (the scope ring's layout
+        // version): a new one beside an old one is worse than no update.
+        assert_eq!(fs::read(install.join("libperfr.so")).unwrap(), b"old-lib");
+        assert_eq!(fs::read(install.join("perfr")).unwrap(), b"old-binary");
+        // Nothing staged, nothing kept aside, and the file that was new is gone.
+        assert_eq!(names_in(&install), ["blocked", "libperfr.so", "perfr"]);
+    }
+
+    #[test]
+    fn a_finished_install_keeps_no_copy_of_what_it_replaced() {
+        for style in [ReplaceStyle::Atomic, ReplaceStyle::WindowsAside] {
+            let dir = tempfile::tempdir().unwrap();
+            let install = dir.path().join("bin");
+            fs::create_dir_all(&install).unwrap();
+            fs::write(install.join("perfr"), b"old-binary").unwrap();
+            fs::write(install.join("libperfr.so"), b"old-lib").unwrap();
+            let files = [packed("perfr/libperfr.so", b"new-lib"), packed("perfr/perfr", b"new-binary")];
+            let platform = Platform { os: "linux", arch: "x86_64" };
+            install_tree(&install, &files, style, platform).unwrap();
+            assert_eq!(fs::read(install.join("libperfr.so")).unwrap(), b"new-lib", "{style:?}");
+            assert_eq!(fs::read(install.join("perfr")).unwrap(), b"new-binary", "{style:?}");
+            assert_eq!(names_in(&install), ["libperfr.so", "perfr"], "{style:?}");
+        }
+    }
+
+    #[test]
+    fn staging_that_fails_part_way_removes_what_it_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path().join("bin");
+        fs::create_dir_all(&install).unwrap();
+        fs::write(install.join("perfr"), b"old-binary").unwrap();
+        // `share` is a file, so the directory for `share/doc.txt` cannot be made.
+        fs::write(install.join("share"), b"in the way").unwrap();
+        let files = [
+            packed("perfr/perfr", b"new-binary"),
+            packed("perfr/libperfr.so", b"new-lib"),
+            packed("perfr/share/doc.txt", b"doc"),
+        ];
+        let platform = Platform { os: "linux", arch: "x86_64" };
+        install_tree(&install, &files, ReplaceStyle::Atomic, platform).unwrap_err();
+        assert_eq!(names_in(&install), ["perfr", "share"]);
+        assert_eq!(fs::read(install.join("perfr")).unwrap(), b"old-binary");
+    }
+
+    #[test]
+    fn an_aside_copy_that_is_still_in_use_does_not_block_the_next_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("perfr.exe");
+        fs::write(&exe, b"current").unwrap();
+        // The service started before the last update still runs from
+        // `perfr.exe.old`, and Windows will not delete or replace a running
+        // image. A directory stands in for it: it cannot be unlinked either.
+        fs::create_dir_all(dir.path().join("perfr.exe.old").join("held")).unwrap();
+        let staged = dir.path().join(".perfr.exe.new-0");
+        fs::write(&staged, b"next").unwrap();
+        let old = replace_keeping_old(&exe, &staged, ReplaceStyle::WindowsAside).unwrap();
+        assert_eq!(fs::read(&exe).unwrap(), b"next");
+        assert_eq!(old, Old::Kept(dir.path().join("perfr.exe.old-1")));
+        assert_eq!(fs::read(dir.path().join("perfr.exe.old-1")).unwrap(), b"current");
+    }
+
+    #[test]
+    fn file_capabilities_are_read_from_the_xattr_layout() {
+        // `setcap cap_sys_admin,cap_perfmon,cap_dac_read_search+ep`, as
+        // `getfattr -e hex -n security.capability` prints it: revision 2 with
+        // the effective bit, then permitted and inheritable, low and high.
+        let uprobes = [
+            0x01, 0x00, 0x00, 0x02, 0x04, 0x00, 0x20, 0x00, 0, 0, 0, 0, 0x40, 0x00, 0x00, 0x00, 0, 0, 0, 0,
+        ];
+        let permitted = parse_file_capabilities(&uprobes).unwrap();
+        assert_eq!(permitted, (1 << 2) | (1 << 21) | (1 << 38));
+        assert_eq!(parse_file_capabilities(&uprobes[..8]), None, "cut short");
+        assert_eq!(parse_file_capabilities(&[0u8; 20]), None, "an empty set is no grant");
+
+        let note = capabilities_note(Some(permitted)).unwrap();
+        assert!(note.contains("perfr setup --uprobes"), "{note}");
+        // `cap_perfmon,cap_sys_ptrace`: what plain `perfr setup` grants.
+        let note = capabilities_note(Some((1 << 38) | (1 << 19))).unwrap();
+        assert!(note.contains("`perfr setup`"), "{note}");
+        assert!(!note.contains("--uprobes"), "{note}");
+        assert_eq!(capabilities_note(None), None);
+    }
+
+    #[test]
+    fn a_binary_without_file_capabilities_reads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("perfr");
+        fs::write(&exe, b"plain").unwrap();
+        assert_eq!(file_capabilities(&exe), None);
+        assert_eq!(file_capabilities(&dir.path().join("absent")), None);
     }
 
     #[test]

@@ -21,7 +21,7 @@
 
 use perfr_scope_ring::event::{flags, kind};
 use perfr_scope_ring::shm::now_monotonic_ns;
-use perfr_scope_ring::text::split_name;
+use perfr_scope_ring::text::continuations;
 use perfr_scope_ring::{ring_for_thread, ScopeEvent, ScopeRingWriter};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -267,7 +267,7 @@ fn next_handle(state: &mut ThreadState) -> Handle {
 }
 
 fn push_named(writer: &ScopeRingWriter, state: &ThreadState, mut head: ScopeEvent, name: &[u8]) {
-    let rest = split_name(&mut head, name);
+    let rest = continuations(&mut head, name);
     let rings = writer.rings();
     rings.push(state.ring, head);
     for chunk in rest {

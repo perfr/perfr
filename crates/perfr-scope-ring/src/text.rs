@@ -33,48 +33,79 @@ use std::collections::HashMap;
 /// last record is flagged [`flags::CUT`] so the reader knows. The bytes need
 /// not be UTF-8; they are only ever sliced, and decoded once rejoined.
 pub fn split_name(head: &mut ScopeEvent, name: impl AsRef<[u8]>) -> Vec<ScopeEvent> {
-    let name = name.as_ref();
+    continuations(head, name.as_ref()).collect()
+}
+
+/// As [`split_name`], with the continuation records made one at a time as
+/// they are asked for. This is the form the producer uses: a `Vec` of them
+/// was an allocation, usually a reallocation or two, and a free on the
+/// write path of every scope whose name is longer than the record holds,
+/// which is nearly every `__PRETTY_FUNCTION__` and nearly every log line.
+pub fn continuations<'a>(head: &mut ScopeEvent, name: &'a [u8]) -> Continuations<'a> {
     let cut = name.len() > MAX_NAME_BYTES;
     let bytes = &name[..name.len().min(MAX_NAME_BYTES)];
     let first = bytes.len().min(INLINE_TEXT);
     head.text[..first].copy_from_slice(&bytes[..first]);
     head.text_len = first as u8;
 
-    let mut rest = &bytes[first..];
+    let rest = &bytes[first..];
     if rest.is_empty() {
         head.flags &= !flags::MORE_TEXT;
         if cut {
             head.flags |= flags::CUT;
         }
-        return Vec::new();
+    } else {
+        head.flags |= flags::MORE_TEXT;
     }
-    head.flags |= flags::MORE_TEXT;
+    Continuations {
+        rest,
+        index: 1,
+        cut,
+        timestamp_ns: head.timestamp_ns,
+        scope_id: head.scope_id,
+        tid: head.tid,
+    }
+}
 
-    let mut out = Vec::new();
-    let mut index = 1u32;
-    while !rest.is_empty() {
-        let take = rest.len().min(INLINE_TEXT);
+/// The [`kind::TEXT`] records that carry what did not fit a head, in the
+/// order they must be written. See [`continuations`].
+pub struct Continuations<'a> {
+    rest: &'a [u8],
+    index: u32,
+    cut: bool,
+    timestamp_ns: u64,
+    scope_id: u64,
+    tid: u32,
+}
+
+impl Iterator for Continuations<'_> {
+    type Item = ScopeEvent;
+
+    fn next(&mut self) -> Option<ScopeEvent> {
+        if self.rest.is_empty() {
+            return None;
+        }
+        let take = self.rest.len().min(INLINE_TEXT);
         let mut chunk = ScopeEvent {
-            timestamp_ns: head.timestamp_ns,
-            scope_id: head.scope_id,
-            tid: head.tid,
+            timestamp_ns: self.timestamp_ns,
+            scope_id: self.scope_id,
+            tid: self.tid,
             kind: kind::TEXT,
-            depth: index as u8,
+            depth: self.index as u8,
             flags: 0,
             text_len: take as u8,
             text: [0; 32],
         };
-        chunk.text[..take].copy_from_slice(&rest[..take]);
-        rest = &rest[take..];
-        if !rest.is_empty() {
+        chunk.text[..take].copy_from_slice(&self.rest[..take]);
+        self.rest = &self.rest[take..];
+        if !self.rest.is_empty() {
             chunk.flags |= flags::MORE_TEXT;
-        } else if cut {
+        } else if self.cut {
             chunk.flags |= flags::CUT;
         }
-        out.push(chunk);
-        index += 1;
+        self.index += 1;
+        Some(chunk)
     }
-    out
 }
 
 /// How a reassembled name ended.

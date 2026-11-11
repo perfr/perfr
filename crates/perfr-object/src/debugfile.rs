@@ -107,7 +107,10 @@ pub fn detached_debug_file_under(
         }
     }
     let link = metadata.gnu_debuglink.as_ref()?;
-    let name = Path::new(&link.path);
+    // The link is a file name, by its definition. Joined as written, an
+    // absolute one or one with `..` in it would have every regular file
+    // the service can open read and checksummed on the target's say-so.
+    let name = Path::new(Path::new(&link.path).file_name()?);
     let dir = path.parent().unwrap_or(Path::new("."));
     let under_root = root.join(dir.strip_prefix("/").unwrap_or(dir)).join(name);
     for candidate in [dir.join(name), dir.join(".debug").join(name), under_root] {
@@ -168,6 +171,41 @@ mod tests {
         let found = detached_debug_file_under(&path, &metadata, &empty_root)
             .expect("debug file next to it");
         assert_eq!(found.file_name().unwrap(), "hello_world_elf.debug");
+    }
+
+    /// The link is a file name. One that is a path -- absolute, or
+    /// climbing out with `..` -- must not send the lookup to read and
+    /// checksum whatever file it names.
+    #[test]
+    fn a_debuglink_that_is_a_path_is_looked_up_by_its_file_name_only() {
+        let base = std::env::temp_dir().join(format!("perfr-debuglink-path-{}", std::process::id()));
+        let bin = base.join("bin");
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let outside = elsewhere.join("prog.debug");
+        std::fs::write(&outside, b"not next to the program").unwrap();
+        let checksum = crc32_file(&outside).unwrap();
+        let program = bin.join("prog");
+        let no_root = base.join("no-debug-root");
+        let linked = |link: &str| {
+            let metadata = ElfMetadata {
+                gnu_debuglink: Some(crate::GnuDebugLink { path: link.to_owned(), crc32_checksum: checksum }),
+                ..Default::default()
+            };
+            detached_debug_file_under(&program, &metadata, &no_root)
+        };
+
+        assert_eq!(linked("../elsewhere/prog.debug"), None);
+        assert_eq!(linked(outside.to_str().unwrap()), None);
+        assert_eq!(linked(".."), None);
+        // The same link does find a file of that name where links are
+        // looked for: beside the program.
+        let beside = bin.join("prog.debug");
+        std::fs::copy(&outside, &beside).unwrap();
+        assert_eq!(linked("../elsewhere/prog.debug"), Some(beside.clone()));
+        assert_eq!(linked("prog.debug"), Some(beside));
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

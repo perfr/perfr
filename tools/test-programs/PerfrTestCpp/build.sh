@@ -11,10 +11,12 @@ set -euo pipefail
 cd "$(dirname "$0")"
 ROOT=$(git -C . rev-parse --show-toplevel)
 INCLUDE="$ROOT/crates/perfr-api/include"
-API_LIBRARY="$ROOT/target/release/libperfr.so"
-if [[ $(uname -s) == Darwin ]]; then API_LIBRARY="$ROOT/target/release/libperfr.dylib"; fi
-[ -f "$API_LIBRARY" ] || (cd "$ROOT" && cargo build --release -p perfr-api)
 if [[ ${PERFR_STATIC:-0} == 1 ]]; then
+  # The static build is the only one that needs a library at build time, and
+  # the one it links is perfr-api's archive. The guard used to look for
+  # libperfr.so, which is perfr-lib's output: with that present and the
+  # archive absent it built nothing and the link failed.
+  [ -f "$ROOT/target/release/libperfr_api.a" ] || (cd "$ROOT" && cargo build --release -p perfr-api)
   NATIVE_LIBS=(-lpthread -ldl -lm)
   if [[ $(uname -s) == Darwin ]]; then NATIVE_LIBS=(-lSystem -liconv); fi
   ${CXX:-c++} -O2 -g -std=c++17 -Wall -Wextra -DPERFR_STATIC -I"$INCLUDE" \

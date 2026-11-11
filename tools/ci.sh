@@ -17,7 +17,8 @@
 #   test     cargo test over the workspace, under a memory cap
 #   musl     the static release build of the service, as shipped
 #   wasm     the viewer compiled for wasm32
-#   docs     crates/README.md names every crate directory
+#   docs     crates/README.md names every crate directory, and the Unreal
+#            plugin's copy of perfr.h is the header it was copied from
 #
 # fmt and clippy count what they find and pass anyway: the tree is not clean
 # under either yet, and a gate that starts red only teaches people to ignore
@@ -144,6 +145,16 @@ step_docs() {
     fi
   done
   [ "$missing" -eq 0 ] && echo "crates/README.md names every crate"
+  # The Unreal plugin carries its own perfr.h so it can be dropped into a
+  # project as is. Nothing else notices when the two drift apart.
+  local header=crates/perfr-api/include/perfr.h
+  local copy=integrations/unreal/PerfrProfiler/Source/PerfrProfiler/Public/perfr.h
+  if cmp -s "$header" "$copy"; then
+    echo "the Unreal plugin's perfr.h matches $header"
+  else
+    echo "$copy differs from $header: run integrations/unreal/sync-perfr-header.sh"
+    missing=1
+  fi
   return "$missing"
 }
 

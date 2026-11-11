@@ -53,7 +53,12 @@ pub fn summarize(
         if key.is_scheduler() || !seen.insert((key.pid, key.tid)) {
             continue;
         }
-        let name = intern.get(key.tid).unwrap_or("");
+        // A thread the names table does not know has no name. Only the
+        // demo and bench producers name theirs by interning a string
+        // under the tid. Everywhere else a string id is a frame or a scope,
+        // and a tid can be the same number: the thread was then listed,
+        // and matched by `q`, under some function's name.
+        let name = if synthetic_pid(key.pid) { intern.get(key.tid).unwrap_or("") } else { "" };
         if thread_match(&needle, key.pid, key.tid, name, process_name(key.pid)) {
             thread_rows.push(json!({
                 "pid": key.pid,
@@ -156,6 +161,12 @@ pub fn summarize(
     })
 }
 
+/// A process of the demo or the bench producer.
+fn synthetic_pid(pid: u32) -> bool {
+    pid == crate::bench::BENCH_PID
+        || crate::demo::DEMO_PROCESSES.iter().chain(crate::demo::REMOTE_PROCESSES).any(|(demo, _)| *demo == pid)
+}
+
 struct ScopeRow {
     scope_id: u32,
     pid: u32,
@@ -239,5 +250,35 @@ mod tests {
         assert_eq!(all["cores"][1]["busy"], 1.0);
         let named = summarize(&index, &intern, &threads, &processes, 0, 1_000, "box");
         assert_eq!(named["threads"][0]["process"], "box3d");
+    }
+
+    #[test]
+    fn a_thread_nobody_named_is_not_given_the_string_whose_id_is_its_tid() {
+        let mut index = TrackIndex::default();
+        let mut intern = InternTable::default();
+        // String ids are frame and scope names; a real capture's start at
+        // 1 << 20, and Linux tids go four times as high.
+        let tid = (1 << 20) + 1_424;
+        intern.insert_id(tid, "physics::solve_contacts");
+        intern.insert_id(9, "Tick");
+        index.insert(ev(100, 400, 4242, tid, kind::API_SCOPE, 0, 9));
+        let all = summarize(&index, &intern, &[], &[], 0, 1_000, "");
+        assert_eq!(all["thread_total"], 1);
+        assert_eq!(all["threads"][0]["tid"], tid);
+        assert_eq!(all["threads"][0]["name"], "", "named after a function that happens to have its number");
+        // Nor is it found by that function's name.
+        let found = summarize(&index, &intern, &[], &[], 0, 1_000, "solve_contacts");
+        assert_eq!(found["thread_total"], 0, "{}", found["threads"]);
+
+        // The demo and the bench do name their threads that way, and only
+        // that way: theirs keep their names.
+        let mut index = TrackIndex::default();
+        intern.insert_id(100, "Main");
+        intern.insert_id(crate::bench::BENCH_TID_BASE, "bench-0");
+        index.insert(ev(100, 400, crate::demo::DEMO_PID, 100, kind::API_SCOPE, 0, 9));
+        index.insert(ev(100, 400, crate::bench::BENCH_PID, crate::bench::BENCH_TID_BASE, kind::API_SCOPE, 0, 9));
+        let demo = summarize(&index, &intern, &[], &[], 0, 1_000, "");
+        let names: Vec<&str> = demo["threads"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["Main", "bench-0"]);
     }
 }

@@ -179,19 +179,6 @@ fn gpu_events(event: &WireEvent) -> Vec<LiveEvent> {
     out
 }
 
-/// Calls per second past which a hooked function is switched off
-/// mid-capture; 0 means never. The persisted user setting (on at 100k by
-/// default; the viewer's Settings and `PUT /api/settings` change it, and it
-/// is kept in `~/.config/perfr/settings.json`) unless the capture request
-/// carries its own `max_hook_calls_per_s`. Both engines enforce it: the
-/// Frida agent in the target, the uprobe session by disabling probes.
-pub fn max_hook_calls_per_s(body: &str, service: &LiveService) -> u64 {
-    let requested = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| value.get("max_hook_calls_per_s").and_then(|v| v.as_u64()));
-    requested.unwrap_or_else(|| service.settings().effective_max_hook_calls_per_s())
-}
-
 /// Interns function names into the viewer's table, handing back the id the
 /// LiveEvent carries. The viewer renders the name; we only allocate ids.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -625,55 +612,71 @@ fn hook_list_lines(pid: i32, engine: crate::frida::Engine, hooks: &[HookSpec], s
     lines
 }
 
-/// Whether the capture asked to see every process on the machine.
+/// What the capture request asks for, read once from the body the viewer
+/// posts (the server's `StartBody`, as JSON).
 ///
-/// Absent means no, which is what an older viewer sends: the narrow view is
-/// the safe default, since the widest one buries the target.
-fn wants_all_processes(body: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| value.get("show_all_processes").and_then(|v| v.as_bool()))
-        .unwrap_or(false)
+/// Every field has the default an older viewer gets by not sending it, and
+/// a body that is not JSON is all defaults: the request then fails on its
+/// pid like any other with none.
+#[derive(Debug, PartialEq)]
+struct StartRequest {
+    pid: i32,
+    /// `dynamic_instrumentation_method`, as sent; see `frida::Engine::parse`.
+    method: String,
+    /// The function ids ticked in the hook picker.
+    function_ids: Vec<u64>,
+    /// Every process on the machine, not just the target. Absent means no:
+    /// the narrow view is the safe default, since the widest one buries the
+    /// target.
+    show_all_processes: bool,
+    /// Start with auto-profiling on. Absent means no.
+    auto_profile: bool,
+    /// The uprobe duplicate filter. Absent means on: the filter is the fix,
+    /// the switch exists to see what it does.
+    uprobe_duplicate_filter: bool,
+    /// This capture's own auto-unhook limit, when the request carries one;
+    /// see [`StartRequest::max_hook_calls_per_s`].
+    max_hook_calls_per_s: Option<u64>,
 }
 
-/// The start body asks for auto-profiling. Absent means no.
-fn wants_auto_profile(body: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| value.get("auto_profile").and_then(|v| v.as_bool()))
-        .unwrap_or(false)
-}
+impl StartRequest {
+    fn parse(body: &str) -> StartRequest {
+        let value = serde_json::from_str::<serde_json::Value>(body).unwrap_or(serde_json::Value::Null);
+        let flag = |name: &str| value.get(name).and_then(|v| v.as_bool());
+        StartRequest {
+            pid: value.get("pid").and_then(|p| p.as_i64()).unwrap_or(0) as i32,
+            method: value
+                .get("dynamic_instrumentation_method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            function_ids: value
+                .get("instrumented_functions")
+                .and_then(|v| v.as_array())
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter_map(|entry| entry.get("function_id").and_then(|id| id.as_u64()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            show_all_processes: flag("show_all_processes").unwrap_or(false),
+            auto_profile: flag("auto_profile").unwrap_or(false),
+            uprobe_duplicate_filter: flag("uprobe_duplicate_filter").unwrap_or(true),
+            max_hook_calls_per_s: value.get("max_hook_calls_per_s").and_then(|v| v.as_u64()),
+        }
+    }
 
-/// Whether the uprobe duplicate filter is on for this capture. Absent means
-/// on: the filter is the fix, the switch exists to see what it does.
-fn wants_duplicate_filter(body: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| value.get("uprobe_duplicate_filter").and_then(|v| v.as_bool()))
-        .unwrap_or(true)
-}
-
-/// The function ids and method the viewer put in the capture request.
-fn hook_request(body: &str) -> (Vec<u64>, String) {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
-        return (Vec::new(), String::new());
-    };
-    let ids = value
-        .get("instrumented_functions")
-        .and_then(|v| v.as_array())
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| entry.get("function_id").and_then(|id| id.as_u64()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let method = value
-        .get("dynamic_instrumentation_method")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    (ids, method)
+    /// Calls per second past which a hooked function is switched off
+    /// mid-capture; 0 means never. The persisted user setting (on at 100k by
+    /// default; the viewer's Settings and `PUT /api/settings` change it, and
+    /// it is kept in `~/.config/perfr/settings.json`) unless the capture
+    /// request carries its own `max_hook_calls_per_s`. Both engines enforce
+    /// it: the Frida agent in the target, the uprobe session by disabling
+    /// probes.
+    fn max_hook_calls_per_s(&self, service: &LiveService) -> u64 {
+        self.max_hook_calls_per_s.unwrap_or_else(|| service.settings().effective_max_hook_calls_per_s())
+    }
 }
 
 /// A scheduling slice becomes two events: the core lane it occupied, and the
@@ -3389,21 +3392,18 @@ pub fn run_on(
     service.set_hooks(ControlHooks {
         list_processes_json: Arc::new(list_processes_json),
         start_capture: Arc::new(move |body: &str| {
-            // The viewer posts a StartBody; the pid is what we need.
-            let pid = serde_json::from_str::<serde_json::Value>(body)
-                .ok()
-                .and_then(|value| value.get("pid").and_then(|p| p.as_i64()))
-                .unwrap_or(0) as i32;
-            let engine = crate::frida::Engine::parse(&hook_request(body).1)?;
+            let request = StartRequest::parse(body);
+            let pid = request.pid;
+            let engine = crate::frida::Engine::parse(&request.method)?;
             // Auto-profiling hooks and unhooks mid-capture, which only the
             // uprobe session can do; a capture started with it on uses it for
             // every hook.
             #[cfg(target_os = "linux")]
-            let engine = if wants_auto_profile(body) { crate::frida::Engine::Uprobes } else { engine };
-            if cfg!(any(target_os = "macos", target_os = "windows")) && engine == crate::frida::Engine::Uprobes && !hook_request(body).0.is_empty() {
+            let engine = if request.auto_profile { crate::frida::Engine::Uprobes } else { engine };
+            if cfg!(any(target_os = "macos", target_os = "windows")) && engine == crate::frida::Engine::Uprobes && !request.function_ids.is_empty() {
                 return Err("Kernel uprobes are only available on Linux; select Frida".into());
             }
-            if cfg!(target_os = "windows") && wants_auto_profile(body) {
+            if cfg!(target_os = "windows") && request.auto_profile {
                 return Err("Auto-profiling is not available on Windows yet; pick functions to hook".into());
             }
             let mut worker = start_worker.lock().map_err(|_| "capture worker poisoned".to_string())?;
@@ -3429,10 +3429,10 @@ pub fn run_on(
             // Whatever the viewer ticked in the hook picker. The picker only
             // offers functions once symbols are ready, so an index is there
             // whenever the list is non-empty.
-            let (ids, _method) = hook_request(body);
-            let show_all_processes = wants_all_processes(body);
-            let uprobe_duplicate_filter = wants_duplicate_filter(body);
-            let max_hook_calls_per_s = max_hook_calls_per_s(body, &start_service);
+            let ids = &request.function_ids;
+            let show_all_processes = request.show_all_processes;
+            let uprobe_duplicate_filter = request.uprobe_duplicate_filter;
+            let max_hook_calls_per_s = request.max_hook_calls_per_s(&start_service);
             let mut hooks = Vec::new();
             // Per-hook size and safety verdict, in the same order as `hooks`,
             // gathered while the index is here so the crash journal can name a
@@ -4476,11 +4476,80 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_show_all_flag_means_the_narrow_view() {
-        // What an older viewer sends. The default has to be the safe one.
-        assert!(!wants_all_processes(r#"{"pid":7}"#));
-        assert!(!wants_all_processes("not json at all"));
-        assert!(!wants_all_processes(r#"{"pid":7,"show_all_processes":false}"#));
-        assert!(wants_all_processes(r#"{"pid":7,"show_all_processes":true}"#));
+    fn a_capture_request_is_read_field_by_field_with_an_older_viewers_defaults() {
+        let request = |pid: i32| StartRequest {
+            pid,
+            method: String::new(),
+            function_ids: Vec::new(),
+            show_all_processes: false,
+            auto_profile: false,
+            uprobe_duplicate_filter: true,
+            max_hook_calls_per_s: None,
+        };
+        // What the server sends: its typed body, as JSON.
+        let full = perfr_live_server::http::StartBody {
+            pid: 4242,
+            enable_api: true,
+            context_switches: true,
+            thread_states: true,
+            sampling: true,
+            samples_per_second: 1000.0,
+            unwinding: "dwarf".into(),
+            dynamic_instrumentation_method: "kernel_uprobes".into(),
+            instrumented_functions: Vec::new(),
+            show_all_processes: true,
+            uprobe_duplicate_filter: false,
+            max_hook_calls_per_s: Some(5),
+            auto_profile: true,
+        };
+        assert_eq!(
+            StartRequest::parse(&full.to_json()),
+            StartRequest {
+                method: "kernel_uprobes".into(),
+                show_all_processes: true,
+                auto_profile: true,
+                uprobe_duplicate_filter: false,
+                max_hook_calls_per_s: Some(5),
+                ..request(4242)
+            }
+        );
+        // What an older viewer sends, and what is not a request at all.
+        assert_eq!(StartRequest::parse(r#"{"pid":7}"#), request(7));
+        for not_a_request in ["not json at all", "", "[]", r#"{"pid":"7"}"#] {
+            assert_eq!(StartRequest::parse(not_a_request), request(0), "{not_a_request}");
+        }
+        // A field of the wrong type is an absent field.
+        assert_eq!(
+            StartRequest::parse(
+                r#"{"pid":-3,"show_all_processes":"yes","auto_profile":1,"uprobe_duplicate_filter":null,
+                    "max_hook_calls_per_s":-1,"dynamic_instrumentation_method":7,"instrumented_functions":{"function_id":1}}"#
+            ),
+            request(-3)
+        );
+        // Hook ids: the entries that carry a numeric id, in order.
+        assert_eq!(
+            StartRequest::parse(
+                r#"{"pid":7,"dynamic_instrumentation_method":"frida","max_hook_calls_per_s":0,"instrumented_functions":
+                    [{"function_id":18446744073709551615},{"function_id":"x"},{"name":"f"},{"function_id":12}]}"#
+            ),
+            StartRequest {
+                method: "frida".into(),
+                function_ids: vec![u64::MAX, 12],
+                max_hook_calls_per_s: Some(0),
+                ..request(7)
+            }
+        );
+    }
+
+    #[test]
+    fn a_requests_own_call_limit_wins_over_the_setting() {
+        let service = LiveService::new(ServerConfig { ring_buffer_bytes: 1 << 20, ..Default::default() }).unwrap();
+        let setting = service.settings().effective_max_hook_calls_per_s();
+        assert_eq!(StartRequest::parse(r#"{"pid":7}"#).max_hook_calls_per_s(&service), setting);
+        assert_eq!(StartRequest::parse(r#"{"pid":7,"max_hook_calls_per_s":0}"#).max_hook_calls_per_s(&service), 0);
+        assert_eq!(
+            StartRequest::parse(r#"{"pid":7,"max_hook_calls_per_s":250000}"#).max_hook_calls_per_s(&service),
+            250_000
+        );
     }
 }

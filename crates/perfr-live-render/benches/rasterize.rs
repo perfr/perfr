@@ -6,7 +6,8 @@
 //!
 //! The pixel-column path must stay close to O(width log n). The naive path is
 //! O(scopes) and is included so a regression is visible in the HTML report.
-//! Extra groups measure Y-cull and instanced early-out (CPU prepare only).
+//! Extra groups measure Y-cull, the LOD decision, a fully zoomed-out view
+//! and a lane with overlap (CPU prepare only).
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use perfr_live_event::{kind, LiveEvent};
@@ -37,35 +38,6 @@ fn tall_stack(threads: u32, per: usize) -> TrackIndex {
                 name_id: t * 1000 + i as u32,
             });
         }
-    }
-    idx
-}
-
-fn long_scope_lane(later: usize) -> TrackIndex {
-    let mut idx = TrackIndex::default();
-    idx.insert(LiveEvent {
-        start_ns: 0,
-        duration_ns: 10_000_000,
-        tid: 1,
-        pid: 1,
-        kind: kind::API_SCOPE,
-        depth: 0,
-        extra: 0,
-        _pad: 0,
-        name_id: 1,
-    });
-    for i in 0..later {
-        idx.insert(LiveEvent {
-            start_ns: 10_000_000 + i as u64 * 20,
-            duration_ns: 10,
-            tid: 1,
-            pid: 1,
-            kind: kind::API_SCOPE,
-            depth: 0,
-            extra: 0,
-            _pad: 0,
-            name_id: 2 + i as u32,
-        });
     }
     idx
 }
@@ -124,7 +96,7 @@ fn collect_y_cull(c: &mut Criterion) {
                 width,
                 &layout,
                 None,
-                CollectOpts::full_walk(),
+                CollectOpts::default(),
             ))
         });
     });
@@ -137,60 +109,7 @@ fn collect_y_cull(c: &mut Criterion) {
                 width,
                 &layout,
                 None,
-                CollectOpts {
-                    y_cull: Some(YCull::new(0.0, 80.0)),
-                    early_out: true,
-                    inline: false,
-                    per_lane_spans: false,
-                },
-            ))
-        });
-    });
-    group.finish();
-}
-
-/// Long scope fills the window; later scopes sit past t1.
-fn collect_early_out(c: &mut Criterion) {
-    let idx = long_scope_lane(50_000);
-    let keys: Vec<_> = idx.lanes().map(|(k, _)| k).collect();
-    let layout = stacked_layout(&keys, 0.0);
-    let t0 = 100u64;
-    let t1 = 5_000u64;
-    let width = 1280.0;
-    let mut group = c.benchmark_group("collect_early_out");
-    group.bench_function("walk", |b| {
-        b.iter(|| {
-            black_box(collect_instances_layout_opts(
-                &idx,
-                t0,
-                t1,
-                width,
-                &layout,
-                None,
-                CollectOpts {
-                    y_cull: None,
-                    early_out: false,
-                    inline: false,
-                    per_lane_spans: false,
-                },
-            ))
-        });
-    });
-    group.bench_function("early_out", |b| {
-        b.iter(|| {
-            black_box(collect_instances_layout_opts(
-                &idx,
-                t0,
-                t1,
-                width,
-                &layout,
-                None,
-                CollectOpts {
-                    y_cull: None,
-                    early_out: true,
-                    inline: false,
-                    per_lane_spans: false,
-                },
+                CollectOpts { y_cull: Some(YCull::new(0.0, 80.0)), ..CollectOpts::default() },
             ))
         });
     });
@@ -332,7 +251,6 @@ criterion_group!(
     vs_scopes,
     vs_pixels,
     collect_y_cull,
-    collect_early_out,
     choose_lod_sample
 );
 criterion_main!(benches);

@@ -47,10 +47,14 @@ impl YCull {
     }
 }
 
-/// Collect knobs. Default: early-out on, no Y-cull (full stack).
+/// Collect knobs. Default: no Y-cull (full stack), walked on the pool.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CollectOpts {
     pub y_cull: Option<YCull>,
+    /// Has no effect. It used to stop a lane's walk after a scope that
+    /// reaches the right edge of the window, which is where the walk stops
+    /// anyway: the next event starts at or after the window's end. The
+    /// field stays until the callers that set it stop doing so.
     pub early_out: bool,
     /// Walk the lanes on the calling thread instead of the pool. The caller
     /// decides from its own measurements: on a small window the hand-off to
@@ -68,17 +72,6 @@ impl Default for CollectOpts {
         Self {
             y_cull: None,
             early_out: true,
-            inline: false,
-            per_lane_spans: false,
-        }
-    }
-}
-
-impl CollectOpts {
-    pub fn full_walk() -> Self {
-        Self {
-            y_cull: None,
-            early_out: false,
             inline: false,
             per_lane_spans: false,
         }
@@ -284,7 +277,6 @@ struct RowKey {
     t1: u64,
     width_bits: u32,
     y_bits: u32,
-    early_out: bool,
     intern_len: usize,
 }
 
@@ -696,19 +688,14 @@ mod value_lod_tests {
             100.0,
             &layout,
             None,
-            CollectOpts {
-                y_cull: Some(YCull::new(y0, y0 + h0)),
-                early_out: true,
-                inline: false,
-                per_lane_spans: false,
-            },
+            CollectOpts { y_cull: Some(YCull::new(y0, y0 + h0)), ..CollectOpts::default() },
         );
         assert_eq!(culled.instances.len(), 1);
         assert_eq!(culled.instances[0].name_id, all.instances[0].name_id);
     }
 
     #[test]
-    fn early_out_emits_one_when_scope_fills_window() {
+    fn a_scope_that_fills_the_window_is_its_lanes_only_instance() {
         let mut idx = TrackIndex::default();
         idx.insert(scope(0, 10_000, 1, 1));
         for i in 0..64u64 {
@@ -721,12 +708,7 @@ mod value_lod_tests {
             200.0,
             &stacked_layout(&idx.lanes().map(|(k, _)| k).collect::<Vec<_>>(), 0.0),
             None,
-            CollectOpts {
-                y_cull: None,
-                early_out: true,
-                inline: false,
-                per_lane_spans: false,
-            },
+            CollectOpts::default(),
         );
         assert_eq!(wide.instances.len(), 1);
         assert!(wide.instances[0].w >= 199.0);
@@ -779,12 +761,7 @@ mod value_lod_tests {
             40.0,
             &layout,
             None,
-            CollectOpts {
-                y_cull: Some(YCull::new(80.0, 200.0)),
-                early_out: true,
-                inline: false,
-                per_lane_spans: false,
-            },
+            CollectOpts { y_cull: Some(YCull::new(80.0, 200.0)), ..CollectOpts::default() },
         );
         assert!(inst.instances.iter().all(|i| i.kind != kind::VALUE));
     }
@@ -916,7 +893,6 @@ pub fn collect_instances_cached(
         t1,
         width_bits: width.to_bits(),
         y_bits: y.to_bits(),
-        early_out: opts.early_out,
         intern_len,
     };
     // The walk reads the cache; the writes wait until it is over.
@@ -947,7 +923,6 @@ pub fn collect_instances_cached(
                 y,
                 h,
                 intern,
-                opts.early_out,
                 &mut row,
             );
         }
@@ -1173,7 +1148,6 @@ fn push_lane_instances(
     y: f32,
     h: f32,
     intern: Option<&InternTable>,
-    early_out: bool,
     out: &mut Vec<ScopeInstance>,
 ) {
     let mut i = lane.first_ending_after(t0);
@@ -1186,21 +1160,7 @@ fn push_lane_instances(
             i += 1;
             continue;
         }
-        let inst = instance_for_event(e, t0, t1, span, width, y, h, radius, intern);
-        let covers_rest = e.end_ns() >= t1 && inst.x + inst.w + 0.5 >= width;
-        out.push(inst);
-        if early_out && covers_rest {
-            // Non-overlapping: next.start >= e.end >= t1, so this is one
-            // binary search + one emit. Still peek: do not skip a later
-            // scope that starts before t1 and is not covered by e.end.
-            let next = lane.events().get(i + 1);
-            if next
-                .map(|n| n.start_ns >= t1 || n.start_ns >= e.end_ns())
-                .unwrap_or(true)
-            {
-                break;
-            }
-        }
+        out.push(instance_for_event(e, t0, t1, span, width, y, h, radius, intern));
         i += 1;
     }
 }

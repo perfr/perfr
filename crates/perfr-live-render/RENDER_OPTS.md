@@ -18,8 +18,6 @@ measurement window (this run).
 |---|---|---|---|
 | `collect_y_cull/no_cull` | **99.8 µs** | — | 200 lanes × 64 events, full stack |
 | `collect_y_cull/y_cull_small_view` | **2.61 µs** | **38× faster** | same index, visible Y = 80 px + pad |
-| `collect_early_out/walk` | 130.3 ns | — | long scope fills `[100, 5000)`, 50k later events past t1 |
-| `collect_early_out/early_out` | 130.2 ns | ~1.00× (wash) | already one `first_ending_after` + one emit |
 | `choose_lod_sample/first8` | 118 ns | — | old BTreeMap first-8 (misses dense row) |
 | `choose_lod_sample/density` | 245 ns | 2.1× slower | scores all lanes by `len()`; still << 1 µs |
 | `rasterize_vs_pixels/pixel_columns/1280` | **5.86 ms** | — | 1e6 scopes, no-regress check |
@@ -39,11 +37,13 @@ egui idle-chrome widget skip; on-screen FPS / `fps_sweep`.
    Y-cull is on (same time window is not the same visible set). VALUE
    graphs use `value_lanes_in_view` (egui polylines, never SDF). Header
    rows use their own clip, not the body-leaf window.
-2. **Instanced early-out.** After `first_ending_after(t0)`, if that scope
-   covers `[t0, t1)` and its (min-1px) width spans the remaining view, the
-   lane stops — unless a later scope still starts before `t1` and is not
-   covered. On non-overlapping fill this matches the existing walk (see
-   table). The flag + test keep the path from regressing.
+2. **Instanced early-out (removed).** After `first_ending_after(t0)`, if
+   that scope covered `[t0, t1)` the lane's walk stopped early, unless a
+   later scope still started before `t1`. That is exactly when the walk
+   stops by itself on its next step, so the bench measured 130.3 ns
+   against 130.2 ns and the two listings were always the same. The check
+   is gone; `CollectOpts::early_out` is still there, and does nothing,
+   until the viewer stops setting it.
 3. **Dirty-flag upload.** `GpuDirtyKey` covers `(t0,t1,width,scroll,view_h,
    dest,cull_y0/y1,scale,layout_gen,lod,events,selected,hover,search)`.
    `UploadMode::Skip` emits `TimelinePayload::Keep` (uniforms + `u_time`

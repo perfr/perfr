@@ -64,8 +64,10 @@ try {
         if (-not (Test-Path (Join-Path $root $required))) { Die "archive is missing $required" }
     }
     New-Item -ItemType Directory -Force $installDir | Out-Null
-    # A running service holds its files; stop it before replacing them.
-    foreach ($procName in 'perfr', 'perfr-frida-helper', 'perfr-gpu-helper') {
+    # A running service or helper holds its files; stop them before replacing
+    # any. perfr-hook is the helper's name today, the other two are what
+    # older installs called it and the GPU helper.
+    foreach ($procName in 'perfr', 'perfr-hook', 'perfr-frida-helper', 'perfr-gpu-helper') {
         Get-Process -Name $procName -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$installDir*" } | ForEach-Object {
             Say "stopping $procName (pid $($_.Id)) in $installDir"
             $_ | Stop-Process -Force

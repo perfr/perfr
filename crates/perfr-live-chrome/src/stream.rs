@@ -448,7 +448,11 @@ impl ChromeStream {
         match self.raw[self.pos] {
             b']' => {
                 self.pos += 1;
-                if self.pending == PendingKey::TraceEvents {
+                // An array under any key (`traceEvents`, `samples`,
+                // `systemTraceEvents`) closes back into the object. Only
+                // the legacy top-level array, which has no key, ends the
+                // document.
+                if self.pending != PendingKey::None {
                     self.pending = PendingKey::None;
                     self.phase = Phase::AfterValue;
                 } else {
@@ -894,6 +898,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_top_level_keys_load_in_any_order() {
+        let keys = [
+            r#""traceEvents":[{"name":"t","ph":"i","ts":1,"pid":1,"tid":1}]"#,
+            r#""systemTraceEvents":[{"name":"s","ph":"i","ts":2,"pid":2,"tid":2}]"#,
+            r#""samples":[{"name":"p","ts":3,"pid":3,"tid":3,"sf":"1"}]"#,
+            r#""stackFrames":{"1":{"name":"leaf"}}"#,
+        ];
+        let mut orders = Vec::new();
+        for a in 0..4 {
+            for b in 0..4 {
+                for c in 0..4 {
+                    for d in 0..4 {
+                        let o = [a, b, c, d];
+                        if (0..4).all(|k| o.contains(&k)) {
+                            orders.push(o);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(orders.len(), 24);
+        for o in orders {
+            let text = format!("{{{}}}", o.map(|k| keys[k]).join(","));
+            let (ing, events) =
+                load_like_the_viewer(text.as_bytes()).unwrap_or_else(|| panic!("{text}: the load never finishes"));
+            let mut names: Vec<&str> = events.iter().filter_map(|e| ing.intern.get(e.name_id)).collect();
+            names.sort_unstable();
+            names.dedup();
+            assert_eq!(names, ["leaf", "s", "t"], "{text}");
+        }
+        // What a writer that sorts its keys produces when it has no samples.
+        let text = r#"{"samples":[],"traceEvents":[{"name":"t","ph":"i","ts":1,"pid":1,"tid":1}]}"#;
+        let (_, events) = load_like_the_viewer(text.as_bytes()).expect("finishes");
+        assert_eq!(events.len(), 1);
     }
 
     #[test]

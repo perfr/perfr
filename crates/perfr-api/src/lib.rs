@@ -95,15 +95,30 @@ pub fn capturing() -> bool {
 /// taken only on the init path, never on the hot one.
 static INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Set by [`shutdown`]: the segment's name is gone, so no capture that
+/// starts from here on can find this process, though the segment is still
+/// mapped and written. [`init`] has work to do again.
+static UNLINKED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this process has a segment a service can find by its name.
+fn findable() -> bool {
+    !SEGMENT.load(Ordering::Acquire).is_null() && !UNLINKED.load(Ordering::Acquire)
+}
+
 /// Creates this process's segment. Idempotent; returns `Err(errno)` if the
 /// segment could not be made. Safe to call from several threads at once.
+///
+/// After [`shutdown`] it makes a new one. The old segment's name cannot be
+/// put back, so the old segment stays mapped for any thread still inside a
+/// call, marked as superseded for a capture still reading it, and is
+/// written to no more.
 pub fn init() -> Result<(), i32> {
     if FORK_CHILD.load(Ordering::Relaxed) { return Err(libc::ENOTSUP); }
-    if !SEGMENT.load(Ordering::Acquire).is_null() {
+    if findable() {
         return Ok(());
     }
     let _guard = INIT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !SEGMENT.load(Ordering::Acquire).is_null() {
+    if findable() {
         return Ok(());
     }
     // Windows has no fork, so there is nothing to disarm in a child there.
@@ -119,8 +134,21 @@ pub fn init() -> Result<(), i32> {
         .is_ok_and(|r| r.api_descriptor() != 0) { return Err(libc::EALREADY); }
     let writer = ScopeRingWriter::create_default().map_err(|e| e.raw_os_error().unwrap_or(-1))?;
     let writer = Box::leak(Box::new(writer));
-    SEGMENT.store(writer, Ordering::Release);
+    let replaced = SEGMENT.swap(writer, Ordering::AcqRel);
     writer.publish_api_descriptor(&DYNAMIC_API as *const DynamicApiV1 as u64);
+    UNLINKED.store(false, Ordering::Release);
+    // SAFETY: a non-null pointer here is a writer an earlier init leaked.
+    if let Some(replaced) = unsafe { replaced.as_ref() } {
+        // Last, so a reader that sees the mark finds the new segment there.
+        replaced.mark_superseded();
+        // SAFETY: the writer is leaked, and this is the one time it is
+        // replaced. Windows keeps the handle: closing it there is what
+        // deletes the file, under any thread still inside a call.
+        #[cfg(unix)]
+        unsafe {
+            replaced.release_lease();
+        }
+    }
     // The writer is leaked, so its `Drop`, the one place the name was
     // removed without being asked, never runs. Windows needs no help: the
     // file there is deleted with its last handle.
@@ -158,8 +186,12 @@ extern "C" fn unlink_at_exit() {
 /// a thread mid-call never dereferences a freed writer.
 pub fn shutdown() {
     if FORK_CHILD.load(Ordering::Relaxed) { return; }
+    // Under the lock, so it cannot remove the name of a segment an `init`
+    // on another thread is in the middle of making.
+    let _guard = INIT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(writer) = segment() {
         writer.unlink();
+        UNLINKED.store(true, Ordering::Release);
     }
 }
 
@@ -652,8 +684,7 @@ mod tests {
     }
 
     /// One segment per process, and these tests share a process, so the
-    /// ones that write are serialised. None calls `shutdown`: it unlinks the
-    /// name, and a later reader in the same process would find nothing.
+    /// ones that write are serialised.
     static WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -766,6 +797,32 @@ mod tests {
                 "binary leaked into a name: {name:?}"
             );
         }
+    }
+
+    #[test]
+    fn init_after_shutdown_makes_the_process_findable_again() {
+        let _serial = WRITES.lock().unwrap_or_else(|p| p.into_inner());
+        init().expect("init");
+        let attached = ScopeRingReader::open(std::process::id()).expect("a capture already reading");
+        shutdown();
+        assert!(!segment_file(std::process::id()).exists(), "shutdown removes the name");
+
+        // A plugin host that reloads, a harness that brackets each test: it
+        // was told 0, and no capture started from here on could find it.
+        init().expect("init again");
+        let service = ScopeRingReader::open(std::process::id()).expect("a later capture finds the process");
+        assert!(attached.superseded(), "the capture reading the old segment is told to move");
+        assert!(!service.superseded());
+        service.set_capturing(true);
+        let h = start(b"after the second init");
+        assert_ne!(h, 0);
+        stop(h);
+        assert!(
+            all_events().iter().any(|e| e.scope_id == h && e.kind == kind::SCOPE_START),
+            "and what the process records goes where that capture reads"
+        );
+        init().expect("and a third is the no-op a second one used to be");
+        assert!(!service.superseded());
     }
 
     #[test]

@@ -80,18 +80,25 @@ impl ContextSwitchManager {
             return SwitchOut::Died;
         }
 
-        // A mismatch happens when in or out switches were lost.
-        if (open.pid.is_some() && pid != -1 && open.pid != Some(pid)) || open.tid != tid {
+        // A mismatch happens when in or out switches were lost. An id of -1
+        // is not a mismatch: it is how an exiting thread's last switch-out
+        // reports an id the kernel can no longer resolve. Which one depends
+        // on the source -- the sched_switch tracepoint loses the pid, while
+        // PERF_RECORD_SWITCH_CPU_WIDE takes both from the sample id, where
+        // the tid of an already unhashed thread reads -1 and the pid stays
+        // valid for as long as the process lives. Rejecting it dropped the
+        // final run interval of every thread.
+        if (open.pid.is_some() && pid != -1 && open.pid != Some(pid)) || (tid != -1 && open.tid != tid) {
             return SwitchOut::NoSlice;
         }
 
-        // A switch-out caused by a thread exiting reports pid -1; prefer the
-        // pid recorded at switch-in, and accept -1 over dropping the slice.
+        // Prefer the ids recorded at switch-in over a -1, and accept a pid of
+        // -1 over dropping the slice.
         let pid_to_set = if pid != -1 { pid } else { open.pid.unwrap_or(-1) };
 
         SwitchOut::Slice(SchedulingSlice {
             pid: pid_to_set,
-            tid,
+            tid: open.tid,
             core,
             duration_ns: timestamp_ns - open.timestamp_ns,
             out_timestamp_ns: timestamp_ns,
@@ -152,6 +159,35 @@ mod tests {
             panic!()
         };
         assert_eq!(slice.pid, -1);
+    }
+
+    /// perf reports the switch-out of a thread that has already been
+    /// unhashed with tid -1 and the pid still valid.
+    #[test]
+    fn exit_switch_out_without_a_tid_takes_the_tid_from_switch_in() {
+        let mut manager = ContextSwitchManager::new();
+        manager.process_context_switch_in(Some(10), 11, 0, 100);
+        assert_eq!(
+            manager.process_context_switch_out(10, -1, 0, 250),
+            SwitchOut::Slice(SchedulingSlice {
+                pid: 10,
+                tid: 11,
+                core: 0,
+                duration_ns: 150,
+                out_timestamp_ns: 250,
+            })
+        );
+
+        // Neither id survived the exit: the open entry supplies both.
+        manager.process_context_switch_in(Some(10), 11, 0, 300);
+        let SwitchOut::Slice(slice) = manager.process_context_switch_out(-1, -1, 0, 400) else {
+            panic!()
+        };
+        assert_eq!((slice.pid, slice.tid), (10, 11));
+
+        // A pid that is present still has to match.
+        manager.process_context_switch_in(Some(10), 11, 0, 500);
+        assert_eq!(manager.process_context_switch_out(99, -1, 0, 600), SwitchOut::NoSlice);
     }
 
     /// The emplace quirk: a second switch-in on the same core keeps the first.

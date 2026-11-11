@@ -303,11 +303,12 @@ pub fn parse_context_switch(bytes: &[u8]) -> Option<ContextSwitch> {
     })
 }
 
-/// Twin of `ReadPerfSampleIdAll`: `sample_id_all` puts the sample id at the
-/// very end of every non-SAMPLE record.
+/// `sample_id_all` puts the sample id at the very end of every non-SAMPLE
+/// record. A record that is nothing but its header and that id is a whole
+/// one: the per-task `PERF_RECORD_SWITCH` is exactly that, 40 bytes.
 pub fn parse_sample_id_all(bytes: &[u8]) -> Option<SampleIdTidTimeStreamidCpu> {
     let start = bytes.len().checked_sub(SampleIdTidTimeStreamidCpu::SIZE)?;
-    if start <= PerfEventHeader::SIZE {
+    if start < PerfEventHeader::SIZE {
         return None;
     }
     SampleIdTidTimeStreamidCpu::parse(&bytes[start..])
@@ -498,6 +499,93 @@ mod tests {
             parse_record_sample(&bytes, SampleFlags::callchain_sample(), true).unwrap();
         assert_eq!(sample.ips_size, 3);
         assert_eq!(sample.ips.unwrap(), vec![0xa0, 0xb0, 0xc0]);
+    }
+
+    /// The id block `sample_id_all` appends: pid, tid, time, stream id, cpu.
+    fn push_sample_id(bytes: &mut Vec<u8>, pid: u32, tid: u32, time: u64, cpu: u32) {
+        push_u32(bytes, pid);
+        push_u32(bytes, tid);
+        push_u64(bytes, time);
+        push_u64(bytes, 9); // stream id
+        push_u32(bytes, cpu);
+        push_u32(bytes, 0);
+    }
+
+    /// `PERF_RECORD_SWITCH_CPU_WIDE`: header, next/prev pid and tid, id.
+    /// 48 bytes, the size the kernel writes for the scheduler rings.
+    fn cpu_wide_switch(misc: u16, pid: u32, tid: u32, time: u64, cpu: u32) -> Vec<u8> {
+        let mut bytes = header(record_type::SWITCH_CPU_WIDE, misc, 48);
+        push_u32(&mut bytes, 4242); // next_prev_pid
+        push_u32(&mut bytes, 4243); // next_prev_tid
+        push_sample_id(&mut bytes, pid, tid, time, cpu);
+        assert_eq!(bytes.len(), 48);
+        bytes
+    }
+
+    #[test]
+    fn a_cpu_wide_switch_is_read_from_its_trailing_id() {
+        let out = parse_context_switch(&cpu_wide_switch(MISC_SWITCH_OUT, 100, 101, 7_000, 5)).unwrap();
+        assert_eq!(
+            out,
+            ContextSwitch { pid: 100, tid: 101, core: 5, timestamp_ns: 7_000, is_switch_out: true }
+        );
+        // The thread it names is the one in the id, not the "next/prev" one
+        // the cpu-wide variant also carries.
+        let into = parse_context_switch(&cpu_wide_switch(0, 100, 101, 7_500, 5)).unwrap();
+        assert!(!into.is_switch_out);
+        assert_eq!((into.pid, into.tid), (100, 101));
+    }
+
+    #[test]
+    fn an_exiting_threads_switch_out_keeps_its_minus_one_tid() {
+        // The kernel can no longer resolve the tid of a thread that has
+        // been unhashed; the pid is still good.
+        let out = parse_context_switch(&cpu_wide_switch(MISC_SWITCH_OUT, 100, u32::MAX, 7_000, 0)).unwrap();
+        assert_eq!((out.pid, out.tid), (100, -1));
+    }
+
+    #[test]
+    fn a_per_task_switch_is_a_header_and_an_id_and_nothing_else() {
+        // PERF_RECORD_SWITCH: 40 bytes, the smallest record there is with
+        // sample_id_all. Both readers of the trailing id must take it.
+        let mut bytes = header(record_type::SWITCH, MISC_SWITCH_OUT, 40);
+        push_sample_id(&mut bytes, 100, 101, 7_000, 2);
+        assert_eq!(bytes.len(), 40);
+        let switch = parse_context_switch(&bytes).unwrap();
+        assert_eq!((switch.tid, switch.core, switch.is_switch_out), (101, 2, true));
+        let id = parse_sample_id_all(&bytes).expect("a record of exactly header + id has an id");
+        assert_eq!(({ id.pid }, { id.tid }, { id.time }, { id.cpu }), (100, 101, 7_000, 2));
+
+        // One byte short of holding both is not a record.
+        assert_eq!(parse_context_switch(&bytes[..39]), None);
+        assert!(parse_sample_id_all(&bytes[..39]).is_none());
+        assert!(parse_sample_id_all(&bytes[..8]).is_none());
+        assert!(parse_sample_id_all(&[]).is_none());
+    }
+
+    #[test]
+    fn a_tracepoint_sample_carries_its_raw_payload() {
+        // What the scheduler tracepoints produce: the id fields, then a
+        // u32 size and that many bytes.
+        let mut bytes = header(record_type::SAMPLE, 0, 0);
+        push_u32(&mut bytes, 100);
+        push_u32(&mut bytes, 101);
+        push_u64(&mut bytes, 7_000);
+        push_u64(&mut bytes, 9);
+        push_u32(&mut bytes, 3);
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, 12);
+        bytes.extend_from_slice(b"twelve bytes");
+        let size = bytes.len();
+        bytes[6..8].copy_from_slice(&(size as u16).to_le_bytes());
+        let flags = SampleFlags { sample_type: sample_bits::TID_TIME_STREAMID_CPU | sample_bits::RAW, regs_user_count: 0 };
+        let sample = parse_record_sample(&bytes, flags, true).unwrap();
+        assert_eq!((sample.pid, sample.tid, sample.time, sample.cpu), (100, 101, 7_000, 3));
+        assert_eq!(sample.raw_data.as_deref(), Some(&b"twelve bytes"[..]));
+        // A size that runs past the record is refused, not read.
+        let mut long = bytes.clone();
+        long[40..44].copy_from_slice(&13u32.to_le_bytes());
+        assert!(parse_record_sample(&long, flags, true).is_none());
     }
 
     #[test]

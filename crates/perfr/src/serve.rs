@@ -1558,16 +1558,23 @@ fn capture_loop(
     let (symbolizer_tx, symbolizer_rx) = std::sync::mpsc::channel::<Symbolizer>();
     let start_symbol_load = |started_ns: &mut Option<u64>| {
         let tx = symbolizer_tx.clone();
+        // Taken before the thread exists: the load reads the maps no
+        // earlier than this, so it knows whatever was mapped before it.
+        let now_ns = crate::now_monotonic_ns();
         let spawned = std::thread::Builder::new().name("perfr-symbolize".to_string()).spawn(move || {
             let _ = tx.send(Symbolizer::for_pid(target_pid));
         });
         match spawned {
-            Ok(_) => *started_ns = Some(crate::now_monotonic_ns()),
+            Ok(_) => *started_ns = Some(now_ns),
             Err(error) => log::warn!("the symbol load could not be started: {error}"),
         }
     };
     if has_target {
         start_symbol_load(&mut symbol_load_started_ns);
+        if symbol_load_started_ns.is_none() {
+            // No symbols are coming: name by address rather than wait.
+            named_through_ns = u64::MAX;
+        }
     }
     // One sampled thread = two per-task rings: the sampling ring, and a
     // task-event ring (`mmap_task`: PERF_RECORD_FORK / EXIT / MMAP for that

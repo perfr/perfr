@@ -532,6 +532,39 @@ mod tests {
         assert_eq!((s.samples.len(), s.threads.len()), (400_000, 4_000));
     }
 
+    /// `bundle`'s zip with its manifest's `format` replaced.
+    fn zip_claiming_format(bundle: &CaptureBundle, format: &str) -> Vec<u8> {
+        let mut entries = read_store_zip(&bundle.to_zip().unwrap()).unwrap();
+        for (name, bytes) in &mut entries {
+            if name.ends_with(crate::MANIFEST_FILE) {
+                let mut manifest: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                manifest["format"] = format.into();
+                *bytes = serde_json::to_vec(&manifest).unwrap();
+            }
+        }
+        let borrowed: Vec<(&str, &[u8])> = entries.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
+        write_store_zip(&borrowed).unwrap()
+    }
+
+    #[test]
+    fn a_capture_in_a_newer_layout_is_refused_by_name_not_read_as_this_one() {
+        let b = sample_bundle();
+        // What this build writes, and a revision of it that only added to it.
+        assert_eq!(CaptureBundle::from_zip(&zip_claiming_format(&b, "perfr-capture/1")).unwrap(), b);
+        assert_eq!(CaptureBundle::from_zip(&zip_claiming_format(&b, "perfr-capture/1.4")).unwrap(), b);
+        // A layout this build has never seen: its tables may have the same
+        // names and mean something else.
+        for format in ["perfr-capture/2", "perfr-capture/10", "perfr-capture/", "perfr-capture/next"] {
+            let zip = zip_claiming_format(&b, format);
+            let error = CaptureBundle::from_zip(&zip).unwrap_err().to_string();
+            assert!(error.contains(format) && error.contains("perfr-capture/1"), "{format}: {error}");
+            let error = crate::slice_bundle_bytes(bytes::Bytes::from(zip), 0, 1_000).unwrap_err().to_string();
+            assert!(error.contains(format), "{format}: {error}");
+        }
+        let error = CaptureBundle::from_zip(&zip_claiming_format(&b, "something else")).unwrap_err().to_string();
+        assert!(error.contains("not a perfr capture"), "{error}");
+    }
+
     #[test]
     fn a_reversed_window_and_an_empty_one_are_fine() {
         let b = sample_bundle();

@@ -679,8 +679,19 @@ pub fn read_manifest(dir: impl AsRef<Path>) -> Result<Manifest, CaptureError> {
 pub fn read_manifest_names(manifest: &[u8]) -> Result<(u32, Vec<ProcessName>, Vec<ThreadName>), CaptureError> {
     let manifest: serde_json::Value = serde_json::from_slice(manifest)?;
     let format = manifest["format"].as_str().unwrap_or_default();
-    if !format.starts_with("perfr-capture/") {
+    let Some(version) = format.strip_prefix("perfr-capture/") else {
         return Err(CaptureError::Manifest(format!("not a perfr capture: format {format:?}")));
+    };
+    // The number after the slash is the layout; a dot and more after it is
+    // a revision that only added to that layout. Any other layout is not
+    // this one with a different label: its tables may carry the same names
+    // and columns and mean something else, and read as this one it would
+    // open as a capture that is quietly wrong.
+    let ours = DATASET_FORMAT.strip_prefix("perfr-capture/").unwrap_or(DATASET_FORMAT);
+    if version.split('.').next() != Some(ours) {
+        return Err(CaptureError::Manifest(format!(
+            "this capture is in format {format:?}, and this perfr reads {DATASET_FORMAT}; a newer perfr may open it"
+        )));
     }
     let b = &manifest["bundle"];
     let processes = b["processes"]

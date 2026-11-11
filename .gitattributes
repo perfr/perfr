@@ -8,3 +8,9 @@
 *.h text eol=lf
 *.py text eol=lf
 *.wgsl text eol=lf
+
+# Parser fixtures are kept byte for byte. Three of the .cpp files here are
+# stored with CRLF, which the *.cpp rule above forbids, so git reported
+# them as modified in every fresh checkout. They are the sources of
+# binaries that are already built and committed; nothing reads them.
+crates/perfr-object/testdata/** -text

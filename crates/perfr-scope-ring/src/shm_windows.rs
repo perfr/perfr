@@ -38,7 +38,7 @@
 //! field is validated before an event is read.
 
 use crate::event::EVENT_SIZE;
-use crate::ring::{self, Header, Rings, MAGIC, MAX_RINGS, VERSION};
+use crate::ring::{self, Header, RingWriter, Rings, MAGIC, MAX_RINGS, VERSION};
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -335,7 +335,7 @@ pub struct ScopeRingWriter {
     /// `FILE_FLAG_DELETE_ON_CLOSE`. Never read; its being open is the point.
     _owner: File,
     mapping: Mapping,
-    rings: Rings,
+    rings: RingWriter,
     pid: u32,
 }
 
@@ -402,7 +402,7 @@ impl ScopeRingWriter {
         // SAFETY: base is a fresh writable mapping of exactly `len` bytes.
         unsafe { ring::init_region(base, ring_count, slots_per_ring, pid) };
         // SAFETY: the region was just initialised at these dimensions.
-        let rings = unsafe { Rings::from_raw(base, ring_count, slots_per_ring) };
+        let rings = unsafe { RingWriter::from_raw(base, ring_count, slots_per_ring) };
         Ok(ScopeRingWriter { _owner: owner, mapping, rings, pid })
     }
 
@@ -419,7 +419,7 @@ impl ScopeRingWriter {
         unsafe { &*self.mapping.base.cast::<Header>() }.superseded.store(1, Ordering::Release);
     }
 
-    pub fn rings(&self) -> &Rings {
+    pub fn rings(&self) -> &RingWriter {
         &self.rings
     }
 

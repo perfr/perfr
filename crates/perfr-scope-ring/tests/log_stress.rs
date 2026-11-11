@@ -27,9 +27,9 @@ impl Region {
         Region { bytes, offset, ring_count, slots }
     }
 
-    fn rings(&self) -> ring::Rings {
+    fn rings(&self) -> ring::RingWriter {
         unsafe {
-            ring::Rings::from_raw(
+            ring::RingWriter::from_raw(
                 self.bytes.as_ptr().add(self.offset) as *mut u8,
                 self.ring_count,
                 self.slots,

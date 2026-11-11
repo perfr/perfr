@@ -69,8 +69,8 @@ pub use event::{flags, kind, ScopeEvent, EVENT_SIZE, INLINE_TEXT, MAX_NAME_BYTES
 pub use intern::NameInterner;
 pub use merge::{drain, drain_from, Cursors, Drain, Producer, RingSlice, BACKSTOP_NS};
 pub use ring::{
-    ring_count_for_threads, ring_for_thread, slots_for_budget, Rings, DEFAULT_RING_COUNT,
-    MAX_RINGS, VERSION,
+    ring_count_for_threads, ring_for_thread, slots_for_budget, RingWriter, Rings,
+    DEFAULT_RING_COUNT, MAX_RINGS, VERSION,
 };
 pub use shm::{
     segment_version, sweep_dead_segments, unlink_segment, ScopeRingReader, ScopeRingWriter,

@@ -396,7 +396,7 @@ impl Lane {
             let col0 = t0.saturating_add((x as f64 * dt) as u64);
             let col1 = t0
                 .saturating_add(((x + 1) as f64 * dt) as u64)
-                .max(col0 + 1);
+                .max(col0.saturating_add(1));
             out[x] = self
                 .overlapping(col0, col1)
                 .map(|e| e.color_for(intern))
@@ -609,12 +609,15 @@ impl TrackIndex {
 
     pub fn time_bounds(&self) -> Option<(u64, u64)> {
         let b = &self.bounds;
-        if b.min_all == u64::MAX {
+        // Asked of the count, not of `min_all` still being at its initial
+        // `u64::MAX`: an event can start there (a JSON `ts` of 1e30
+        // saturates to it), and the `+ 1` below must not overflow for it.
+        if self.events == 0 {
             None
         } else if b.any_real {
-            Some((b.min_real, b.max_real.max(b.min_real + 1)))
+            Some((b.min_real, b.max_real.max(b.min_real.saturating_add(1))))
         } else {
-            Some((b.min_all, b.max_all.max(b.min_all + 1)))
+            Some((b.min_all, b.max_all.max(b.min_all.saturating_add(1))))
         }
     }
 
@@ -1661,6 +1664,31 @@ mod tests {
 #[cfg(test)]
 mod bounds_tests {
     use super::*;
+
+    /// A JSON `"ts":1e30` saturates to the last nanosecond there is. One
+    /// such event must not take the index down with it.
+    #[test]
+    fn an_event_at_the_end_of_time_does_not_overflow_the_bounds_or_the_columns() {
+        let last = LiveEvent { start_ns: u64::MAX, duration_ns: 5, tid: 7, pid: 7, kind: 1, depth: 0, extra: 0, _pad: 0, name_id: 1 };
+        let mut index = TrackIndex::default();
+        index.insert(last);
+        assert_eq!(index.time_bounds(), Some((u64::MAX, u64::MAX)));
+        let frame = index.rasterize_pixel(u64::MAX - 10, u64::MAX, 2_000, None);
+        assert_eq!(frame.pixels.len(), 2_000);
+        let mut lane = Lane::default();
+        for k in 0..3_000u64 {
+            lane.insert(LiveEvent { start_ns: u64::MAX - 3_000 + k, duration_ns: 1, ..last });
+        }
+        let mut out = vec![0u32; 64];
+        lane.rasterize_pixel_columns(u64::MAX - 1, u64::MAX, 64, &mut out, None);
+        let key = last.lane_key();
+        let layout = [(key, 0.0)];
+        let _ = pick_column_event(&index, &layout, u64::MAX - 1, u64::MAX, 100.0, 99.9, 1.0, 1.0);
+        // The viewer's own rows only: the fallback bounds take the same path.
+        let mut own = TrackIndex::default();
+        own.insert(LiveEvent { pid: perfr_live_event::dev::VIEWER_PID, ..last });
+        assert_eq!(own.time_bounds(), Some((u64::MAX, u64::MAX)));
+    }
 
     #[test]
     fn the_viewers_own_rows_do_not_define_the_captures_bounds() {

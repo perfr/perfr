@@ -1086,7 +1086,7 @@ impl PerfettoState {
                 } else if let Some(d) = ts_delta_us {
                     s.legacy_ts_us = s.legacy_ts_us.saturating_add(d);
                 }
-                s.legacy_ts_us.max(0) as u64 * 1000
+                (s.legacy_ts_us.max(0) as u64).saturating_mul(1000)
             }
         };
 
@@ -2687,6 +2687,23 @@ mod tests {
         assert_eq!(evs.len(), 1);
         assert_eq!((evs[0].pid, evs[0].tid, evs[0].start_ns, evs[0].duration_ns), (3, 30, 1_010_000, 5_000));
         assert_eq!(ing.thread_names.get(&(3, 30)).map(String::as_str), Some("Compositor"));
+    }
+
+    #[test]
+    fn an_absurd_legacy_timestamp_saturates() {
+        let mut th = Encoder::new();
+        th.i32(THD_PID, 7).i64(THD_TID, 70);
+        let mut p = Encoder::new();
+        p.varint(P_SEQUENCE_ID, 4).msg(P_THREAD_DESCRIPTOR, &th);
+        let mut trace = packet(&p);
+        let mut e = Encoder::new();
+        e.varint(TE_TYPE, TYPE_INSTANT).string(TE_NAME, "far").i64(TE_TIMESTAMP_ABSOLUTE_US, i64::MAX);
+        let mut p = Encoder::new();
+        p.varint(P_SEQUENCE_ID, 4).msg(P_TRACK_EVENT, &e);
+        trace.extend(packet(&p));
+        let (_ing, evs) = collect(&trace);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].start_ns, u64::MAX);
     }
 
     #[test]

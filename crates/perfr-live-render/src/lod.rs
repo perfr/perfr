@@ -1107,7 +1107,7 @@ pub fn pick_column_event(
     let col0 = t0.saturating_add((x.max(0.0) as f64 / width as f64 * span) as u64);
     let col1 = t0
         .saturating_add(((x.max(0.0) as f64 + 1.0) / width as f64 * span) as u64)
-        .max(col0 + 1);
+        .max(col0.saturating_add(1));
     index.lane(key)?.overlapping(col0, col1).copied()
 }
 

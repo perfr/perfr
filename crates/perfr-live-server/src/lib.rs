@@ -141,6 +141,16 @@ pub struct LiveService {
     pub pairer: Mutex<ScopePairer>,
     pub intern: Mutex<InternTable>,
     live_tx: broadcast::Sender<Vec<u8>>,
+    /// Orders every change a viewer is told about against the moment a
+    /// viewer joins. A change is two steps, the state (ring, names, capture
+    /// marks) and then the frame that tells the viewers; whoever makes one
+    /// holds this for reading across both. A joining viewer takes it for
+    /// writing while it subscribes and copies the state
+    /// (`subscribe_with_snapshot`), so each change is either wholly in its
+    /// copy or wholly in the frames it receives afterwards, never in both
+    /// and never in neither. Taken before the ring, intern and name locks,
+    /// and never twice by one thread.
+    feed: parking_lot::RwLock<()>,
     pub capturing: AtomicBool,
     pub demo: AtomicBool,
     /// The benchmark producer's knobs and counters (`bench.rs`).
@@ -336,6 +346,32 @@ pub struct ViewerLogLine {
     pub message: String,
 }
 
+/// The state a viewer starts from (`LiveService::subscribe_with_snapshot`).
+pub struct ViewerSnapshot {
+    /// Hello, every interned string and name, the status: encoded frames.
+    pub head: Vec<Vec<u8>>,
+    /// The ring, oldest first. Not encoded: a ring is hundreds of megabytes,
+    /// and encoding all of it up front held a second copy for as long as a
+    /// slow viewer took to read the first.
+    events: Vec<LiveEvent>,
+    wire: WireFormat,
+}
+
+impl ViewerSnapshot {
+    pub fn event_count(&self) -> usize {
+        self.events.len()
+    }
+
+    /// The events as batch frames, each encoded when it is asked for, in
+    /// chunks that keep one WebSocket message reasonable.
+    pub fn event_frames(&self) -> impl Iterator<Item = Vec<u8>> + '_ {
+        self.events.chunks(SNAPSHOT_BATCH_EVENTS).map(|chunk| encode_event_batch_with(chunk, self.wire))
+    }
+}
+
+/// Events per batch frame of a snapshot.
+const SNAPSHOT_BATCH_EVENTS: usize = 2048;
+
 /// Thread and process names of the current capture.
 #[derive(Default)]
 struct CaptureNames {
@@ -359,6 +395,7 @@ impl LiveService {
             pairer: Mutex::new(ScopePairer::default()),
             intern: Mutex::new(InternTable::default()),
             live_tx,
+            feed: parking_lot::RwLock::new(()),
             capturing: AtomicBool::new(false),
             demo: AtomicBool::new(false),
             bench: bench::BenchState::default(),
@@ -534,6 +571,7 @@ impl LiveService {
     /// from nothing (a capture that started and finished at once, with no
     /// clock), and the status pushed.
     pub fn clear_capture(&self) -> Result<(), String> {
+        let _feed = self.feed.read();
         self.clear_ring()?;
         self.clear_names();
         self.capturing.store(false, Ordering::Relaxed);
@@ -563,12 +601,14 @@ impl LiveService {
 
     /// Names a thread for every viewer, now and for late subscribers.
     pub fn set_thread_name(&self, pid: u32, tid: u32, name: &str) {
+        let _feed = self.feed.read();
         self.names.lock().threads.insert((pid, tid), name.to_string());
         self.broadcast_frame(&LiveFrame::ThreadName { pid, tid, name: name.to_string() });
     }
 
     /// Names a process for every viewer, now and for late subscribers.
     pub fn set_process_name(&self, pid: u32, name: &str) {
+        let _feed = self.feed.read();
         self.names.lock().processes.insert(pid, name.to_string());
         self.broadcast_frame(&LiveFrame::ProcessName { pid, name: name.to_string() });
     }
@@ -637,6 +677,7 @@ impl LiveService {
     }
 
     pub fn intern_string(&self, text: &str) -> u32 {
+        let _feed = self.feed.read();
         let mut intern = self.intern.lock();
         let id = intern.intern(text);
         drop(intern);
@@ -648,6 +689,7 @@ impl LiveService {
     }
 
     pub fn intern_id(&self, id: u32, text: &str) {
+        let _feed = self.feed.read();
         self.intern.lock().insert_id(id, text);
         self.broadcast_frame(&LiveFrame::InternedString {
             id,
@@ -732,6 +774,7 @@ impl LiveService {
     }
 
     fn admit_events(&self, events: &[LiveEvent]) {
+        let _feed = self.feed.read();
         self.ring().push_many(events);
         self.data_gen.fetch_add(1, Ordering::Relaxed);
         let mut end = 0u64;
@@ -801,6 +844,7 @@ impl LiveService {
     /// the loop never sees (it captures with no target), and the loop can
     /// have marked first.
     pub fn mark_capture_started(&self, pid: u32, start_ns: u64) {
+        let _feed = self.feed.read();
         let was_capturing = self.capturing.swap(true, Ordering::Relaxed);
         if pid > 0 {
             self.capture_pid.store(pid as u64, Ordering::Relaxed);
@@ -830,6 +874,7 @@ impl LiveService {
     /// own when the target exits) and the Stop handler marks it again after
     /// joining the worker; viewers must see one CaptureFinished, not two.
     pub fn mark_capture_finished(&self) {
+        let _feed = self.feed.read();
         if self.capturing.swap(false, Ordering::Relaxed) {
             self.broadcast_frame(&LiveFrame::CaptureFinished);
         }
@@ -837,6 +882,30 @@ impl LiveService {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
         self.live_tx.subscribe()
+    }
+
+    /// A subscription and the state it continues from: what a viewer is
+    /// sent first, and the receiver of everything that changes afterwards.
+    /// The two are taken at one moment (see `feed`). Taken one after the
+    /// other, in either order, they overlap or leave a gap: a viewer that
+    /// was sent the ring and subscribed afterwards never saw what was
+    /// broadcast while the ring was on its way to it, which for a page
+    /// reloaded during a capture was a hole in the timeline as long as the
+    /// transfer, and names that stayed numbers for good.
+    pub fn subscribe_with_snapshot(&self) -> (broadcast::Receiver<Vec<u8>>, ViewerSnapshot) {
+        let _feed = self.feed.write();
+        let rx = self.live_tx.subscribe();
+        let mut head = vec![self.hello_frame()];
+        head.extend(self.names_and_status_frames());
+        let (_, events) = self.ring().snapshot();
+        (rx, ViewerSnapshot { head, events, wire: self.wire() })
+    }
+
+    fn hello_frame(&self) -> Vec<u8> {
+        encode_frame(&LiveFrame::Hello {
+            version: VERSION,
+            event_size: perfr_live_event::LIVE_EVENT_SIZE as u16,
+        })
     }
 
     pub fn hello_and_snapshot_frames(&self) -> Vec<Vec<u8>> {
@@ -858,11 +927,7 @@ impl LiveService {
     }
 
     pub fn hello_and_snapshot_frames_in(&self, window: Option<(u64, u64)>) -> Vec<Vec<u8>> {
-        use perfr_live_event::LIVE_EVENT_SIZE;
-        let mut frames = vec![encode_frame(&LiveFrame::Hello {
-            version: VERSION,
-            event_size: LIVE_EVENT_SIZE as u16,
-        })];
+        let mut frames = vec![self.hello_frame()];
         frames.extend(self.names_and_status_frames());
         let (_, mut events) = self.ring().snapshot();
         if let Some((a, b)) = window {
@@ -872,7 +937,7 @@ impl LiveService {
         if !events.is_empty() {
             // Chunk so one WS message stays reasonable.
             let wire = self.wire();
-            for chunk in events.chunks(2048) {
+            for chunk in events.chunks(SNAPSHOT_BATCH_EVENTS) {
                 frames.push(encode_event_batch_with(chunk, wire));
             }
         }

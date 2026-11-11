@@ -1864,14 +1864,35 @@ async fn send_frame(sink: &mut futures_util::stream::SplitSink<WebSocket, Messag
     ok
 }
 
-async fn ws_loop(socket: WebSocket, svc: Arc<LiveService>) {
-    let (mut sink, mut stream) = socket.split();
-    for frame in svc.hello_and_snapshot_frames() {
-        if !send_frame(&mut sink, frame).await {
-            return;
+/// Starts a viewer from the service's state as it is now: sends it the
+/// Hello, the names and the whole ring, and returns the receiver of every
+/// frame broadcast from that state on. `None` when the socket is gone.
+async fn start_viewer(
+    svc: &Arc<LiveService>,
+    sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+) -> Option<broadcast::Receiver<Vec<u8>>> {
+    // Copying the ring holds its lock for the length of a large memcpy:
+    // not on a thread the other requests are served from.
+    let service = svc.clone();
+    let (rx, snapshot) = tokio::task::spawn_blocking(move || service.subscribe_with_snapshot()).await.ok()?;
+    for frame in &snapshot.head {
+        if !send_frame(sink, frame.clone()).await {
+            return None;
         }
     }
-    let mut rx = svc.subscribe();
+    for frame in snapshot.event_frames() {
+        if !send_frame(sink, frame).await {
+            return None;
+        }
+    }
+    Some(rx)
+}
+
+async fn ws_loop(socket: WebSocket, svc: Arc<LiveService>) {
+    let (mut sink, mut stream) = socket.split();
+    let Some(mut rx) = start_viewer(&svc, &mut sink).await else {
+        return;
+    };
     let mut lag_reported = false;
     loop {
         tokio::select! {

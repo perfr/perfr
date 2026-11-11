@@ -975,3 +975,146 @@ fn a_record_that_is_refused_leaves_the_running_captures_auto_profiling_alone() {
     assert!(!svc.auto_profile());
     assert_eq!(*seen_at_start.lock(), vec![false, true, false]);
 }
+
+// ------------------------------------------------------- the live stream ---
+
+/// A viewer on the WebSocket, as far as the stream goes: it holds the
+/// events and names it was sent, and starts over where the real one does.
+/// Blocking, so that a test decides when it reads.
+struct Viewer {
+    ws: tokio_tungstenite::tungstenite::WebSocket<std::net::TcpStream>,
+    events: Vec<LiveEvent>,
+    names: std::collections::HashMap<u32, String>,
+    hellos: usize,
+    finished: usize,
+}
+
+impl Viewer {
+    fn connect(addr: std::net::SocketAddr) -> Viewer {
+        let stream = std::net::TcpStream::connect(addr).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
+        let (ws, _) = tokio_tungstenite::tungstenite::client(format!("ws://{addr}/ws"), stream).expect("the handshake");
+        Viewer { ws, events: Vec::new(), names: Default::default(), hellos: 0, finished: 0 }
+    }
+
+    fn apply(&mut self, bytes: &[u8]) {
+        for frame in decode_all(bytes).expect("a decodable message") {
+            match frame {
+                // A Hello starts a snapshot of the whole ring, a
+                // CaptureStarted a new capture: both empty the view.
+                LiveFrame::Hello { .. } => {
+                    self.hellos += 1;
+                    self.events.clear();
+                }
+                LiveFrame::CaptureStarted { .. } => self.events.clear(),
+                LiveFrame::CaptureFinished => self.finished += 1,
+                LiveFrame::EventBatch { events } => self.events.extend(events),
+                LiveFrame::InternedString { id, text } => {
+                    self.names.insert(id, text);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Reads until `done` says so; panics when that takes over ten seconds.
+    fn read_until(&mut self, what: &str, done: impl Fn(&Viewer) -> bool) {
+        use tokio_tungstenite::tungstenite::{Error, Message};
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !done(self) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what}: not within 10 s ({} events, {} hello, {} finished)",
+                self.events.len(),
+                self.hellos,
+                self.finished
+            );
+            match self.ws.read() {
+                Ok(Message::Binary(bytes)) => self.apply(&bytes),
+                Ok(_) => {}
+                // The read timeout: nothing to read just now.
+                Err(Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                Err(error) => panic!("{what}: the socket failed: {error}"),
+            }
+        }
+    }
+
+    /// The name ids of the events held, sorted: every test event has its own.
+    fn event_ids(&self) -> Vec<u32> {
+        let mut ids: Vec<u32> = self.events.iter().map(|e| e.name_id).collect();
+        ids.sort_unstable();
+        ids
+    }
+}
+
+fn ring_ids(svc: &LiveService) -> Vec<u32> {
+    let mut ids: Vec<u32> = svc.ring().snapshot().1.iter().map(|e| e.name_id).collect();
+    ids.sort_unstable();
+    ids
+}
+
+fn serve_with(cfg: ServerConfig) -> (std::sync::Arc<LiveService>, Served) {
+    let svc = LiveService::new(cfg).unwrap();
+    let served = serve(svc.clone());
+    svc.config.lock().bind = served.addr;
+    (svc, served)
+}
+
+#[test]
+fn a_viewer_that_connects_while_events_arrive_misses_nothing_and_gets_nothing_twice() {
+    const HELD: u64 = 8_192;
+    const LIVE: u64 = 6_000;
+    const LAST: u32 = u32::MAX;
+    let (svc, served) = serve_with(ServerConfig { ring_buffer_bytes: 1 << 20, ..ServerConfig::default() });
+    // What the ring already holds: several messages' worth, so that sending
+    // it takes long enough for the producer to get a word in.
+    let held: Vec<LiveEvent> = (0..HELD).map(ev).collect();
+    svc.push_events(&held);
+    let producer = {
+        let svc = svc.clone();
+        std::thread::spawn(move || {
+            for i in HELD..HELD + LIVE {
+                // A name now and then, as a capture interns them: one that
+                // arrives while a viewer's snapshot is on its way must
+                // still reach that viewer.
+                if i % 16 == 0 {
+                    svc.intern_id(i as u32, &format!("name {i}"));
+                }
+                svc.push_events(&[ev(i)]);
+                std::thread::sleep(std::time::Duration::from_micros(50));
+            }
+        })
+    };
+    // Viewers arrive while that goes on (a page reloaded mid-capture).
+    let viewers: Vec<_> = (0..4)
+        .map(|n| {
+            let addr = served.addr;
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(30 * n));
+                let mut viewer = Viewer::connect(addr);
+                viewer.read_until("the last event", |v| v.events.iter().any(|e| e.name_id == LAST));
+                viewer
+            })
+        })
+        .collect();
+    producer.join().unwrap();
+    svc.push_events(&[LiveEvent { name_id: LAST, ..ev(HELD + LIVE) }]);
+    let in_ring = ring_ids(&svc);
+    assert_eq!(in_ring.len() as u64, HELD + LIVE + 1, "the ring was sized to hold all of it");
+    for (n, viewer) in viewers.into_iter().enumerate() {
+        let viewer = viewer.join().unwrap();
+        let got = viewer.event_ids();
+        let missing = in_ring.iter().filter(|id| got.binary_search(id).is_err()).count();
+        assert_eq!(
+            (got.len(), missing),
+            (in_ring.len(), 0),
+            "viewer {n}: holds {} events of the ring's {}, and lacks {missing} of them",
+            got.len(),
+            in_ring.len()
+        );
+        assert_eq!(got, in_ring, "viewer {n}");
+        for i in (HELD..HELD + LIVE).filter(|i| i % 16 == 0) {
+            assert_eq!(viewer.names.get(&(i as u32)).map(String::as_str), Some(format!("name {i}").as_str()), "viewer {n}");
+        }
+    }
+}

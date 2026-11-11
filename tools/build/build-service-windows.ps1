@@ -4,7 +4,7 @@
 
 # Builds the service, the embedded viewer, the Frida files and the manual
 # instrumentation SDK on Windows x64, into dist\windows\. The twin of
-# tools/build/build-service-macos.sh and rust\build-service-musl.sh.
+# tools/build/build-service-macos.sh and tools/build/build-service-musl.sh.
 #
 #   .\tools\build\build-service-windows.ps1            # dist\windows
 #   .\tools\build\build-service-windows.ps1 -Output d  # elsewhere
@@ -56,7 +56,8 @@ try {
         "target\$target\release\PerfrTestRust.exe" = 'PerfrTestRust.exe'
         'crates\perfr-api\include\perfr.h' = 'include\perfr.h'
         'crates\perfr-api\python\perfr_api\__init__.py' = 'perfr_api.py'
-        'docs\building_windows.md' = 'README.md'
+        # What a user unpacks, not how a contributor builds.
+        'tools\release\README.archive.md' = 'README.md'
     }
     foreach ($entry in $files.GetEnumerator()) {
         if (-not (Test-Path $entry.Key)) { throw "missing $($entry.Key)" }

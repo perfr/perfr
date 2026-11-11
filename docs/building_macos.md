@@ -1,8 +1,10 @@
 # Rust service on macOS
 
 main includes a macOS service backend for **Apple Silicon and Intel**.
-It serves the embedded browser viewer and records manual instrumentation from
-Rust, C, C++, and Python processes running as the same user. The build targets
+It serves the embedded browser viewer, records manual instrumentation from
+Rust, C, C++, and Python processes running as the same user, and hooks
+functions in a running process with Frida
+([Frida instrumentation](frida-instrumentation.md)). The build targets
 macOS 11 or later; native CI runs on macOS 15 on both architectures.
 
 ## Build and launch
@@ -84,10 +86,11 @@ the same host's `CLOCK_MONOTONIC` clock. Frida dynamic hooks and Mach-O symbol d
 and validation limits. CPU sampling, scheduler events, live Mach-O disassembly
 and GPU capture are not implemented.
 
-Linux and Mac captures share the viewer protocol and export format. A merged
-live timeline across several services is **not implemented**: it needs host
-namespacing, clock synchronization/drift handling and viewer aggregation.
-Monotonic timestamps from different machines cannot be compared directly.
+Linux and Mac captures share the viewer protocol and export format. A Mac
+can be one of several machines on one timeline: start its service with
+`--join <hub-host>:44766`, or dial it from the hub with `--connect`. The hub
+measures each link's clock offset and moves the remote's events onto its own
+clock; [Several machines](manual/machines.md) has the details and the limits.
 
 ## Validation
 
@@ -100,7 +103,5 @@ Run the smoke test locally with Python and `pyarrow` installed:
 python3 tools/e2e/manual_service_smoke.py --service dist/macos/perfr --api-lib dist/macos/libperfr.dylib
 ```
 
-Initial development was on Linux, with compile checks for both Apple targets and
-Linux runtime regression tests. Native macOS runtime and universal/Rosetta
-compatibility remain to be confirmed by running this workflow or testing on Macs;
-cross-compilation checks alone do not establish those results.
+The same workflow runs `multi_machine_smoke.py`, two services on one
+timeline. `frida-rust` runs the function-hook tests on both architectures.

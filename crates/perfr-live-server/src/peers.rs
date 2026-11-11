@@ -55,7 +55,7 @@ pub const DEFAULT_PORT: u16 = 44766;
 /// Where the machine index sits in a packed pid or tid, and the highest
 /// index a live session hands out. Defined once, next to the viewer's
 /// reading of them (`MachineId::from_pid`): the hub packs with these and
-/// the viewer unpacks, and two copies only had to drift apart once.
+/// the viewer unpacks, so the two must be the same numbers.
 pub use perfr_live_event::dev::{MACHINE_SHIFT, MAX_MACHINES};
 const LOCAL_LIMIT: u32 = 1 << MACHINE_SHIFT;
 /// How many targets a hub dials at once: one per machine it can hold.

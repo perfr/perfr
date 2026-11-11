@@ -13705,6 +13705,9 @@ fn format_elapsed(s: f64) -> String {
 }
 
 #[cfg(test)]
+mod state_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::tracks::TrackStrip;

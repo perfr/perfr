@@ -129,6 +129,13 @@ impl NvmlSampler {
         now_ns >= self.next_sample_ns
     }
 
+    /// How long from `now_ns` until the next sample is due; zero when one
+    /// is. For a caller with nothing else to do in between: it sleeps this
+    /// long instead of waking every millisecond to ask.
+    pub fn until_due(&self, now_ns: u64) -> Duration {
+        Duration::from_nanos(self.next_sample_ns.saturating_sub(now_ns))
+    }
+
     /// Records that a sample was taken at `now_ns`, scheduling the next one.
     /// The next deadline is computed from the previous deadline, not from
     /// `now`, so a slow poll does not make the cadence drift -- but a long
@@ -260,6 +267,20 @@ mod tests {
         // 1ms of poll latency does not push the schedule out.
         assert!(!sampler.is_due(9_000_000));
         assert!(sampler.is_due(10_000_001));
+    }
+
+    #[test]
+    fn the_wait_for_the_next_sample_ends_when_it_is_due() {
+        let mut sampler = NvmlSampler::new(Duration::from_millis(10), 1);
+        assert_eq!(sampler.until_due(0), Duration::ZERO, "the first sample is due at once");
+        sampler.mark_sampled(1_000_000);
+        let wait = sampler.until_due(4_000_000);
+        assert!(wait > Duration::ZERO);
+        // Slept exactly that long, the sampler is due: no early wakeup to
+        // ask again, no sample taken late.
+        assert!(!sampler.is_due(4_000_000 + wait.as_nanos() as u64 - 1));
+        assert!(sampler.is_due(4_000_000 + wait.as_nanos() as u64));
+        assert_eq!(sampler.until_due(1_000_000_000), Duration::ZERO, "overdue is due");
     }
 
     #[test]

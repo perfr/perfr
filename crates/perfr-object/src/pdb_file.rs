@@ -47,11 +47,6 @@ pub fn pdb_info(bytes: &[u8]) -> Result<PdbInfo, String> {
     })
 }
 
-/// Whether the file has the DBI stream `CreatePdbFile` requires.
-pub fn has_dbi_stream(bytes: &[u8]) -> bool {
-    open(bytes).is_ok_and(|mut pdb| pdb.debug_information().is_ok())
-}
-
 /// `ComputeAddress`: section RVA plus the offset, plus the image base.
 fn compute_address(
     offset_in_section: u32,

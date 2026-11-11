@@ -24,7 +24,6 @@ mod coff;
 mod coff_symbols;
 mod debugfile;
 mod debuglink;
-mod dwarf;
 mod msvc;
 mod pdb_file;
 mod pdb_typename;
@@ -32,18 +31,17 @@ mod lineinfo;
 mod sections;
 mod symbols;
 mod unwind;
-pub use coff::{is_pe, no_pdb_debug_info_error, parse_coff_metadata, CoffMetadata, PdbDebugInfo};
+pub use coff::{is_pe, parse_coff_metadata, CoffMetadata, PdbDebugInfo};
 pub use coff_symbols::{
-    coff_has_debug_symbols, coff_symbol_table_symbols, exception_table_symbols, export_table_symbols, has_export_table,
+    exception_table_symbols, export_table_symbols, has_export_table,
     unwind_ranges, UnwindRange,
 };
 pub use debugfile::{
     debuginfod_debuginfo, detached_debug_file, detached_debug_file_under, DEFAULT_DEBUG_ROOT,
 };
 pub use debuglink::{crc32_continue, crc32_gnu_debuglink, GnuDebugLink};
-pub use dwarf::{subprograms, Subprogram};
 pub use msvc::demangle_msvc;
-pub use pdb_file::{has_dbi_stream, load_pdb_symbols, pdb_info, PdbInfo, UNKNOWN_SYMBOL_SIZE};
+pub use pdb_file::{load_pdb_symbols, pdb_info, PdbInfo, UNKNOWN_SYMBOL_SIZE};
 pub use lineinfo::{line_rows, LineRow};
 pub use lineinfo::{declaration_location, line_info, no_line_info_error, LineInfo};
 pub use symbols::{load_symbols, Symbol, SymbolTable};

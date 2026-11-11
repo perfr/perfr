@@ -30,7 +30,7 @@ or, with the hub already running, one request per machine:
 curl -X POST http://127.0.0.1:44766/api/peers/connect -d '{"target": "render-01"}'
 ```
 
-A target is `host`, `host:port` or a pasted `http://host:port/`; the port defaults to 44766. A link that drops is redialed every two seconds by whichever side dialed it. Up to 64 machines can be linked to one hub.
+A target is `host`, `host:port` or a pasted `http://host:port/`; the port defaults to 44766. Name the machine by its IP address or by its own host name (what `hostname` prints there): a service answers only requests addressed to one of those, so another DNS name for the same machine is refused with a 403. A link that drops is redialed every two seconds by whichever side dialed it. Up to 64 machines can be linked to one hub.
 
 `GET /api/peers` lists the links: each machine's index, host name, core count, where its cores draw on the Scheduler track, and the state of its clock fit (below). `/api/status` reports how many machines are linked.
 

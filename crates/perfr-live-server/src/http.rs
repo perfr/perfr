@@ -14,7 +14,6 @@ use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tower_http::cors::CorsLayer;
 
 use perfr_live_event::argb_to_css;
 use perfr_live_render::{
@@ -87,12 +86,77 @@ pub fn router(service: Arc<LiveService>) -> Router {
             post(capture_import).layer(axum::extract::DefaultBodyLimit::max(IMPORT_BODY_LIMIT)),
         )
         .route("/*path", get(static_asset))
-        .layer(CorsLayer::permissive())
+        // In front of every route, the WebSocket upgrades included: there
+        // is no authentication behind this, so who may call is decided
+        // here, once. See `request_allowed`.
+        .layer(axum::middleware::from_fn_with_state(service.clone(), origin_middleware))
         // Outermost: HTML, js, wasm, worker snippets, and API all get
         // COOP/COEP/CORP so SharedArrayBuffer is not blocked by a missing
         // header on one worker URL.
         .layer(axum::middleware::from_fn(isolation_middleware))
         .with_state(service)
+}
+
+/// Answers 403 to a request that `request_allowed` turns down, before any
+/// handler or body extractor sees it.
+async fn origin_middleware(
+    State(svc): State<Arc<LiveService>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    // Decided in a block of its own: the borrows of `req` must end before
+    // the request moves on, or the future is not `Send`.
+    let allowed = {
+        // A header that is not text is not a name we know: it reads as
+        // present and empty, which matches nothing.
+        let text = |name: header::HeaderName| req.headers().get(name).map(|v| v.to_str().unwrap_or_default());
+        let origin = text(header::ORIGIN);
+        // HTTP/2 carries the host in the request target, not in a header.
+        let host = text(header::HOST).or_else(|| req.uri().authority().map(|a| a.as_str()));
+        let bind = svc.config.lock().bind;
+        request_allowed(origin, host, bind, &svc.machine_name())
+    };
+    if !allowed {
+        return (
+            StatusCode::FORBIDDEN,
+            "perfr answers its own viewer, opened by IP address or as localhost, and clients that are not web pages",
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
+/// Whether a request may reach the API, by its `Origin` and `Host`. Nothing
+/// behind this is authenticated and the service often runs as root, so the
+/// two things a browser lets a hostile page do have to be refused here:
+///
+/// * A page on another site can send requests to this port. Reads and JSON
+///   writes need the server's consent (CORS), which is no longer given, but
+///   a POST with no body and a WebSocket handshake need none. Every such
+///   request names the page in `Origin`; it is let through only when that
+///   page is this service's own viewer (`share_origin_allowed`).
+/// * A page whose DNS name is re-pointed at this machine after it loaded
+///   (rebinding) is same-origin to the browser, and its GETs carry no
+///   `Origin` at all. Its `Host` is still the attacker's name, so a request
+///   without `Origin` must be addressed to a name DNS has no say in: an IP
+///   literal, `localhost`, the bound address, or this machine's own name
+///   (`machine`: the host name the service took from the OS at start). The
+///   last is for peers, which are told `--connect <machine>` and are not
+///   browsers; a page gets no use of it, since `share_origin_allowed` does
+///   not take it.
+///
+/// A request with neither header is HTTP/1.0 from something that is not a
+/// browser, and is let through.
+pub(crate) fn request_allowed(origin: Option<&str>, host: Option<&str>, bind: std::net::SocketAddr, machine: &str) -> bool {
+    match (origin, host) {
+        (Some(origin), Some(host)) => share_origin_allowed(origin, host, bind),
+        (Some(_), None) => false,
+        (None, Some(host)) => {
+            let name = host_name(host);
+            host_needs_no_dns(name, bind) || (!machine.is_empty() && name.eq_ignore_ascii_case(machine))
+        }
+        (None, None) => true,
+    }
 }
 
 async fn isolation_middleware(
@@ -584,15 +648,7 @@ async fn capture_export(
 }
 
 /// Publish a stopped capture (or selected slice) to the configured bucket.
-async fn capture_share(State(svc): State<Arc<LiveService>>, Query(q): Query<ExportQuery>, headers: axum::http::HeaderMap) -> Response {
-    if let Some(origin) = headers.get(header::ORIGIN) {
-        let origin = origin.to_str().unwrap_or_default();
-        let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or_default();
-        if !share_origin_allowed(origin, host, svc.config.lock().bind) {
-            return (StatusCode::FORBIDDEN,
-                "Sharing must be requested from the service viewer, opened by IP address or as localhost").into_response();
-        }
-    }
+async fn capture_share(State(svc): State<Arc<LiveService>>, Query(q): Query<ExportQuery>) -> Response {
     let window = match (q.t0, q.t1) {
         (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
         (None, None) => None,
@@ -618,12 +674,14 @@ async fn capture_share(State(svc): State<Arc<LiveService>>, Query(q): Query<Expo
     }
 }
 
-/// Whether a browser `Origin` may trigger an upload. The page must be this
-/// service's own viewer: same scheme-less origin as the request's `Host`,
-/// and that host one a page cannot reach by DNS rebinding -- an IP literal,
-/// `localhost`, or the address the service was told to bind. A rebinding
-/// attack needs a name the attacker controls, which resolves to us only
-/// after the page loaded; such a name matches none of these.
+/// Whether a page with this `Origin` may call the service. Written for the
+/// share upload, hence the name; `request_allowed` applies it to every
+/// route. The page must be this service's own viewer: same scheme-less
+/// origin as the request's `Host`, and that host one a page cannot reach by
+/// DNS rebinding -- an IP literal, `localhost`, or the address the service
+/// was told to bind. A rebinding attack needs a name the attacker controls,
+/// which resolves to us only after the page loaded; such a name matches
+/// none of these.
 fn share_origin_allowed(origin: &str, host: &str, bind: std::net::SocketAddr) -> bool {
     let Some(origin_host) = origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) else {
         return false;
@@ -631,14 +689,23 @@ fn share_origin_allowed(origin: &str, host: &str, bind: std::net::SocketAddr) ->
     if origin_host.is_empty() || origin_host != host {
         return false;
     }
+    host_needs_no_dns(host_name(host), bind)
+}
+
+/// The name in a `Host` header, without its port.
+fn host_name(host: &str) -> &str {
     // `[::1]:8080` is bracketed; `1.2.3.4:8080` and `localhost:8080` are not.
-    let name = match host.strip_prefix('[') {
+    match host.strip_prefix('[') {
         Some(rest) => rest.split(']').next().unwrap_or_default(),
         None => match host.rsplit_once(':') {
             Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
             _ => host,
         },
-    };
+    }
+}
+
+/// Whether `name` reaches this service whatever DNS says.
+fn host_needs_no_dns(name: &str, bind: std::net::SocketAddr) -> bool {
     name.eq_ignore_ascii_case("localhost")
         || name.parse::<std::net::IpAddr>().is_ok()
         || name.eq_ignore_ascii_case(&bind.ip().to_string())

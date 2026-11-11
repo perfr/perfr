@@ -1539,3 +1539,54 @@ fn a_drag_on_the_lanes_still_pans() {
     page.frames(2);
     assert!(page.app.t0 > view.0, "dragging the lanes left moves the view later");
 }
+
+fn wheel(dy: f32) -> Event {
+    Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, dy), modifiers: Modifiers::NONE }
+}
+
+/// Many threads, so the lanes scroll, and the Benchmark window floating
+/// over the middle of them.
+fn page_with_a_window_over_the_lanes() -> (Page, Rect) {
+    let mut page = many_thread_page(200);
+    page.app.bench_open = true;
+    page.frames(3);
+    assert!(page.app.vscroll_max > 0.0, "the lanes are taller than the view");
+    let rate = page.rect_of("bench:rate").expect("the Benchmark window is drawn");
+    (page, rate)
+}
+
+#[test]
+fn the_wheel_over_a_floating_window_leaves_the_lanes_under_it_alone() {
+    let (mut page, rate) = page_with_a_window_over_the_lanes();
+    let over_window = rate.center() - Vec2::new(0.0, 30.0);
+    page.frame(vec![Event::PointerMoved(over_window)]);
+    page.frame(vec![wheel(-120.0)]);
+    page.frames(3);
+    assert_eq!(page.app.lane_scroll, 0.0, "the lanes scrolled under the window the wheel was over");
+
+    // Over the lanes themselves it scrolls them, as before.
+    let lanes = Pos2::new(page.size.x - 80.0, page.size.y - 120.0);
+    page.frame(vec![Event::PointerMoved(lanes)]);
+    page.frame(vec![wheel(-120.0)]);
+    page.frames(3);
+    assert!(page.app.lane_scroll > 0.0);
+}
+
+#[test]
+fn a_press_on_a_window_over_the_splitter_is_not_a_splitter_grab() {
+    let (mut page, rate) = page_with_a_window_over_the_lanes();
+    // The report panel's edge under the window.
+    page.app.open_right_tab(ReportTab::Inspector);
+    page.app.report_w_override = Some(page.size.x - rate.center().x);
+    page.frames(3);
+    let handle = page.rect_of("report_splitter").expect("the splitter");
+    let rate = page.rect_of("bench:rate").expect("the window is still there");
+    assert!(handle.left() > rate.left() - 40.0 && handle.right() < rate.right() + 40.0, "{handle:?} is under {rate:?}");
+    let width = page.app.report_w_last;
+    let on_window = Pos2::new(handle.center().x, rate.center().y - 30.0);
+    page.drag(on_window, on_window - Vec2::new(0.0, 4.0));
+    assert!(page.app.report_splitter_grab.is_none(), "a press on the window grabbed the splitter beneath it");
+    page.release(on_window);
+    page.frames(2);
+    assert_eq!(page.app.report_w_last, width);
+}

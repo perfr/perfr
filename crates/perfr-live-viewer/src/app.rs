@@ -268,6 +268,13 @@ fn vscroll_from_primary_drag(any_touches: bool, narrow: bool) -> bool {
     any_touches || narrow
 }
 
+/// Whether `pos` is on the panels themselves rather than on a window, a
+/// menu or a popup above them. Input read straight from the pointer, with
+/// no widget to be covered, has to ask.
+fn nothing_floats_over(ctx: &Context, pos: Pos2) -> bool {
+    ctx.layer_id_at(pos).is_none_or(|layer| layer == egui::LayerId::background())
+}
+
 fn consume_scroll_y(ctx: &Context) {
     ctx.input_mut(|i| {
         i.raw_scroll_delta.y = 0.0;
@@ -7284,7 +7291,10 @@ impl PerfrLiveApp {
                 }
             }
         }
-        let hover = ctx.pointer_hover_pos();
+        // Over the lanes, and not over a window or a menu floating above
+        // them: the rectangle alone also took the wheel that was scrolling
+        // the process list, the presets or the settings.
+        let hover = ctx.pointer_hover_pos().filter(|p| nothing_floats_over(ctx, *p));
         let over_lanes = hover.map(|p| lanes.contains(p)).unwrap_or(false);
         let over_ruler = hover.map(|p| ruler.contains(p)).unwrap_or(false);
         let zoom_step = time_zoom_step(scroll.y, zoom);
@@ -8520,7 +8530,10 @@ impl PerfrLiveApp {
         // down: the press origin stays put for the whole hold, so a press
         // frame that ran before this code saw it (the web runner runs a
         // frame from inside the pointerdown handler) still starts the drag.
-        if down && self.report_splitter_grab.is_none() && origin.is_some_and(|p| handle.contains(p)) {
+        if down
+            && self.report_splitter_grab.is_none()
+            && origin.is_some_and(|p| handle.contains(p) && nothing_floats_over(ctx, p))
+        {
             self.report_splitter_grab = origin.map(|p| p.x - panel.left());
         }
         if !down {

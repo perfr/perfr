@@ -799,6 +799,44 @@ mod tests {
     }
 
     #[test]
+    fn async_slices_that_do_not_close_in_order_never_share_a_row() {
+        // a opens, b opens, a closes, c opens while b is still open.
+        let json = r#"[
+          {"name":"req","ph":"S","ts":0,"pid":1,"tid":1,"id":"a"},
+          {"name":"req","ph":"S","ts":10,"pid":1,"tid":1,"id":"b"},
+          {"name":"req","ph":"F","ts":20,"pid":1,"tid":1,"id":"a"},
+          {"name":"req","ph":"S","ts":30,"pid":1,"tid":1,"id":"c"},
+          {"name":"req","ph":"T","ts":35,"pid":1,"tid":1,"id":"c"},
+          {"name":"req","ph":"F","ts":40,"pid":1,"tid":1,"id":"b"},
+          {"name":"req","ph":"S","ts":45,"pid":1,"tid":1,"id":"d"},
+          {"name":"req","ph":"F","ts":50,"pid":1,"tid":1,"id":"c"},
+          {"name":"req","ph":"F","ts":60,"pid":1,"tid":1,"id":"d"}
+        ]"#;
+        let (_ing, evs) = collect(json);
+        let slices: Vec<_> = evs.iter().filter(|e| e.kind == kind::API_TRACK).collect();
+        for a in &slices {
+            for b in &slices {
+                assert!(
+                    a.start_ns == b.start_ns || a.depth != b.depth || a.end_ns() <= b.start_ns || b.end_ns() <= a.start_ns,
+                    "{a:?} and {b:?} overlap on one row"
+                );
+            }
+        }
+        let row = |start_us: u64, dur: u64| {
+            slices
+                .iter()
+                .find(|e| e.start_ns == start_us * 1000 && e.duration_ns == dur)
+                .unwrap_or_else(|| panic!("no slice at {start_us}"))
+                .depth
+        };
+        assert_eq!(row(0, 20_000), 0, "a");
+        assert_eq!(row(10, 30_000), 1, "b");
+        assert_eq!(row(30, 20_000), 0, "c takes the row a left");
+        assert_eq!(row(45, 15_000), 1, "d takes the row b left");
+        assert_eq!(row(35, 1), 2, "an instant sits under every open slice");
+    }
+
+    #[test]
     fn be_pairing_by_id() {
         let json = r#"[
           {"name":"A","ph":"B","ts":0,"pid":1,"tid":1,"id":"x"},

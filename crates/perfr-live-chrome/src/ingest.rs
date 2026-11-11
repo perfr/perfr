@@ -233,6 +233,37 @@ enum ThreadSlices {
 /// Pairs a thread may hold while it is not yet known to be a `B`/`E` thread.
 const UNDECIDED_SLICES: usize = 4096;
 
+/// The rows of one async lane that hold an open slice.
+///
+/// Async slices on a lane do not close in the order they opened. Taking
+/// "how many are open" as the row gave a new slice the row of one still
+/// open whenever an earlier one had closed: with k requests in flight every
+/// new one landed on row k-1, on top of the last.
+#[derive(Clone, Copy, Default)]
+struct OpenRows([u64; 4]);
+
+impl OpenRows {
+    /// Take the first free row. With all 256 taken the last one is shared.
+    fn take(&mut self) -> u8 {
+        let row = (0..=255u8).find(|&r| !self.holds(r)).unwrap_or(255);
+        self.0[usize::from(row >> 6)] |= 1 << (row & 63);
+        row
+    }
+
+    fn release(&mut self, row: u8) {
+        self.0[usize::from(row >> 6)] &= !(1 << (row & 63));
+    }
+
+    fn holds(&self, row: u8) -> bool {
+        self.0[usize::from(row >> 6)] & (1 << (row & 63)) != 0
+    }
+
+    /// The row under every open slice, where an instant is drawn.
+    fn below_all(&self) -> u8 {
+        (0..=255u8).rev().find(|&r| self.holds(r)).map_or(0, |r| r.saturating_add(1))
+    }
+}
+
 /// Pairing key for async begins / ends. `id2.global` ids are trace-wide by
 /// definition, so they pair across processes.
 const PID_ANY: u32 = u32::MAX;
@@ -262,7 +293,7 @@ pub struct ChromeIngestor {
     async_open: HashMap<(u32, u64), Vec<OpenAsync>>,
     /// Lane key is `(pid, name)` — chrome://tracing does not mint a row per id.
     async_tids: HashMap<(u32, String), u32>,
-    async_lane_open: HashMap<u32, u8>,
+    async_lane_open: HashMap<u32, OpenRows>,
     counter_tids: HashMap<(u32, String), u32>,
     object_tids: HashMap<(u32, String), u32>,
     next_async_tid: u32,
@@ -772,8 +803,7 @@ impl ChromeIngestor {
         self.note_thread(pid, tid);
         let args_id = self.intern_args(&ev);
         let stack = self.async_open.entry((key_pid, id)).or_default();
-        let depth = *self.async_lane_open.get(&tid).unwrap_or(&0);
-        *self.async_lane_open.entry(tid).or_insert(0) = depth.saturating_add(1);
+        let depth = self.async_lane_open.entry(tid).or_default().take();
         stack.push(OpenAsync {
             start_ns,
             name_id,
@@ -796,7 +826,7 @@ impl ChromeIngestor {
             Some(o) => (o.pid, o.tid),
             None => (own_pid, self.async_tid(own_pid, Self::async_lane(&ev, &name))),
         };
-        let depth = *self.async_lane_open.get(&tid).unwrap_or(&0);
+        let depth = self.async_lane_open.get(&tid).map_or(0, OpenRows::below_all);
         let args_id = self.intern_args(&ev);
         self.note_thread(pid, tid);
         let out = self.scope_event(start_ns, 1, pid, tid, name_id, depth, kind::API_TRACK);
@@ -818,8 +848,8 @@ impl ChromeIngestor {
             Some(o) => (o.pid, o.tid),
             None => (own_pid, self.async_tid(own_pid, Self::async_lane(&ev, &name))),
         };
-        if let Some(n) = self.async_lane_open.get_mut(&tid) {
-            *n = n.saturating_sub(1);
+        if let (Some(open), Some(rows)) = (&open, self.async_lane_open.get_mut(&tid)) {
+            rows.release(open.depth);
         }
         let Some(open) = open else {
             self.stats.unmatched_end += 1;

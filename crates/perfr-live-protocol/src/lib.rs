@@ -402,7 +402,15 @@ pub fn unpack_events(payload: &[u8]) -> Result<Vec<LiveEvent>, ProtocolError> {
 pub fn encode_event_batch_with(events: &[LiveEvent], wire: WireFormat) -> Vec<u8> {
     // The original packed format has no flags/color byte. Raw frames are
     // understood by all clients and preserve metadata without a wire break.
-    if events.iter().any(|e| e._pad != 0) {
+    //
+    // The AUTO_NAME colour hint is not metadata: every reader of the byte
+    // tests it for a source flag or for MANUAL_API, and treats AUTO_NAME as
+    // it treats 0. Every value sample carries it, though (so do agent
+    // scopes and events posted from outside), and one such event used to
+    // send its whole batch raw: a capture with a value lane, or the
+    // service's own per-frame byte count, got next to nothing from the
+    // packed format. Such a batch is packed, and arrives with 0 there.
+    if events.iter().any(|e| e._pad != 0 && e._pad != perfr_live_event::color_mode::AUTO_NAME) {
         return encode_event_batch(events);
     }
     match wire {
@@ -704,6 +712,43 @@ mod tests {
             let bytes = encode_event_batch_with(&events, wire);
             let (frame, _) = decode_frame(&bytes).unwrap();
             assert_eq!(frame, LiveFrame::EventBatch { events: events.clone() });
+        }
+    }
+
+    #[test]
+    fn a_colour_hint_nobody_reads_does_not_send_the_batch_raw() {
+        use perfr_live_event::{color_mode, event_flags};
+        // A drain pass of a capture with one value sample in it: a GPU
+        // lane, or the service's own "ws frame bytes". Every value carries
+        // the AUTO_NAME hint, which no reader distinguishes from none.
+        let mut events = capture_like_batch(2048);
+        events[1000] = LiveEvent::from_value(events[1000].start_ns, 4_000, 4_000, 7, 0.5);
+        assert_eq!(events[1000]._pad, color_mode::AUTO_NAME);
+        let raw = encode_event_batch(&events);
+        let mut sizes = Vec::new();
+        for (wire, frame_type) in [(WireFormat::Packed, FRAME_EVENT_BATCH_PACKED), (WireFormat::Deflate, FRAME_EVENT_BATCH_DEFLATE)] {
+            let bytes = encode_event_batch_with(&events, wire);
+            sizes.push(bytes.len());
+            assert_eq!(bytes[4], frame_type, "{wire:?}: {} bytes, raw is {}", bytes.len(), raw.len());
+            // What arrives is the batch, less the hint.
+            let (frame, _) = decode_frame(&bytes).unwrap();
+            let LiveFrame::EventBatch { events: got } = frame else { panic!("not a batch") };
+            let mut expected = events.clone();
+            expected[1000]._pad = 0;
+            assert_eq!(got, expected, "{wire:?}");
+            assert_eq!(got[1000].color_rgba(), events[1000].color_rgba(), "it draws the same");
+        }
+        eprintln!("2048 events with one value sample: raw {} B, packed {} B, deflate {} B", raw.len(), sizes[0], sizes[1]);
+        // A byte that does say something still goes out whole: a hooked
+        // function's scope, a cut log line, a colour the program chose.
+        for pad in [event_flags::DYNAMIC, event_flags::TRUNCATED, color_mode::MANUAL_API, event_flags::DYNAMIC | color_mode::AUTO_NAME] {
+            let mut flagged = capture_like_batch(8);
+            flagged[3]._pad = pad;
+            for wire in [WireFormat::Packed, WireFormat::Deflate] {
+                let bytes = encode_event_batch_with(&flagged, wire);
+                assert_eq!(bytes[4], FRAME_EVENT_BATCH, "{pad:#x} {wire:?}");
+                assert_eq!(decode_frame(&bytes).unwrap().0, LiveFrame::EventBatch { events: flagged.clone() });
+            }
         }
     }
 

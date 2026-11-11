@@ -273,7 +273,7 @@ impl FunctionIndex {
         self.module_count
     }
 
-    /// Every function, in module order.
+    /// Every function, sorted by id.
     pub fn functions(&self) -> impl Iterator<Item = &InstrumentableFunction> {
         self.functions.iter()
     }

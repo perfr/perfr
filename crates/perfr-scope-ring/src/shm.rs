@@ -337,16 +337,26 @@ impl ScopeRingWriter {
     }
 
     /// Release an inherited API lease in an atfork child callback.
+    ///
+    /// The descriptor and the mapping both go. The lease is a lock on the
+    /// open file, and lasts while anything refers to that: closing the
+    /// descriptor alone left it held through the child's copy of the
+    /// mapping, for as long as the child lived, whatever became of the
+    /// parent.
     /// # Safety
     /// Only call once in the child, for a permanently leaked writer that will
-    /// never be used or dropped there. The parent's descriptor is unaffected.
+    /// never be used or dropped there, and that nothing in the child still
+    /// points into. The parent's descriptor and mapping are unaffected.
     pub unsafe fn abandon_in_fork_child(&self) {
+        libc::munmap(self.mapping.base.cast(), self.mapping.len);
         libc::close(self._owner_fd.as_raw_fd());
     }
 
-    /// Gives up the producer lease of a segment this process has replaced,
-    /// so its address is no longer vouched for and its descriptor does not
-    /// stay open for as long as the process runs.
+    /// Closes the descriptor of a segment this process has replaced, so
+    /// that one is not left open for every time it does. The lease itself
+    /// lasts as long as the segment stays mapped, which it does, for any
+    /// thread still inside a call; nothing can open the segment by name any
+    /// more to ask.
     /// # Safety
     /// Only call once, for a permanently leaked writer that is never
     /// dropped: the descriptor is closed under it.

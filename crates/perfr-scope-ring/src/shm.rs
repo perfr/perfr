@@ -541,8 +541,11 @@ impl ScopeRingReader {
     /// whatever its header says and whoever has its pid now.
     pub fn writer_alive(&self) -> bool {
         let fd = self.owner_fd.as_raw_fd();
+        // A shared lock: refused while the writer holds its exclusive
+        // lease, and granted alongside any number of other readers asking
+        // the same question at the same moment.
         // SAFETY: plain syscalls on a descriptor this reader owns.
-        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        if unsafe { libc::flock(fd, libc::LOCK_SH | libc::LOCK_NB) } == 0 {
             unsafe { libc::flock(fd, libc::LOCK_UN) };
             return false;
         }
@@ -717,6 +720,35 @@ mod tests {
         assert_eq!(reader.api_descriptor(), 1234);
         drop(writer);
         assert_eq!(reader.api_descriptor(), 0, "never call a stale process-local address");
+    }
+
+    #[test]
+    fn another_reader_asking_at_the_same_moment_is_not_taken_for_a_writer() {
+        let _serial = exclusive();
+        let pid = std::process::id();
+        let path = segment_directory().join(shm_file_name(pid));
+        // A writer that died without unlinking: its lease went with it, its
+        // file and the address in its header stay.
+        {
+            let writer = ScopeRingWriter::create(1, 8).unwrap();
+            writer.publish_api_descriptor(1234);
+            let bytes = std::fs::read(&path).unwrap();
+            drop(writer);
+            std::fs::write(&path, bytes).unwrap();
+        }
+        let reader = ScopeRingReader::open(pid).unwrap();
+        let other = ScopeRingReader::open(pid).unwrap();
+        // The other reader is part way through asking whether a writer
+        // holds the segment, which it does by taking the lock for a moment.
+        // That lock was exclusive, so this reader found the segment locked,
+        // concluded the writer was alive, and handed out its address.
+        let asking = unsafe { libc::flock(other.owner_fd.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+        let alive = reader.writer_alive();
+        let descriptor = reader.api_descriptor();
+        unlink_segment(pid);
+        assert_eq!(asking, 0);
+        assert!(!alive);
+        assert_eq!(descriptor, 0, "never call a stale process-local address");
     }
 
     #[test]

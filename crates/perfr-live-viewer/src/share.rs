@@ -260,7 +260,7 @@ pub fn query_share_base(search: &str) -> Option<String> {
     if value.is_empty() {
         return None;
     }
-    loopback_http_base(crate::dev::percent_decode(value).trim())
+    loopback_http_base(crate::util::percent_decode(value).trim())
 }
 
 /// `{base}/api/share`, with a single slash between them.
@@ -397,19 +397,7 @@ fn plain_error_body(body: &str) -> bool {
 /// Decimal size of the bytes that will be posted: `12.4 MB` is 12.4 million
 /// bytes. Under 1000 bytes the unit is `B` with no decimal.
 pub fn format_share_bytes(bytes: u64) -> String {
-    const KB: f64 = 1_000.0;
-    const MB: f64 = 1_000_000.0;
-    const GB: f64 = 1_000_000_000.0;
-    let n = bytes as f64;
-    if n >= GB {
-        format!("{:.1} GB", n / GB)
-    } else if n >= MB {
-        format!("{:.1} MB", n / MB)
-    } else if n >= KB {
-        format!("{:.1} KB", n / KB)
-    } else {
-        format!("{bytes} B")
-    }
+    crate::util::fmt_bytes(bytes)
 }
 
 /// What the confirm dialog says about sharing a time range.
@@ -582,8 +570,8 @@ pub fn login_url(share_base: &str, server_login_url: &str, provider: &str, next:
     let endpoint = login_endpoint(share_base, server_login_url);
     format!(
         "{endpoint}?provider={}&next={}",
-        percent_encode(provider),
-        percent_encode(next)
+        crate::util::percent_encode(provider),
+        crate::util::percent_encode(next)
     )
 }
 
@@ -668,8 +656,8 @@ pub fn fragment_share_token(hash: &str) -> Option<String> {
     }
     for kv in hash.split('&') {
         let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-        if crate::dev::percent_decode(k) == SHARE_TOKEN_FRAGMENT {
-            return usable_share_token(&crate::dev::percent_decode(v));
+        if crate::util::percent_decode(k) == SHARE_TOKEN_FRAGMENT {
+            return usable_share_token(&crate::util::percent_decode(v));
         }
     }
     None
@@ -977,19 +965,6 @@ fn progress(text: &str) -> ShareLine {
         text: text.into(),
         role: ShareLineRole::Progress,
     }
-}
-
-fn percent_encode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.as_bytes() {
-        match *b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 fn is_http_base(base: &str) -> bool {

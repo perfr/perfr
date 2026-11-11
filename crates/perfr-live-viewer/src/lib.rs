@@ -37,6 +37,8 @@ mod presets;
 mod logs;
 mod track_order;
 mod rect_select;
+#[cfg(feature = "egui")]
+mod util;
 mod report_copy;
 #[cfg(feature = "egui")]
 mod share;

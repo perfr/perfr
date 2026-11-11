@@ -308,7 +308,7 @@ pub fn query_capture_url(search: &str) -> Option<String> {
     if value.is_empty() {
         return None;
     }
-    Some(percent_decode(value))
+    Some(crate::util::percent_decode(value))
 }
 
 /// `?story=<url>` -- open a story on top of the capture. `demo` and
@@ -336,7 +336,7 @@ pub fn query_story_url(search: &str) -> Option<String> {
     if value.is_empty() {
         return None;
     }
-    Some(percent_decode(value))
+    Some(crate::util::percent_decode(value))
 }
 
 /// `?chrome=compact` -- a short bar for an iframe. Capture controls stay
@@ -358,26 +358,6 @@ pub fn query_chrome_compact_from_location() -> bool {
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub fn query_chrome_compact(search: &str) -> bool {
     search.trim_start_matches('?').split('&').any(|kv| kv == "chrome=compact")
-}
-
-/// Enough of percent-decoding for a path: `%2F`, `%3A` and friends.
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-pub(crate) fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// `?collapse=scheduler` -- start with the machine-wide scheduler track

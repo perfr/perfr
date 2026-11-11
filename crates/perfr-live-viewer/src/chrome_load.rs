@@ -75,15 +75,15 @@ impl TraceLoad {
             Some(total) if total > 0 => format!(
                 "Loading {}  {} / {}  {} events",
                 self.name,
-                fmt_bytes(inn),
-                fmt_bytes(total),
+                crate::util::fmt_bytes(inn),
+                crate::util::fmt_bytes(total),
                 fmt_int(ev)
             ),
             _ => format!(
                 "Loading {}  {} in / {} decoded  {} events",
                 self.name,
-                fmt_bytes(inn),
-                fmt_bytes(dec),
+                crate::util::fmt_bytes(inn),
+                crate::util::fmt_bytes(dec),
                 fmt_int(ev)
             ),
         }
@@ -150,18 +150,6 @@ fn fmt_int(n: u64) -> String {
         out.push(c);
     }
     out.chars().rev().collect()
-}
-
-fn fmt_bytes(n: u64) -> String {
-    if n >= 1_000_000_000 {
-        format!("{:.1} GB", n as f64 / 1e9)
-    } else if n >= 1_000_000 {
-        format!("{:.1} MB", n as f64 / 1e6)
-    } else if n >= 1000 {
-        format!("{:.1} KB", n as f64 / 1e3)
-    } else {
-        format!("{n} B")
-    }
 }
 
 /// Every extension a file picker or a drop may hand us. Perfetto
@@ -507,7 +495,9 @@ fn same_origin_trace_path(search: &str) -> Option<String> {
         if k != "trace" {
             continue;
         }
-        let decoded = percent_decode(v);
+        // `+` for a space, as a form would write it: this reader always
+        // took it that way.
+        let decoded = crate::util::percent_decode(&v.replace('+', " "));
         if !decoded.starts_with('/') || decoded.starts_with("//") {
             return None;
         }
@@ -519,27 +509,6 @@ fn same_origin_trace_path(search: &str) -> Option<String> {
         }
     }
     None
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn percent_decode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let b = s.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(c) =
-                u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or(""), 16)
-            {
-                out.push(c as char);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(if b[i] == b'+' { ' ' } else { b[i] as char });
-        i += 1;
-    }
-    out
 }
 
 #[cfg(test)]
@@ -555,6 +524,11 @@ mod tests {
         assert_eq!(
             same_origin_trace_path("?trace=%2Ftraces%2Ffoo.json.gz"),
             Some("/traces/foo.json.gz".into())
+        );
+        // A name outside ASCII arrives as the escaped bytes of its UTF-8.
+        assert_eq!(
+            same_origin_trace_path("?trace=/traces/caf%C3%A9+au+lait.json"),
+            Some("/traces/café au lait.json".into())
         );
         assert!(same_origin_trace_path("?trace=https://evil/x.json").is_none());
         assert!(same_origin_trace_path("?trace=//evil/x.json").is_none());

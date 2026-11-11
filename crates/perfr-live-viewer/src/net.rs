@@ -563,20 +563,6 @@ fn json_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// A query value with everything but unreserved characters percent-encoded.
-pub fn urlencoding_lite(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.as_bytes() {
-        match *b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
 /// Parses the sampling report. Text that is not a report (an older
 /// service's plain "not provided" body) reads as an empty one: the panel
 /// then shows no rows instead of the previous selection's.
@@ -1405,7 +1391,7 @@ mod wasm_impl {
             if self.offline {
                 return;
             }
-            let q = urlencoding_lite(q);
+            let q = crate::util::percent_encode(q);
             let inbox = self.inbox.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let result = get_text(&format!(
@@ -2494,12 +2480,6 @@ mod tests {
     fn the_tree_query_puts_the_mode_after_the_ranges_or_alone() {
         assert_eq!(sampling_tree_query(&[], "top_down"), "?mode=top_down");
         assert_eq!(sampling_tree_query(&[(1, 2, Some(3))], "bottom_up"), "?ranges=1-2:3&mode=bottom_up");
-    }
-
-    #[test]
-    fn a_search_string_is_encoded_down_to_unreserved_characters() {
-        assert_eq!(urlencoding_lite("Abc-_.~09"), "Abc-_.~09");
-        assert_eq!(urlencoding_lite("std::map<int, T>&x=1/é"), "std%3A%3Amap%3Cint%2C%20T%3E%26x%3D1%2F%C3%A9");
     }
 
     #[test]

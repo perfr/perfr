@@ -272,6 +272,117 @@ mod tests {
     use super::*;
     use perfr_perf_records::{record_type, PerfEventHeader};
 
+    /// A ring this test writes the way the kernel does: a memfd laid out as
+    /// a perf mapping (the metadata page, then the data area), so the reader
+    /// runs over real shared memory without a perf event behind it.
+    fn synthetic_ring(ring_size: u64) -> RingBuffer {
+        let page_size = sys::page_size();
+        let length = (page_size + ring_size) as usize;
+        let fd = unsafe { libc::memfd_create(c"perfr-ring-test".as_ptr(), libc::MFD_CLOEXEC) };
+        assert!(fd >= 0);
+        assert_eq!(unsafe { libc::ftruncate(fd, length as libc::off_t) }, 0);
+        let mmap = sys::Mmap::ring(fd, length).unwrap();
+        // `data_offset` and `data_size`, which the kernel fills at mmap.
+        unsafe {
+            mmap.address.add(1024 + 16).cast::<u64>().write(page_size);
+            mmap.address.add(1024 + 24).cast::<u64>().write(ring_size);
+        }
+        RingBuffer::from_mapping(mmap, ring_size, fd, page_size).unwrap()
+    }
+
+    /// The kernel's side of the protocol: copy the bytes in at `data_head`,
+    /// wrapping at the end of the data area, then publish the new head.
+    fn publish(ring: &RingBuffer, bytes: &[u8]) {
+        let metadata = ring.metadata();
+        let head = metadata.data_head.load(Ordering::Relaxed);
+        let tail = metadata.data_tail.load(Ordering::Acquire);
+        assert!(head - tail + bytes.len() as u64 <= ring.ring_size, "the test overfilled its ring");
+        for (i, byte) in bytes.iter().enumerate() {
+            let at = ((head + i as u64) & (ring.ring_size - 1)) as usize;
+            unsafe { ring.data().cast_mut().add(at).write(*byte) };
+        }
+        metadata.data_head.store(head + bytes.len() as u64, Ordering::Release);
+    }
+
+    /// A record of `size` bytes whose payload is a function of `seed`, so a
+    /// read that returned the wrong bytes cannot compare equal.
+    fn record(kind: u32, size: usize, seed: u8) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(size);
+        bytes.extend_from_slice(&kind.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&(size as u16).to_le_bytes());
+        bytes.extend((8..size).map(|i| seed.wrapping_mul(31).wrapping_add(i as u8)));
+        bytes
+    }
+
+    #[test]
+    fn an_empty_ring_reads_nothing() {
+        let mut ring = synthetic_ring(4096);
+        assert!(!ring.has_new_data());
+        assert_eq!(ring.read_record().unwrap(), None);
+        assert_eq!(ring.fill_fraction(), 0.0);
+    }
+
+    #[test]
+    fn records_come_back_whole_wherever_they_wrap() {
+        // Sizes that are not divisors of the ring, so over a few laps a
+        // record straddles the end at every 8-byte offset -- header split
+        // from payload, payload split in two, header itself split.
+        let mut ring = synthetic_ring(4096);
+        let mut wrapped = 0;
+        for i in 0..2_000u32 {
+            let size = 8 + 8 * (i as usize % 13);
+            let written = record(record_type::SAMPLE, size, i as u8);
+            let tail = ring.metadata().data_tail.load(Ordering::Relaxed);
+            if (tail & 4095) + size as u64 > 4096 {
+                wrapped += 1;
+            }
+            publish(&ring, &written);
+            assert_eq!(ring.read_record().unwrap().as_deref(), Some(&written[..]), "record {i}");
+            assert_eq!(ring.read_record().unwrap(), None);
+        }
+        assert!(wrapped > 10, "only {wrapped} records wrapped; the sizes no longer exercise it");
+    }
+
+    #[test]
+    fn several_records_are_read_in_the_order_written() {
+        let mut ring = synthetic_ring(4096);
+        // Start near the end so the batch itself crosses it.
+        publish(&ring, &record(record_type::SAMPLE, 4000, 0));
+        ring.read_record().unwrap().unwrap();
+        let batch: Vec<Vec<u8>> = (0..20).map(|i| record(record_type::SAMPLE, 24 + 8 * (i % 3), i as u8)).collect();
+        for written in &batch {
+            publish(&ring, written);
+        }
+        assert!(ring.fill_fraction() > 0.0);
+        let mut buf = Vec::new();
+        for written in &batch {
+            assert!(ring.read_record_into(&mut buf).unwrap());
+            assert_eq!(&buf, written);
+        }
+        assert!(!ring.read_record_into(&mut buf).unwrap());
+        assert_eq!(ring.fill_fraction(), 0.0);
+    }
+
+    #[test]
+    fn a_record_smaller_than_a_header_is_an_error_and_is_not_consumed() {
+        let mut ring = synthetic_ring(4096);
+        let mut bad = record(record_type::SAMPLE, 16, 1);
+        bad[6..8].copy_from_slice(&4u16.to_le_bytes());
+        publish(&ring, &bad);
+        assert_eq!(ring.read_record().unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert!(ring.has_new_data(), "an unreadable record must not be skipped silently");
+    }
+
+    #[test]
+    fn a_record_longer_than_what_was_written_is_an_error_not_a_read_past_the_head() {
+        let mut ring = synthetic_ring(4096);
+        let mut bad = record(record_type::SAMPLE, 16, 1);
+        bad[6..8].copy_from_slice(&64u16.to_le_bytes());
+        publish(&ring, &bad);
+        assert_eq!(ring.read_record().unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
     // A self-observing smoke test: watch our own pid, do some mmaps, and
     // require that every record the kernel hands us parses and that mmap
     // records for a named mapping show up. Runs wherever

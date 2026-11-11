@@ -235,6 +235,11 @@ pub struct TrackStrip {
     pub pinned_sections: FastSet<u32>,
     /// User order for whole machine trees, overriding MachineId::sort_key.
     pub machine_sort: HashMap<MachineId, i32>,
+    /// Machines whose instrumented processes the user has arranged by hand
+    /// (a process header was dragged). Those keep the order of
+    /// `process_sort`; the order by event count is only the default, as the
+    /// activity sort is for `pinned_sections`.
+    hand_ordered: FastSet<MachineId>,
 }
 
 /// Everything the layout needs to know about the index, gathered in one pass
@@ -367,6 +372,7 @@ impl Default for TrackStrip {
             thread_sort: HashMap::new(),
             pinned_sections: FastSet::default(),
             machine_sort: HashMap::new(),
+            hand_ordered: FastSet::default(),
         }
     }
 }
@@ -429,9 +435,13 @@ impl TrackStrip {
         for &p in &pids {
             self.process_tier.insert(p, process_tier(p, hints));
         }
+        let hand_ordered = &self.hand_ordered;
         let rank = |p: u32| -> (u8, i64) {
             let tier = process_tier(p, hints);
-            let bucket = if tier == TIER_INSTRUMENTED {
+            // A tier arranged by hand is not re-sorted by size: this runs
+            // every frame, and a process dragged above a busier one went
+            // back under it on the frame after the release.
+            let bucket = if tier == TIER_INSTRUMENTED && !hand_ordered.contains(&MachineId::from_pid(p)) {
                 // Bigger first: the bucket is negated.
                 -((events_per_pid.get(&p).copied().unwrap_or(0) + 1).ilog2() as i64)
             } else {
@@ -1293,6 +1303,9 @@ impl TrackStrip {
         for (i, p) in same.iter().enumerate() {
             self.process_sort.insert(*p, i as i32);
         }
+        if tier_of(pid) == TIER_INSTRUMENTED {
+            self.hand_ordered.insert(machine);
+        }
         let tiers = self.process_tier.clone();
         self.process_order.sort_by_key(|p| {
             (
@@ -1878,6 +1891,32 @@ mod tests {
         // The order survives a rebuild (process_order is re-sorted by the map).
         strip.sync(&idx, None);
         assert_eq!(strip.process_order, vec![12, 10, 11]);
+    }
+
+    #[test]
+    fn a_process_dragged_above_a_busier_one_stays_there() {
+        // By default the instrumented processes are ordered by how much
+        // they said. Every earlier test of the drag gave each process one
+        // event, so that default never disagreed with the hand order.
+        let mut idx = TrackIndex::default();
+        for i in 0..1000u64 {
+            idx.insert(LiveEvent { start_ns: i * 20, ..scope(10, 1, 1) });
+        }
+        for i in 0..100u64 {
+            idx.insert(LiveEvent { start_ns: i * 20, ..scope(11, 1, 2) });
+        }
+        idx.insert(scope(12, 1, 3));
+        let mut strip = TrackStrip::default();
+        strip.sync(&idx, None);
+        assert_eq!(strip.process_order, vec![10, 11, 12], "busiest first until arranged by hand");
+        strip.reorder_process(12, 0);
+        assert_eq!(strip.process_order, vec![12, 10, 11]);
+        // The next frame's sync must not put the busiest back on top.
+        strip.sync(&idx, None);
+        assert_eq!(strip.process_order, vec![12, 10, 11]);
+        strip.reorder_process(11, 1);
+        strip.sync(&idx, None);
+        assert_eq!(strip.process_order, vec![12, 11, 10]);
     }
 
     #[test]

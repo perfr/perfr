@@ -719,6 +719,53 @@ struct SampleCounters {
     named_early: u64,
 }
 
+/// The open-file limit a capture asks for. Its rings are descriptors: two
+/// per sampled thread, four per CPU for the scheduler and its tracepoints,
+/// two per CPU for every hooked function -- 1152 on 32 CPUs with 16 hooks
+/// before the first thread, against a customary soft limit of 1024. Enough
+/// for a thousand threads and sixty-four hooks on sixty-four CPUs.
+///
+/// Not simply the hard limit: that is 2^30 on some distributions, the soft
+/// limit is inherited by the helpers the service starts, and a program that
+/// walks every possible descriptor at start-up does not come back from that.
+#[cfg(target_os = "linux")]
+const CAPTURE_OPEN_FILES: u64 = 65_536;
+
+/// The soft limit to set, given the current soft and hard ones: up to
+/// `CAPTURE_OPEN_FILES` or the hard limit, whichever is lower, and never
+/// down. `None` when there is nothing to gain.
+#[cfg(target_os = "linux")]
+fn open_file_limit_to_ask_for(soft: u64, hard: u64) -> Option<u64> {
+    let wanted = CAPTURE_OPEN_FILES.min(hard);
+    (wanted > soft).then_some(wanted)
+}
+
+/// Raises the soft open-file limit for the capture's rings. Without it the
+/// rings past the limit fail with EMFILE part-way through: some threads
+/// unsampled, a hook armed on some CPUs and not on others, and -- the
+/// target's liveness being read from /proc -- a capture that takes its
+/// target for dead. Stays raised: hooks are added mid-capture and the next
+/// capture needs it again.
+#[cfg(target_os = "linux")]
+fn raise_open_file_limit() {
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: getrlimit and setrlimit read and write the struct passed.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return;
+    }
+    let Some(wanted) = open_file_limit_to_ask_for(limit.rlim_cur, limit.rlim_max) else { return };
+    let before = limit.rlim_cur;
+    limit.rlim_cur = wanted;
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } == 0 {
+        log::info!("raised the open-file limit from {before} to {wanted} for the capture's rings");
+    } else {
+        log::warn!(
+            "the open-file limit stays at {before} ({}); a capture of many threads or hooks may run out",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
 /// The perf rings of one kind that a capture could not open. Each ring is
 /// an event the kernel may refuse and a mapping it may refuse, per thread or
 /// per CPU, so a capture can run with some of them missing; these used to
@@ -1408,6 +1455,7 @@ fn capture_loop(
     // The hook specs the engines arm; the armed set also carries each hook's
     // size and safety verdict, kept for the crash journal.
     let hooks: Vec<HookSpec> = armed_hooks.iter().map(|a| a.spec.clone()).collect();
+    raise_open_file_limit();
     // GPU telemetry rides the same helper-process path the file mode uses:
     // the static service cannot dlopen NVML, so a helper streams pod events
     // in and they are converted to viewer lanes here.
@@ -3663,6 +3711,21 @@ mod tests {
         bytes.extend_from_slice(&count.to_le_bytes());
         sample_id(&mut bytes, tid, time, cpu);
         bytes
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_open_file_limit_is_raised_to_what_a_capture_needs_and_never_lowered() {
+        // The customary default: 1024 soft, far more allowed.
+        assert_eq!(open_file_limit_to_ask_for(1024, 524_288), Some(CAPTURE_OPEN_FILES));
+        // A hard limit of 2^30 is not a number to hand to child processes.
+        assert_eq!(open_file_limit_to_ask_for(1024, 1 << 30), Some(CAPTURE_OPEN_FILES));
+        // A hard limit below what is wanted is all there is to have.
+        assert_eq!(open_file_limit_to_ask_for(1024, 4096), Some(4096));
+        // Already enough, or already more: left alone.
+        assert_eq!(open_file_limit_to_ask_for(CAPTURE_OPEN_FILES, 524_288), None);
+        assert_eq!(open_file_limit_to_ask_for(524_288, 524_288), None);
+        assert_eq!(open_file_limit_to_ask_for(4096, 4096), None);
     }
 
     #[cfg(target_os = "linux")]

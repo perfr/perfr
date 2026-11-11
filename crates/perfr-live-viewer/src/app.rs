@@ -948,6 +948,10 @@ pub struct PerfrLiveApp {
     visible_count: u32,
     draw_label: String,
     visible_cache: Option<(u64, u64, u64, i32, u32)>,
+    /// A widget held the keyboard focus when the last frame ended. egui
+    /// takes the focus away on Escape before a frame's own code runs, so
+    /// this is the only way to tell that an Escape was typed into a box.
+    had_keyboard_focus: bool,
     search: String,
     search_ids: HashSet<u32>,
     search_resolved: String,
@@ -1802,6 +1806,7 @@ impl PerfrLiveApp {
             visible_count: 0,
             draw_label: String::new(),
             visible_cache: None,
+            had_keyboard_focus: false,
             search: String::new(),
             search_ids: HashSet::new(),
             search_resolved: String::new(),
@@ -3849,7 +3854,9 @@ impl PerfrLiveApp {
                 self.search.clear();
             }
         }
-        if resp.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+        // As in the tracks box below: the key arrives on a box that has
+        // just lost its focus to it.
+        if (resp.has_focus() || resp.lost_focus()) && ui.input(|i| i.key_pressed(Key::Escape)) {
             self.search.clear();
         }
     }
@@ -7383,12 +7390,13 @@ impl PerfrLiveApp {
     }
 
     fn handle_keys(&mut self, ctx: &Context, body: Rect, ruler: Rect, view_h: f32, dt: f32) {
-        if ctx.wants_keyboard_input() {
-            if ctx.input(|i| i.key_pressed(Key::Escape)) {
-                if self.search_active() || !self.search.is_empty() {
-                    self.search.clear();
-                }
-            }
+        // An Escape typed into a text box belongs to the box, like every
+        // other key typed there. It does not look like typing by now (the
+        // focus is already gone), and it used to run the timeline's Escape
+        // as well: leaving the tracks filter or a report filter also threw
+        // away the scope search, the selection, the measure and the marquee.
+        let escape_in_a_box = self.had_keyboard_focus && ctx.input(|i| i.key_pressed(Key::Escape));
+        if ctx.wants_keyboard_input() || escape_in_a_box {
             return;
         }
         // With the Self pane open this runs twice a frame, once per
@@ -7442,15 +7450,17 @@ impl PerfrLiveApp {
             self.rect_result = None;
         }
         let (a, d, left, right, up, down, w, s) = ctx.input(|i| {
+            // Ctrl+S, Ctrl+A, Cmd+W and the like are the browser's.
+            let plain = !(i.modifiers.ctrl || i.modifiers.command);
             (
-                i.key_down(Key::A),
-                i.key_down(Key::D),
+                plain && i.key_down(Key::A),
+                plain && i.key_down(Key::D),
                 i.key_down(Key::ArrowLeft),
                 i.key_down(Key::ArrowRight),
                 i.key_down(Key::ArrowUp),
                 i.key_down(Key::ArrowDown),
-                i.key_down(Key::W),
-                i.key_down(Key::S),
+                plain && i.key_down(Key::W),
+                plain && i.key_down(Key::S),
             )
         });
         // Hold-to-pan from key-down state + dt, not OS key-repeat (~30 Hz).
@@ -11111,6 +11121,7 @@ impl eframe::App for PerfrLiveApp {
                 .frame(Frame::new().fill(theme::CANVAS()).inner_margin(0))
                 .show(ctx, |ui| self.timeline(ui, dt, &devf));
             self.publish_ui_rects();
+            self.had_keyboard_focus = ctx.wants_keyboard_input();
 
             if self.settle_frames > 0 {
                 self.settle_frames -= 1;

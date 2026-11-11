@@ -1082,3 +1082,74 @@ fn a_track_drag_ends_on_release_without_a_gpu_too() {
     page.frames(2);
     assert!(!page.app.tracks.any_dragging());
 }
+
+/// The three-thread page with a thread selected and a scope search on.
+fn page_with_a_selection_and_a_search() -> Page {
+    let mut page = three_thread_page();
+    page.app.selected_thread = Some((100, 102));
+    page.app.search = "work".into();
+    page.frames(2);
+    page
+}
+
+#[test]
+fn escape_in_the_tracks_filter_clears_that_filter_and_nothing_else() {
+    let mut page = page_with_a_selection_and_a_search();
+    let filter = page.rect_of("filter:tracks").expect("the tracks box");
+    page.click(filter.center());
+    page.type_text("zz");
+    assert_eq!(page.app.track_filter, "zz");
+    page.key(Key::Escape);
+    assert_eq!(page.app.track_filter, "", "Escape clears the box it was typed in");
+    assert_eq!(page.app.selected_thread, Some((100, 102)), "and it took the selection with it");
+    assert_eq!(page.app.search, "work", "and the scope search");
+}
+
+#[test]
+fn escape_in_the_scope_search_clears_the_search_and_keeps_the_selection() {
+    let mut page = three_thread_page();
+    page.app.selected_thread = Some((100, 102));
+    page.frames(2);
+    let search = page.text_rect("scope").expect("the empty search box shows its hint");
+    page.click(search.center());
+    page.type_text("work");
+    assert_eq!(page.app.search, "work");
+    page.key(Key::Escape);
+    assert_eq!(page.app.search, "");
+    assert_eq!(page.app.selected_thread, Some((100, 102)));
+}
+
+#[test]
+fn escape_over_the_timeline_still_clears_the_search_and_the_selection() {
+    let mut page = page_with_a_selection_and_a_search();
+    page.key(Key::Escape);
+    assert_eq!(page.app.search, "");
+    assert_eq!(page.app.selected_thread, None);
+    // And again after a text box was used and left.
+    page.app.selected_thread = Some((100, 102));
+    let filter = page.rect_of("filter:tracks").expect("the tracks box");
+    page.click(filter.center());
+    page.key(Key::Escape);
+    assert_eq!(page.app.selected_thread, Some((100, 102)));
+    page.key(Key::Escape);
+    assert_eq!(page.app.selected_thread, None, "the second Escape is the timeline's");
+}
+
+#[test]
+fn a_browser_shortcut_on_a_navigation_key_does_not_move_the_view() {
+    let mut page = three_thread_page();
+    let view = (page.app.t0, page.app.t1);
+    for key in [Key::S, Key::W, Key::A, Key::D] {
+        let held = Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::CTRL };
+        page.frame_with(vec![held], Modifiers::CTRL);
+        page.frame_with(Vec::new(), Modifiers::CTRL);
+        let up = Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::CTRL };
+        page.frame_with(vec![up], Modifiers::CTRL);
+        assert_eq!((page.app.t0, page.app.t1), view, "Ctrl+{key:?} panned or zoomed");
+    }
+    // The bare key still does.
+    page.frame(vec![key_event(Key::S, true)]);
+    page.frames(3);
+    page.frame(vec![key_event(Key::S, false)]);
+    assert_ne!((page.app.t0, page.app.t1), view);
+}

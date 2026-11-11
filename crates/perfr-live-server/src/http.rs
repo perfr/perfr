@@ -1447,7 +1447,66 @@ async fn put_settings(State(svc): State<Arc<LiveService>>, Json(body): Json<crat
     }
 }
 
+/// The smallest ring `PUT /api/config` takes: under this a capture is a
+/// fraction of a second, which nobody means to ask for.
+pub(crate) const MIN_RING_BYTES: u64 = 1 << 20;
+
+/// The largest, on a machine with memory to spare.
+pub(crate) const MAX_RING_BYTES: u64 = 8 << 30;
+
+/// The largest ring this machine takes: half of its memory, and never over
+/// [`MAX_RING_BYTES`]. The ring is allocated and written in full when it is
+/// created, so a size the machine cannot back is not a slow request but the
+/// end of the process: the allocation fails (or its size overflows) and a
+/// release build aborts. With the memory size unknown the fixed cap alone
+/// applies.
+pub(crate) fn max_ring_bytes(physical_memory: Option<u64>) -> u64 {
+    physical_memory
+        .map_or(MAX_RING_BYTES, |total| (total / 2).min(MAX_RING_BYTES))
+        .max(MIN_RING_BYTES)
+}
+
+pub(crate) fn check_ring_bytes(bytes: u64, max: u64) -> Result<(), String> {
+    if (MIN_RING_BYTES..=max).contains(&bytes) {
+        return Ok(());
+    }
+    Err(format!(
+        "ring_buffer_bytes must be between {MIN_RING_BYTES} (1 MiB) and {max} ({} MiB: half of this \
+         machine's memory, {} GiB at most); got {bytes}",
+        max >> 20,
+        MAX_RING_BYTES >> 30,
+    ))
+}
+
+/// The machine's physical memory, when the platform says.
+#[cfg(target_os = "linux")]
+fn physical_memory_bytes() -> Option<u64> {
+    // `MemTotal:       65843088 kB`
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = meminfo.lines().find(|line| line.starts_with("MemTotal:"))?;
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    kib.checked_mul(1024)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn physical_memory_bytes() -> Option<u64> {
+    // SAFETY: sysconf takes no pointers; -1 is its "not known".
+    let (pages, page_size) = unsafe { (libc::sysconf(libc::_SC_PHYS_PAGES), libc::sysconf(libc::_SC_PAGESIZE)) };
+    if pages <= 0 || page_size <= 0 {
+        return None;
+    }
+    (pages as u64).checked_mul(page_size as u64)
+}
+
+#[cfg(not(unix))]
+fn physical_memory_bytes() -> Option<u64> {
+    None
+}
+
 async fn put_config(State(svc): State<Arc<LiveService>>, Json(body): Json<ConfigBody>) -> Response {
+    if let Err(error) = check_ring_bytes(body.ring_buffer_bytes, max_ring_bytes(physical_memory_bytes())) {
+        return (StatusCode::BAD_REQUEST, error).into_response();
+    }
     let spill = body
         .spill_path
         .filter(|s| !s.is_empty())

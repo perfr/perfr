@@ -458,3 +458,155 @@ fn stream_slice_keeps_events_crossing_both_edges_and_normalizes_bounds() {
     assert_eq!(events, vec![crossing, ev(5)]);
     assert!(matches!(frames.last(), Some(LiveFrame::CaptureFinished)));
 }
+
+// ------------------------------------------------- the router, over TCP ---
+
+/// The real router on a loopback port, with the runtime that serves it.
+struct Served {
+    addr: std::net::SocketAddr,
+    _runtime: tokio::runtime::Runtime,
+}
+
+fn serve(svc: std::sync::Arc<LiveService>) -> Served {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = crate::http::router(svc);
+    runtime.spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    Served { addr, _runtime: runtime }
+}
+
+/// A service whose configured bind is the port it is served on, as in a
+/// real run.
+fn serve_small() -> (std::sync::Arc<LiveService>, Served) {
+    let svc = LiveService::new(small_cfg()).unwrap();
+    let served = serve(svc.clone());
+    svc.config.lock().bind = served.addr;
+    (svc, served)
+}
+
+/// One HTTP/1.1 exchange written out by hand, so that a test decides every
+/// header the server sees: `Host` and `Origin` are what the origin rules
+/// read, and an HTTP client library would choose them for us. `headers` is
+/// sent as given (no `Host` is added). Returns the status and the body.
+fn exchange(addr: std::net::SocketAddr, method: &str, path: &str, headers: &[(&str, &str)], body: Option<&[u8]>) -> (u16, String) {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    let mut request = format!("{method} {path} HTTP/1.1\r\n");
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    if let Some(body) = body {
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).unwrap();
+    if let Some(body) = body {
+        stream.write_all(body).unwrap();
+    }
+    // The head, then as much body as it announces: an upgraded connection
+    // stays open, so reading to the end would wait for the timeout.
+    let mut raw = Vec::new();
+    let mut byte = [0u8; 1];
+    while !raw.ends_with(b"\r\n\r\n") {
+        match stream.read(&mut byte) {
+            Ok(1) => raw.push(byte[0]),
+            _ => break,
+        }
+    }
+    let head = String::from_utf8_lossy(&raw).into_owned();
+    let status: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("no status line in the reply to {method} {path}: {head:?}"));
+    let length = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok())?
+        })
+        .unwrap_or(0);
+    let mut body = vec![0u8; length];
+    stream.read_exact(&mut body).unwrap();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+/// The `Host` a client on this machine sends for `addr`.
+fn host_of(addr: std::net::SocketAddr) -> String {
+    addr.to_string()
+}
+
+fn get(served: &Served, path: &str) -> (u16, String) {
+    exchange(served.addr, "GET", path, &[("Host", &host_of(served.addr))], None)
+}
+
+fn send_json(served: &Served, method: &str, path: &str, body: &str) -> (u16, String) {
+    let host = host_of(served.addr);
+    exchange(
+        served.addr,
+        method,
+        path,
+        &[("Host", &host), ("Content-Type", "application/json")],
+        Some(body.as_bytes()),
+    )
+}
+
+#[test]
+fn a_ring_size_outside_the_allowed_range_is_refused_rather_than_allocated() {
+    let (svc, served) = serve_small();
+    let before = svc.config.lock().ring_buffer_bytes;
+    // Sizes whose element count overflows an allocation outright: before
+    // the range check these reached `vec![..; n]` and the handler panicked,
+    // which in a release build is the end of the service.
+    for bytes in [u64::MAX, 1u64 << 62] {
+        let (status, text) = send_json(&served, "PUT", "/api/config", &format!(r#"{{"ring_buffer_bytes":{bytes}}}"#));
+        assert_eq!(status, 400, "{bytes}: {text}");
+        assert!(text.contains("ring_buffer_bytes must be between"), "{text}");
+    }
+    // Too small to hold a capture worth looking at.
+    for bytes in [0u64, 4096, (1 << 20) - 1] {
+        let (status, text) = send_json(&served, "PUT", "/api/config", &format!(r#"{{"ring_buffer_bytes":{bytes}}}"#));
+        assert_eq!(status, 400, "{bytes}: {text}");
+        assert!(text.contains("ring_buffer_bytes must be between"), "{text}");
+    }
+    assert_eq!(svc.config.lock().ring_buffer_bytes, before, "a refused size changes nothing");
+    // The smallest size allowed is taken, and the service is still up.
+    let (status, text) = send_json(&served, "PUT", "/api/config", r#"{"ring_buffer_bytes":1048576}"#);
+    assert_eq!(status, 200, "{text}");
+    let (status, text) = get(&served, "/api/config");
+    assert_eq!(status, 200);
+    assert!(text.contains(r#""ring_buffer_bytes":1048576"#), "{text}");
+}
+
+#[test]
+fn the_largest_ring_is_half_of_memory_up_to_eight_gibibytes() {
+    use crate::http::{check_ring_bytes, max_ring_bytes, MAX_RING_BYTES, MIN_RING_BYTES};
+    const GIB: u64 = 1 << 30;
+    assert_eq!(max_ring_bytes(Some(4 * GIB)), 2 * GIB);
+    assert_eq!(max_ring_bytes(Some(64 * GIB)), MAX_RING_BYTES);
+    assert_eq!(max_ring_bytes(Some(16 * GIB)), MAX_RING_BYTES);
+    assert_eq!(max_ring_bytes(None), MAX_RING_BYTES, "unknown memory leaves the fixed cap");
+    // A machine so small that half of it is under the floor still takes
+    // the one size the floor allows.
+    assert_eq!(max_ring_bytes(Some(1 << 20)), MIN_RING_BYTES);
+    assert_eq!(max_ring_bytes(Some(0)), MIN_RING_BYTES);
+
+    let max = max_ring_bytes(Some(4 * GIB));
+    assert!(check_ring_bytes(MIN_RING_BYTES, max).is_ok());
+    assert!(check_ring_bytes(256 << 20, max).is_ok());
+    assert!(check_ring_bytes(max, max).is_ok());
+    assert!(check_ring_bytes(MIN_RING_BYTES - 1, max).is_err());
+    let error = check_ring_bytes(max + 1, max).unwrap_err();
+    assert!(error.contains("between 1048576 (1 MiB) and 2147483648 (2048 MiB"), "{error}");
+    assert!(error.ends_with(&format!("got {}", max + 1)), "{error}");
+}

@@ -307,6 +307,8 @@ pub struct TrackIndex {
     /// It used to walk every event of every lane, and was called once per
     /// WebSocket batch -- on a busy live capture that was most of the drain.
     bounds: Bounds,
+    /// See [`TrackIndex::set_extent_floor`]. 0 when there is none.
+    extent_floor: u64,
 }
 
 /// Min/max over all events and over "real" ones -- a zero-width mark at t=0
@@ -328,7 +330,9 @@ impl Default for Bounds {
 }
 
 impl Bounds {
-    fn add(&mut self, e: &LiveEvent) {
+    /// `floor` is the index's extent floor: an event that begins before it
+    /// counts like one of the viewer's own rows, in the fallback only.
+    fn add(&mut self, e: &LiveEvent, floor: u64) {
         let start = e.start_ns;
         let end = e.end_ns();
         self.min_all = self.min_all.min(start);
@@ -339,7 +343,7 @@ impl Bounds {
         // letting them into the real bounds stretched the navigable range
         // seconds before a capture's first event.
         let own = perfr_live_event::dev::is_self_pid(e.pid);
-        if !own && (start > 0 || e.duration_ns > 1) {
+        if !own && start >= floor && (start > 0 || e.duration_ns > 1) {
             self.any_real = true;
             self.min_real = self.min_real.min(start);
             self.max_real = self.max_real.max(end);
@@ -359,7 +363,36 @@ impl TrackIndex {
         };
         lane.insert(event);
         self.events += 1;
-        self.bounds.add(&event);
+        self.bounds.add(&event, self.extent_floor);
+    }
+
+    /// Where the capture begins, when that is known apart from its events.
+    /// An event that begins before this is still held and drawn, but does
+    /// not widen [`Self::time_bounds`] (unless nothing else is held).
+    ///
+    /// A capture cut to a window keeps every event that overlaps the window
+    /// whole. One that spans it -- a frame loop's outer scope, a thread
+    /// asleep throughout -- begins before the window and ends after it, and
+    /// counted in the bounds it made a two-second cut open as wide as the
+    /// capture it was cut from, with data in the middle only.
+    ///
+    /// [`Self::clear`] removes the floor: what is held next is another
+    /// capture, with its own beginning.
+    pub fn set_extent_floor(&mut self, start_ns: u64) {
+        if self.extent_floor != start_ns {
+            self.extent_floor = start_ns;
+            self.rescan_bounds();
+        }
+    }
+
+    fn rescan_bounds(&mut self) {
+        let mut b = Bounds::default();
+        for lane in self.lanes.values() {
+            for e in &lane.events {
+                b.add(e, self.extent_floor);
+            }
+        }
+        self.bounds = b;
     }
 
     /// Changes only when a lane is added or removed. See the field.
@@ -377,6 +410,7 @@ impl TrackIndex {
         self.lanes.clear();
         self.events = 0;
         self.bounds = Bounds::default();
+        self.extent_floor = 0;
         self.lane_gen = self.lane_gen.wrapping_add(1);
     }
 
@@ -396,13 +430,7 @@ impl TrackIndex {
         }
         self.events = self.lanes.values().map(Lane::len).sum();
         // Dropping events can move either bound; rescan (retain is rare).
-        let mut b = Bounds::default();
-        for lane in self.lanes.values() {
-            for e in &lane.events {
-                b.add(e);
-            }
-        }
-        self.bounds = b;
+        self.rescan_bounds();
     }
 
     pub fn lane_count(&self) -> usize {
@@ -1491,5 +1519,36 @@ mod bounds_tests {
         own.start_ns = 9_000_000;
         index.insert(own);
         assert_eq!(index.time_bounds(), Some((5_000_000, 5_000_100)));
+    }
+
+    #[test]
+    fn events_already_running_at_the_floor_are_held_but_do_not_widen_the_bounds() {
+        let span = |start_ns: u64, end_ns: u64, tid: u32| LiveEvent { start_ns, duration_ns: end_ns - start_ns, tid, pid: 7, kind: 1, depth: 0, extra: 0, _pad: 0, name_id: 1 };
+        // A capture cut to [100, 200]: one scope spans the window, one runs
+        // into it, one sits inside and one runs out of it.
+        let stored = [span(10, 900, 1), span(50, 150, 2), span(120, 130, 2), span(190, 260, 2)];
+        let mut index = TrackIndex::default();
+        index.set_extent_floor(100);
+        index.extend(stored);
+        assert_eq!(index.event_count(), 4, "all four are held");
+        assert_eq!(index.time_bounds(), Some((120, 260)), "the bounds are those of what begins in the window");
+        // The same whichever comes first, the floor or the events.
+        let mut late = TrackIndex::default();
+        late.extend(stored);
+        assert_eq!(late.time_bounds(), Some((10, 900)));
+        late.set_extent_floor(100);
+        assert_eq!(late.time_bounds(), Some((120, 260)));
+        // Dropping events keeps the floor.
+        late.retain(|e| e.start_ns != 190);
+        assert_eq!(late.time_bounds(), Some((120, 130)));
+        // With nothing but events that were already running, they are what there is.
+        let mut only = TrackIndex::default();
+        only.set_extent_floor(100);
+        only.insert(span(10, 900, 1));
+        assert_eq!(only.time_bounds(), Some((10, 900)));
+        // Another capture starts without the floor of the last.
+        late.clear();
+        late.insert(span(10, 20, 1));
+        assert_eq!(late.time_bounds(), Some((10, 20)));
     }
 }

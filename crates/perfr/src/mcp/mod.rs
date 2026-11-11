@@ -911,6 +911,36 @@ mod tests {
     }
 
     #[test]
+    fn what_the_agent_is_told_matches_the_build_and_the_platform_table() {
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let url = spawn_service(hits);
+        let mcp = Mcp::connect(&url, false, tools::Platform::windows()).unwrap();
+        let init = call(&mcp, 1, "initialize", json!({}));
+        assert_eq!(init["result"]["serverInfo"]["version"], crate::build_info::package_version());
+        // Windows samples (`Platform::windows`). Text that calls sampling
+        // Linux-only keeps an agent there from ever asking for the report.
+        let caps = tool(&mcp, 2, "perfr_capabilities", json!({}));
+        assert_eq!(caps["features"]["sampling"]["supported"], true);
+        let instructions = init["result"]["instructions"].as_str().unwrap().to_string();
+        let listed = call(&mcp, 3, "tools/list", json!({})).to_string();
+        for text in [&instructions, &listed] {
+            assert!(!text.contains("scheduler are Linux-only"), "{text}");
+            assert!(!text.contains("on Linux, perfr_sampling_report"), "{text}");
+            assert!(!text.contains("Default on for Linux, unsupported on macOS"), "{text}");
+            assert!(!text.contains("the scheduler, kernel uprobes and auto-profiling are Linux-only"), "{text}");
+        }
+        assert!(instructions.contains("Windows"), "{instructions}");
+        // And a refusal does not explain itself with another platform's name.
+        let mut none = tools::Platform::windows();
+        none.sampling = false;
+        let mcp = Mcp::connect(&url, false, none).unwrap();
+        let report = tool(&mcp, 4, "perfr_sampling_report", json!({}));
+        assert_eq!(report["supported"], false);
+        assert!(!report["message"].as_str().unwrap().contains("macOS"), "{report}");
+        assert!(report["message"].as_str().unwrap().contains("perfr_function_stats"), "{report}");
+    }
+
+    #[test]
     fn remote_url_and_remote_bind_are_refused() {
         match Mcp::connect("http://10.1.2.3:44766", false, tools::Platform::linux()) {
             Err(error) => assert!(error.contains("not loopback"), "{error}"),

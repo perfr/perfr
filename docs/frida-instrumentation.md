@@ -22,6 +22,12 @@ verifies their pinned SHA-256 checksums, and caches them under
 `target/frida-devkits`. Set `PERFR_FRIDA_DEVKIT_ROOT` to use another cache.
 Builds thereafter can use the cached devkits without downloading them again.
 
+A debug build of `perfr-hook` on a checkout that has no devkits (what
+`cargo test --workspace` does on a fresh clone) links a stub instead and says
+so in a build warning: that helper starts, and fails every injection with a
+message naming `tools/frida/devkits.sh`. Release builds, and any build with
+`PERFR_FRIDA_DEVKIT_ROOT` set, still stop when the devkit is missing.
+
 On macOS, `tools/build/build-service-macos.sh` packages the helper and agent alongside the
 service and manual SDK. `--universal` builds both architectures for all native
 components. The agent must contain the target process's architecture.

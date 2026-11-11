@@ -92,7 +92,7 @@ while [ "$n" -lt "$lines" ]; do
   head -n "$n" "$INSTALL" >"$TMP/cut.sh"
   run_install "$TMP/cut.sh" "$TMP/cut"
   if [ -e "$TMP/cut/bin" ]; then
-    fail "the first $n of $lines lines installed: $(ls "$TMP/cut/bin" | tr '\n' ' ')"
+    fail "the first $n of $lines lines installed: $(cd "$TMP/cut/bin" && echo *)"
   fi
   n=$((n + 1))
 done

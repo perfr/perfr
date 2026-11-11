@@ -1,4 +1,4 @@
-# The toolchain CI builds with; rustup picks it up for any cargo run in rust/.
+# The toolchain CI builds with; rustup picks it up for any cargo run in this repository.
 [toolchain]
 channel = "1.88.0"
 components = ["rustfmt", "clippy"]

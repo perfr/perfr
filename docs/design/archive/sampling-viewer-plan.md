@@ -1,5 +1,9 @@
 # Plan: sampling UX in the live viewer
 
+> Executed. The sample bar, the selection-driven report and demangling, all
+> described below as missing, have shipped (`docs/manual/timeline.md`,
+> `crates/perfr/src/demangle.rs`), and `rust/shims` no longer exists.
+
 Status as of 2026-08-31. The **data** side is built and verified; the
 **viewer** side is not. This is the plan for the rest, written down so it can
 be picked up cold.

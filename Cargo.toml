@@ -8,9 +8,9 @@
 # eframe/wgpu tree never enters a service build; `cargo test --workspace`
 # covers all of it. crates/README.md describes the crates.
 #
-# See docs/rust-port-plan.html for how the C++ service was ported, and
-# https://perfr.dev/blog/ for the running write-up of what each step cost. The C++ tree
-# itself lives on the `cpp` branch of the Orbit repository.
+# https://perfr.dev/rust-port-plan.html is how the C++ service was ported, and
+# https://perfr.dev/blog/ the running write-up of what each step cost. Where
+# the C++ tree itself went is under History in crates/README.md.
 
 [workspace]
 resolver = "2"

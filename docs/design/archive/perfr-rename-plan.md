@@ -6,6 +6,9 @@ found in the LICENSE file.
 
 # Renaming Orbit to perfr
 
+> Executed 2026-10-27. Kept as the record of what was renamed and of the
+> names that were deliberately left alone.
+
 Plan, 2026-10-25. Executed 2026-10-27 on the `perfr` branch, on top of PR
 #118, as one PR so the tree is never half-named. Where the execution
 departed from the table below: the license stays BSD-2-Clause for now (the

@@ -5,7 +5,7 @@
 > service's `windows.rs` loop, Frida over a named pipe, the static CRT
 > build and the packaging. The outcome and its numbers are in
 > `perfr-web/blog/metrics/phase-17-windows.txt`, the status in
-> `cross-platform-plan.md`, the how-to in `../building_windows.md`, and the
+> `cross-platform-plan.md`, the how-to in `docs/building_windows.md`, and the
 > story in blog post 24. Two deviations from the plan are recorded there:
 > raw advapi32 bindings instead of `ferrisetw`, and a file-backed section
 > in a per-user directory instead of a `Local\` named section. The text

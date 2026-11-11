@@ -1,8 +1,9 @@
 # Cross-platform: status, plan, and what cannot be faked
 
-> Starting on a Windows machine? Read `windows-agent-brief.md` first: it is the
-> cold-start handoff -- the rules, the per-crate `windows-msvc` check results,
-> and the work in order with an acceptance test for each item.
+> The Windows work was handed over with `archive/windows-agent-brief.md` (the
+> rules, the per-crate `windows-msvc` check results, and the work in order
+> with an acceptance test for each item). It is done; `docs/building_windows.md`
+> is the how-to.
 
 Target platforms: Linux x86-64 (done), Linux aarch64, macOS (x86-64 + Apple
 silicon), Windows x86-64 (done, 2026-10-17: see "Windows, done and verified"
@@ -141,6 +142,10 @@ Rust tree already meets on every platform; the literal musl story is
 Linux-only.
 
 ## Backend switch
+
+> Historical. No `PERFR_BACKEND` or `PERFR_*_BACKEND` variable is read by
+> anything on `main`: the C++ implementations the switch selected are gone,
+> and with them the differential harness this section plans around.
 
 The Linux port's `PERFR_BACKEND` env var (`cpp` / `rust` / `both`) selects the
 capture backend and, in `both`, runs both and fails on disagreement. The

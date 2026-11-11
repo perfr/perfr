@@ -1,5 +1,9 @@
 # The uprobes duplicate-event workaround, and what is underneath it
 
+> The C++ files named below are in the Orbit C++ tree, not in this
+> repository. The same workaround in the Rust service is in
+> `crates/perfr/src/uprobes.rs`.
+
 Investigated 2026-08-31. Two questions: what is the workaround in perfr's C++,
 and is there a Linux kernel bug behind it. The first is answered definitively;
 the second is answered partially, and the honest limits are marked.

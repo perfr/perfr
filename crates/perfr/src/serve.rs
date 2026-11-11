@@ -694,36 +694,14 @@ struct SampledThread {
     dead: bool,
 }
 
-/// How many exited threads may wait, rings open, for a drain the symbol load
-/// is holding back. Each costs a 4 MiB ring and two descriptors, and a target
-/// that starts a thread per task can retire hundreds of them a second.
+/// Lets go of the threads whose exit record has been read. Called after the
+/// sample drain, never where the exit is noticed: the sampling ring still
+/// holds what the thread took since the previous pass -- all of it, for a
+/// thread shorter-lived than a pass -- and dropping the thread ahead of the
+/// drain lost those samples.
 #[cfg(target_os = "linux")]
-const MAX_DEAD_THREADS_HELD: usize = 64;
-
-/// Lets go of the threads whose exit record has been read, once their
-/// sampling rings have been too: `drained` says a drain ran after they were
-/// marked. Dropping a thread where its exit was noticed, ahead of the drain,
-/// lost everything it had sampled since the previous pass -- all of it, for a
-/// thread shorter-lived than a pass or one that exited during the symbol
-/// load, when the rings are not read at all.
-///
-/// While the symbol load holds the drains back the dead wait, the oldest
-/// giving way past `MAX_DEAD_THREADS_HELD`. When no drain will ever run
-/// (`will_drain` is false: no unwinder) waiting gains nothing.
-#[cfg(target_os = "linux")]
-fn retire_dead_threads(threads: &mut Vec<SampledThread>, drained: bool, will_drain: bool) {
-    if drained || !will_drain {
-        threads.retain(|t| !t.dead);
-        return;
-    }
-    let mut excess = threads.iter().filter(|t| t.dead).count().saturating_sub(MAX_DEAD_THREADS_HELD);
-    if excess > 0 {
-        threads.retain(|t| {
-            let evict = t.dead && excess > 0;
-            excess -= usize::from(evict);
-            !evict
-        });
-    }
+fn retire_dead_threads(threads: &mut Vec<SampledThread>) {
+    threads.retain(|t| !t.dead);
 }
 
 /// What a capture's sampling rings yielded, for the summary at its end.
@@ -736,6 +714,9 @@ struct SampleCounters {
     failed_drains: u64,
     /// Samples the kernel could not write because a thread's ring was full.
     lost: u64,
+    /// Samples named by address because too many were already waiting for
+    /// the symbols.
+    named_early: u64,
 }
 
 /// `extra` of a `DROP` marker for a loss that is not of a scope-ring record
@@ -765,6 +746,22 @@ struct HeldSample {
     stack: Vec<u8>,
 }
 
+/// One sample unwound while the symbols were still loading: its frames,
+/// innermost first, waiting for names.
+#[cfg(target_os = "linux")]
+struct UnnamedSample {
+    time: u64,
+    tid: u32,
+    frames: Vec<u64>,
+}
+
+/// How many unwound samples may wait for the symbols. A few hundred bytes
+/// each, so this is some tens of megabytes: thirty busy threads for eight
+/// seconds. A load slower than that has its later samples named by address
+/// rather than held without bound.
+#[cfg(target_os = "linux")]
+const MAX_UNNAMED_SAMPLES: usize = 250_000;
+
 /// Buffers reused across a capture. A 1 kHz sample with a 64 KiB stack used
 /// to allocate a fresh perf record and a fresh stack copy every time; those
 /// sit below glibc's mmap threshold, so a few minutes of capture fragmented
@@ -779,6 +776,8 @@ struct SampleScratch {
     stack: Vec<u8>,
     held: Vec<HeldSample>,
     pool: Vec<Vec<u8>>,
+    /// Samples unwound before the symbolizer was ready.
+    unnamed: Vec<UnnamedSample>,
 }
 
 #[cfg(target_os = "linux")]
@@ -788,12 +787,22 @@ const STACK_POOL_MAX: usize = 2048;
 /// newer ones wait in `scratch` until a later pass, so a uretprobe entry
 /// that is still inside the reorder window can patch the return slot first.
 /// `returns` is the uprobe session, when one is armed.
+///
+/// The rings are read whether or not the symbols have loaded (`names_ready`).
+/// A ring holds 65 samples -- the kernel reserves the whole stack area in
+/// every record -- so a thread that waited in its ring for a symbol load
+/// kept its first 65 ms of CPU and lost the rest. Unwinding needs the
+/// unwinder, not the symbolizer: a sample taken during the load is unwound
+/// at once and its frames, a few hundred bytes, wait for their names in
+/// `scratch.unnamed`. Naming them early instead would split every function
+/// sampled both before and after the load into a hex ghost and its real name.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn drain_samples(
     threads: &mut [SampledThread],
     unwinder: &mut ProcessUnwinder,
     symbolizer: &Symbolizer,
+    names_ready: bool,
     pc_ids: &mut crate::report::FastMap<u64, u32>,
     names: &mut FrameNames,
     store: &SampleStore,
@@ -806,9 +815,40 @@ fn drain_samples(
     returns: Option<&UprobeSession>,
     scratch: &mut SampleScratch,
 ) {
-    emit_ready_samples(
-        unwinder, symbolizer, pc_ids, names, store, target_pid, period_ns, batch, horizon_ns, returns, scratch,
-    );
+    if names_ready {
+        name_waiting_samples(symbolizer, pc_ids, names, store, target_pid, period_ns, batch, scratch);
+    }
+    // Samples the reorder horizon has caught up to.
+    let mut i = 0;
+    while i < scratch.held.len() {
+        if scratch.held[i].time > horizon_ns {
+            i += 1;
+            continue;
+        }
+        let mut held = scratch.held.swap_remove(i);
+        push_sample(
+            held.time,
+            held.tid,
+            &held.regs,
+            &mut held.stack,
+            unwinder,
+            symbolizer,
+            names_ready,
+            pc_ids,
+            names,
+            store,
+            target_pid,
+            period_ns,
+            counters,
+            batch,
+            returns,
+            &mut scratch.unnamed,
+        );
+        if scratch.pool.len() < STACK_POOL_MAX {
+            held.stack.clear();
+            scratch.pool.push(held.stack);
+        }
+    }
     for thread in threads.iter_mut() {
         let tid = thread.tid;
         let read = thread.sample.drain(|kind, record| {
@@ -855,13 +895,16 @@ fn drain_samples(
                     &mut scratch.stack,
                     unwinder,
                     symbolizer,
+                    names_ready,
                     pc_ids,
                     names,
                     store,
                     target_pid,
                     period_ns,
+                    counters,
                     batch,
                     returns,
+                    &mut scratch.unnamed,
                 );
             } else {
                 let mut owned = scratch.pool.pop().unwrap_or_default();
@@ -885,10 +928,11 @@ fn drain_samples(
     }
 }
 
+/// Names the samples that were unwound while the symbols loaded and pushes
+/// their timeline events. They keep the timestamps they were taken at.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
-fn emit_ready_samples(
-    unwinder: &mut ProcessUnwinder,
+fn name_waiting_samples(
     symbolizer: &Symbolizer,
     pc_ids: &mut crate::report::FastMap<u64, u32>,
     names: &mut FrameNames,
@@ -896,41 +940,16 @@ fn emit_ready_samples(
     target_pid: i32,
     period_ns: u64,
     batch: &mut Vec<LiveEvent>,
-    horizon_ns: u64,
-    returns: Option<&UprobeSession>,
     scratch: &mut SampleScratch,
 ) {
-    let mut i = 0;
-    while i < scratch.held.len() {
-        if scratch.held[i].time > horizon_ns {
-            i += 1;
-            continue;
-        }
-        let mut held = scratch.held.swap_remove(i);
-        push_sample(
-            held.time,
-            held.tid,
-            &held.regs,
-            &mut held.stack,
-            unwinder,
-            symbolizer,
-            pc_ids,
-            names,
-            store,
-            target_pid,
-            period_ns,
-            batch,
-            returns,
-        );
-        if scratch.pool.len() < STACK_POOL_MAX {
-            held.stack.clear();
-            scratch.pool.push(held.stack);
-        }
+    for sample in scratch.unnamed.drain(..) {
+        name_sample(sample.time, sample.tid, &sample.frames, symbolizer, pc_ids, names, store, target_pid, period_ns, batch);
     }
 }
 
-/// Unwind one sample and push its timeline events. `stack` is patched in
-/// place when a uprobe session has hijacked return addresses.
+/// Unwind one sample and, when the symbols are there to name its frames,
+/// push its timeline events; otherwise its frames wait in `unnamed`. `stack`
+/// is patched in place when a uprobe session has hijacked return addresses.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn push_sample(
@@ -940,13 +959,16 @@ fn push_sample(
     stack: &mut [u8],
     unwinder: &mut ProcessUnwinder,
     symbolizer: &Symbolizer,
+    names_ready: bool,
     pc_ids: &mut crate::report::FastMap<u64, u32>,
     names: &mut FrameNames,
     store: &SampleStore,
     target_pid: i32,
     period_ns: u64,
+    counters: &mut SampleCounters,
     batch: &mut Vec<LiveEvent>,
     returns: Option<&UprobeSession>,
+    unnamed: &mut Vec<UnnamedSample>,
 ) {
     #[cfg(target_arch = "x86_64")]
     let start = StartRegs { ip: regs[8], sp: regs[7], frame_pointer: regs[6], link: 0 };
@@ -955,21 +977,50 @@ fn push_sample(
     if let Some(session) = returns {
         session.patch_user_stack(tid as i32, start.sp, time, stack);
     }
-    let outcome = {
+    let mut outcome = {
         let _unwind = perfr_api::scope("unwind");
         unwinder.unwind(start, start.sp, stack, 64)
     };
-    // frames[0] is the sampled pc; a flame graph stacks the
-    // outermost caller at depth 0, so walk them in reverse.
-    let depth_count = outcome.frames.len().min(u8::MAX as usize);
+    // frames[0] is the sampled pc; a frame's depth is a u8 on the timeline.
+    outcome.frames.truncate(u8::MAX as usize);
+    if names_ready {
+        name_sample(time, tid, &outcome.frames, symbolizer, pc_ids, names, store, target_pid, period_ns, batch);
+    } else if unnamed.len() < MAX_UNNAMED_SAMPLES {
+        unnamed.push(UnnamedSample { time, tid, frames: outcome.frames });
+    } else {
+        if counters.named_early == 0 {
+            log::warn!(
+                "{MAX_UNNAMED_SAMPLES} samples are waiting for the symbols; \
+                 further ones are named by address until the load finishes"
+            );
+        }
+        counters.named_early += 1;
+        name_sample(time, tid, &outcome.frames, symbolizer, pc_ids, names, store, target_pid, period_ns, batch);
+    }
+}
+
+/// Push the timeline events of one unwound sample: `frames` are its pcs,
+/// innermost first.
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+fn name_sample(
+    time: u64,
+    tid: u32,
+    frames: &[u64],
+    symbolizer: &Symbolizer,
+    pc_ids: &mut crate::report::FastMap<u64, u32>,
+    names: &mut FrameNames,
+    store: &SampleStore,
+    target_pid: i32,
+    period_ns: u64,
+    batch: &mut Vec<LiveEvent>,
+) {
     // Innermost-first ids, for the report's self/inclusive
     // counts; the timeline spans below want them reversed.
     let frame_ids: Vec<u32> = {
         let _symbolize = perfr_api::scope("symbolize");
-        outcome
-            .frames
+        frames
             .iter()
-            .take(depth_count)
             .map(|pc| *pc_ids.entry(*pc).or_insert_with(|| names.id_for_frame(&symbolizer.resolve_frame(*pc))))
             .collect()
     };
@@ -987,6 +1038,8 @@ fn push_sample(
         _pad: 0,
         name_id: frame_ids.first().copied().unwrap_or(0),
     });
+    // A flame graph stacks the outermost caller at depth 0, so walk the
+    // frames in reverse.
     for (index, name_id) in frame_ids.iter().rev().copied().enumerate() {
         batch.push(LiveEvent {
             start_ns: time,
@@ -1350,20 +1403,17 @@ fn capture_loop(
     }
     // Do not block the capture on symbol loading: start with an empty
     // symbolizer (every address resolves to its hex form) and build the real
-    // one on a background thread. Scheduling, sampling and thread states stream
-    // from the first pass; sample frames read as addresses until the symbols
-    // arrive, then the pc cache is cleared so later frames re-resolve to names.
-    // This is what keeps a big split debug file from delaying the whole
-    // capture. Symbolizer::for_pid emits its own "load symbols (N modules)"
-    // scope around the parallel per-file loads.
+    // one on a background thread. This is what keeps a big split debug file
+    // from delaying the whole capture. Symbolizer::for_pid emits its own
+    // "load symbols (N modules)" scope around the parallel per-file loads.
     let mut symbolizer = Symbolizer::empty();
-    // Samples are held until the symbolizer is ready rather than resolved with
-    // the empty one: the empty symbolizer names every address as bare hex, so
-    // a function sampled both before and after the load split into a hex ghost
-    // and its real name. The kernel sampling rings buffer meanwhile, so held
-    // samples keep their timestamps and appear, correctly named, once symbols
-    // land. Scheduling and thread states need no symbols and stream from the
-    // first pass.
+    // Samples are not named until the symbolizer is ready: the empty one
+    // names every address as bare hex, so a function sampled both before and
+    // after the load split into a hex ghost and its real name. They are read
+    // and unwound from the first pass all the same (`drain_samples`), and
+    // their frames wait: they keep their timestamps and appear, correctly
+    // named, once the symbols land. Scheduling and thread states need no
+    // symbols and stream from the first pass.
     let mut symbols_ready = false;
     let (symbolizer_tx, symbolizer_rx) = std::sync::mpsc::channel::<Symbolizer>();
     if has_target {
@@ -1386,15 +1436,24 @@ fn capture_loop(
     // scan stays as the safety net for a clone that lands between a
     // thread's birth and its own task ring being armed; it logs when it
     // finds anything, so a gap would show.
+    //
+    // `sample_now` is false for the threads found during setup. A sampling
+    // ring holds 65 ms of one thread's CPU, and the rest of the setup --
+    // the unwinder, the scheduler rings, the hooks -- takes longer than
+    // that before the first pass can read anything: a thread sampled from
+    // here on kept those 65 ms and lost what followed, a few hundred
+    // milliseconds of every busy thread at the start of every capture.
+    // Their sampling is switched on where the loop starts instead. The task
+    // rings are enabled here, so no thread born meanwhile goes unnoticed.
     let mut threads: Vec<SampledThread> = Vec::new();
-    let sample_thread = |threads: &mut Vec<SampledThread>, tid: i32| -> bool {
+    let sample_thread = |threads: &mut Vec<SampledThread>, tid: i32, sample_now: bool| -> bool {
         if threads.iter().any(|t| t.tid == tid && !t.dead) {
             return false;
         }
         let Ok(sample) = perfr_perf_ring::ring::open_stack_sample(period_ns, 64_000, tid, -1, 4096) else {
             return false;
         };
-        if sample.enable().is_err() {
+        if sample_now && sample.enable().is_err() {
             return false;
         }
         let task = perfr_perf_ring::ring::open_mmap_task(tid, -1, 64).ok();
@@ -1404,12 +1463,12 @@ fn capture_loop(
         threads.push(SampledThread { tid, sample, task, dead: false });
         true
     };
-    let scan_threads = |threads: &mut Vec<SampledThread>| -> usize {
+    let scan_threads = |threads: &mut Vec<SampledThread>, sample_now: bool| -> usize {
         let Ok(tasks) = std::fs::read_dir(format!("/proc/{target_pid}/task")) else { return 0 };
         let mut opened = 0;
         for entry in tasks.flatten() {
             if let Some(tid) = entry.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) {
-                if sample_thread(threads, tid) {
+                if sample_thread(threads, tid, sample_now) {
                     opened += 1;
                 }
             }
@@ -1418,7 +1477,7 @@ fn capture_loop(
     };
     if has_target {
         let _phase = perfr_api::scope("open sampling rings");
-        scan_threads(&mut threads);
+        scan_threads(&mut threads, false);
     }
     const THREAD_SCAN_EVERY_NS: u64 = 2_000_000_000;
     let mut last_thread_scan_ns: u64 = crate::now_monotonic_ns();
@@ -1450,6 +1509,7 @@ fn capture_loop(
         stack: Vec::new(),
         held: Vec::new(),
         pool: Vec::new(),
+        unnamed: Vec::new(),
     };
     let mut switch_rings = Vec::new();
     {
@@ -1701,6 +1761,15 @@ fn capture_loop(
     let mut last_alive_check_ns: u64 = 0;
     // Auto-profiling, from the first pass it is on (`auto_profile.rs`).
     let mut auto: Option<AutoRun> = None;
+    // The setup is done and the loop is about to read: start sampling the
+    // threads it found (see `sample_thread`).
+    threads.retain(|thread| match thread.sample.enable() {
+        Ok(()) => true,
+        Err(error) => {
+            log::warn!("sampling of thread {} could not be switched on: {error}", thread.tid);
+            false
+        }
+    });
     while running.load(Ordering::Relaxed) {
         let _pass = perfr_api::scope("capture pass");
         let target_gone = has_target && {
@@ -1740,9 +1809,9 @@ fn capture_loop(
             running.store(false, Ordering::Relaxed);
             continue;
         }
-        // The background symbol load finished: swap it in and start draining
-        // the sampling rings (which buffered while it built). Even a stripped
-        // binary resolves to module+offset here, not bare hex.
+        // The background symbol load finished: swap it in, and the samples
+        // unwound while it built get their names in the drain below. Even a
+        // stripped binary resolves to module+offset here, not bare hex.
         if let Ok(built) = symbolizer_rx.try_recv() {
             announce_symbols(&built);
             symbolizer = built;
@@ -1905,7 +1974,7 @@ fn capture_loop(
                 }
             }
             for tid in born {
-                if sample_thread(&mut threads, tid) {
+                if sample_thread(&mut threads, tid, true) {
                     log::info!("thread {tid} born, sampling it ({} threads)", threads.len());
                 }
             }
@@ -1913,7 +1982,7 @@ fn capture_loop(
             if now.saturating_sub(last_thread_scan_ns) >= THREAD_SCAN_EVERY_NS {
                 last_thread_scan_ns = now;
                 let _scan = perfr_api::scope("scan threads");
-                let opened = scan_threads(&mut threads);
+                let opened = scan_threads(&mut threads, true);
                 if opened > 0 {
                     log::info!(
                         "the /proc scan found {opened} thread(s) no fork record announced ({} threads)",
@@ -1956,15 +2025,15 @@ fn capture_loop(
             uprobe_calls = session.poll_at(probe_now_ns);
         }
         let sample_horizon = uprobes.as_ref().map(|s| s.sample_horizon(probe_now_ns)).unwrap_or(u64::MAX);
-        // Hold samples until the symbols are ready; the kernel rings buffer
-        // them meanwhile, so they arrive named rather than as bare addresses.
+        // Read and unwound every pass; named once the symbols are ready, so
+        // they arrive named rather than as bare addresses.
         let _samples = perfr_api::scope("read samples");
-        let samples_drained = symbols_ready && unwinder.is_some();
-        if let (true, Some(unwinder)) = (symbols_ready, unwinder.as_mut()) {
+        if let Some(unwinder) = unwinder.as_mut() {
             drain_samples(
                 &mut threads,
                 unwinder,
                 &symbolizer,
+                symbols_ready,
                 &mut pc_ids,
                 &mut names,
                 &store,
@@ -1978,7 +2047,7 @@ fn capture_loop(
                 &mut sample_scratch,
             );
         }
-        retire_dead_threads(&mut threads, samples_drained, unwinder.is_some());
+        retire_dead_threads(&mut threads);
         drop(_samples);
         if let Some(session) = uprobes.as_mut() {
             session.retire_returns_before(sample_horizon);
@@ -2252,31 +2321,19 @@ fn capture_loop(
     // final unwind, so the last samples are patched with the same return
     // addresses as the rest of the capture.
     let flushed_calls = uprobes.as_mut().map(|session| session.flush()).unwrap_or_default();
-    // Samples still held for the symbols. A capture stopped before its
-    // symbol load finished -- the first capture of a big binary, stopped
-    // within a second or two -- lost every sample it took: the rings were
-    // never read. Wait for the load, within reason, then read them out once
-    // more; a load that is still not done resolves them by address rather
-    // than losing them.
+    // The last samples: what the rings took since the final pass, and what
+    // the reorder horizon was still holding. Read out first, then named: a
+    // capture stopped before its symbol load finished -- the first capture
+    // of a big binary, stopped within a second or two -- has every sample
+    // it took waiting for names. Wait for the load, within reason; one that
+    // is still not done has them named by address rather than lost.
     if let (true, Some(unwinder)) = (sampling_works, unwinder.as_mut()) {
-        if !symbols_ready {
-            let _wait = perfr_api::scope("wait for symbols");
-            match symbolizer_rx.recv_timeout(std::time::Duration::from_secs(10)) {
-                Ok(built) => {
-                    announce_symbols(&built);
-                    symbolizer = built;
-                }
-                Err(_) => log::warn!(
-                    "symbols were still loading when the capture stopped; \
-                     its samples are named by address"
-                ),
-            }
-        }
         let mut tail: Vec<LiveEvent> = Vec::new();
         drain_samples(
             &mut threads,
             unwinder,
             &symbolizer,
+            symbols_ready,
             &mut pc_ids,
             &mut names,
             &store,
@@ -2289,6 +2346,29 @@ fn capture_loop(
             uprobes.as_ref(),
             &mut sample_scratch,
         );
+        if !symbols_ready {
+            let _wait = perfr_api::scope("wait for symbols");
+            match symbolizer_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(built) => {
+                    announce_symbols(&built);
+                    symbolizer = built;
+                }
+                Err(_) => log::warn!(
+                    "symbols were still loading when the capture stopped; \
+                     its samples are named by address"
+                ),
+            }
+            name_waiting_samples(
+                &symbolizer,
+                &mut pc_ids,
+                &mut names,
+                &store,
+                target_pid,
+                period_ns,
+                &mut tail,
+                &mut sample_scratch,
+            );
+        }
         if !tail.is_empty() {
             service.push_events(&tail);
         }
@@ -2410,6 +2490,12 @@ fn capture_loop(
     log::info!("{} callstack samples recorded", samples.parsed);
     // Only worth a line when it happened: a sample whose register set came
     // back short is one the unwinder could not start from.
+    if samples.named_early > 0 {
+        log::warn!(
+            "{} sample(s) were named by address: more than {MAX_UNNAMED_SAMPLES} were waiting for the symbols",
+            samples.named_early
+        );
+    }
     let unparsed = samples.records.saturating_sub(samples.parsed);
     if unparsed > 0 || samples.short_regs > 0 {
         log::warn!(
@@ -3243,96 +3329,6 @@ mod tests {
         assert_eq!(service.dropped_before_start(), 1);
     }
 
-    /// A sampling ring on a thread of this process that burns `cpu_ms` of
-    /// CPU and exits, or None where perf_event_open is not permitted.
-    #[cfg(target_os = "linux")]
-    fn ring_of_an_exited_thread(cpu_ms: i64) -> Option<perfr_perf_ring::RingBuffer> {
-        let (tid_tx, tid_rx) = std::sync::mpsc::channel();
-        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-        let worker = std::thread::spawn(move || {
-            tid_tx.send(unsafe { libc::gettid() }).unwrap();
-            if go_rx.recv().is_err() {
-                return;
-            }
-            let cpu_time_ns = || {
-                let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-                unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
-                ts.tv_sec * 1_000_000_000 + ts.tv_nsec
-            };
-            let until = cpu_time_ns() + cpu_ms * 1_000_000;
-            while cpu_time_ns() < until {
-                std::hint::spin_loop();
-            }
-        });
-        let tid = tid_rx.recv().unwrap();
-        let ring = perfr_perf_ring::ring::open_stack_sample(1_000_000, 1024, tid, -1, 64)
-            .and_then(|ring| ring.enable().map(|()| ring));
-        match ring {
-            Ok(ring) => {
-                go_tx.send(()).unwrap();
-                worker.join().unwrap();
-                Some(ring)
-            }
-            Err(error) => {
-                drop(go_tx);
-                worker.join().unwrap();
-                eprintln!("skipping: perf_event_open not permitted here ({error})");
-                None
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn an_exited_thread_keeps_its_ring_until_a_drain_has_read_it() {
-        let Some(sample) = ring_of_an_exited_thread(20) else { return };
-        let mut threads = vec![SampledThread { tid: 1, sample, task: None, dead: true }];
-        // The pass that reads the exit record has not drained yet: what the
-        // thread sampled since the previous pass is still in the ring.
-        retire_dead_threads(&mut threads, false, true);
-        assert_eq!(threads.len(), 1, "dropped with its last samples unread");
-        assert!(threads[0].sample.has_new_data());
-        // Once a drain has run there is nothing left to wait for.
-        retire_dead_threads(&mut threads, true, true);
-        assert!(threads.is_empty());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn dead_threads_go_at_once_when_no_drain_will_ever_read_them() {
-        let Some(sample) = ring_of_an_exited_thread(0) else { return };
-        let Some(live) = ring_of_an_exited_thread(0) else { return };
-        let mut threads = vec![
-            SampledThread { tid: 1, sample, task: None, dead: true },
-            SampledThread { tid: 2, sample: live, task: None, dead: false },
-        ];
-        // No unwinder: holding the rings open would be for nothing.
-        retire_dead_threads(&mut threads, false, false);
-        assert_eq!(threads.iter().map(|t| t.tid).collect::<Vec<_>>(), [2]);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn dead_threads_waiting_for_a_drain_are_bounded() {
-        // Rings on this thread: only the bookkeeping is under test.
-        let tid = unsafe { libc::gettid() };
-        let mut threads = Vec::new();
-        for label in 0..MAX_DEAD_THREADS_HELD as i32 + 4 {
-            let Ok(sample) = perfr_perf_ring::ring::open_stack_sample(1_000_000, 1024, tid, -1, 4) else {
-                eprintln!("skipping: perf_event_open not permitted here");
-                return;
-            };
-            // One thread near the front is still alive.
-            threads.push(SampledThread { tid: label, sample, task: None, dead: label != 1 });
-        }
-        retire_dead_threads(&mut threads, false, true);
-        assert_eq!(threads.iter().filter(|t| t.dead).count(), MAX_DEAD_THREADS_HELD);
-        // The oldest go first, and the living are not touched.
-        let kept: Vec<i32> = threads.iter().map(|t| t.tid).collect();
-        assert_eq!(kept[..3], [1, 4, 5]);
-        assert_eq!(kept.len(), MAX_DEAD_THREADS_HELD + 1);
-    }
-
     /// What `drain_samples` needs around it, with nothing of the kernel in
     /// it: sampled threads whose rings the test fills, an unwinder that
     /// knows no module (so a frame is whatever the registers said), and a
@@ -3372,7 +3368,7 @@ mod tests {
                 names: FrameNames::new(service, store.clone()),
                 store,
                 counters: SampleCounters::default(),
-                scratch: SampleScratch { stack: Vec::new(), held: Vec::new(), pool: Vec::new() },
+                scratch: SampleScratch { stack: Vec::new(), held: Vec::new(), pool: Vec::new(), unnamed: Vec::new() },
             }
         }
 
@@ -3382,11 +3378,18 @@ mod tests {
 
         /// One pass of the sample drain, returning the events it pushed.
         fn drain(&mut self, horizon_ns: u64) -> Vec<LiveEvent> {
+            self.drain_with(true, horizon_ns)
+        }
+
+        /// One pass while the symbols are loading (`names_ready` false) or
+        /// after they have landed.
+        fn drain_with(&mut self, names_ready: bool, horizon_ns: u64) -> Vec<LiveEvent> {
             let mut batch = Vec::new();
             drain_samples(
                 &mut self.threads,
                 &mut self.unwinder,
                 &self.symbolizer,
+                names_ready,
                 &mut self.pc_ids,
                 &mut self.names,
                 &self.store,
@@ -3476,6 +3479,74 @@ mod tests {
         assert_eq!((ticks[0].start_ns, ticks[0].tid, ticks[0].pid), (5_000, 4001, 4000));
         assert!(batch.iter().any(|e| e.kind == kind::FUNCTION_CALL && e.name_id == ticks[0].name_id));
         assert_eq!(rig.counters.parsed, 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn samples_taken_while_the_symbols_load_leave_the_ring_at_once_and_are_named_later() {
+        let mut rig = SampleRig::new(&[4001]);
+        for i in 0..3 {
+            assert!(rig.ring(4001).publish(&stack_sample_record(4001, 5_000 + i, 0x401000 + i, &[0u8; 64])));
+        }
+        // The symbols are not there yet. Nothing may be drawn -- a frame
+        // named now would be named again, differently, after the load --
+        // but nothing may stay in the ring either: it holds 65 samples.
+        let during = rig.drain_with(false, u64::MAX);
+        assert!(during.iter().all(|e| e.kind != kind::SAMPLE && e.kind != kind::FUNCTION_CALL));
+        assert_eq!(rig.ring(4001).fill_fraction(), 0.0, "the samples waited in the kernel's ring");
+        assert_eq!(rig.scratch.unnamed.len(), 3);
+        assert_eq!(rig.store.export_rows().0.len(), 0);
+
+        // The load lands: they appear, at the times they were taken.
+        let after = rig.drain_with(true, u64::MAX);
+        let mut ticks: Vec<u64> = after.iter().filter(|e| e.kind == kind::SAMPLE).map(|e| e.start_ns).collect();
+        ticks.sort_unstable();
+        assert_eq!(ticks, [5_000, 5_001, 5_002]);
+        assert!(rig.scratch.unnamed.is_empty());
+        assert_eq!(rig.store.export_rows().0.len(), 3);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_symbol_load_that_never_ends_does_not_hold_samples_without_bound() {
+        let mut rig = SampleRig::new(&[4001]);
+        rig.scratch.unnamed = (0..MAX_UNNAMED_SAMPLES as u64)
+            .map(|time| UnnamedSample { time, tid: 4001, frames: Vec::new() })
+            .collect();
+        assert!(rig.ring(4001).publish(&stack_sample_record(4001, 5_000, 0x401000, &[0u8; 64])));
+        let batch = rig.drain_with(false, u64::MAX);
+        assert_eq!(rig.scratch.unnamed.len(), MAX_UNNAMED_SAMPLES);
+        assert_eq!(batch.iter().filter(|e| e.kind == kind::SAMPLE).count(), 1, "named by address, not dropped");
+        assert_eq!(rig.counters.named_early, 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_sample_inside_the_reorder_window_waits_for_the_horizon() {
+        let mut rig = SampleRig::new(&[4001]);
+        assert!(rig.ring(4001).publish(&stack_sample_record(4001, 5_000, 0x401000, &[0u8; 64])));
+        assert!(rig.ring(4001).publish(&stack_sample_record(4001, 9_000, 0x401000, &[0u8; 64])));
+        let first = rig.drain(6_000);
+        assert_eq!(first.iter().filter(|e| e.kind == kind::SAMPLE).map(|e| e.start_ns).collect::<Vec<_>>(), [5_000]);
+        assert_eq!(rig.scratch.held.len(), 1);
+        let second = rig.drain(u64::MAX);
+        assert_eq!(second.iter().filter(|e| e.kind == kind::SAMPLE).map(|e| e.start_ns).collect::<Vec<_>>(), [9_000]);
+        assert!(rig.scratch.held.is_empty());
+        assert_eq!(rig.scratch.pool.len(), 1, "the held stack's buffer goes back to the pool");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exited_thread_is_let_go_only_after_its_last_samples_were_read() {
+        let mut rig = SampleRig::new(&[4001, 4002]);
+        assert!(rig.ring(4002).publish(&stack_sample_record(4002, 5_000, 0x401000, &[0u8; 64])));
+        // The pass that reads the exit record marks the thread; what it
+        // sampled since the previous pass is still in its ring.
+        rig.threads[1].dead = true;
+        let batch = rig.drain(u64::MAX);
+        retire_dead_threads(&mut rig.threads);
+        assert_eq!(batch.iter().filter(|e| e.kind == kind::SAMPLE && e.tid == 4002).count(), 1);
+        assert_eq!(rig.threads.iter().map(|t| t.tid).collect::<Vec<_>>(), [4001]);
     }
 
     #[cfg(target_os = "linux")]

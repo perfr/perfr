@@ -5,7 +5,7 @@
 [package]
 name = "perfr-scope-ring"
 version = "0.1.1"
-description = "Per-core lock-free rings behind the manual instrumentation API"
+description = "Lock-free shared-memory rings behind the manual instrumentation API"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

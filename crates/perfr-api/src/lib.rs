@@ -4,9 +4,10 @@
 
 //! perfr manual instrumentation: the producer behind `include/perfr.h`.
 //!
-//! Eight functions, exported with a C ABI for C, C++ and Python, and offered
-//! natively for Rust. Every one is safe from any thread at any time; before
-//! [`init`] each is a single predictable branch.
+//! Thirteen functions, exported with a C ABI for every language that loads
+//! the library, and offered natively for Rust. Every one is safe from any
+//! thread at any time; before [`init`], and while nobody is capturing, each
+//! is a load and a predictable branch.
 //!
 //! What a call costs is set by [`perfr_scope_ring`]: one `fetch_add`, one
 //! compare-exchange, plain stores, one release store, about twenty

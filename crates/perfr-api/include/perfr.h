@@ -174,10 +174,15 @@ static inline int perfr_available(void) { return 1; }
 #else /* PERFR_STATIC */
 
 /* ----------------------------------------------------------- dynamic mode --
- * One table pointer per process, defined here and collapsed across every
- * translation unit by the linker (weak on ELF and Mach-O, selectany on
- * COFF). It lives inside extern "C" so C and C++ files in the same program
- * share the one slot. */
+ * One table pointer per linked module, defined here and collapsed across
+ * every translation unit of that module by the linker (weak on ELF and
+ * Mach-O, selectany on COFF). It lives inside extern "C" so C and C++ files
+ * in the same module share the one slot.
+ *
+ * Per module, not per process: on Windows every DLL that includes this
+ * header has a slot of its own, and so does an ELF shared object built with
+ * hidden visibility. Each such module calls perfr_init() itself; they all
+ * end up with the same library and the same segment. */
 
 #if defined(_MSC_VER)
 #define PERFR_SHARED_ __declspec(selectany)

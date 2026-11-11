@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The 32-byte record a manually instrumented scope writes.
+//! The 56-byte record a manually instrumented scope writes.
 
 /// What a record means.
 pub mod kind {
@@ -73,12 +73,12 @@ pub mod flags {
     pub const DYNAMIC: u8 = 1 << 3;
 }
 
-/// One event, exactly 32 bytes and `repr(C)`.
+/// One event, exactly [`EVENT_SIZE`] (56) bytes and `repr(C)`: with the
+/// slot's 8-byte stamp, one cache line.
 ///
 /// Fixed width is what lets a producer claim a slot with a single index bump
-/// instead of reserving a variable-length span. Names are interned ids rather
-/// than strings for the same reason: a scope must cost a handful of stores,
-/// not a copy.
+/// instead of reserving a variable-length span. The name rides in the record
+/// as text, up to [`INLINE_TEXT`] bytes of it, for the reasons on `text`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScopeEvent {
@@ -91,9 +91,9 @@ pub struct ScopeEvent {
     pub scope_id: u64,
     pub tid: u32,
     pub kind: u8,
-    /// Nesting depth, stamped from thread-local storage. The ring never
-    /// tracks hierarchy. On a [`kind::TEXT`] record this is the chain
-    /// position instead, starting at 1.
+    /// On a [`kind::TEXT`] record, the chain position, starting at 1. Unused
+    /// on every other kind: the producer does not track nesting, and the
+    /// reader works depth out from the order of starts and stops.
     pub depth: u8,
     pub flags: u8,
     /// Bytes of `text` in use.

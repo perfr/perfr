@@ -11,6 +11,10 @@ description, including what happens when `main` rejects the push.
 `test_release.sh` runs shellcheck and the script against a temporary
 origin (a dry-run, a real tag, and the refusals).
 
+[`check_tag.sh`](check_tag.sh) is the first step of both release workflows:
+it refuses a tag that does not name the version stamped in
+`crates/perfr/Cargo.toml`, which is the version the binaries report.
+
 ## Python wheels
 
 `build_wheels.sh` builds the two pip packages for one or more platforms:

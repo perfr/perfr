@@ -49,6 +49,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # This job gates the other three. The binaries take their version from
+      # the tree, so a tag that names another version must not publish.
+      - name: Check the tag against the stamped version
+        if: env.PERFR_RELEASE_TAG != ''
+        run: tools/release/check_tag.sh "$PERFR_RELEASE_TAG"
+
       - name: Pin the build stamp to this commit
         run: |
           set -euo pipefail

@@ -11,10 +11,13 @@ use std::time::Instant;
 use perfr_live_chrome::{ChromeIngestor, ChromeStream};
 use perfr_live_event::LIVE_EVENT_SIZE;
 
-fn rss_bytes() -> Option<u64> {
-    let s = std::fs::read_to_string("/proc/self/statm").ok()?;
-    let pages = s.split_whitespace().next()?.parse::<u64>().ok()?;
-    Some(pages * 4096)
+/// The process's peak resident size: `VmHWM`, which the kernel keeps. (The
+/// first field of `statm` read at start and end, as this did, is the
+/// virtual size at two moments: neither resident nor a peak.) Linux only.
+fn peak_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kb = status.lines().find_map(|l| l.strip_prefix("VmHWM:"))?;
+    Some(kb.trim().trim_end_matches("kB").trim().parse::<u64>().ok()? * 1024)
 }
 
 fn main() {
@@ -24,7 +27,6 @@ fn main() {
     let meta = std::fs::metadata(&path).expect("stat");
     let compressed = meta.len();
     let t0 = Instant::now();
-    let peak0 = rss_bytes().unwrap_or(0);
 
     let mut f = std::fs::File::open(&path).expect("open");
     let mut stream = ChromeStream::default();
@@ -37,26 +39,19 @@ fn main() {
             break;
         }
         stream.push(&buf[..n]);
-        loop {
-            let batch = stream.pump(&mut ing, 64 * 1024);
-            if batch.is_empty() {
-                break;
-            }
-            events += batch.len() as u64;
+        // Until the stream wants more input: an empty batch only means a
+        // budget of steps emitted nothing.
+        while !stream.needs_input() {
+            events += stream.pump(&mut ing, 64 * 1024).len() as u64;
         }
     }
     stream.finish_input();
-    loop {
-        let batch = stream.pump(&mut ing, 64 * 1024);
-        if batch.is_empty() {
-            break;
-        }
-        events += batch.len() as u64;
+    while !stream.is_done() {
+        events += stream.pump(&mut ing, 64 * 1024).len() as u64;
     }
     let more = ing.finish(1);
     events += more.len() as u64;
     let dt = t0.elapsed();
-    let peak = rss_bytes().unwrap_or(0).max(peak0);
     if let Some(e) = stream.error() {
         eprintln!("error: {e}");
         std::process::exit(1);
@@ -96,7 +91,10 @@ fn main() {
         None => println!("content_ns\t-"),
     }
     println!("wall_s\t{:.3}", dt.as_secs_f64());
-    println!("peak_rss_bytes\t{peak}");
+    match peak_rss_bytes() {
+        Some(peak) => println!("peak_rss_bytes\t{peak}"),
+        None => println!("peak_rss_bytes\t-"),
+    }
     println!("ev_per_s\t{:.0}", events as f64 / dt.as_secs_f64().max(1e-6));
     if std::env::var_os("PERFR_DUMP_THREADS").is_some() {
         let mut rows: Vec<_> = ing.thread_names.iter().collect();

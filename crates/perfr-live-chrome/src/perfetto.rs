@@ -2033,12 +2033,11 @@ fn nested_json(ing: &mut ChromeIngestor, data: &[u8]) -> Vec<LiveEvent> {
     stream.push(data);
     stream.finish_input();
     let mut out = Vec::new();
-    loop {
-        let batch = stream.pump(ing, 64 * 1024);
-        if batch.is_empty() {
-            break;
-        }
-        out.extend(batch);
+    // To the stream's end, not to the first batch without events: a run of
+    // metadata longer than a budget dropped the rest of the payload. An
+    // error ends it too; what was read before it stays.
+    while !stream.is_done() {
+        out.extend(stream.pump(ing, 64 * 1024));
     }
     ing.unit = saved;
     out
@@ -2922,6 +2921,20 @@ mod tests {
         enc.write_all(br#"[{"name":"J","ph":"i","ts":1,"pid":8,"tid":8}]"#).unwrap();
         let (_ing, evs) = collect(&embedded_json(&enc.finish().unwrap()));
         assert!(evs.is_empty(), "gzip where JSON belongs was inflated: {evs:?}");
+    }
+
+    #[test]
+    fn an_embedded_json_trace_is_read_to_its_end() {
+        // More events that emit nothing than one pump's budget of steps,
+        // then one that does.
+        let mut json = String::from("[");
+        for _ in 0..70_000 {
+            json.push_str(r#"{"ph":"M"},"#);
+        }
+        json.push_str(r#"{"name":"after","ph":"i","ts":1,"pid":8,"tid":8}]"#);
+        let (ing, evs) = collect(&embedded_json(json.as_bytes()));
+        assert_eq!(ing.stats.events_in, 70_001);
+        assert_eq!(evs.len(), 1);
     }
 
     #[test]

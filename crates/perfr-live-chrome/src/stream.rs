@@ -107,6 +107,8 @@ pub struct ChromeStream {
     format: Format,
     perfetto: Option<Box<PerfettoState>>,
     eof: bool,
+    /// The last pump stopped for want of input, not of budget.
+    drained: bool,
     pub bytes_in: u64,
     pub bytes_decoded: u64,
     /// JSON events or Perfetto packets decoded so far (the progress line).
@@ -133,6 +135,7 @@ impl Default for ChromeStream {
             format: Format::Unknown,
             perfetto: None,
             eof: false,
+            drained: false,
             bytes_in: 0,
             bytes_decoded: 0,
             events_seen: 0,
@@ -164,6 +167,16 @@ impl ChromeStream {
         self.error.is_some() || (self.input_ended() && self.phase == Phase::Done)
     }
 
+    /// The last [`Self::pump`] parsed all it could of what has been pushed:
+    /// the next one needs a push (or the end of input) first.
+    ///
+    /// This, not an empty batch, is when to stop pumping. A batch is the
+    /// events one budget of steps emitted, and long runs of input emit
+    /// none: metadata, begins waiting for their ends, packets nothing maps.
+    pub fn needs_input(&self) -> bool {
+        self.drained || self.error.is_some()
+    }
+
     /// Sniffed from the first decoded bytes; `Unknown` until they arrive.
     pub fn format(&self) -> Format {
         self.format
@@ -189,6 +202,7 @@ impl ChromeStream {
             return;
         }
         self.bytes_in += chunk.len() as u64;
+        self.drained = false;
         match self.decode {
             Decode::Identity => {}
             Decode::Ended => return,
@@ -385,6 +399,7 @@ impl ChromeStream {
     /// knows its last packet has arrived.
     pub fn finish_input(&mut self) {
         self.eof = true;
+        self.drained = false;
         if !self.container_known {
             // A file of fewer than four bytes: it is what it is.
             self.open_container();
@@ -398,14 +413,19 @@ impl ChromeStream {
         if self.error.is_some() || budget == 0 {
             return out;
         }
+        self.drained = false;
         for _ in 0..budget {
             match self.step(ing, &mut out) {
                 Step::Event => {}
-                Step::Done => break,
+                Step::Done => {
+                    self.drained = true;
+                    break;
+                }
                 Step::NeedBytes => {
                     if self.inflate(true) {
                         continue;
                     }
+                    self.drained = true;
                     // No more bytes are coming. What is left is a value the
                     // file ends inside of (the writer crashed or was killed)
                     // or one the scanner cannot read. Left in the buffer it
@@ -858,73 +878,47 @@ fn deserialize_dump_marker(bytes: &[u8]) -> Result<ChromeEvent, serde_json::Erro
 
 const HELPER_CHUNK: usize = 1 << 20;
 
-fn feed(stream: &mut ChromeStream, bytes: &[u8]) {
+/// Push `bytes` in 1 MiB chunks (so a gzip is inflated into the scanner
+/// incrementally, as a reader would feed it) and parse them to the end.
+fn pump_all(
+    stream: &mut ChromeStream,
+    ing: &mut ChromeIngestor,
+    bytes: &[u8],
+    mut emit: impl FnMut(Vec<perfr_live_event::LiveEvent>),
+) -> Result<(), String> {
     for chunk in bytes.chunks(HELPER_CHUNK) {
         stream.push(chunk);
+        while !stream.needs_input() {
+            emit(stream.pump(ing, 64 * 1024));
+        }
+    }
+    stream.finish_input();
+    while !stream.is_done() {
+        emit(stream.pump(ing, 64 * 1024));
+    }
+    match stream.error() {
+        Some(e) => Err(e.to_string()),
+        None => Ok(()),
     }
 }
 
-/// One-shot helper for tests and native tools.
+/// One-shot helper for tests and native tools: the ingestor after the whole
+/// input, with the emitted events dropped.
 pub fn ingest_bytes(bytes: &[u8]) -> Result<ChromeIngestor, String> {
     let mut stream = ChromeStream::default();
-    feed(&mut stream, bytes);
-    stream.finish_input();
     let mut ing = ChromeIngestor::default();
-    loop {
-        let batch = stream.pump(&mut ing, 64 * 1024);
-        if batch.is_empty() {
-            if let Some(e) = stream.error() {
-                return Err(e.to_string());
-            }
-            break;
-        }
-        // Events already recorded on the ingestor via ingest(); pump returns
-        // them for the caller to insert. Drain so we do not hold two copies
-        // in the one-shot helper — the tests read `ing` after.
-        let _ = batch;
-    }
-    if let Some(e) = stream.error() {
-        return Err(e.to_string());
-    }
+    pump_all(&mut stream, &mut ing, bytes, drop)?;
     Ok(ing)
 }
 
 /// Ingest and collect emitted [`LiveEvent`]s (including finish()).
-/// Input is fed in 1 MiB chunks so a gzip is inflated into the scanner
-/// incrementally instead of as one decompressed blob.
 pub fn ingest_collect(bytes: &[u8]) -> Result<(ChromeIngestor, Vec<perfr_live_event::LiveEvent>), String> {
     let mut stream = ChromeStream::default();
     let mut ing = ChromeIngestor::default();
     let mut events = Vec::new();
-    for chunk in bytes.chunks(HELPER_CHUNK) {
-        stream.push(chunk);
-        loop {
-            let batch = stream.pump(&mut ing, 64 * 1024);
-            if batch.is_empty() {
-                if let Some(e) = stream.error() {
-                    return Err(e.to_string());
-                }
-                break;
-            }
-            events.extend(batch);
-        }
-    }
-    stream.finish_input();
-    loop {
-        let batch = stream.pump(&mut ing, 64 * 1024);
-        if batch.is_empty() {
-            if let Some(e) = stream.error() {
-                return Err(e.to_string());
-            }
-            break;
-        }
-        events.extend(batch);
-    }
-    // The slices a thread holds back until `finish` are not in `events`
-    // yet, so the end of the trace is asked of the ingestor as well.
-    let seen_end = ing.content_time_bounds().map_or(0, |(_, end)| end);
-    let max_end = events.iter().map(|e| e.end_ns()).max().unwrap_or(0).max(seen_end).max(1);
-    events.extend(ing.finish(max_end));
+    pump_all(&mut stream, &mut ing, bytes, |batch| events.extend(batch))?;
+    // `finish` closes at the latest time the ingestor has seen.
+    events.extend(ing.finish(1));
     Ok((ing, events))
 }
 
@@ -1307,6 +1301,34 @@ mod tests {
             t.elapsed(),
             peak >> 10
         );
+    }
+
+    /// A pump's batch is empty whenever a budget of steps emitted nothing:
+    /// metadata, `B`s waiting for their `E`, packets nothing maps. The
+    /// helpers took an empty batch for the end of the trace.
+    #[test]
+    fn a_long_run_of_events_that_emit_nothing_is_not_the_end_of_the_trace() {
+        let mut text = String::from("[");
+        for _ in 0..300_000 {
+            text.push_str(r#"{"ph":"M"},"#);
+        }
+        text.push_str(r#"{"name":"after","ph":"i","ts":1,"pid":1,"tid":1}]"#);
+        let (ing, events) = crate::ingest_collect(text.as_bytes()).expect("ingest");
+        assert_eq!((ing.stats.events_in, events.len()), (300_001, 1));
+        let ing = crate::ingest_bytes(text.as_bytes()).expect("ingest");
+        assert_eq!(ing.stats.events_in, 300_001);
+        // Pumped until it wants input after each push, a stream holds no
+        // backlog when the next push comes.
+        let mut stream = ChromeStream::default();
+        let mut ing = ChromeIngestor::default();
+        for chunk in text.as_bytes().chunks(1 << 20) {
+            stream.push(chunk);
+            assert!(!stream.needs_input());
+            while !stream.needs_input() {
+                let _ = stream.pump(&mut ing, 1024);
+            }
+            assert!(stream.pending_bytes() < 64, "{} bytes not parsed", stream.pending_bytes());
+        }
     }
 
     #[test]

@@ -147,40 +147,6 @@ impl DwarfSections {
         }
     }
 
-    /// The same table for a PE image, whose DWARF sections carry the same
-    /// names but are reached through the section table rather than ELF
-    /// headers. Uses object's high-level section API so that names longer than
-    /// the eight-byte field -- which is every `.debug_*` name -- resolve
-    /// through the string table.
-    pub(crate) fn load_from_pe<Nt>(file: &object::read::pe::PeFile<'_, Nt>, _data: &[u8]) -> Self
-    where
-        Nt: object::read::pe::ImageNtHeaders,
-    {
-        use object::read::{Object, ObjectSection};
-
-        let mut sections = std::collections::HashMap::new();
-        for &id in DWARF_SECTION_IDS {
-            let wanted = id.name().trim_start_matches(['.', '_', 'z']);
-            for section in file.sections() {
-                let Ok(name) = section.name() else {
-                    continue;
-                };
-                let trimmed = name.trim_start_matches(['.', '_', 'z']);
-                if trimmed != wanted {
-                    continue;
-                }
-                if let Ok(bytes) = section.data() {
-                    sections.insert(id.name(), bytes.to_vec());
-                }
-                break;
-            }
-        }
-        Self {
-            sections,
-            empty: Vec::new(),
-        }
-    }
-
     pub(crate) fn get(&self, id: gimli::SectionId) -> &[u8] {
         self.sections.get(id.name()).unwrap_or(&self.empty)
     }

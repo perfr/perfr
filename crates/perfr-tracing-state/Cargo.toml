@@ -5,7 +5,7 @@
 [package]
 name = "perfr-tracing-state"
 version = "0.1.1"
-description = "Pure-logic bookkeeping of the Linux tracer: uprobe returns, leaf functions, switches"
+description = "Pure-logic bookkeeping of the capture backends: context switches, hooked calls, GPU sampling"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

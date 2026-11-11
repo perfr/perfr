@@ -2971,18 +2971,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "perfr-collector"
-version = "0.1.1"
-dependencies = [
- "libc",
- "perfr-perf-merge",
- "perfr-perf-records",
- "perfr-perf-ring",
- "perfr-tracing-state",
- "perfr-wire",
-]
-
-[[package]]
 name = "perfr-etw"
 version = "0.1.1"
 dependencies = [
@@ -3156,10 +3144,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "perfr-perf-merge"
-version = "0.1.1"
-
-[[package]]
 name = "perfr-perf-records"
 version = "0.1.1"
 
@@ -3176,14 +3160,6 @@ name = "perfr-pod-dump"
 version = "0.1.1"
 dependencies = [
  "perfr-wire",
-]
-
-[[package]]
-name = "perfr-ptrace"
-version = "0.1.1"
-dependencies = [
- "libc",
- "perfr-maps",
 ]
 
 [[package]]
@@ -3216,15 +3192,6 @@ version = "0.1.1"
 [[package]]
 name = "perfr-tracing-state"
 version = "0.1.1"
-
-[[package]]
-name = "perfr-trampoline"
-version = "0.1.1"
-dependencies = [
- "iced-x86",
- "perfr-maps",
- "perfr-ptrace",
-]
 
 [[package]]
 name = "perfr-unwind"

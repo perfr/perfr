@@ -24,8 +24,7 @@ log = "0.4"
 perfr-frida-transport = { path = "../perfr-frida-transport" }
 # Pure Rust; already in the tree through perfr-capture. Used by the wire bench only.
 miniz_oxide = "0.8"
-# The disassembler behind the code views (pure Rust); the trampoline crate
-# already carries it.
+# The disassembler behind the code views and the hook-safety check (pure Rust).
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "instr_info", "intel"] }
 perfr-api = { path = "../perfr-api" }
 perfr-build-info = { path = "../perfr-build-info" }

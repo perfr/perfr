@@ -56,7 +56,7 @@ jobs:
 
   lint:
     # Report-only until the tree is clean; see the header of tools/ci.sh.
-    name: rustfmt and clippy
+    name: rustfmt, clippy, crate map
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -66,8 +66,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ci-lint
-      - name: Format and lint
-        run: tools/ci.sh fmt clippy
+      - name: Format, lint, and check the crate map
+        run: tools/ci.sh fmt clippy docs
 
   musl:
     # The static service is what ships, and until now it was first built when

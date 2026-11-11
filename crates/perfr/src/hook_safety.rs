@@ -209,7 +209,9 @@ pub fn assess_in_module(bytes: &[u8], machine: u16, is_64_bit: bool, file_offset
     // the next function).
     let mut end = (start + 16).min(bytes.len());
     if size > 0 {
-        end = end.min(start + size as usize);
+        // Saturating: the size is the file's `st_size`, and one near
+        // u64::MAX wrapped this to below `start` -- a slice that panics.
+        end = end.min(start.saturating_add(usize::try_from(size).unwrap_or(usize::MAX)));
     }
     assess(&bytes[start..end], size, is_64_bit)
 }
@@ -331,5 +333,19 @@ mod tests {
         assert_eq!(s.level, SafetyLevel::Safe, "{s:?}");
         // An offset past the file is unsafe, not a panic.
         assert_eq!(assess_in_module(&bytes, EM_X86_64, true, 999, 8).level, SafetyLevel::Unsafe);
+    }
+
+    #[test]
+    fn a_symbol_size_that_overflows_the_file_is_capped_not_added() {
+        // `st_size` is whatever the file says. Added to the entry offset,
+        // u64::MAX wrapped to just below it, and the entry window became a
+        // slice that ends before it starts.
+        let mut bytes = vec![0u8; 100];
+        bytes.extend_from_slice(&[0xf3, 0x0f, 0x1e, 0xfa, 0x55, 0x48, 0x89, 0xe5]);
+        for size in [u64::MAX, u64::MAX - 99, u64::MAX - 100, 1 << 63] {
+            let s = assess_in_module(&bytes, EM_X86_64, true, 100, size);
+            assert_eq!(s.level, SafetyLevel::Safe, "size {size:#x}: {s:?}");
+            assert!(s.entry.contains("endbr64"), "{}", s.entry);
+        }
     }
 }

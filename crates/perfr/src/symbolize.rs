@@ -412,7 +412,8 @@ impl Module {
         let Some((start, size, _)) = index.checked_sub(1).and_then(|i| symbols.get(i)) else {
             return 0;
         };
-        let inside = if *size == 0 { *start == file_address } else { file_address < start + size };
+        // `file_address - start`, as in `find_symbol`: the sum can overflow.
+        let inside = if *size == 0 { *start == file_address } else { file_address - start < *size };
         if !inside {
             return 0;
         }
@@ -471,7 +472,9 @@ fn find_symbol(symbols: &[(u64, u64, String)], address: u64) -> Option<&str> {
     if *size == 0 {
         (*start == address).then_some(name.as_str())
     } else {
-        (address < start + size).then_some(name.as_str())
+        // Not `address < start + size`: the size is the file's `st_size`,
+        // and the sum of a hostile one overflows. `start <= address` here.
+        (address - start < *size).then_some(name.as_str())
     }
 }
 
@@ -679,6 +682,22 @@ mod tests {
     fn zero_sized_symbols_match_only_exactly() {
         assert_eq!(find_symbol(&symbols(), 0x2000), Some("stub"));
         assert_eq!(find_symbol(&symbols(), 0x2001), None);
+    }
+
+    #[test]
+    fn a_symbol_whose_size_runs_past_the_address_space_still_contains_its_addresses() {
+        // Sizes come straight from `st_size`; start + size must not be
+        // computed, it need not fit.
+        let symbols = vec![(0x1000, 0x100, "alpha".to_string()), (0x4000, u64::MAX, "endless".to_string())];
+        assert_eq!(find_symbol(&symbols, 0x4000), Some("endless"));
+        assert_eq!(find_symbol(&symbols, 0x9000_0000), Some("endless"));
+        assert_eq!(find_symbol(&symbols, 0x3fff), None);
+        // The function id asks the same question of a module with a path;
+        // 0 because no segment says where in the file the symbol is.
+        let file = Arc::new(LoadedFile { segments: Vec::new(), symbols, image_base: 0 });
+        let module = Module { start: 0, end: u64::MAX, bias: 0, name: "x".into(), path: "/t/x".into(), file };
+        let frame = Symbolizer { modules: vec![module] }.resolve_frame(0x5000);
+        assert_eq!((frame.name.as_str(), frame.function_id), ("endless", 0));
     }
 
     #[test]

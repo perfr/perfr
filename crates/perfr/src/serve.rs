@@ -346,6 +346,17 @@ impl SymbolState {
     }
 }
 
+/// Drops what the previous capture left on `/api/status` for the next one:
+/// its auto-profiling status and its hook-crash report. The report outlives
+/// the capture that produced it so the operator sees what happened, but only
+/// until the next Record: kept longer, every later capture, of any process,
+/// showed a fresh tab the old crash and handed it to an agent asking for
+/// the status.
+fn forget_previous_capture(service: &LiveService) {
+    service.set_auto_profile_status(serde_json::Value::Null);
+    service.set_hook_crash("");
+}
+
 /// The index loaded for `pid`, if there is one, and the load's status word.
 ///
 /// Handed out as a clone so the caller works on it with the lock released: a
@@ -3275,9 +3286,10 @@ pub fn run_on(
                     return Err("previous capture worker panicked".into());
                 }
             }
-            // The previous capture is finished. Clear its auto-profile status
-            // before anything else can fail, or a failed start keeps showing it.
-            start_service.set_auto_profile_status(serde_json::Value::Null);
+            // The previous capture is finished. Clear what it left on the
+            // status before anything else can fail, or a failed start keeps
+            // showing it.
+            forget_previous_capture(&start_service);
             start_pid.store(pid, Ordering::SeqCst);
             // Whatever the viewer ticked in the hook picker. The picker only
             // offers functions once symbols are ready, so an index is there
@@ -3562,6 +3574,16 @@ mod tests {
     use perfr_tracing_state::context_switches::SchedulingSlice;
 
     const S: u64 = 1_000_000_000;
+
+    #[test]
+    fn a_new_capture_does_not_inherit_the_last_ones_hook_crash() {
+        let service = LiveService::new(ServerConfig { ring_buffer_bytes: 1 << 20, ..Default::default() }).unwrap();
+        service.set_hook_crash(r#"{"summary":"target 7 crashed (segfault) with 1 hook(s) armed"}"#);
+        service.set_auto_profile_status(serde_json::json!({"on": true}));
+        super::forget_previous_capture(&service);
+        assert_eq!(service.hook_crash(), "");
+        assert!(service.auto_profile_status.lock().is_null());
+    }
 
     /// A stand-in for a capture thread: loops until its flag clears, then
     /// spends `tail_ms` in its tail and says so.

@@ -544,6 +544,92 @@ mod tests {
         assert_eq!(CaptureBundle::from_zip(&zip).unwrap(), b);
     }
 
+    /// A Parquet table of unsigned columns (`true` for 64-bit), two rows
+    /// each: enough to write the first columns of the events, samples and
+    /// frames tables with the right types, and stop short of the rest.
+    fn narrow_table(columns: &[(&str, bool)]) -> Vec<u8> {
+        use arrow_array::{Array, RecordBatch, UInt32Array, UInt64Array};
+        use arrow_schema::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let fields: Vec<Field> = columns
+            .iter()
+            .map(|(name, wide)| Field::new(*name, if *wide { DataType::UInt64 } else { DataType::UInt32 }, false))
+            .collect();
+        let arrays: Vec<Arc<dyn Array>> = columns
+            .iter()
+            .map(|(_, wide)| -> Arc<dyn Array> {
+                if *wide { Arc::new(UInt64Array::from(vec![1u64, 2])) } else { Arc::new(UInt32Array::from(vec![1u32, 2])) }
+            })
+            .collect();
+        let schema = Arc::new(Schema::new(fields));
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        let mut out = Vec::new();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(&mut out, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        out
+    }
+
+    #[test]
+    fn a_bundle_whose_tables_have_too_few_columns_is_an_error_not_a_panic() {
+        let good = read_store_zip(&sample_bundle().to_zip().unwrap()).unwrap();
+        let with = |name: &str, table: &[u8]| {
+            let entries: Vec<(&str, &[u8])> = good
+                .iter()
+                .map(|(n, d)| (n.as_str(), if n == name { table } else { d.as_slice() }))
+                .collect();
+            write_store_zip(&entries).unwrap()
+        };
+        // Every column present has the type its position calls for, so the
+        // reader gets as far as the first one that is not there.
+        let events = narrow_table(&[("start_ns", true), ("duration_ns", true), ("pid", false)]);
+        let samples = narrow_table(&[("timestamp_ns", true), ("tid", false)]);
+        let frames = narrow_table(&[("id", false)]);
+        for (name, table) in [(EVENTS_PARQUET, &events), (SAMPLES_PARQUET, &samples), (FRAMES_PARQUET, &frames)] {
+            let err = CaptureBundle::from_zip(&with(name, table)).expect_err(name).to_string();
+            assert!(err.contains("column"), "{name}: {err}");
+        }
+    }
+
+    /// Every prefix of `bytes`, then `bytes` with each bit flipped in turn.
+    fn every_truncation_and_bit_flip(bytes: &[u8], mut check: impl FnMut(&[u8])) {
+        for cut in 0..bytes.len() {
+            check(&bytes[..cut]);
+        }
+        let mut flipped = bytes.to_vec();
+        for bit in 0..bytes.len() * 8 {
+            flipped[bit / 8] ^= 1 << (bit % 8);
+            check(&flipped);
+            flipped[bit / 8] ^= 1 << (bit % 8);
+        }
+    }
+
+    #[test]
+    fn no_truncation_or_bit_flip_of_a_valid_bundle_panics_the_reader() {
+        let mut bundle = sample_bundle();
+        bundle.events.truncate(2);
+        bundle.samples.truncate(1);
+        bundle.frames.truncate(2);
+        let zip = bundle.to_zip().unwrap();
+        assert_eq!(CaptureBundle::from_zip(&zip).unwrap(), bundle);
+        // The zip as a whole: its directory, its headers, its CRCs. A
+        // damaged table is stopped here by its entry's CRC and never
+        // reaches the Parquet reader, which is why the tables are not swept
+        // one by one below: parquet 59 itself panics, or asks for terabytes,
+        // on some single-bit changes to a table, and only the CRC stands
+        // between an accidentally damaged file and that.
+        every_truncation_and_bit_flip(&zip, |bytes| {
+            let _ = CaptureBundle::from_zip(bytes);
+            let _ = crate::zipstore::stored_entry_ranges(bytes);
+        });
+        // The manifest is the one entry this crate parses itself.
+        let entries = read_store_zip(&zip).unwrap();
+        let (_, manifest) = entries.iter().find(|(name, _)| name == MANIFEST_FILE).unwrap();
+        every_truncation_and_bit_flip(manifest, |bytes| {
+            let _ = crate::read_manifest_names(bytes);
+        });
+    }
+
     #[test]
     fn something_that_is_not_a_capture_is_refused() {
         assert!(CaptureBundle::from_zip(b"not a zip").is_err());

@@ -300,8 +300,15 @@ pub fn write_events_parquet_to_vec(
 }
 
 fn column<'a, T: 'static>(batch: &'a RecordBatch, i: usize, what: &str) -> Result<&'a T, ArrowError> {
+    // `RecordBatch::column` indexes a `Vec`: a table with fewer columns than
+    // this reader expects (a file from something else, named like ours)
+    // would panic there rather than fail to open.
     batch
-        .column(i)
+        .columns()
+        .get(i)
+        .ok_or_else(|| {
+            ArrowError::SchemaError(format!("the table has {} columns; column {i} ({what}) is missing", batch.num_columns()))
+        })?
         .as_any()
         .downcast_ref::<T>()
         .ok_or_else(|| ArrowError::CastError(format!("column {i} is not {what}")))

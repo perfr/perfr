@@ -714,11 +714,11 @@ impl Rings {
         unsafe { crate::meta::snapshot_drops(self.base) }
     }
 
-    /// Claims a slot and publishes its timestamp, but never commits it:
-    /// a producer descheduled mid-write. Test-only, and the only way to
-    /// construct that interleaving deterministically.
+    /// Claims a slot, but never commits it: a producer descheduled
+    /// mid-write. Test-only, and the only way to construct that
+    /// interleaving deterministically.
     #[doc(hidden)]
-    pub fn reserve_for_test(&self, ring: usize, _timestamp_ns: u64) -> u64 {
+    pub fn reserve_for_test(&self, ring: usize) -> u64 {
         self.claim(ring)
     }
 
@@ -962,7 +962,7 @@ mod tests {
             rings.push(0, event(i, 1));
         }
         assert_eq!(rings.committed(0, 0).unwrap().timestamp_ns, 0);
-        let lapping = rings.reserve_for_test(0, 0);
+        let lapping = rings.reserve_for_test(0);
         assert_eq!(lapping, 4);
         assert!(rings.committed(0, 0).is_none(), "claim 0 may be half overwritten");
         assert_eq!(rings.committed(0, 1).unwrap().timestamp_ns, 1, "claim 1 is still whole");

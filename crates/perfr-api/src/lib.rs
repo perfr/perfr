@@ -811,6 +811,7 @@ mod tests {
     /// A second copy of this test binary running one test, for what only a
     /// process of its own can show: what is left behind when it exits.
     /// `role` is how that test knows it is the child and not an ordinary run.
+    #[cfg(unix)]
     fn run_as_child(test: &str, role: &str) -> (u32, std::process::ExitStatus) {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", test, "--test-threads=1", "--nocapture"])
@@ -822,8 +823,10 @@ mod tests {
         (pid, child.wait().unwrap())
     }
 
+    #[cfg(unix)]
     const CHILD_ROLE: &str = "PERFR_API_TEST_CHILD";
 
+    #[cfg(unix)]
     fn child_role_is(role: &str) -> bool {
         std::env::var(CHILD_ROLE).is_ok_and(|r| r == role)
     }
@@ -832,6 +835,7 @@ mod tests {
         perfr_scope_ring::shm::segment_directory().join(perfr_scope_ring::shm::shm_file_name(pid))
     }
 
+    #[cfg(unix)]
     #[test]
     fn child_that_inits_and_returns_from_main() {
         if !child_role_is("exit") {
@@ -1056,14 +1060,10 @@ mod tests {
             .find(|e| e.kind == kind::SCOPE_STOP && e.scope_id == replay_start.scope_id)
             .expect("and its stop");
         assert_eq!(replay_stop.timestamp_ns, 222, "and the end timestamp given");
-        // Every assembled name is one this test wrote: no handle bytes from
-        // the link leaking through as a "name".
-        let expected = ["outer", "marker", "job", "hp", long.as_str()];
+        // No handle bytes from the link leaking through as a "name". (Other
+        // tests in this process write names of their own to the same
+        // segment, so which names there are is not checked here.)
         for (name, _) in &names {
-            assert!(
-                expected.contains(&name.as_str()) || !mine.iter().any(|_| true) || true,
-                "unexpected name {name:?}"
-            );
             assert!(
                 name.bytes().all(|b| b.is_ascii_graphic() || b == b' '),
                 "binary leaked into a name: {name:?}"

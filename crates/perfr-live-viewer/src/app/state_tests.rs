@@ -1346,3 +1346,141 @@ fn a_name_with_a_control_character_leaves_the_readouts_parseable() {
         serde_json::from_str(&page.app.sel_readout).expect("window.__perfr_sel is JSON whatever was typed");
     assert_eq!(sel["report_filter"], "\u{1b}");
 }
+
+/// An app with every piece of per-capture state set: a stream of process
+/// 100 on screen and held for Share, names, a selection of every kind,
+/// reports, a half-read frame.
+fn app_with_everything_set() -> PerfrLiveApp {
+    let mut app = connected_app();
+    app.accept_stream(capture_stream(status_frame(false, false), vec![scope(100, 101, 5_000, 1_000, 7)]));
+    app.tracks.ensure_catalogue(&app.index);
+    let pick = ScopePick::from_event(scope(100, 101, 5_000, 1_000, 7));
+    let measure = TimeMeasure { start_ns: 5_000, stop_ns: 5_500, label_y: 0.0, sample_tid: None };
+    app.selected = Some(pick);
+    app.hover = Some(pick);
+    app.selected_thread = Some((100, 101));
+    app.scope_report = Some((7, "work".into()));
+    app.scope_menu = Some((pick, Pos2::ZERO));
+    app.sample_sels = vec![measure];
+    app.measure = Some(measure);
+    app.sampling = Some(service_report());
+    app.tree = Some(Arc::new(small_tree()));
+    app.sampling_ranges = vec![(5_000, 5_500, None)];
+    app.rect_result = Some(RectResult::default());
+    app.flame_zoom = vec![0];
+    app.report_selection.insert(1);
+    app.live_focus = Some(crate::live::LiveKey { pid: 100, name_id: 7, kind: kind::API_SCOPE });
+    app.live_order = vec![crate::live::LiveKey { pid: 100, name_id: 7, kind: kind::API_SCOPE }];
+    app.leftover = vec![1, 2, 3];
+    app.core_util_key = Some((1, 2));
+    app.capture_start_ns = 4_000;
+    app.user_set_view = true;
+    app.t0 = 5_000.0;
+    app.t1 = 6_000.0;
+    app.notice = Some("an earlier failure".into());
+    app
+}
+
+/// Which of those are gone.
+fn what_was_reset(app: &PerfrLiveApp) -> Vec<&'static str> {
+    let old_events = app.index.lanes().any(|(k, _)| k.pid == 100);
+    let checks: [(&'static str, bool); 27] = [
+        ("index", !old_events),
+        ("live_all", app.live_all.row(crate::live::LiveKey { pid: 100, name_id: 7, kind: kind::API_SCOPE }).is_none()),
+        ("intern", app.intern.get(7) != Some("work")),
+        ("thread_names", !app.thread_names.contains_key(&(100, 101))),
+        ("trace_processes", !app.trace_processes.iter().any(|p| p.pid == 100)),
+        ("tracks", app.tracks.catalogue_threads().is_empty()),
+        ("selected", app.selected.is_none()),
+        ("hover", app.hover.is_none()),
+        ("selected_thread", app.selected_thread.is_none()),
+        ("scope_report", app.scope_report.is_none()),
+        ("scope_menu", app.scope_menu.is_none()),
+        ("sample_sels", app.sample_sels.is_empty()),
+        ("measure", app.measure.is_none()),
+        ("sampling", app.sampling.as_ref().map(|r| r.samples) != Some(999)),
+        ("tree", app.tree.as_ref().map(|t| t.samples) != Some(100)),
+        ("sampling_ranges", app.sampling_ranges.is_empty()),
+        ("rect_result", app.rect_result.is_none()),
+        ("flame_zoom", app.flame_zoom.is_empty()),
+        ("report_selection", app.report_selection.is_empty()),
+        ("live_focus", app.live_focus.is_none()),
+        ("live_order", app.live_order.is_empty()),
+        ("held_stream", !app.held_stream.has_bytes() && !app.held_stream.is_local()),
+        ("leftover", app.leftover.is_empty()),
+        ("core_util_key", app.core_util_key.is_none()),
+        ("capture_start_ns", app.capture_start_ns != 4_000),
+        ("view", (app.t0, app.t1) != (5_000.0, 6_000.0)),
+        ("notice", app.notice.is_none()),
+    ];
+    checks.into_iter().filter(|(_, reset)| *reset).map(|(name, _)| name).collect()
+}
+
+/// What each of the five ways a capture is replaced resets today. They are
+/// five hand-written lists, and they differ; this pins them as they are, so
+/// that folding them into one is a visible change to this table and not an
+/// accident. Not every difference is meant: see the notes on each.
+#[test]
+fn what_each_way_of_replacing_the_capture_resets() {
+    // Clear: the selection and the reports go, as nowhere else. The marquee
+    // result, the flame zoom and the report's row selection stay.
+    let mut app = app_with_everything_set();
+    app.clear_everything();
+    assert_eq!(
+        what_was_reset(&app),
+        [
+            "index", "live_all", "intern", "thread_names", "trace_processes", "selected", "selected_thread",
+            "scope_report", "scope_menu", "sample_sels", "measure", "sampling", "tree", "sampling_ranges",
+            "held_stream", "view", "notice",
+        ]
+    );
+
+    // A stream file: its own report replaces the old one (the file is
+    // local), its bytes are the held stream, a half-read frame is dropped.
+    // The selected thread, a scoped report and the open scope menu stay.
+    let mut app = app_with_everything_set();
+    app.accept_stream(stream(&[
+        hello(),
+        LiveFrame::InternedString { id: 9, text: "other".into() },
+        LiveFrame::ProcessName { pid: 300, name: "another".into() },
+        LiveFrame::EventBatch { events: vec![scope(300, 301, 9_000, 1_000, 9)] },
+        LiveFrame::CaptureFinished,
+    ]));
+    assert_eq!(
+        what_was_reset(&app),
+        [
+            "index", "live_all", "intern", "thread_names", "trace_processes", "selected", "hover", "sample_sels",
+            "measure", "sampling", "tree", "sampling_ranges", "leftover", "view", "notice",
+        ]
+    );
+
+    // A Chrome or Perfetto trace: the only one that rebuilds the track
+    // strip. The reports of the previous capture stay in the panel.
+    let mut app = app_with_everything_set();
+    app.begin_trace_load(TraceLoad::from_bytes("t.json".into(), b"[]".to_vec()));
+    assert_eq!(
+        what_was_reset(&app),
+        [
+            "index", "live_all", "intern", "thread_names", "trace_processes", "tracks", "selected", "hover",
+            "sample_sels", "measure", "held_stream", "view", "notice",
+        ]
+    );
+
+    // A capture starting on the service: names stay interned (the service
+    // sends each once per socket), and so do the selected thread and the
+    // reports of the capture before.
+    let mut app = app_with_everything_set();
+    app.apply_frame(LiveFrame::CaptureStarted { pid: 200, start_ns: 9_000 });
+    assert_eq!(
+        what_was_reset(&app),
+        [
+            "index", "live_all", "thread_names", "trace_processes", "selected", "hover", "sample_sels", "measure",
+            "held_stream", "capture_start_ns",
+        ]
+    );
+
+    // A Hello, the start of a full resend: only what the resend brings again.
+    let mut app = app_with_everything_set();
+    app.apply_frame(hello());
+    assert_eq!(what_was_reset(&app), ["index", "live_all", "thread_names", "trace_processes", "hover"]);
+}

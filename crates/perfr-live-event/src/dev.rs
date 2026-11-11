@@ -26,9 +26,13 @@ pub const REMOTE_DEMO_PID: u32 = 20;
 pub const REMOTE_RENDER_PID: u32 = 21;
 
 /// Where a linked machine's index sits in a pid or tid the hub filed
-/// (`perfr-live-server/src/peers.rs`): the top byte, 1..=64. The hub's own
-/// ids have a zero top byte, as do the synthetic ids above that range.
+/// (`perfr-live-server/src/peers.rs`, which packs with these): the top
+/// byte, 1..=64. The hub's own ids have a zero top byte.
 pub const MACHINE_SHIFT: u32 = 24;
+/// The highest machine index a live session hands out. Kept well under the
+/// top-byte values of the ids that are already synthetic (the agent's pid
+/// `0xA6E7_0000`, the viewer's `0x5E1F_0002`), so those never read as a
+/// machine.
 pub const MAX_MACHINES: u8 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

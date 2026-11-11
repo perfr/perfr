@@ -52,13 +52,11 @@ pub const DEFAULT_PORT: u16 = 44766;
 // Identity: a machine is a byte, a process is a word.
 // ---------------------------------------------------------------------------
 
-/// Where the machine index sits in a packed pid or tid.
-pub const MACHINE_SHIFT: u32 = 24;
-/// The highest machine index a live session hands out. Kept well under the
-/// top-byte values of the ids that are already synthetic (the agent's pid
-/// `0xA6E7_0000`, the viewer's `0x5E1F_0002`), so those never read as a
-/// machine.
-pub const MAX_MACHINES: u8 = 64;
+/// Where the machine index sits in a packed pid or tid, and the highest
+/// index a live session hands out. Defined once, next to the viewer's
+/// reading of them (`MachineId::from_pid`): the hub packs with these and
+/// the viewer unpacks, and two copies only had to drift apart once.
+pub use perfr_live_event::dev::{MACHINE_SHIFT, MAX_MACHINES};
 const LOCAL_LIMIT: u32 = 1 << MACHINE_SHIFT;
 /// How many targets a hub dials at once: one per machine it can hold.
 pub const DIAL_TARGETS_MAX: usize = MAX_MACHINES as usize;

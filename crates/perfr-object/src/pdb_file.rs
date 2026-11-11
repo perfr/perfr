@@ -119,7 +119,6 @@ pub fn load_pdb_symbols(bytes: &[u8], image_base: u64) -> Result<Vec<Symbol>, St
                 mangled_name: name,
                 address,
                 size: u64::from(procedure.len),
-                is_hotpatchable: false,
             });
         }
     }
@@ -155,7 +154,6 @@ pub fn load_pdb_symbols(bytes: &[u8], image_base: u64) -> Result<Vec<Symbol>, St
             // The public stream carries no sizes; they come from the section
             // contributions below, or from the distance to the next symbol.
             size: UNKNOWN_SYMBOL_SIZE,
-            is_hotpatchable: false,
         });
     }
 

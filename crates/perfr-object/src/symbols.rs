@@ -6,8 +6,7 @@
 //! `LoadSymbolsFromDynsym`.
 //!
 //! The filter is deliberately identical to `CreateSymbolInfo`: skip undefined
-//! symbols, keep only `STT_FUNC`, and record address, size and whether the
-//! address appears in `__patchable_function_entries`.
+//! symbols, keep only `STT_FUNC`, and record address and size.
 
 use object::elf;
 use object::read::elf::{FileHeader, SectionHeader, Sym};
@@ -33,7 +32,6 @@ pub struct Symbol {
     pub mangled_name: String,
     pub address: u64,
     pub size: u64,
-    pub is_hotpatchable: bool,
 }
 
 /// Reads one symbol table, keeping only defined function symbols.
@@ -119,8 +117,6 @@ where
         return Err(missing_section_error(table));
     };
 
-    let hotpatchable = load_hotpatchable_addresses::<Elf>(&sections, endian, data);
-
     let mut result = Vec::new();
     for symbol in symbols.iter() {
         // SF_Undefined: defined in another object file.
@@ -143,7 +139,6 @@ where
             mangled_name: name,
             address,
             size: symbol.st_size(endian).into(),
-            is_hotpatchable: is_hotpatchable(&hotpatchable, address),
         });
     }
 
@@ -153,42 +148,72 @@ where
     Ok(result)
 }
 
-/// `IsHotpatchable`.
-///
-/// The addresses in `__patchable_function_entries` point at the first byte of
-/// the padding, not at the function entry. perfr requires a five-byte padding
-/// and a two-byte nop at the entry, so a symbol is hotpatchable when its
-/// address minus five is listed.
-pub(crate) fn is_hotpatchable(addresses: &std::collections::HashSet<u64>, symbol_address: u64) -> bool {
-    const PADDING_SIZE: u64 = 5;
-    addresses.contains(&symbol_address.wrapping_sub(PADDING_SIZE))
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// `ElfFileImpl::LoadHotpatchableAddresses`.
-///
-/// The section's `sh_entsize` is zero in real binaries even though the entries
-/// are 64-bit, so the C++ reads raw bytes and reinterprets. This does the same,
-/// minus the `memcpy` into an over-long vector.
-pub(crate) fn load_hotpatchable_addresses<Elf>(
-    sections: &object::read::elf::SectionTable<'_, Elf>,
-    endian: Endianness,
-    data: &[u8],
-) -> std::collections::HashSet<u64>
-where
-    Elf: FileHeader<Endian = Endianness>,
-{
-    let mut addresses = std::collections::HashSet::new();
-    for section in sections.iter() {
-        if sections.section_name(endian, section).ok() != Some(b"__patchable_function_entries") {
-            continue;
-        }
-        let Ok(contents) = section.data(endian, data) else {
-            continue;
-        };
-        for chunk in contents.chunks_exact(std::mem::size_of::<u64>()) {
-            let bytes: [u8; 8] = chunk.try_into().expect("chunks_exact(8) yields 8 bytes");
-            addresses.insert(u64::from_le_bytes(bytes));
+    fn testdata(name: &str) -> Vec<u8> {
+        let dir = std::env::var("PERFR_TESTDATA")
+            .unwrap_or_else(|_| format!("{}/testdata", env!("CARGO_MANIFEST_DIR")));
+        std::fs::read(format!("{dir}/{name}")).expect("testdata should be readable")
+    }
+
+    fn named<'a>(symbols: &'a [Symbol], name: &str) -> &'a Symbol {
+        symbols.iter().find(|s| s.mangled_name == name).unwrap_or_else(|| panic!("no symbol {name}"))
+    }
+
+    #[test]
+    fn the_symtab_gives_every_defined_function_with_its_address_and_size() {
+        let symbols = load_symbols(&testdata("hello_world_elf"), SymbolTable::Debug).unwrap();
+        assert_eq!(symbols.len(), 10);
+        let main = named(&symbols, "main");
+        assert_eq!((main.address, main.size), (0x1135, 35));
+        // A size of zero is kept as the file has it, not guessed.
+        let stub = named(&symbols, "deregister_tm_clones");
+        assert_eq!((stub.address, stub.size), (0x1080, 0));
+
+        let symbols = load_symbols(&testdata("hello_world_static_elf"), SymbolTable::Debug).unwrap();
+        // 1125 of type STT_FUNC; the indirect ones (STT_GNU_IFUNC) name
+        // resolvers, not code a sample lands in under that name.
+        assert_eq!(symbols.len(), 1125);
+        let fopen = named(&symbols, "fopen64");
+        assert_eq!((fopen.address, fopen.size), (0x40f9a0, 10));
+    }
+
+    #[test]
+    fn the_dynsym_gives_the_exported_functions_and_skips_the_imported_ones() {
+        let data = testdata("libtest-1.0.so");
+        let dynamic = load_symbols(&data, SymbolTable::Dynamic).unwrap();
+        assert_eq!(dynamic.len(), 1);
+        assert_eq!(
+            (dynamic[0].mangled_name.as_str(), dynamic[0].address, dynamic[0].size),
+            ("PrintHelloWorld", 0x1110, 12)
+        );
+        assert_eq!(load_symbols(&data, SymbolTable::Debug).unwrap().len(), 7);
+    }
+
+    #[test]
+    fn a_missing_or_functionless_table_is_an_error_that_says_which() {
+        let stripped = testdata("no_symbols_elf");
+        assert_eq!(
+            load_symbols(&stripped, SymbolTable::Debug).unwrap_err(),
+            "ELF file does not have a .symtab section."
+        );
+        assert_eq!(
+            load_symbols(&testdata("hello_world_static_elf"), SymbolTable::Dynamic).unwrap_err(),
+            "ELF file does not have a .dynsym section."
+        );
+        assert_eq!(load_symbols(b"not an elf", SymbolTable::Debug).unwrap_err(), "ELF file could not be parsed.");
+    }
+
+    #[test]
+    fn truncated_files_do_not_panic() {
+        let good = testdata("hello_world_elf");
+        let mut len = 1;
+        while len < good.len() {
+            let _ = load_symbols(&good[..len], SymbolTable::Debug);
+            let _ = load_symbols(&good[..len], SymbolTable::Dynamic);
+            len *= 2;
         }
     }
-    addresses
 }

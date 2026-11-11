@@ -17,7 +17,7 @@ use object::elf;
 use object::read::elf::FileHeader;
 use object::Endianness;
 
-use crate::symbols::{is_hotpatchable, load_hotpatchable_addresses, Symbol};
+use crate::symbols::Symbol;
 
 const ERROR_PREFIX: &str =
     "Unable to load unwind info ranges from the .debug_frame or the .eh_frame section: ";
@@ -60,12 +60,9 @@ where
     let endian = header.endian().map_err(|e| format!("{ERROR_PREFIX}{e}"))?;
     let gimli_endian = gimli::RunTimeEndian::Little;
 
-    let hotpatchable = {
-        let sections = header
-            .sections(endian, data)
-            .map_err(|e| format!("{ERROR_PREFIX}{e}"))?;
-        load_hotpatchable_addresses::<Elf>(&sections, endian, data)
-    };
+    // A file whose section table cannot be read has no unwind sections to
+    // offer either; say so with the table's own error.
+    header.sections(endian, data).map_err(|e| format!("{ERROR_PREFIX}{e}"))?;
 
     // .debug_frame first: it carries the more specific unwind information.
     // "Present but empty" falls through to .eh_frame, as in the C++.
@@ -80,7 +77,7 @@ where
         let bases = gimli::BaseAddresses::default();
         let (found_entries, ranges) = collect_ranges(&frame, &bases);
         if found_entries || section_counts_as_non_empty(&section.data) {
-            return Ok(to_symbols(ranges, &hotpatchable));
+            return Ok(to_symbols(ranges));
         }
     }
 
@@ -93,7 +90,7 @@ where
         let bases = gimli::BaseAddresses::default().set_eh_frame(section.address);
         let (found_entries, ranges) = collect_ranges(&frame, &bases);
         if found_entries || section_counts_as_non_empty(&section.data) {
-            return Ok(to_symbols(ranges, &hotpatchable));
+            return Ok(to_symbols(ranges));
         }
     }
 
@@ -158,10 +155,7 @@ where
     (has_entries, ranges)
 }
 
-fn to_symbols(
-    ranges: Vec<(u64, u64)>,
-    hotpatchable: &std::collections::HashSet<u64>,
-) -> Vec<Symbol> {
+fn to_symbols(ranges: Vec<(u64, u64)>) -> Vec<Symbol> {
     ranges
         .into_iter()
         .map(|(address, size)| Symbol {
@@ -174,7 +168,6 @@ fn to_symbols(
             mangled_name: format!("[function@{address:#x}]"),
             address,
             size,
-            is_hotpatchable: is_hotpatchable(hotpatchable, address),
         })
         .collect()
 }

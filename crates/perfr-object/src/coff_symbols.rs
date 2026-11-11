@@ -208,8 +208,6 @@ pub fn exception_table_symbols(data: &[u8]) -> Result<Vec<Symbol>, String> {
             mangled_name: format!("[function@{:#x}]", range.start),
             address: range.start,
             size: range.end - range.start,
-            // Only ELF files carry hotpatchable functions.
-            is_hotpatchable: false,
         })
         .collect())
 }
@@ -307,7 +305,6 @@ where
             mangled_name: name,
             address: virtual_address,
             size: sizes.get(&virtual_address).copied().unwrap_or(0),
-            is_hotpatchable: false,
         });
     }
 

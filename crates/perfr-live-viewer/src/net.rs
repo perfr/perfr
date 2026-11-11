@@ -1743,20 +1743,22 @@ mod wasm_impl {
             if key != crate::share::LOGIN_SIGNAL_KEY && key != crate::share::SHARE_TOKEN_KEY {
                 return;
             }
+            // The bearer is kept in memory only: whatever the popup stored
+            // is taken out of storage on every event. It used to be removed
+            // only when no token was waiting in the inbox, and the popup's
+            // two writes (token, then signal) arrive before a frame drains
+            // it, so the bearer stayed in localStorage until the next load.
+            let stored = web_sys::window().and_then(|w| take_stored_share_token(&w));
             let mut g = inbox_storage.lock().unwrap_or_else(|e| e.into_inner());
-            if key == crate::share::SHARE_TOKEN_KEY {
-                if let Some(token) = ev
-                    .new_value()
-                    .as_deref()
-                    .and_then(crate::share::usable_share_token)
-                {
-                    g.share_token = Some(token);
-                }
-            }
-            if g.share_token.is_none() {
-                if let Some(window) = web_sys::window() {
-                    g.share_token = take_stored_share_token(&window).or(g.share_token.take());
-                }
+            let from_event = if key == crate::share::SHARE_TOKEN_KEY {
+                ev.new_value().as_deref().and_then(crate::share::usable_share_token)
+            } else {
+                None
+            };
+            if from_event.is_some() {
+                g.share_token = from_event;
+            } else if g.share_token.is_none() {
+                g.share_token = stored;
             }
             g.share_login_signalled = true;
         }) as Box<dyn FnMut(_)>);

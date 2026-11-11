@@ -1776,3 +1776,62 @@ fn a_saved_knob_that_is_not_a_number_falls_back_to_its_default() {
         assert_eq!(loaded, defaults, "{knob}");
     }
 }
+
+/// The times of the ruler's long (major) ticks for a window, to the nearest unit.
+fn major_ticks(t0: f64, t1: f64) -> Vec<i64> {
+    let ctx = egui::Context::default();
+    let ruler = Rect::from_min_size(Pos2::new(100.0, 40.0), Vec2::new(1000.0, 26.0));
+    let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))), ..Default::default() };
+    let out = ctx.run(input, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| paint_timebar(ui, ruler, t0, t1, 0.0));
+    });
+    fn lines(shape: &Shape, out: &mut Vec<[Pos2; 2]>) {
+        match shape {
+            Shape::Vec(shapes) => shapes.iter().for_each(|s| lines(s, out)),
+            Shape::LineSegment { points, .. } => out.push(*points),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &out.shapes {
+        lines(&clipped.shape, &mut found);
+    }
+    let span = t1 - t0;
+    found
+        .iter()
+        .filter(|p| p[0].x == p[1].x && (p[1].y - p[0].y - 7.0).abs() < 0.01)
+        .map(|p| (t0 + (p[0].x - ruler.left()) as f64 / ruler.width() as f64 * span).round() as i64)
+        .collect()
+}
+
+#[test]
+fn the_rulers_long_ticks_stay_on_round_times_left_of_zero() {
+    // 1,000 units over 1,000 points: a tick every 10, a long one every 50.
+    assert_eq!(major_ticks(0.0, 1000.0).iter().take(3).collect::<Vec<_>>(), [&0, &50, &100]);
+    assert_eq!(major_ticks(20.0, 1020.0).iter().take(3).collect::<Vec<_>>(), [&50, &100, &150]);
+    // A window that starts before zero, as a zoom out of an empty view gives.
+    let ticks = major_ticks(-320.0, 680.0);
+    assert!(ticks.contains(&0), "{ticks:?}");
+    assert!(ticks.iter().all(|t| t % 50 == 0), "long ticks off the round times: {ticks:?}");
+}
+
+#[test]
+fn the_shaders_clock_keeps_its_precision_after_a_day() {
+    // The selection pulse is sin(2 pi t / period); what matters is that t
+    // moves smoothly and stays in phase.
+    let period = 1.2f32 as f64;
+    assert!(
+        perfr_live_render::INSTANCE_WGSL.contains("const PULSE_PERIOD: f32 = 1.2;"),
+        "the wrap in shader_time is a whole number of the shader's pulse periods"
+    );
+    for now in [0.25f64, 59.9, 1_199.9, 1_200.3, 86_400.0 + 0.123, 30.0 * 86_400.0 + 0.456] {
+        let phase = |t: f64| (t / period).fract();
+        for step in 0..5 {
+            let t = now + step as f64 / 120.0;
+            let shader = shader_time(t) as f64;
+            let off = (phase(shader) - phase(t)).abs();
+            let off = off.min(1.0 - off);
+            assert!(off < 1e-3, "at {t} s the pulse is {off} of a period out of phase");
+        }
+    }
+}

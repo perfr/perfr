@@ -275,6 +275,16 @@ fn nothing_floats_over(ctx: &Context, pos: Pos2) -> bool {
     ctx.layer_id_at(pos).is_none_or(|layer| layer == egui::LayerId::background())
 }
 
+/// The clock handed to the timeline's shader, which only uses it for the
+/// selection's pulse. Seconds since the page opened lose their fraction as
+/// an `f32`: after a day one step is 8 ms, and the pulse moves in jerks.
+/// Wrapped at a thousand pulse periods (the shader's `PULSE_PERIOD`), it
+/// stays under 1,200 and the pulse does not notice the wrap.
+fn shader_time(now_s: f64) -> f32 {
+    const WRAP_S: f64 = 1.2f32 as f64 * 1000.0;
+    (now_s % WRAP_S) as f32
+}
+
 fn consume_scroll_y(ctx: &Context) {
     ctx.input_mut(|i| {
         i.raw_scroll_delta.y = 0.0;
@@ -5819,7 +5829,7 @@ impl PerfrLiveApp {
             if self.has_gpu {
                 let screen = ui.ctx().screen_rect();
                 let screen_px = [screen.width() * ppp, screen.height() * ppp];
-                let now = ui.ctx().input(|i| i.time) as f32;
+                let now = shader_time(ui.ctx().input(|i| i.time));
                 let mut view_body = ViewUniforms::from_rect(body, ppp, screen_px);
                 view_body.time = now;
                 let (payload, overlay) = {
@@ -13468,13 +13478,15 @@ fn paint_timebar(ui: &Ui, rect: Rect, t0: f64, t1: f64, origin_ns: f64) {
     if !(t + minor > t) {
         return;
     }
-    let mut step_i = ((t / minor).round() as i64).max(0);
+    // Signed: a window may start left of zero, and counting its first
+    // tick as tick 0 put the long ticks wherever the window began.
+    let mut step_i = (t / minor).round() as i64;
     let font = FontId::new(10.0, FontFamily::Monospace);
     let mut last_label_right = f32::NEG_INFINITY;
     while t <= t1 {
         let x = rect.left() + ((t - t0) / span) as f32 * rect.width();
         if x >= rect.left() && x <= rect.right() {
-            let is_major = step_i % 5 == 0;
+            let is_major = step_i.rem_euclid(5) == 0;
             let h = if is_major { 9.0 } else { 4.0 };
             painter.line_segment(
                 [

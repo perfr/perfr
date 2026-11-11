@@ -1664,3 +1664,22 @@ fn the_settings_window_of_a_page_with_a_service_keeps_its_capture_settings() {
     assert!(page.shows("INTERFACE"));
     assert!(page.rect_of("Functions").is_some(), "the capture settings are above the knobs: {:?}", page.labels());
 }
+
+#[test]
+fn a_capture_that_stops_asks_for_its_report_once() {
+    let mut page = Page::with(|app| app.apply_status(service_status(false)));
+    page.frames(2);
+    page.app.start_record();
+    page.app.apply_status(service_status(true));
+    page.frames(3);
+    page.app.sample_sels.push(TimeMeasure { start_ns: 1, stop_ns: 2, label_y: 0.0, sample_tid: None });
+    page.frames(2);
+    let asked = page.app.report_requests;
+    page.app.stop_record();
+    page.app.apply_status(service_status(false));
+    page.frames(3);
+    assert_eq!(page.app.report_requests - asked, 1, "the service scans the capture once per request");
+    assert!(page.app.report_open);
+    assert_eq!(page.app.report_tab, ReportTab::TopDown);
+    assert!(page.app.sample_sels.is_empty() && page.app.sampling_ranges.is_empty(), "the report is over the whole capture");
+}

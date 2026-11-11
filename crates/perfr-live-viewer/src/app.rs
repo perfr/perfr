@@ -989,6 +989,10 @@ pub struct PerfrLiveApp {
     sampling_ranges: Vec<(u64, u64, Option<u32>)>,
     /// When the report was last requested, to throttle requests mid-drag.
     last_report_request_s: f64,
+    /// How often `request_reports` ran: the native `Net` sends and records
+    /// nothing, so this is what a test can count.
+    #[cfg(test)]
+    report_requests: u32,
     /// Set when the selection was made on one thread's sample bar.
     /// Which of the four report views is showing.
     report_tab: ReportTab,
@@ -1837,6 +1841,8 @@ impl PerfrLiveApp {
             sampling: None,
             sampling_ranges: Vec::new(),
             last_report_request_s: 0.0,
+            #[cfg(test)]
+            report_requests: 0,
             report_tab: crate::dev::query_report_tab_from_location()
                 .and_then(|v| ReportTab::from_query(&v))
                 .unwrap_or(ReportTab::Flat),
@@ -3316,14 +3322,11 @@ impl PerfrLiveApp {
             }
         }
         self.error.clear();
-        // The moment recording stops, show the aggregate over everything just
-        // recorded. perfr does the same: a finished capture with no selection
-        // should answer a question, not sit blank waiting to be dragged on.
-        // The default tab is set in the CaptureFinished handler, which is the
-        // reliable stop signal for a connected viewer (a capturing=false status
-        // may not arrive over the socket once the capture ends).
+        // The capture just stopped. The report over everything recorded is
+        // asked for by the capture-ended edge in `update`, which also opens
+        // the panel; asking here as well had the service scan the capture
+        // twice for every stop.
         if self.was_capturing && !capturing {
-            self.show_whole_capture_report();
             // The final order of the Live table: once, on the finished counts.
             self.live_resort_pending = true;
         }
@@ -8087,6 +8090,10 @@ impl PerfrLiveApp {
     /// before you have selected anything, the answer you want is about
     /// everything you just recorded.
     fn request_reports(&mut self) {
+        #[cfg(test)]
+        {
+            self.report_requests += 1;
+        }
         if self.capture_is_local() {
             self.compute_local_reports();
             return;

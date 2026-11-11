@@ -597,6 +597,30 @@ mod tests {
     }
 
     #[test]
+    fn long_args_are_cut_between_characters_wherever_the_limit_falls() {
+        // serde_json writes non-ASCII text as is, so the 512-byte hover limit
+        // can land inside a character. `{"k":"` is 6 bytes: `pad` ASCII
+        // letters put the next character at byte `6 + pad`.
+        for ch in ['é', '€', '😀'] {
+            for offset in 509..=513usize {
+                let value = format!("{}{}", "a".repeat(offset - 6), ch.to_string().repeat(40));
+                let json = format!(
+                    r#"[{{"name":"X","ph":"X","ts":1,"dur":10,"pid":1,"tid":1,"args":{{"k":"{value}"}}}}]"#
+                );
+                let (ing, evs) = collect(&json);
+                let id = *ing.args.get(&ArgKey::from_event(evs[0])).expect("args kept");
+                let text = ing.intern.get(id).unwrap();
+                let full = format!(r#"{{"k":"{value}"}}"#);
+                let kept = text.strip_suffix('…').unwrap_or_else(|| panic!("{ch:?} at {offset}: no ellipsis"));
+                assert!(full.starts_with(kept), "{ch:?} at {offset}: not a prefix");
+                // Never more than the limit, and never short by more than
+                // the character the limit fell in.
+                assert!(kept.len() <= 512 && kept.len() > 512 - ch.len_utf8(), "{ch:?} at {offset}: kept {}", kept.len());
+            }
+        }
+    }
+
+    #[test]
     fn be_pairing_by_id() {
         let json = r#"[
           {"name":"A","ph":"B","ts":0,"pid":1,"tid":1,"id":"x"},

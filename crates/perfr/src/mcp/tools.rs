@@ -436,7 +436,7 @@ impl Mcp {
         let mut ambiguous = Vec::new();
         let mut missing = Vec::new();
         for id in arg_u64s(args, "function_ids") {
-            match self.lookup_id(pid, id)? {
+            match self.lookup_id(id)? {
                 Some(hit) => resolved.push(hit),
                 None => missing.push(id.to_string()),
             }
@@ -585,40 +585,9 @@ impl Mcp {
         if !self.platform.sampling {
             return Ok(unsupported_feature("sampling"));
         }
-        let limit = page_limit(args, 15, 40);
-        let offset = page_offset(args);
         match self.http.get_raw("/api/sampling/report", Duration::from_secs(60)) {
             Ok(raw) if raw.status == 501 => Ok(unsupported_feature("sampling")),
-            Ok(raw) => {
-                let body = parse_body(&raw)?;
-                let functions = body.get("functions").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-                let total = functions.len();
-                let hotspots: Vec<Value> = functions
-                    .into_iter()
-                    .skip(offset)
-                    .take(limit)
-                    .map(|row| {
-                        let id = row.get("function_id").and_then(json_u64).unwrap_or(0);
-                        json!({
-                            "name": clip(row.get("name").and_then(|v| v.as_str()).unwrap_or("")),
-                            "module": basename(row.get("module").and_then(|v| v.as_str()).unwrap_or("")),
-                            "function_id": if id == 0 { Value::Null } else { json!(id) },
-                            "self": row.get("self").and_then(|v| v.as_u64()).unwrap_or(0),
-                            "inclusive": row.get("inclusive").and_then(|v| v.as_u64()).unwrap_or(0),
-                            "self_percent": round1(row.get("self_percent").and_then(|v| v.as_f64()).unwrap_or(0.0)),
-                            "inclusive_percent": round1(row.get("inclusive_percent").and_then(|v| v.as_f64()).unwrap_or(0.0)),
-                        })
-                    })
-                    .collect();
-                Ok(json!({
-                    "supported": true,
-                    "samples": body.get("samples").and_then(|v| v.as_u64()).unwrap_or(0),
-                    "total_functions": total,
-                    "offset": offset,
-                    "limit": limit,
-                    "hotspots": hotspots,
-                }))
-            }
+            Ok(raw) => Ok(shape_hotspots(&parse_body(&raw)?, args)),
             Err(error) => Err(error),
         }
     }
@@ -727,7 +696,7 @@ impl Mcp {
         Ok(status.get("capturing").and_then(|v| v.as_bool()).unwrap_or(false))
     }
 
-    fn lookup_id(&self, _pid: u32, id: u64) -> Result<Option<Armed>, String> {
+    fn lookup_id(&self, id: u64) -> Result<Option<Armed>, String> {
         let session = self.session.lock().map_err(|_| "session poisoned".to_string())?;
         if let Some(hit) = session.known.get(&id) {
             return Ok(Some(hit.clone()));
@@ -1207,6 +1176,28 @@ impl Mcp {
             .map_err(|_| "session poisoned".to_string())
     }
 
+    /// One edit of the loaded story, answered with the story as it now is.
+    /// With `checked`, an edit that leaves the story invalid is undone and
+    /// its validation errors are the answer.
+    fn edit_story(
+        &self,
+        checked: bool,
+        edit: impl FnOnce(&mut perfr_story::Story) -> Result<(), String>,
+    ) -> Result<Value, String> {
+        let mut slot = self.story_mut()?;
+        let story = slot.as_mut().ok_or(NO_STORY)?;
+        let backup = checked.then(|| story.clone());
+        edit(story)?;
+        if let Some(backup) = backup {
+            let errors = perfr_story::validate(story);
+            if !errors.is_empty() {
+                *story = backup;
+                return Err(story_errors(&errors));
+            }
+        }
+        Ok(story_payload(story))
+    }
+
     fn story_create(&self, args: &Value) -> Result<Value, String> {
         let mut story = perfr_story::Story::default();
         if let Some(title) = arg_str(args, "title") {
@@ -1220,11 +1211,7 @@ impl Mcp {
         }
         let errors = perfr_story::validate(&story);
         if !errors.is_empty() {
-            return Err(errors
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join("; "));
+            return Err(story_errors(&errors));
         }
         *self.story_mut()? = Some(story.clone());
         Ok(story_payload(&story))
@@ -1246,9 +1233,7 @@ impl Mcp {
 
     fn story_get(&self) -> Result<Value, String> {
         let slot = self.story_mut()?;
-        let story = slot
-            .as_ref()
-            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
+        let story = slot.as_ref().ok_or(NO_STORY)?;
         Ok(story_payload(story))
     }
 
@@ -1256,53 +1241,18 @@ impl Mcp {
         let step_json = args.get("step").cloned().ok_or("step is required")?;
         let step: perfr_story::Step =
             serde_json::from_value(step_json).map_err(|e| format!("step: {e}"))?;
-        let added = step.id.clone();
         let at = arg_usize(args, "index");
-        let mut slot = self.story_mut()?;
-        let story = slot
-            .as_mut()
-            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
-        story.add_step(step, at)?;
-        let errors = perfr_story::validate(story);
-        if !errors.is_empty() {
-            let _ = story.remove_step(&added);
-            return Err(errors
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join("; "));
-        }
-        Ok(story_payload(story))
+        self.edit_story(true, |story| story.add_step(step, at))
     }
 
     fn story_update_step(&self, args: &Value) -> Result<Value, String> {
         let id = arg_str(args, "id").ok_or("id is required")?;
-        let mut slot = self.story_mut()?;
-        let story = slot
-            .as_mut()
-            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
-        let backup = story.clone();
-        story.update_step(id, args)?;
-        let errors = perfr_story::validate(story);
-        if !errors.is_empty() {
-            *story = backup;
-            return Err(errors
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join("; "));
-        }
-        Ok(story_payload(story))
+        self.edit_story(true, |story| story.update_step(id, args))
     }
 
     fn story_remove_step(&self, args: &Value) -> Result<Value, String> {
         let id = arg_str(args, "id").ok_or("id is required")?;
-        let mut slot = self.story_mut()?;
-        let story = slot
-            .as_mut()
-            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
-        story.remove_step(id)?;
-        Ok(story_payload(story))
+        self.edit_story(false, |story| story.remove_step(id).map(|_| ()))
     }
 
     fn story_set_view(&self, args: &Value) -> Result<Value, String> {
@@ -1310,22 +1260,7 @@ impl Mcp {
         let view = args.get("view").cloned().ok_or("view is required")?;
         let view: perfr_story::View =
             serde_json::from_value(view).map_err(|e| format!("view: {e}"))?;
-        let mut slot = self.story_mut()?;
-        let story = slot
-            .as_mut()
-            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
-        let backup = story.clone();
-        story.set_view(id, view)?;
-        let errors = perfr_story::validate(story);
-        if !errors.is_empty() {
-            *story = backup;
-            return Err(errors
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join("; "));
-        }
-        Ok(story_payload(story))
+        self.edit_story(true, |story| story.set_view(id, view))
     }
 
     fn story_add_overlay(&self, args: &Value) -> Result<Value, String> {
@@ -1333,51 +1268,24 @@ impl Mcp {
         let overlay = args.get("overlay").cloned().ok_or("overlay is required")?;
         let overlay: perfr_story::Overlay =
             serde_json::from_value(overlay).map_err(|e| format!("overlay: {e}"))?;
-        let mut slot = self.story_mut()?;
-        let story = slot
-            .as_mut()
-            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
-        let backup = story.clone();
-        story.add_overlay(step_id, overlay)?;
-        let errors = perfr_story::validate(story);
-        if !errors.is_empty() {
-            *story = backup;
-            return Err(errors
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join("; "));
-        }
-        Ok(story_payload(story))
+        self.edit_story(true, |story| story.add_overlay(step_id, overlay))
     }
 
     fn story_remove_overlay(&self, args: &Value) -> Result<Value, String> {
         let step_id = arg_str(args, "step_id").ok_or("step_id is required")?;
         let overlay_id = arg_str(args, "overlay_id").ok_or("overlay_id is required")?;
-        let mut slot = self.story_mut()?;
-        let story = slot
-            .as_mut()
-            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
-        story.remove_overlay(step_id, overlay_id)?;
-        Ok(story_payload(story))
+        self.edit_story(false, |story| story.remove_overlay(step_id, overlay_id))
     }
 
     fn story_reorder(&self, args: &Value) -> Result<Value, String> {
         let id = arg_str(args, "id").ok_or("id is required")?;
         let index = arg_usize(args, "index").ok_or("index is required")?;
-        let mut slot = self.story_mut()?;
-        let story = slot
-            .as_mut()
-            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
-        story.reorder(id, index)?;
-        Ok(story_payload(story))
+        self.edit_story(false, |story| story.reorder(id, index))
     }
 
     fn story_validate(&self) -> Result<Value, String> {
         let slot = self.story_mut()?;
-        let story = slot
-            .as_ref()
-            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
+        let story = slot.as_ref().ok_or(NO_STORY)?;
         let errors = perfr_story::validate(story);
         Ok(json!({
             "ok": errors.is_empty(),
@@ -1387,16 +1295,10 @@ impl Mcp {
 
     fn story_export(&self, args: &Value) -> Result<Value, String> {
         let slot = self.story_mut()?;
-        let story = slot
-            .as_ref()
-            .ok_or("no story loaded; call perfr_story_create or perfr_story_load")?;
+        let story = slot.as_ref().ok_or(NO_STORY)?;
         let errors = perfr_story::validate(story);
         if !errors.is_empty() {
-            return Err(errors
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join("; "));
+            return Err(story_errors(&errors));
         }
         let text = story.to_json_pretty()?;
         let mut path_out = Value::Null;
@@ -1578,6 +1480,14 @@ fn file_inside(dir: &Path, path: &str) -> Result<PathBuf, String> {
 fn is_story_document(bytes: &[u8]) -> bool {
     serde_json::from_slice::<Value>(bytes)
         .is_ok_and(|doc| doc.get("format").and_then(|f| f.as_str()) == Some(perfr_story::FORMAT))
+}
+
+/// What a story tool answers when there is no story to work on.
+const NO_STORY: &str = "no story loaded; call perfr_story_create or perfr_story_load";
+
+/// Validation errors as one tool error.
+fn story_errors(errors: &[perfr_story::StoryError]) -> String {
+    errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
 }
 
 fn story_payload(story: &perfr_story::Story) -> Value {

@@ -471,7 +471,7 @@ fn merge_json(path: &Path, agent: Agent, action: &SkillAction) -> Result<String,
     }
     let mut root = existing;
     let desired = match agent {
-        Agent::OpenCode => opencode_entry(&root),
+        Agent::OpenCode => opencode_server(),
         _ => mcp_stdio(),
     };
     let current = mcp_value(&root, agent);
@@ -517,16 +517,6 @@ fn write_config(path: &Path, text: &str) -> Result<(), String> {
     // it had (0600 for one that holds tokens).
     fs::set_permissions(staged.path(), meta.permissions()).map_err(failed)?;
     staged.persist(&target).map(|_| ()).map_err(|error| failed(error.error))
-}
-
-fn opencode_entry(root: &Value) -> Value {
-    if root.get("mcp").and_then(|mcp| mcp.get("servers")).is_some() || root.get("mcp").is_none() {
-        opencode_server()
-    } else if mcp_looks_like_v1(root.get("mcp")) {
-        opencode_server()
-    } else {
-        opencode_server()
-    }
 }
 
 fn mcp_looks_like_v1(mcp: Option<&Value>) -> bool {

@@ -346,8 +346,26 @@ fn hooks_clone(svc: &LiveService) -> Option<crate::ControlHooks> {
     svc.hooks.lock().clone()
 }
 
+/// Answers a request with `work`, run on the blocking pool. For a handler
+/// that calls one of the service's hooks, copies or scans the ring, or
+/// touches a disk: all of that is synchronous and some of it takes
+/// seconds (the process list of a busy machine, a symbol search over a
+/// large binary, an index over millions of events). Run on the handler's
+/// own thread it parks one of the runtime's few workers, and with each
+/// worker so parked nothing else is served, the WebSocket sends included.
+async fn blocking(work: impl FnOnce() -> Response + Send + 'static) -> Response {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(response) => response,
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
 async fn processes(State(svc): State<Arc<LiveService>>) -> Response {
-    let raw = match hooks_clone(&svc) {
+    blocking(move || processes_response(&svc)).await
+}
+
+fn processes_response(svc: &LiveService) -> Response {
+    let raw = match hooks_clone(svc) {
         Some(h) => match (h.list_processes_json)() {
             Ok(json) => json,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
@@ -365,7 +383,7 @@ async fn processes(State(svc): State<Arc<LiveService>>) -> Response {
             serde_json::to_string(&list).unwrap_or_else(|_| "[]".into())
         }
     };
-    let raw = with_peer_processes(&svc, raw);
+    let raw = with_peer_processes(svc, raw);
     ([(header::CONTENT_TYPE, "application/json")], raw).into_response()
 }
 
@@ -535,10 +553,11 @@ async fn sampling_tree(
     } else {
         ranges
     };
-    match tree(&ranges, &mode) {
+    blocking(move || match tree(&ranges, &mode) {
         Ok(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    }
+    })
+    .await
 }
 
 /// The largest capture bundle an import accepts. A slice is rarely more than
@@ -557,7 +576,11 @@ struct TargetsQuery {
 /// busy fraction in a window. A missing `t0` is the start of the capture;
 /// a `t1` that is absent, 0, or not after `t0` is its end.
 /// The busy fraction is scheduling-slice coverage, not a claim about the program.
-async fn capture_targets(State(svc): State<Arc<LiveService>>, Query(q): Query<TargetsQuery>) -> Json<serde_json::Value> {
+async fn capture_targets(State(svc): State<Arc<LiveService>>, Query(q): Query<TargetsQuery>) -> Response {
+    blocking(move || capture_targets_body(&svc, q).into_response()).await
+}
+
+fn capture_targets_body(svc: &LiveService, q: TargetsQuery) -> Json<serde_json::Value> {
     let index = svc.cached_index();
     let (start, end) = index.time_bounds().unwrap_or((0, 1));
     let (t0, t1) = match (q.t0, q.t1) {
@@ -615,18 +638,21 @@ async fn capture_export(
     };
     if format == "stream" {
         let filename = export_filename(&format, window.is_some());
-        let bytes = svc.capture_stream(window);
-        return (
-            [
-                (header::CONTENT_TYPE, "application/octet-stream"),
-                (
-                    header::CONTENT_DISPOSITION,
-                    &*format!("attachment; filename=\"{filename}\""),
-                ),
-            ],
-            bytes,
-        )
-            .into_response();
+        return blocking(move || {
+            let bytes = svc.capture_stream(window);
+            (
+                [
+                    (header::CONTENT_TYPE, "application/octet-stream"),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        &*format!("attachment; filename=\"{filename}\""),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response()
+        })
+        .await;
     }
     let hook = svc.capture_export.lock().clone();
     let Some(export) = hook else {
@@ -799,8 +825,7 @@ async fn ingest_events(
     // Both clocks now: the capture clock from the service, so a Windows
     // service stamps on the same QueryPerformanceCounter axis its capture uses.
     let now = crate::ingest::ClockNow { monotonic_ns: svc.now_ns(), unix_ns: crate::ingest::now_unix_ns() };
-    let summary = crate::ingest::ingest(&svc, body, now);
-    Json(summary).into_response()
+    blocking(move || Json(crate::ingest::ingest(&svc, body, now)).into_response()).await
 }
 
 /// `POST /api/log`: a batch of the viewer's own log lines, for the
@@ -955,16 +980,19 @@ impl ViewerLogBudget {
 /// and (through the service's hook) its samples -- so the view starts from
 /// nothing. 409 while a capture is running.
 async fn capture_clear(State(svc): State<Arc<LiveService>>) -> Response {
-    if let Some(hook) = svc.capture_clear.lock().clone() {
-        if let Err(error) = hook() {
-            let status = if error.starts_with("busy") { StatusCode::CONFLICT } else { StatusCode::INTERNAL_SERVER_ERROR };
-            return (status, error).into_response();
+    blocking(move || {
+        if let Some(hook) = svc.capture_clear.lock().clone() {
+            if let Err(error) = hook() {
+                let status = if error.starts_with("busy") { StatusCode::CONFLICT } else { StatusCode::INTERNAL_SERVER_ERROR };
+                return (status, error).into_response();
+            }
         }
-    }
-    match svc.clear_capture() {
-        Ok(()) => StatusCode::OK.into_response(),
-        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
-    }
+        match svc.clear_capture() {
+            Ok(()) => StatusCode::OK.into_response(),
+            Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+        }
+    })
+    .await
 }
 
 /// `POST /api/capture/open` with `{"path": "...", "t0": .., "t1": ..}`:
@@ -1036,8 +1064,7 @@ async fn capture_import(State(svc): State<Arc<LiveService>>, body: Bytes) -> Res
     let Some(import) = hook else {
         return (StatusCode::NOT_IMPLEMENTED, "this service does not open captures").into_response();
     };
-    let bytes = body.to_vec();
-    match tokio::task::spawn_blocking(move || import(bytes)).await {
+    match tokio::task::spawn_blocking(move || import(body.to_vec())).await {
         Ok(Ok(summary)) => (
             [(header::CONTENT_TYPE, "application/json")],
             summary,
@@ -1063,10 +1090,11 @@ async fn symbols_modules(
     let Some(modules) = modules else {
         return ([(header::CONTENT_TYPE, "application/json")], r#"{"modules":[]}"#).into_response();
     };
-    match modules(q.pid.unwrap_or(0)) {
+    blocking(move || match modules(q.pid.unwrap_or(0)) {
         Ok(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    }
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1489,7 +1517,7 @@ struct PidBody {
 }
 
 async fn symbols_load(State(svc): State<Arc<LiveService>>, Json(body): Json<PidBody>) -> Response {
-    match hooks_clone(&svc) {
+    blocking(move || match hooks_clone(&svc) {
         Some(h) => match (h.load_symbols)(body.pid) {
             Ok(()) => StatusCode::OK.into_response(),
             Err(e) => (StatusCode::CONFLICT, e).into_response(),
@@ -1499,7 +1527,8 @@ async fn symbols_load(State(svc): State<Arc<LiveService>>, Json(body): Json<PidB
             r#"{"pid":0,"status":"idle","function_count":0,"module_count":0,"error":""}"#,
         )
             .into_response(),
-    }
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1512,7 +1541,7 @@ async fn symbols_status(
     Query(q): Query<SymbolsQuery>,
 ) -> Response {
     let pid = q.pid.unwrap_or(0);
-    match hooks_clone(&svc) {
+    blocking(move || match hooks_clone(&svc) {
         Some(h) => match (h.symbols_status_json)(pid) {
             Ok(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
@@ -1522,7 +1551,8 @@ async fn symbols_status(
             r#"{"pid":0,"status":"idle","function_count":0,"module_count":0,"error":""}"#,
         )
             .into_response(),
-    }
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1551,24 +1581,27 @@ fn json_or_error(result: Result<String, String>) -> Response {
 }
 
 async fn code_disassembly(State(svc): State<Arc<LiveService>>, Query(q): Query<DisassemblyQuery>) -> Response {
-    match hooks_clone(&svc) {
+    blocking(move || match hooks_clone(&svc) {
         Some(h) => json_or_error((h.disassemble_json)(q.pid.unwrap_or(0), q.function_id.unwrap_or(0))),
         None => (StatusCode::NOT_IMPLEMENTED, "no service behind this server").into_response(),
-    }
+    })
+    .await
 }
 
 async fn code_source(State(svc): State<Arc<LiveService>>, Query(q): Query<SourceQuery>) -> Response {
-    match hooks_clone(&svc) {
+    blocking(move || match hooks_clone(&svc) {
         Some(h) => json_or_error((h.source_json)(q.path.as_deref().unwrap_or(""))),
         None => (StatusCode::NOT_IMPLEMENTED, "no service behind this server").into_response(),
-    }
+    })
+    .await
 }
 
 async fn code_example(State(svc): State<Arc<LiveService>>) -> Response {
-    match hooks_clone(&svc) {
+    blocking(move || match hooks_clone(&svc) {
         Some(h) => json_or_error((h.example_disassembly_json)()),
         None => (StatusCode::NOT_IMPLEMENTED, "no service behind this server").into_response(),
-    }
+    })
+    .await
 }
 
 async fn functions_search(
@@ -1582,7 +1615,7 @@ async fn functions_search(
     // index seen (an Unreal Shipping build, 400k functions) is ~100 MB of
     // JSON built in about a second.
     let limit = q.limit.unwrap_or(24);
-    match hooks_clone(&svc) {
+    blocking(move || match hooks_clone(&svc) {
         Some(h) => match (h.search_functions_json)(pid, &query, limit) {
             Ok(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
@@ -1592,7 +1625,8 @@ async fn functions_search(
             r#"{"pid":0,"status":"idle","functions":[]}"#,
         )
             .into_response(),
-    }
+    })
+    .await
 }
 
 async fn capture_stop(State(svc): State<Arc<LiveService>>) -> Response {
@@ -1721,10 +1755,11 @@ async fn get_settings(State(svc): State<Arc<LiveService>>) -> Json<crate::Settin
 /// Replaces and saves them. The body is the whole object as `GET` returns
 /// it; a key left out takes its default.
 async fn put_settings(State(svc): State<Arc<LiveService>>, Json(body): Json<crate::Settings>) -> Response {
-    match svc.update_settings(body) {
+    blocking(move || match svc.update_settings(body) {
         Ok(saved) => Json(saved).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    }
+    })
+    .await
 }
 
 /// The smallest ring `PUT /api/config` takes: under this a capture is a
@@ -1791,10 +1826,12 @@ async fn put_config(State(svc): State<Arc<LiveService>>, Json(body): Json<Config
         .spill_path
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from);
-    match svc.replace_ring(body.ring_buffer_bytes, spill) {
+    // A new ring is allocated and written in full: gigabytes, at the top.
+    blocking(move || match svc.replace_ring(body.ring_buffer_bytes, spill) {
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
-    }
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1823,12 +1860,15 @@ pub(crate) fn encode_raster_body(raster: &perfr_live_render::RasterizedFrame) ->
 
 async fn frame(State(svc): State<Arc<LiveService>>, Query(q): Query<FrameQuery>) -> Response {
     let width = q.width.unwrap_or(1280).clamp(16, 4096) as usize;
-    let raster = svc.rasterize_frame(q.t0, q.t1, width);
-    (
-        [(header::CONTENT_TYPE, "application/octet-stream")],
-        encode_raster_body(&raster),
-    )
-        .into_response()
+    blocking(move || {
+        let raster = svc.rasterize_frame(q.t0, q.t1, width);
+        (
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            encode_raster_body(&raster),
+        )
+            .into_response()
+    })
+    .await
 }
 
 #[derive(Clone, Serialize)]
@@ -1941,8 +1981,8 @@ fn timeline_body(svc: &LiveService, q: FrameQuery) -> TimelineBody {
 async fn timeline(
     State(svc): State<Arc<LiveService>>,
     Query(q): Query<FrameQuery>,
-) -> Json<TimelineBody> {
-    Json(timeline_body(&svc, q))
+) -> Response {
+    blocking(move || Json(timeline_body(&svc, q)).into_response()).await
 }
 
 async fn ws_upgrade(
@@ -2689,12 +2729,15 @@ async fn functions_resolve(
     if body.functions.len() > 100_000 {
         return (StatusCode::BAD_REQUEST, "Too many preset functions").into_response();
     }
-    let keys = serde_json::to_string(&body.functions).unwrap();
-    match hooks_clone(&svc) {
-        Some(h) => match (h.resolve_functions_json)(body.pid, &keys) {
-            Ok(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
-            Err(error) => (StatusCode::CONFLICT, error).into_response(),
-        },
-        None => (StatusCode::NOT_IMPLEMENTED, "Function resolution requires a capture service").into_response(),
-    }
+    blocking(move || {
+        let keys = serde_json::to_string(&body.functions).unwrap();
+        match hooks_clone(&svc) {
+            Some(h) => match (h.resolve_functions_json)(body.pid, &keys) {
+                Ok(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
+                Err(error) => (StatusCode::CONFLICT, error).into_response(),
+            },
+            None => (StatusCode::NOT_IMPLEMENTED, "Function resolution requires a capture service").into_response(),
+        }
+    })
+    .await
 }

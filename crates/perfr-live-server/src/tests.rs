@@ -1364,3 +1364,33 @@ fn a_bench_rate_beyond_the_ceiling_is_brought_down_to_it() {
     assert_eq!(BenchParams { rate: u64::MAX, ..BenchParams::default() }.clamped().rate, MAX_RATE);
     assert_eq!(BenchParams::default().clamped().rate, crate::bench::DEFAULT_RATE);
 }
+
+// ------------------------------------------------- slow work in a handler ---
+
+#[test]
+fn a_request_that_takes_long_does_not_hold_up_the_others() {
+    const SLOW: std::time::Duration = std::time::Duration::from_millis(1500);
+    let (svc, served) = serve_small();
+    // The process list of a busy machine, a symbol search over a large
+    // binary: a hook that takes its time. The runtime here has two workers.
+    let mut hooks = hooks_with_start(|_| Ok(()));
+    hooks.list_processes_json = std::sync::Arc::new(|| {
+        std::thread::sleep(SLOW);
+        Ok("[]".into())
+    });
+    svc.set_hooks(hooks);
+    let waited = std::thread::scope(|scope| {
+        let slow: Vec<_> = (0..2).map(|_| scope.spawn(|| get(&served, "/api/processes"))).collect();
+        // Both are in the hook by now.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let asked = std::time::Instant::now();
+        let (status, _) = get(&served, "/api/status");
+        let waited = asked.elapsed();
+        assert_eq!(status, 200);
+        for request in slow {
+            assert_eq!(request.join().unwrap(), (200, "[]".to_string()));
+        }
+        waited
+    });
+    assert!(waited < SLOW / 3, "the status waited {waited:?} behind two slow requests");
+}

@@ -14,7 +14,7 @@
 //! it is not. A thread can read `cpu_id`, be descheduled, resume on another
 //! core, and store into a ring that a different thread is now writing to.
 //! Linux offers `rseq` for exactly this, but it is Linux-only and intrusive.
-//! One relaxed `fetch_add` on the write cursor makes each ring MPSC instead:
+//! One `fetch_add` on the write cursor makes each ring MPSC instead:
 //! still lock-free, still no CAS loop, ~20 cycles uncontended, and the
 //! per-core sharding keeps contention near zero anyway.
 //!
@@ -33,7 +33,7 @@
 
 use crate::event::{ScopeEvent, EVENT_SIZE};
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x4F52_4249_545F_5347; // "PERFR_SG"
 pub const VERSION: u32 = 2;
@@ -162,7 +162,8 @@ pub struct Slot {
     pub seq: AtomicU64,
     /// `UnsafeCell` because two threads hold `&Slot` while one writes: the
     /// producer that claimed this index, and the consumer reading it. The
-    /// `seq` handshake is what makes that safe, and `UnsafeCell` is how you
+    /// `seq` handshake, and the look at the cursor in `Rings::read_claim`
+    /// behind it, is what makes that safe, and `UnsafeCell` is how you
     /// say so to the compiler -- writing through a `&T` cast to `*mut T` is
     /// undefined behaviour regardless of any handshake.
     pub event: UnsafeCell<ScopeEvent>,
@@ -395,7 +396,7 @@ impl Rings {
     /// Appends one event. Never blocks and never fails; when the ring is full
     /// the oldest unread slot is overwritten, which the consumer detects.
     ///
-    /// The whole write path: one relaxed bump, plain stores, one release
+    /// The whole write path: one atomic bump, plain stores, one release
     /// store. If a consumer has published its read cursor and this claim
     /// will overwrite a slot at or past it, the event still sitting in that
     /// slot is counted against its own thread and kind before the bytes are
@@ -404,7 +405,16 @@ impl Rings {
     /// a second count of the loss: see [`crate::meta`].
     pub fn push(&self, ring: usize, event: ScopeEvent) {
         let ring = ring.min(self.ring_count.saturating_sub(1));
-        let claim = self.ring_header(ring).write_cursor.fetch_add(1, Ordering::Relaxed);
+        // The strongest ordering, and not for the count's sake: `fetch_add`
+        // hands each claim out once whatever the ordering. It is for the
+        // reader this claim laps. The slot keeps the stamp of the record a
+        // lap back until the commit below, so the cursor is all that tells
+        // that reader its slot is being rewritten, and only if the bump is
+        // visible to it no later than the first payload byte is.
+        // `read_claim` has the argument. On x86-64 every ordering is the
+        // same `lock xadd`; on aarch64 this is `ldaddal` where a relaxed
+        // bump would be `ldadd`.
+        let claim = self.ring_header(ring).write_cursor.fetch_add(1, Ordering::SeqCst);
         self.note_overwrite(ring, claim);
         let slot = self.slot(ring, claim);
         // SAFETY: this claim is ours alone -- fetch_add handed it out once --
@@ -418,7 +428,9 @@ impl Rings {
 
     /// Counts the event about to be overwritten, if this claim laps the
     /// consumer. The producer mapping is writable, which is the only place
-    /// this runs; the load of the old slot is the same handshake as a read.
+    /// this runs. The old slot is read by its stamp alone: the cursor a
+    /// reader goes by already stands past this claim, and this claim is the
+    /// one that overwrites the slot next.
     fn note_overwrite(&self, ring: usize, claim: u64) {
         let Some(read) = self.published_read(ring) else {
             return;
@@ -431,7 +443,7 @@ impl Rings {
         // SAFETY: `base` is the producer's writable mapping, and the drop
         // table sits on its control page.
         unsafe {
-            match self.committed(ring, old_claim) {
+            match self.copy_if_stamped(ring, old_claim) {
                 Some(old) => crate::meta::note_drop(self.base, old.tid, old.kind),
                 None => crate::meta::note_drop(self.base, 0, crate::meta::DROP_KIND_UNKNOWN),
             }
@@ -485,11 +497,82 @@ impl Rings {
         self.ring_header(ring).write_cursor.load(Ordering::Acquire)
     }
 
-    /// The event in a slot if it is committed for `claim`, else `None`.
+    /// The event in a slot if it is committed for `claim` and no producer
+    /// has since been handed the slot to overwrite, else `None`.
     ///
-    /// `None` means one of two things and the consumer distinguishes them by
-    /// comparing sequences: not yet committed, or already lapped.
+    /// `None` is either of two things, not yet committed or lapped. The drain
+    /// has to tell them apart and reads through `read_claim`, which says.
     pub fn committed(&self, ring: usize, claim: u64) -> Option<ScopeEvent> {
+        match self.read_claim(ring, claim) {
+            Claimed::Committed(event) => Some(event),
+            Claimed::Pending | Claimed::Overwritten => None,
+        }
+    }
+
+    /// What a reader finds at `claim`: its record, nothing yet, or a slot
+    /// that has gone to a later lap.
+    ///
+    /// The slot's stamp cannot vouch for a copy on its own. A producer
+    /// writes the record first and the stamp last, so while the producer of
+    /// `claim + capacity` is rewriting this slot the stamp still reads
+    /// `claim + 1`. Checked before the copy and again after, it passes both
+    /// times around a record that is half one event and half another, or
+    /// wholly the later one. A reader that has just been lapped resumes at
+    /// exactly that slot, and was handed such records as committed.
+    ///
+    /// What does move first is the write cursor: `push` is handed its claim
+    /// by `fetch_add` before it stores a byte. So the cursor is loaded
+    /// after the copy. Past `claim + capacity`, some producer has been
+    /// handed this slot and the copy is thrown away, whole or not. At or
+    /// below it none has, and the copy holds no byte of a later lap.
+    ///
+    /// The language says nothing about a read that races a write, so that
+    /// rests on two orderings in the machine. In the producer, the bump has
+    /// to be visible no later than the payload stores after it. In the
+    /// reader, the cursor load must not be satisfied before the payload
+    /// loads ahead of it.
+    ///
+    /// * x86-64 gives both for nothing. The bump is a locked instruction,
+    ///   a core's stores become visible in program order, and its loads see
+    ///   memory in program order.
+    /// * aarch64 gives neither: stores to different addresses may become
+    ///   visible in either order, and loads may be satisfied in either
+    ///   order. For the producer, the `SeqCst` bump is `ldaddal`, and Arm
+    ///   orders the write of an atomic instruction that has both acquire
+    ///   and release semantics before every later access by its thread
+    ///   (barrier-ordered-before); the write of a relaxed `ldadd` it does
+    ///   not. For the reader, `fence(Acquire)` is `dmb ishld`, which orders
+    ///   the loads before it ahead of the loads after it, and is no
+    ///   instruction at all on x86-64.
+    ///
+    /// Two cases this does not cover, and both are the producer's to close:
+    ///
+    /// * An aarch64 core without the LSE atomics (Armv8.0) runs the bump as
+    ///   an `ldaxr`/`stlxr` loop, and the architecture orders an exclusive
+    ///   store before later acquire loads, not before later plain stores.
+    ///   Only a barrier between the bump and the record would promise it
+    ///   there.
+    /// * A producer that slept through a whole lap holding `claim -
+    ///   capacity` writes this slot when it wakes, and the cursor shows
+    ///   nothing of it. That takes a producer that checks the slot is still
+    ///   its own before it commits.
+    pub(crate) fn read_claim(&self, ring: usize, claim: u64) -> Claimed {
+        let copy = self.copy_if_stamped(ring, claim);
+        fence(Ordering::Acquire);
+        let cursor = self.ring_header(ring).write_cursor.load(Ordering::Relaxed);
+        if cursor > claim.saturating_add(self.slots_per_ring as u64) {
+            return Claimed::Overwritten;
+        }
+        match copy {
+            Some(event) => Claimed::Committed(event),
+            None => Claimed::Pending,
+        }
+    }
+
+    /// The event in a slot whose stamp says `claim`, before and after the
+    /// copy. Not proof that the copy is that event: see
+    /// [`Rings::read_claim`].
+    fn copy_if_stamped(&self, ring: usize, claim: u64) -> Option<ScopeEvent> {
         let slot = self.slot(ring, claim);
         if slot.seq.load(Ordering::Acquire) != claim + 1 {
             return None;
@@ -497,13 +580,26 @@ impl Rings {
         // SAFETY: the acquire load paired with the producer's release store
         // makes the payload visible.
         let event = unsafe { std::ptr::read_volatile(slot.event.get()) };
-        // Re-check: a producer lapping us could have started overwriting the
-        // slot while it was being read.
+        // Re-check: catches a slot rewritten and committed during the copy.
         if slot.seq.load(Ordering::Acquire) != claim + 1 {
             return None;
         }
         Some(event)
     }
+}
+
+/// What [`Rings::read_claim`] found at a claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Claimed {
+    /// The record of that claim, whole.
+    Committed(ScopeEvent),
+    /// The claim has not been committed, and its slot has not been handed
+    /// to a later one: a producer is still writing it, or nobody has claimed
+    /// it yet.
+    Pending,
+    /// A producer a lap or more ahead has been handed the slot. The record
+    /// is gone, or going, and waiting will not bring it back.
+    Overwritten,
 }
 
 #[cfg(test)]
@@ -595,6 +691,27 @@ mod tests {
             rings.push(0, event(i, 1));
         }
         assert!(rings.committed(0, 0).is_none(), "lapped slots must not read back");
+        assert_eq!(rings.committed(0, 4).unwrap().timestamp_ns, 4);
+    }
+
+    #[test]
+    fn a_slot_whose_next_claim_is_already_handed_out_no_longer_reads_back() {
+        // Four slots hold claims 0..4, and claim 4 has been handed to a
+        // producer that has not stored a byte yet. From here on it may be
+        // anywhere in its write of slot 0, and the slot's stamp will say
+        // "claim 0" until the whole record is in. A reader must go by the
+        // cursor, not the stamp.
+        let region = Region::new(1, 4);
+        let rings = region.rings();
+        for i in 0..4u64 {
+            rings.push(0, event(i, 1));
+        }
+        assert_eq!(rings.committed(0, 0).unwrap().timestamp_ns, 0);
+        let lapping = rings.reserve_for_test(0, 0);
+        assert_eq!(lapping, 4);
+        assert!(rings.committed(0, 0).is_none(), "claim 0 may be half overwritten");
+        assert_eq!(rings.committed(0, 1).unwrap().timestamp_ns, 1, "claim 1 is still whole");
+        rings.publish_reserved_for_test(0, lapping, event(4, 1));
         assert_eq!(rings.committed(0, 4).unwrap().timestamp_ns, 4);
     }
 

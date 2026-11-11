@@ -6,7 +6,7 @@
 //!
 //! An instrumented process writes scope events into its own set of per-core
 //! rings in shared memory; the service maps them, drains each ring, and merges
-//! them into one globally ordered stream. The write path is a relaxed
+//! them into one globally ordered stream. The write path is one atomic
 //! `fetch_add`, a handful of plain stores and one release store -- no locks,
 //! no CAS loop, no allocation, no syscall.
 //!

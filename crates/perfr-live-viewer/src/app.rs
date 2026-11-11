@@ -5969,6 +5969,19 @@ impl PerfrLiveApp {
         if self.pending_vscroll.is_none() {
             self.lane_scroll = out.state.offset.y;
         }
+        // A track drag ends when the button comes up, wherever the pointer
+        // is then. Only the lifted row's own widget used to say so, and a
+        // row has no widget on a frame it is outside the lanes' clip
+        // (released over the ruler or the toolbar, or below the lanes),
+        // filtered out, gone with its capture, or drawn without a GPU.
+        // The row then followed the pointer for good, with pan, zoom, keys
+        // and picking off, until another drag was made and finished. A
+        // release the widget saw has already ended the drag by here.
+        if self.tracks.any_dragging() && !ui.input(|i| i.pointer.primary_down()) {
+            self.tracks.end_drag();
+            self.tracks.end_header_drag();
+            self.relayout_tracks();
+        }
         self.paint_lane_scrollbar(ui, lanes_rect, height, avail.y);
         self.skip_clip_labels = false;
 

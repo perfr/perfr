@@ -171,6 +171,14 @@ fn collect_texts(shape: &Shape, texts: &mut Vec<String>, rects: &mut Vec<Rect>) 
     }
 }
 
+/// Takes the path a page with a GPU takes: the instances are listed and a
+/// paint callback is queued for them, which nothing here ever renders. The
+/// branch without a GPU draws a message in place of the lanes and skips
+/// part of the frame (the lifted row of a track drag among it).
+pub(super) fn draw_as_with_a_gpu(app: &mut PerfrLiveApp) {
+    app.has_gpu = true;
+}
+
 pub(super) fn key_event(key: Key, pressed: bool) -> Event {
     Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE }
 }
@@ -993,4 +1001,84 @@ fn the_ring_and_spill_boxes_follow_the_service_until_they_are_edited_and_again_a
     page.app.apply_status(StatusJson { ring_bytes: 1 << 24, ..service_status(false) });
     page.frames(2);
     assert_eq!(page.app.ring_bytes, "16777216");
+}
+
+/// A connected page showing a finished capture of one process, three threads.
+fn three_thread_page() -> Page {
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        draw_as_with_a_gpu(app);
+        feed(
+            app,
+            &[
+                hello(),
+                LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000_000 },
+                LiveFrame::EventBatch {
+                    events: (0..3).map(|t| scope(100, 101 + t, 2_000_000 + t as u64 * 1_000, 5_000_000, 7)).collect(),
+                },
+                LiveFrame::CaptureFinished,
+            ],
+        );
+    });
+    page.frames(4);
+    page
+}
+
+impl Page {
+    /// Presses on `from` and drags to `to` in a few steps, button still down.
+    fn drag(&mut self, from: Pos2, to: Pos2) {
+        self.press(from);
+        for step in 1..=6 {
+            let at = from + (to - from) * (step as f32 / 6.0);
+            self.frame(vec![Event::PointerMoved(at)]);
+        }
+    }
+}
+
+#[test]
+fn a_track_dropped_outside_the_lanes_is_dropped() {
+    let mut page = three_thread_page();
+    let header = page.rect_of("row:thread:100:102").expect("the thread's header");
+    let grab = Pos2::new(header.left() + 60.0, header.center().y);
+    // Up into the toolbar, a row height and more above the lanes.
+    let toolbar = Pos2::new(grab.x, 6.0);
+    page.drag(grab, toolbar);
+    assert!(page.app.tracks.dragging(), "the header is lifted");
+    page.release(toolbar);
+    page.frames(2);
+    assert!(!page.app.tracks.any_dragging(), "the button is up and the row still follows the pointer");
+    assert!(!page.app.wants_live_repaint());
+}
+
+#[test]
+fn a_track_dropped_on_the_rail_still_lands_where_it_was_dropped() {
+    let mut page = three_thread_page();
+    let order = |page: &Page| -> Vec<u32> { page.app.tracks.thread_order().iter().map(|t| t.tid).collect() };
+    let before = order(&page);
+    assert_eq!(before.len(), 3);
+    let first = page.rect_of(&format!("row:thread:100:{}", before[0])).expect("first header");
+    let last = page.rect_of(&format!("row:thread:100:{}", before[2])).expect("last header");
+    let grab = Pos2::new(first.left() + 60.0, first.center().y);
+    let below = Pos2::new(grab.x, last.bottom() + 4.0);
+    page.drag(grab, below);
+    page.release(below);
+    page.frames(2);
+    assert!(!page.app.tracks.any_dragging());
+    assert_eq!(order(&page), vec![before[1], before[2], before[0]], "dragged from the top to under the last");
+}
+
+#[test]
+fn a_track_drag_ends_on_release_without_a_gpu_too() {
+    let mut page = three_thread_page();
+    // The lifted row is drawn by the GPU branch of the frame only.
+    page.app.has_gpu = false;
+    page.frames(2);
+    let first = page.rect_of("row:thread:100:101").or(page.rect_of("row:thread:100:102")).expect("a header");
+    let grab = Pos2::new(first.left() + 60.0, first.center().y);
+    let to = grab + Vec2::new(0.0, 30.0);
+    page.drag(grab, to);
+    assert!(page.app.tracks.dragging());
+    page.release(to);
+    page.frames(2);
+    assert!(!page.app.tracks.any_dragging());
 }

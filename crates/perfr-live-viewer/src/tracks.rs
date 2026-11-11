@@ -659,8 +659,17 @@ impl TrackStrip {
         }
     }
 
+    /// How many threads of this capture the user has hidden. `hidden` is
+    /// kept by pid and tid across captures, so that the same process
+    /// captured again keeps its layout; a thread it names that this
+    /// capture does not have is not one the "N hidden" chip can bring back.
     pub fn hidden_count(&self) -> usize {
-        self.hidden.len()
+        self.hidden.iter().filter(|t| self.has_thread(**t)).count()
+    }
+
+    /// Whether the index, as last catalogued, gives this thread a row.
+    fn has_thread(&self, t: ThreadId) -> bool {
+        self.catalogue.leaves.contains_key(&(t.pid, t.tid))
     }
 
     pub fn toggle_hidden(&mut self, t: ThreadId) {
@@ -1054,7 +1063,7 @@ impl TrackStrip {
     }
 
     pub fn hidden_in_process(&self, pid: u32) -> usize {
-        self.hidden.iter().filter(|t| t.pid == pid).count()
+        self.hidden.iter().filter(|t| t.pid == pid && self.has_thread(**t)).count()
     }
 
     pub fn show_process_threads(&mut self, pid: u32) {
@@ -2012,6 +2021,35 @@ mod tests {
         strip.update_drag(y0 + 30.0);
         strip.tick(0.016, &idx, None);
         assert_eq!(strip.thread_band(t).unwrap().0, y0 + 26.0);
+    }
+
+    #[test]
+    fn the_hidden_count_is_of_threads_this_capture_has() {
+        // What the user hid is kept by pid and tid, and outlives the
+        // capture it was hidden in. The "N hidden" chips are about rows
+        // that would be on the rail now.
+        let t = ThreadId { pid: 10, tid: 2 };
+        let mut idx = TrackIndex::default();
+        idx.insert(scope(10, 1, 1));
+        idx.insert(scope(10, 2, 1));
+        let mut strip = TrackStrip::default();
+        strip.sync(&idx, None);
+        strip.toggle_hidden(t);
+        strip.sync(&idx, None);
+        assert_eq!(strip.hidden_count(), 1);
+        assert_eq!(strip.hidden_in_process(10), 1);
+        // Another capture takes its place, without that thread.
+        idx.clear();
+        idx.insert(scope(10, 1, 1));
+        idx.insert(scope(20, 2, 1));
+        strip.sync(&idx, None);
+        assert_eq!(strip.hidden_count(), 0, "a thread of an earlier capture was counted");
+        assert_eq!(strip.hidden_in_process(10), 0);
+        // It is still hidden if it comes back, and counted again.
+        idx.insert(scope(10, 2, 1));
+        strip.sync(&idx, None);
+        assert_eq!(strip.hidden_count(), 1);
+        assert!(!strip.rows().iter().any(|r| r.id == RowId::Thread(t)));
     }
 
     #[test]

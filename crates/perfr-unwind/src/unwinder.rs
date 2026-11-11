@@ -52,6 +52,29 @@ pub struct ProcessUnwinder {
     unwinder: ArchUnwinder,
     cache: ArchCache,
     modules_loaded: usize,
+    /// Every mapped file with text that a maps snapshot has shown, by path.
+    files: HashMap<Vec<u8>, KnownFile>,
+}
+
+/// A mapped file as the unwinder last saw it.
+#[derive(Debug)]
+struct KnownFile {
+    /// The span of its mappings.
+    span: std::ops::Range<u64>,
+    /// Where its text was mapped: with the span, what tells one mapping of
+    /// the file from a later one somewhere else.
+    text_start: u64,
+    /// Whether it parsed as an object and became a module. A file that did
+    /// not (deleted, not an ELF) is remembered all the same, so that it is
+    /// not read again at every refresh.
+    is_module: bool,
+}
+
+/// What a refresh from a newer maps snapshot changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModulesChange {
+    pub added: usize,
+    pub removed: usize,
 }
 
 /// One mapped file's aggregate: its address span and its text.
@@ -91,23 +114,86 @@ fn file_spans(mappings: &[MemoryMapping]) -> HashMap<&[u8], FileSpan<'_>> {
 impl ProcessUnwinder {
     /// Builds an unwinder from the content of a `/proc/<pid>/maps`.
     pub fn from_maps_content(maps_content: &[u8]) -> ProcessUnwinder {
-        let mappings = parse_maps(maps_content);
-        let mut unwinder = ArchUnwinder::new();
-        let mut modules_loaded = 0;
-        for (path, span) in &file_spans(&mappings) {
-            let Some(text) = span.text else { continue };
-            let Ok(path) = std::str::from_utf8(path) else { continue };
-            if let Some(module) = load_module(path, span.start..span.end, &mappings, text) {
-                unwinder.add_module(module);
-                modules_loaded += 1;
-            }
-        }
-        ProcessUnwinder { unwinder, cache: ArchCache::new(), modules_loaded }
+        let mut unwinder = ProcessUnwinder {
+            unwinder: ArchUnwinder::new(),
+            cache: ArchCache::new(),
+            modules_loaded: 0,
+            files: HashMap::new(),
+        };
+        unwinder.refresh_from_maps_content(maps_content);
+        unwinder
     }
 
     pub fn for_pid(pid: i32) -> std::io::Result<ProcessUnwinder> {
         let content = std::fs::read(format!("/proc/{pid}/maps"))?;
         Ok(Self::from_maps_content(&content))
+    }
+
+    /// Brings the modules in line with the process's maps as they are now:
+    /// see [`ProcessUnwinder::refresh_from_maps_content`].
+    pub fn refresh(&mut self, pid: i32) -> std::io::Result<ModulesChange> {
+        let content = std::fs::read(format!("/proc/{pid}/maps"))?;
+        Ok(self.refresh_from_maps_content(&content))
+    }
+
+    /// Brings the modules in line with a newer `/proc/<pid>/maps`: files
+    /// mapped since the last snapshot are loaded, files no longer mapped (or
+    /// mapped somewhere else now) are dropped, and the rest are left alone
+    /// without being read again.
+    ///
+    /// A process keeps mapping code after a capture starts -- plugins, the
+    /// extension modules of an interpreter, a game's level code -- and an
+    /// address in a module this does not know is unwound by guessing at
+    /// frame pointers: right only for code that keeps them, and otherwise a
+    /// stack cut short or wrong from that frame up.
+    pub fn refresh_from_maps_content(&mut self, maps_content: &[u8]) -> ModulesChange {
+        let mappings = parse_maps(maps_content);
+        let spans = file_spans(&mappings);
+        let mut change = ModulesChange::default();
+
+        let unwinder = &mut self.unwinder;
+        self.files.retain(|path, known| {
+            let still_there = spans.get(&path[..]).is_some_and(|span| {
+                span.text.is_some_and(|text| {
+                    known.span == (span.start..span.end) && known.text_start == text.start_address
+                })
+            });
+            if !still_there && known.is_module {
+                unwinder.remove_module(known.span.start);
+                change.removed += 1;
+            }
+            still_there
+        });
+
+        for (path, span) in &spans {
+            let Some(text) = span.text else { continue };
+            if self.files.contains_key(*path) {
+                continue;
+            }
+            let module = std::str::from_utf8(path)
+                .ok()
+                .and_then(|path| load_module(path, span.start..span.end, &mappings, text));
+            let is_module = module.is_some();
+            if let Some(module) = module {
+                self.unwinder.add_module(module);
+                change.added += 1;
+            }
+            self.files.insert(
+                path.to_vec(),
+                KnownFile { span: span.start..span.end, text_start: text.start_address, is_module },
+            );
+        }
+        self.modules_loaded = self.modules_loaded + change.added - change.removed;
+        change
+    }
+
+    /// Whether `start..end` lies inside the mappings of `path` as the last
+    /// snapshot showed them. The kernel announces an executable mapping
+    /// again whenever its protection changes (a hook engine does that to
+    /// every page it patches), so most announcements are of files already
+    /// here and need no refresh.
+    pub fn covers(&self, path: &[u8], start: u64, end: u64) -> bool {
+        self.files.get(path).is_some_and(|known| known.span.start <= start && end <= known.span.end)
     }
 
     pub fn modules_loaded(&self) -> usize {
@@ -195,6 +281,90 @@ mod tests {
         let segments = [(0, 0), (0x2000, 0x2000), (0xd000, 0xd000), (0xec70, 0xfc70)];
         assert_eq!(perfr_maps::load_bias(&mappings, text, &segments), 0x7481baaa5000);
         assert!(files[&b"/usr/share/data.bin"[..]].text.is_none(), "nothing to unwind through");
+    }
+
+    /// The maps of this test process, split into the lines of the test
+    /// executable and everything else.
+    fn own_maps() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let exe = std::env::current_exe().unwrap();
+        let exe = exe.to_str().unwrap();
+        let all = std::fs::read("/proc/self/maps").unwrap();
+        let (mut own, mut others) = (Vec::new(), Vec::new());
+        for line in all.split_inclusive(|b| *b == b'\n') {
+            if line.strip_suffix(b"\n").unwrap_or(line).ends_with(exe.as_bytes()) {
+                own.extend_from_slice(line);
+            } else {
+                others.extend_from_slice(line);
+            }
+        }
+        (all, own, others)
+    }
+
+    #[test]
+    fn a_file_mapped_after_the_unwinder_was_built_is_loaded_by_a_refresh() {
+        let (all, own, _) = own_maps();
+        // As if the capture had started before the libraries were mapped.
+        let mut unwinder = ProcessUnwinder::from_maps_content(&own);
+        assert_eq!(unwinder.modules_loaded(), 1, "the test executable alone");
+        let libc = parse_maps(&all)
+            .into_iter()
+            .find(|m| m.perms & PROT_EXEC != 0 && m.pathname.windows(4).any(|w| w == b"libc"))
+            .expect("the test process maps libc");
+        assert!(!unwinder.covers(&libc.pathname, libc.start_address, libc.end_address));
+
+        let change = unwinder.refresh_from_maps_content(&all);
+        assert!(change.added >= 1, "libc was not loaded: {change:?}");
+        assert_eq!(change.removed, 0);
+        assert_eq!(unwinder.modules_loaded(), 1 + change.added);
+        assert!(unwinder.covers(&libc.pathname, libc.start_address, libc.end_address));
+
+        // The same maps again: nothing to do, and nothing read twice.
+        assert_eq!(unwinder.refresh_from_maps_content(&all), ModulesChange::default());
+    }
+
+    #[test]
+    fn a_file_that_was_unmapped_or_moved_is_dropped_by_a_refresh() {
+        let (all, own, _) = own_maps();
+        let mut unwinder = ProcessUnwinder::from_maps_content(&all);
+        let loaded = unwinder.modules_loaded();
+        assert!(loaded > 1);
+        let change = unwinder.refresh_from_maps_content(&own);
+        assert_eq!(change, ModulesChange { added: 0, removed: loaded - 1 });
+        assert_eq!(unwinder.modules_loaded(), 1);
+
+        // The executable "mapped again" 1 GiB higher: the module at the old
+        // addresses goes and one at the new addresses comes.
+        let moved: Vec<u8> = parse_maps(&own)
+            .iter()
+            .map(|m| {
+                format!(
+                    "{:x}-{:x} r{}p {:08x} 00:00 {} {}\n",
+                    m.start_address + (1 << 30),
+                    m.end_address + (1 << 30),
+                    if m.perms & PROT_EXEC != 0 { "-x" } else { "--" },
+                    m.offset,
+                    m.inode,
+                    String::from_utf8_lossy(&m.pathname),
+                )
+            })
+            .collect::<String>()
+            .into_bytes();
+        assert_eq!(unwinder.refresh_from_maps_content(&moved), ModulesChange { added: 1, removed: 1 });
+    }
+
+    #[test]
+    fn a_mapped_file_that_is_not_an_object_is_not_read_at_every_refresh() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("perfr-unwind-not-an-object-{}", std::process::id()));
+        std::fs::write(&path, b"this is not an ELF file").unwrap();
+        let maps = format!("7f0000000000-7f0000001000 r-xp 00000000 00:00 42 {}\n", path.display());
+        let mut unwinder = ProcessUnwinder::from_maps_content(maps.as_bytes());
+        assert_eq!(unwinder.modules_loaded(), 0);
+        assert!(unwinder.covers(path.to_str().unwrap().as_bytes(), 0x7f0000000000, 0x7f0000001000));
+        // Had the refresh tried the file again it would now find an object.
+        std::fs::copy(std::env::current_exe().unwrap(), &path).unwrap();
+        assert_eq!(unwinder.refresh_from_maps_content(maps.as_bytes()), ModulesChange::default());
+        std::fs::remove_file(&path).unwrap();
     }
 
     // Deep, non-inlinable recursion so samples land under a real call chain.

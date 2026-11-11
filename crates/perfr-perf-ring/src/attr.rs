@@ -102,12 +102,18 @@ pub fn context_switch() -> PerfEventAttr {
     attr
 }
 
-/// Twin of `mmap_task_event_open`'s attr.
+/// A task's forks and exits (`task`) and its executable mappings (`mmap`):
+/// who to sample, and what code there is to unwind through.
+///
+/// Not `mmap_data`: that asks for every other mapping too, and nothing reads
+/// those. A thread that allocates maps and unmaps anonymous memory all day,
+/// each one a record with a path lookup in the kernel, into a ring that
+/// also has to carry the fork and exit records.
 pub fn mmap_task() -> PerfEventAttr {
     let mut attr = generic_event_attr();
     attr.kind = PERF_TYPE_SOFTWARE;
     attr.config = PERF_COUNT_SW_DUMMY;
-    attr.flags |= flag::MMAP | flag::MMAP_DATA | flag::TASK;
+    attr.flags |= flag::MMAP | flag::TASK;
     attr
 }
 
@@ -341,6 +347,14 @@ mod tests {
         // Still the generic shape: who and when.
         assert!(attr.sample_type & sample_bits::TID != 0);
         assert!(attr.sample_type & sample_bits::TIME != 0);
+    }
+
+    #[test]
+    fn the_task_ring_asks_for_code_mappings_and_task_events_only() {
+        let attr = mmap_task();
+        assert_ne!(attr.flags & flag::MMAP, 0);
+        assert_ne!(attr.flags & flag::TASK, 0);
+        assert_eq!(attr.flags & flag::MMAP_DATA, 0, "data mappings flood the ring and are never read");
     }
 
     #[test]

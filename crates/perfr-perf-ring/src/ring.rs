@@ -697,11 +697,11 @@ mod tests {
         }
     }
 
-    // A self-observing smoke test: watch our own pid, do some mmaps, and
-    // require that every record the kernel hands us parses and that mmap
-    // records for a named mapping show up. Runs wherever
-    // perf_event_paranoid permits self-observation; skips (with a message)
-    // where it does not, like CI sandboxes.
+    // A self-observing smoke test: watch our own thread, map some code, and
+    // require that every record the kernel hands us parses and that the
+    // mapping is announced by name. Runs wherever perf_event_paranoid
+    // permits self-observation; skips (with a message) where it does not,
+    // like CI sandboxes.
     #[test]
     fn self_observation_produces_parseable_records() {
         // perf_event_open's pid argument is a thread id, and the test
@@ -717,12 +717,26 @@ mod tests {
         };
         ring.enable().unwrap();
 
-        let path = std::env::temp_dir().join(format!("perfr-perf-ring-test-{tid}"));
-        std::fs::write(&path, vec![0u8; 65536]).unwrap();
+        // An executable mapping of a real file is what a loader makes, and
+        // what the ring is asked to announce. The test's own executable is
+        // one file that may certainly be mapped that way.
+        let exe = std::env::current_exe().unwrap();
         {
-            // Map a real file to get a PERF_RECORD_MMAP with a filename.
-            let file = std::fs::File::open(&path).unwrap();
+            let file = std::fs::File::open(&exe).unwrap();
             let mapped = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    65536,
+                    libc::PROT_READ | libc::PROT_EXEC,
+                    libc::MAP_PRIVATE,
+                    std::os::fd::AsRawFd::as_raw_fd(&file),
+                    0,
+                )
+            };
+            assert_ne!(mapped, libc::MAP_FAILED);
+            unsafe { libc::munmap(mapped, 65536) };
+            // A data mapping, which must not be announced.
+            let data = unsafe {
                 libc::mmap(
                     std::ptr::null_mut(),
                     65536,
@@ -732,13 +746,12 @@ mod tests {
                     0,
                 )
             };
-            assert_ne!(mapped, libc::MAP_FAILED);
-            unsafe { libc::munmap(mapped, 65536) };
+            assert_ne!(data, libc::MAP_FAILED);
+            unsafe { libc::munmap(data, 65536) };
         }
-        std::fs::remove_file(&path).unwrap();
 
         let mut records = 0;
-        let mut named_mmaps = 0;
+        let mut code_mappings = 0;
         for _ in 0..1000 {
             match ring.read_record().unwrap() {
                 None => break,
@@ -748,15 +761,16 @@ mod tests {
                     assert_eq!({ header.size } as usize, bytes.len());
                     if { header.kind } == record_type::MMAP {
                         let mmap = perfr_perf_records::reader::parse_mmap(&bytes).unwrap();
-                        if !mmap.filename.is_empty() {
-                            named_mmaps += 1;
+                        assert!(mmap.executable, "a data mapping was announced: {mmap:?}");
+                        if mmap.filename == exe.to_str().unwrap().as_bytes() && mmap.length == 65536 {
+                            code_mappings += 1;
                         }
                     }
                 }
             }
         }
         assert!(records > 0, "the kernel produced no records");
-        assert!(named_mmaps > 0, "no named mmap record seen");
+        assert_eq!(code_mappings, 1, "the executable mapping was not announced by name, once");
     }
 
     /// A descriptor closed twice is only visible when another thread is

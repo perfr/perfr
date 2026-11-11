@@ -46,7 +46,7 @@ use perfr_unwind::ProcessUnwinder;
 use std::collections::HashMap;
 use perfr_live_server::{http, ControlHooks, LiveService, ServerConfig};
 #[cfg(target_os = "linux")]
-use perfr_perf_records::reader::parse_context_switch;
+use perfr_perf_records::reader::{parse_context_switch, parse_mmap, MmapRecord};
 #[cfg(target_os = "linux")]
 use perfr_perf_records::{record_type, ForkExit, Lost};
 #[cfg(target_os = "linux")]
@@ -788,21 +788,27 @@ const STACK_POOL_MAX: usize = 2048;
 /// that is still inside the reorder window can patch the return slot first.
 /// `returns` is the uprobe session, when one is armed.
 ///
-/// The rings are read whether or not the symbols have loaded (`names_ready`).
-/// A ring holds 65 samples -- the kernel reserves the whole stack area in
-/// every record -- so a thread that waited in its ring for a symbol load
-/// kept its first 65 ms of CPU and lost the rest. Unwinding needs the
-/// unwinder, not the symbolizer: a sample taken during the load is unwound
-/// at once and its frames, a few hundred bytes, wait for their names in
-/// `scratch.unnamed`. Naming them early instead would split every function
-/// sampled both before and after the load into a hex ghost and its real name.
+/// The rings are read whether or not the symbols have loaded. A ring holds
+/// 65 samples -- the kernel reserves the whole stack area in every record --
+/// so a thread that waited in its ring for a symbol load kept its first
+/// 65 ms of CPU and lost the rest. Unwinding needs the unwinder, not the
+/// symbolizer: a sample taken during the load is unwound at once and its
+/// frames, a few hundred bytes, wait for their names in `scratch.unnamed`.
+/// Naming them early instead would split every function sampled both before
+/// and after the load into a hex ghost and its real name.
+///
+/// `named_through_ns` says which samples `symbolizer` can name: those taken
+/// up to that instant. Zero while the first load runs, `u64::MAX` once the
+/// symbols are current, and in between when modules were mapped since the
+/// symbolizer in hand read the maps -- it knows everything a sample from
+/// before its snapshot can have run in, and not what came after.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn drain_samples(
     threads: &mut [SampledThread],
     unwinder: &mut ProcessUnwinder,
     symbolizer: &Symbolizer,
-    names_ready: bool,
+    named_through_ns: u64,
     pc_ids: &mut crate::report::FastMap<u64, u32>,
     names: &mut FrameNames,
     store: &SampleStore,
@@ -815,9 +821,7 @@ fn drain_samples(
     returns: Option<&UprobeSession>,
     scratch: &mut SampleScratch,
 ) {
-    if names_ready {
-        name_waiting_samples(symbolizer, pc_ids, names, store, target_pid, period_ns, batch, scratch);
-    }
+    name_waiting_samples(symbolizer, named_through_ns, pc_ids, names, store, target_pid, period_ns, batch, scratch);
     // Samples the reorder horizon has caught up to.
     let mut i = 0;
     while i < scratch.held.len() {
@@ -833,7 +837,7 @@ fn drain_samples(
             &mut held.stack,
             unwinder,
             symbolizer,
-            names_ready,
+            named_through_ns,
             pc_ids,
             names,
             store,
@@ -895,7 +899,7 @@ fn drain_samples(
                     &mut scratch.stack,
                     unwinder,
                     symbolizer,
-                    names_ready,
+                    named_through_ns,
                     pc_ids,
                     names,
                     store,
@@ -928,12 +932,14 @@ fn drain_samples(
     }
 }
 
-/// Names the samples that were unwound while the symbols loaded and pushes
-/// their timeline events. They keep the timestamps they were taken at.
+/// Names the samples that were unwound while the symbols loaded, those taken
+/// up to `named_through_ns`, and pushes their timeline events. They keep the
+/// timestamps they were taken at.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn name_waiting_samples(
     symbolizer: &Symbolizer,
+    named_through_ns: u64,
     pc_ids: &mut crate::report::FastMap<u64, u32>,
     names: &mut FrameNames,
     store: &SampleStore,
@@ -942,9 +948,13 @@ fn name_waiting_samples(
     batch: &mut Vec<LiveEvent>,
     scratch: &mut SampleScratch,
 ) {
-    for sample in scratch.unnamed.drain(..) {
+    scratch.unnamed.retain(|sample| {
+        if sample.time > named_through_ns {
+            return true;
+        }
         name_sample(sample.time, sample.tid, &sample.frames, symbolizer, pc_ids, names, store, target_pid, period_ns, batch);
-    }
+        false
+    });
 }
 
 /// Unwind one sample and, when the symbols are there to name its frames,
@@ -959,7 +969,7 @@ fn push_sample(
     stack: &mut [u8],
     unwinder: &mut ProcessUnwinder,
     symbolizer: &Symbolizer,
-    names_ready: bool,
+    named_through_ns: u64,
     pc_ids: &mut crate::report::FastMap<u64, u32>,
     names: &mut FrameNames,
     store: &SampleStore,
@@ -983,7 +993,7 @@ fn push_sample(
     };
     // frames[0] is the sampled pc; a frame's depth is a u8 on the timeline.
     outcome.frames.truncate(u8::MAX as usize);
-    if names_ready {
+    if time <= named_through_ns {
         name_sample(time, tid, &outcome.frames, symbolizer, pc_ids, names, store, target_pid, period_ns, batch);
     } else if unnamed.len() < MAX_UNNAMED_SAMPLES {
         unnamed.push(UnnamedSample { time, tid, frames: outcome.frames });
@@ -1414,20 +1424,37 @@ fn capture_loop(
     // their frames wait: they keep their timestamps and appear, correctly
     // named, once the symbols land. Scheduling and thread states need no
     // symbols and stream from the first pass.
-    let mut symbols_ready = false;
+    //
+    // The target keeps mapping code while it is captured, so this is not the
+    // only load: each time the unwinder takes on a module mapped since, the
+    // symbolizer is built again from the maps as they are then -- cheaply,
+    // the files it already read are cached -- and swapped in.
+    // `named_through_ns` is the instant up to which the symbolizer in hand
+    // can name samples: zero until the first load lands, `u64::MAX` when it
+    // is current, and otherwise when the first module it does not know was
+    // mapped. `symbols_stale_since_ns` is when the earliest module was
+    // mapped that no load has yet been started for.
+    let mut named_through_ns: u64 = 0;
+    let mut symbols_stale_since_ns: Option<u64> = None;
+    let mut symbol_load_started_ns: Option<u64> = None;
     let (symbolizer_tx, symbolizer_rx) = std::sync::mpsc::channel::<Symbolizer>();
+    let start_symbol_load = |started_ns: &mut Option<u64>| {
+        let tx = symbolizer_tx.clone();
+        let spawned = std::thread::Builder::new().name("perfr-symbolize".to_string()).spawn(move || {
+            let _ = tx.send(Symbolizer::for_pid(target_pid));
+        });
+        match spawned {
+            Ok(_) => *started_ns = Some(crate::now_monotonic_ns()),
+            Err(error) => log::warn!("the symbol load could not be started: {error}"),
+        }
+    };
     if has_target {
-        let tx = symbolizer_tx;
-        std::thread::Builder::new()
-            .name("perfr-symbolize".to_string())
-            .spawn(move || {
-                let _ = tx.send(Symbolizer::for_pid(target_pid));
-            })
-            .expect("spawn symbolizer thread");
+        start_symbol_load(&mut symbol_load_started_ns);
     }
     // One sampled thread = two per-task rings: the sampling ring, and a
     // task-event ring (`mmap_task`: PERF_RECORD_FORK / EXIT / MMAP for that
-    // task) that says when the thread clones another. A fork record names
+    // task) that says when the thread clones another and when it maps code
+    // (see the task-event block of the loop). A fork record names
     // the new tid and it is sampled from that pass on, the way C++ perfr's
     // tracer reacts to PERF_RECORD_FORK, rather than found by polling
     // /proc. A per-task event with `inherit` would follow children by
@@ -1686,6 +1713,11 @@ fn capture_loop(
     let mut switches = ContextSwitchManager::new();
     let mut switch_failed_drains: u64 = 0;
     let mut task_failed_drains: u64 = 0;
+    // Executable mappings that have already caused a look at the maps, by
+    // file and address, so that one the unwinder cannot use (a file that is
+    // gone again by the time the maps are read) asks only once.
+    let mut announced_mappings: std::collections::HashSet<(Vec<u8>, u64)> = std::collections::HashSet::new();
+    let mut modules_mapped_late: u64 = 0;
     // Records the kernel dropped because a ring was full, by kind of ring.
     // The sampling rings' count is in `samples`, the tracepoints' in the
     // thread-state tracer.
@@ -1815,7 +1847,26 @@ fn capture_loop(
         if let Ok(built) = symbolizer_rx.try_recv() {
             announce_symbols(&built);
             symbolizer = built;
-            symbols_ready = true;
+            // An address the previous symbolizer had no module for was
+            // cached as its hex form; the new one may know it.
+            pc_ids.clear();
+            let started_ns = symbol_load_started_ns.take().unwrap_or(0);
+            named_through_ns = match symbols_stale_since_ns {
+                // More code was mapped while this one was being built. It
+                // read the maps after it was started, so it knows whatever
+                // was mapped before that; the first module mapped later is
+                // where its knowledge ends.
+                Some(mapped_ns) => mapped_ns.max(started_ns),
+                None => u64::MAX,
+            };
+        }
+        if symbols_stale_since_ns.is_some() && symbol_load_started_ns.is_none() {
+            symbols_stale_since_ns = None;
+            start_symbol_load(&mut symbol_load_started_ns);
+            if symbol_load_started_ns.is_none() {
+                // No load will land to release the samples that wait.
+                named_through_ns = u64::MAX;
+            }
         }
         batch.clear();
         // Children appear mid-capture; the refresh is rate-limited internally.
@@ -1930,10 +1981,22 @@ fn capture_loop(
             let _task = perfr_api::scope("read task events");
             let mut born: Vec<i32> = Vec::new();
             let mut lost_now: u64 = 0;
+            // Code the target mapped since the last pass.
+            let mut mapped: Vec<MmapRecord> = Vec::new();
             for thread in threads.iter_mut() {
                 let Some(task) = thread.task.as_mut() else { continue };
                 let (own_tid, dead) = (thread.tid, &mut thread.dead);
                 let read = task.drain(|kind, record| {
+                    if kind == record_type::MMAP {
+                        if let Some(mmap) = parse_mmap(record) {
+                            // Only files: there are no unwind tables to
+                            // read for anonymous (JIT) code.
+                            if mmap.pid == target_pid && mmap.executable && mmap.filename.first() == Some(&b'/') {
+                                mapped.push(mmap);
+                            }
+                        }
+                        return;
+                    }
                     if kind != record_type::FORK && kind != record_type::EXIT {
                         return;
                     }
@@ -1970,6 +2033,47 @@ fn capture_loop(
                         .collect();
                     for thread in threads.iter_mut().filter(|t| !alive.contains(&t.tid)) {
                         thread.dead = true;
+                    }
+                }
+            }
+            // New code: a plugin, an interpreter's extension module, a
+            // level's worth of game. The unwinder and the symbolizer were
+            // built from the maps as they were when the capture started, and
+            // without this every sample in such a module was a stack cut
+            // off at its first frame, named by a bare address. The unwinder
+            // takes the module on here, before this pass unwinds the samples
+            // that may be in it; the symbolizer is rebuilt in the background.
+            //
+            // The kernel announces a mapping again whenever its protection
+            // changes, which a hook engine does to every page it patches, so
+            // the maps are read only for a file (or a place) not seen yet.
+            if let Some(unwinder) = unwinder.as_mut() {
+                mapped.retain(|mmap| {
+                    !unwinder.covers(&mmap.filename, mmap.address, mmap.address.saturating_add(mmap.length))
+                        && announced_mappings.insert((mmap.filename.clone(), mmap.address))
+                });
+                if !mapped.is_empty() {
+                    let _load = perfr_api::scope("load new modules");
+                    match unwinder.refresh(target_pid) {
+                        Ok(change) if change.added + change.removed > 0 => {
+                            log::info!(
+                                "the target mapped new code ({}{}): {} module(s) loaded for unwinding, {} dropped; reloading symbols",
+                                String::from_utf8_lossy(&mapped[0].filename),
+                                if mapped.len() > 1 { format!(" and {} more", mapped.len() - 1) } else { String::new() },
+                                change.added,
+                                change.removed
+                            );
+                            modules_mapped_late += change.added as u64;
+                            // A sample taken after the mapping may be in the
+                            // new code, which the symbolizer in hand would
+                            // name by address: from there on they wait.
+                            let mapped_ns = mapped.iter().map(|mmap| mmap.timestamp).min().unwrap_or(0);
+                            named_through_ns = named_through_ns.min(mapped_ns);
+                            symbols_stale_since_ns =
+                                Some(symbols_stale_since_ns.map_or(mapped_ns, |since| since.min(mapped_ns)));
+                        }
+                        Ok(_) => {}
+                        Err(error) => log::debug!("could not re-read the maps of pid {target_pid}: {error}"),
                     }
                 }
             }
@@ -2033,7 +2137,7 @@ fn capture_loop(
                 &mut threads,
                 unwinder,
                 &symbolizer,
-                symbols_ready,
+                named_through_ns,
                 &mut pc_ids,
                 &mut names,
                 &store,
@@ -2333,7 +2437,7 @@ fn capture_loop(
             &mut threads,
             unwinder,
             &symbolizer,
-            symbols_ready,
+            named_through_ns,
             &mut pc_ids,
             &mut names,
             &store,
@@ -2346,20 +2450,28 @@ fn capture_loop(
             uprobes.as_ref(),
             &mut sample_scratch,
         );
-        if !symbols_ready {
-            let _wait = perfr_api::scope("wait for symbols");
-            match symbolizer_rx.recv_timeout(std::time::Duration::from_secs(10)) {
-                Ok(built) => {
-                    announce_symbols(&built);
-                    symbolizer = built;
+        if named_through_ns != u64::MAX {
+            // Modules mapped in the last pass have no load under way yet.
+            if symbols_stale_since_ns.is_some() && symbol_load_started_ns.is_none() {
+                start_symbol_load(&mut symbol_load_started_ns);
+            }
+            if symbol_load_started_ns.is_some() {
+                let _wait = perfr_api::scope("wait for symbols");
+                match symbolizer_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                    Ok(built) => {
+                        announce_symbols(&built);
+                        symbolizer = built;
+                        pc_ids.clear();
+                    }
+                    Err(_) => log::warn!(
+                        "symbols were still loading when the capture stopped; \
+                         its samples are named by address"
+                    ),
                 }
-                Err(_) => log::warn!(
-                    "symbols were still loading when the capture stopped; \
-                     its samples are named by address"
-                ),
             }
             name_waiting_samples(
                 &symbolizer,
+                u64::MAX,
                 &mut pc_ids,
                 &mut names,
                 &store,
@@ -2488,6 +2600,9 @@ fn capture_loop(
         service.set_instrumentation_status(status);
     }
     log::info!("{} callstack samples recorded", samples.parsed);
+    if modules_mapped_late > 0 {
+        log::info!("{modules_mapped_late} module(s) were mapped during the capture and loaded as they appeared");
+    }
     // Only worth a line when it happened: a sample whose register set came
     // back short is one the unwinder could not start from.
     if samples.named_early > 0 {
@@ -3378,18 +3493,19 @@ mod tests {
 
         /// One pass of the sample drain, returning the events it pushed.
         fn drain(&mut self, horizon_ns: u64) -> Vec<LiveEvent> {
-            self.drain_with(true, horizon_ns)
+            self.drain_with(u64::MAX, horizon_ns)
         }
 
-        /// One pass while the symbols are loading (`names_ready` false) or
-        /// after they have landed.
-        fn drain_with(&mut self, names_ready: bool, horizon_ns: u64) -> Vec<LiveEvent> {
+        /// One pass with a symbolizer that can name the samples taken up to
+        /// `named_through_ns`: none while the first load runs (0), all once
+        /// the symbols are current (`u64::MAX`).
+        fn drain_with(&mut self, named_through_ns: u64, horizon_ns: u64) -> Vec<LiveEvent> {
             let mut batch = Vec::new();
             drain_samples(
                 &mut self.threads,
                 &mut self.unwinder,
                 &self.symbolizer,
-                names_ready,
+                named_through_ns,
                 &mut self.pc_ids,
                 &mut self.names,
                 &self.store,
@@ -3491,14 +3607,14 @@ mod tests {
         // The symbols are not there yet. Nothing may be drawn -- a frame
         // named now would be named again, differently, after the load --
         // but nothing may stay in the ring either: it holds 65 samples.
-        let during = rig.drain_with(false, u64::MAX);
+        let during = rig.drain_with(0, u64::MAX);
         assert!(during.iter().all(|e| e.kind != kind::SAMPLE && e.kind != kind::FUNCTION_CALL));
         assert_eq!(rig.ring(4001).fill_fraction(), 0.0, "the samples waited in the kernel's ring");
         assert_eq!(rig.scratch.unnamed.len(), 3);
         assert_eq!(rig.store.export_rows().0.len(), 0);
 
         // The load lands: they appear, at the times they were taken.
-        let after = rig.drain_with(true, u64::MAX);
+        let after = rig.drain_with(u64::MAX, u64::MAX);
         let mut ticks: Vec<u64> = after.iter().filter(|e| e.kind == kind::SAMPLE).map(|e| e.start_ns).collect();
         ticks.sort_unstable();
         assert_eq!(ticks, [5_000, 5_001, 5_002]);
@@ -3508,13 +3624,31 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn samples_taken_after_new_code_was_mapped_wait_for_the_symbols_that_know_it() {
+        let mut rig = SampleRig::new(&[4001]);
+        // A module was mapped at 6000 and a reload of the symbols is under
+        // way; the symbolizer in hand read the maps before that.
+        assert!(rig.ring(4001).publish(&stack_sample_record(4001, 5_000, 0x401000, &[0u8; 64])));
+        assert!(rig.ring(4001).publish(&stack_sample_record(4001, 7_000, 0x7f00_0000_1000, &[0u8; 64])));
+        let during = rig.drain_with(6_000, u64::MAX);
+        let ticks = |batch: &[LiveEvent]| -> Vec<u64> {
+            batch.iter().filter(|e| e.kind == kind::SAMPLE).map(|e| e.start_ns).collect()
+        };
+        assert_eq!(ticks(&during), [5_000], "a sample from before the mapping needs no newer symbols");
+        assert_eq!(rig.scratch.unnamed.len(), 1);
+        // The reload lands.
+        assert_eq!(ticks(&rig.drain_with(u64::MAX, u64::MAX)), [7_000]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn a_symbol_load_that_never_ends_does_not_hold_samples_without_bound() {
         let mut rig = SampleRig::new(&[4001]);
         rig.scratch.unnamed = (0..MAX_UNNAMED_SAMPLES as u64)
-            .map(|time| UnnamedSample { time, tid: 4001, frames: Vec::new() })
+            .map(|i| UnnamedSample { time: 1_000 + i, tid: 4001, frames: Vec::new() })
             .collect();
-        assert!(rig.ring(4001).publish(&stack_sample_record(4001, 5_000, 0x401000, &[0u8; 64])));
-        let batch = rig.drain_with(false, u64::MAX);
+        assert!(rig.ring(4001).publish(&stack_sample_record(4001, 900_000, 0x401000, &[0u8; 64])));
+        let batch = rig.drain_with(0, u64::MAX);
         assert_eq!(rig.scratch.unnamed.len(), MAX_UNNAMED_SAMPLES);
         assert_eq!(batch.iter().filter(|e| e.kind == kind::SAMPLE).count(), 1, "named by address, not dropped");
         assert_eq!(rig.counters.named_early, 1);

@@ -17,4 +17,4 @@
 pub mod modules;
 pub mod unwinder;
 
-pub use unwinder::{ProcessUnwinder, UnwindOutcome};
+pub use unwinder::{ModulesChange, ProcessUnwinder, UnwindOutcome};

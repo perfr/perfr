@@ -410,11 +410,14 @@ async fn peers_connect(State(svc): State<Arc<LiveService>>, Json(body): Json<Con
     if let Err(error) = crate::peers::ws_url(&body.target, "/api/peer") {
         return (StatusCode::BAD_REQUEST, error).into_response();
     }
-    if svc.peers.dialing().iter().any(|t| t == &body.target) {
-        return (StatusCode::OK, "already dialing").into_response();
+    match svc.peers.start_dialing(&body.target) {
+        Ok(true) => {
+            tokio::spawn(crate::peers::redial(svc, body.target));
+            StatusCode::OK.into_response()
+        }
+        Ok(false) => (StatusCode::OK, "already dialing").into_response(),
+        Err(error) => (StatusCode::CONFLICT, error).into_response(),
     }
-    tokio::spawn(crate::peers::connect(svc, body.target));
-    StatusCode::OK.into_response()
 }
 
 /// `GET /api/peer` (WebSocket): a hub links this service as one of its

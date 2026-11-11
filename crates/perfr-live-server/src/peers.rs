@@ -60,6 +60,8 @@ pub const MACHINE_SHIFT: u32 = 24;
 /// machine.
 pub const MAX_MACHINES: u8 = 64;
 const LOCAL_LIMIT: u32 = 1 << MACHINE_SHIFT;
+/// How many targets a hub dials at once: one per machine it can hold.
+pub const DIAL_TARGETS_MAX: usize = MAX_MACHINES as usize;
 
 /// A remote's pid or tid, filed under `machine`. `None` when the id does
 /// not fit in 24 bits (a synthetic id above Linux's `pid_max` ceiling of
@@ -463,6 +465,22 @@ impl Peers {
         self.dialing.lock().clone()
     }
 
+    /// Notes `target` as one this hub dials. `Ok(false)` when it already
+    /// is: the caller must not start a second redial loop for it. Checked
+    /// and noted under one lock, so two requests for the same target that
+    /// arrive together cannot both be the first.
+    pub fn start_dialing(&self, target: &str) -> Result<bool, String> {
+        let mut dialing = self.dialing.lock();
+        if dialing.iter().any(|t| t == target) {
+            return Ok(false);
+        }
+        if dialing.len() >= DIAL_TARGETS_MAX {
+            return Err(format!("already dialing {DIAL_TARGETS_MAX} machines, as many as a hub can hold"));
+        }
+        dialing.push(target.to_string());
+        Ok(true)
+    }
+
     pub fn host_of(&self, machine: u8) -> Option<String> {
         self.entries.lock().get(&machine).map(|e| e.info.host.clone())
     }
@@ -583,14 +601,34 @@ struct Ingest {
     /// Event frames that arrived before the first probe answered: the hub
     /// cannot place them yet. Bounded; a remote that was already capturing
     /// when the link came up loses the oldest.
-    held: Vec<Vec<u8>>,
+    held: std::collections::VecDeque<Vec<u8>>,
+    held_bytes: usize,
     events: u64,
     dropped: u64,
 }
 
 const HELD_FRAMES_MAX: usize = 4096;
+/// As much as the held frames may weigh together: one message of the
+/// largest size a link carries.
+const HELD_BYTES_MAX: usize = 64 << 20;
 
 impl Ingest {
+    /// Keeps a frame until the clock fit exists, dropping the oldest held
+    /// to make room.
+    fn hold(&mut self, bytes: Vec<u8>) {
+        if bytes.len() > HELD_BYTES_MAX {
+            self.dropped += 1;
+            return;
+        }
+        while self.held.len() >= HELD_FRAMES_MAX || self.held_bytes + bytes.len() > HELD_BYTES_MAX {
+            let Some(oldest) = self.held.pop_front() else { break };
+            self.held_bytes -= oldest.len();
+            self.dropped += 1;
+        }
+        self.held_bytes += bytes.len();
+        self.held.push_back(bytes);
+    }
+
     fn id(&self, id: u32) -> Option<u32> {
         pack(self.machine, id)
     }
@@ -722,7 +760,8 @@ pub async fn hub_role(svc: Arc<LiveService>, mut link: Link, link_name: &str) ->
         names: HashMap::new(),
         unknown_name: None,
         sync: ClockSync::default(),
-        held: Vec::new(),
+        held: Default::default(),
+        held_bytes: 0,
         events: 0,
         dropped: 0,
     };
@@ -738,11 +777,7 @@ pub async fn hub_role(svc: Arc<LiveService>, mut link: Link, link_name: &str) ->
                     None => break Ok(()),
                     Some(PeerMsg::Binary(bytes)) => {
                         if ingest.sync.fit().is_none() {
-                            if ingest.held.len() >= HELD_FRAMES_MAX {
-                                ingest.held.remove(0);
-                                ingest.dropped += 1;
-                            }
-                            ingest.held.push(bytes);
+                            ingest.hold(bytes);
                         } else {
                             ingest.bytes(&svc, &bytes);
                         }
@@ -762,6 +797,7 @@ pub async fn hub_role(svc: Arc<LiveService>, mut link: Link, link_name: &str) ->
                                 ingest.sync.record(probe);
                                 if first {
                                     let held = std::mem::take(&mut ingest.held);
+                                    ingest.held_bytes = 0;
                                     for bytes in held {
                                         ingest.bytes(&svc, &bytes);
                                     }
@@ -813,6 +849,19 @@ pub async fn hub_role(svc: Arc<LiveService>, mut link: Link, link_name: &str) ->
 /// Dials `target` and runs the hub role over it, again after every drop,
 /// until the service exits.
 pub async fn connect(svc: Arc<LiveService>, target: String) {
+    if let Err(error) = ws_url(&target, "/api/peer") {
+        log::error!("--connect {target}: {error}");
+        return;
+    }
+    match svc.peers.start_dialing(&target) {
+        Ok(true) => redial(svc, target).await,
+        Ok(false) => {}
+        Err(error) => log::error!("--connect {target}: {error}"),
+    }
+}
+
+/// The redial loop of a target [`Peers::start_dialing`] has accepted.
+pub(crate) async fn redial(svc: Arc<LiveService>, target: String) {
     let url = match ws_url(&target, "/api/peer") {
         Ok(url) => url,
         Err(error) => {
@@ -820,7 +869,6 @@ pub async fn connect(svc: Arc<LiveService>, target: String) {
             return;
         }
     };
-    svc.peers.dialing.lock().push(target.clone());
     let mut announced = false;
     loop {
         match tokio_tungstenite::connect_async(url.as_str()).await {
@@ -1001,7 +1049,8 @@ impl Ingest {
             names: HashMap::new(),
             unknown_name: None,
             sync,
-            held: Vec::new(),
+            held: Default::default(),
+            held_bytes: 0,
             events: 0,
             dropped: 0,
         }
@@ -1178,6 +1227,52 @@ mod tests {
         let names = svc.names.lock();
         assert_eq!(names.processes.get(&((2 << 24) | 1234)).map(String::as_str), Some("game @render-01"));
         assert_eq!(names.threads.get(&((2 << 24) | 1234, (2 << 24) | 1235)).map(String::as_str), Some("render"));
+    }
+
+    #[test]
+    fn frames_held_for_the_first_clock_fit_are_bounded_by_their_bytes() {
+        let mut ingest = Ingest::for_tests(1, "box-b", 0, ClockSync::default());
+        // A link may carry messages of 64 MiB, and nothing has vouched for
+        // the machine at the other end: 4096 of those held is the hub's
+        // memory gone before the first probe is answered.
+        let big = 1usize << 20;
+        for _ in 0..200 {
+            ingest.hold(vec![0u8; big]);
+        }
+        assert!(ingest.held_bytes <= HELD_BYTES_MAX, "{} bytes held", ingest.held_bytes);
+        assert_eq!(ingest.held_bytes, ingest.held.iter().map(Vec::len).sum::<usize>());
+        assert_eq!(ingest.held.len(), HELD_BYTES_MAX / big, "the newest are the ones kept");
+        assert_eq!(ingest.dropped as usize, 200 - HELD_BYTES_MAX / big);
+        // One frame that could never fit is dropped, and costs the held ones nothing.
+        let before = ingest.held.len();
+        ingest.hold(vec![0u8; HELD_BYTES_MAX + 1]);
+        assert_eq!(ingest.held.len(), before);
+        assert_eq!(ingest.dropped as usize, 200 - HELD_BYTES_MAX / big + 1);
+        // Small frames are still bounded by their number.
+        let mut ingest = Ingest::for_tests(1, "box-b", 0, ClockSync::default());
+        for i in 0..HELD_FRAMES_MAX + 10 {
+            ingest.hold(vec![i as u8; 8]);
+        }
+        assert_eq!(ingest.held.len(), HELD_FRAMES_MAX);
+        assert_eq!(ingest.dropped, 10);
+        assert_eq!(ingest.held[0], vec![10u8; 8]);
+    }
+
+    #[test]
+    fn a_target_is_dialed_once_however_many_times_it_is_asked_for() {
+        let peers = Peers::default();
+        assert_eq!(peers.start_dialing("render-01"), Ok(true));
+        assert_eq!(peers.start_dialing("render-01"), Ok(false), "the second request is the same link");
+        assert_eq!(peers.start_dialing("render-02:9000"), Ok(true));
+        assert_eq!(peers.dialing(), vec!["render-01".to_string(), "render-02:9000".to_string()]);
+        // Every target is redialed for the life of the process, so there
+        // are only as many as there are machine slots to fill.
+        for i in 2..DIAL_TARGETS_MAX {
+            assert_eq!(peers.start_dialing(&format!("box-{i}")), Ok(true));
+        }
+        assert!(peers.start_dialing("one-too-many").is_err());
+        assert_eq!(peers.start_dialing("render-01"), Ok(false), "a known target is still not an error");
+        assert_eq!(peers.dialing().len(), DIAL_TARGETS_MAX);
     }
 
     #[test]

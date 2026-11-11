@@ -562,17 +562,23 @@ impl ScopeRingReader {
     /// outside the producer must never dereference this value. Zero unless a
     /// live writer still holds the producer lease.
     pub fn api_descriptor(&self) -> u64 {
+        if !self.writer_alive() {
+            return 0;
+        }
+        // SAFETY: the read-only view covers the header.
+        unsafe { &*self.mapping.base.cast::<Header>() }.api_descriptor.load(Ordering::Acquire)
+    }
+
+    /// Whether the process that created this segment still holds its
+    /// producer lease, which it does until it exits.
+    pub fn writer_alive(&self) -> bool {
         match try_lock_lease(&self.owner) {
             Ok(()) => {
                 // Nobody held it: the producer is gone, whatever the header says.
                 unlock_lease(&self.owner);
-                0
+                false
             }
-            Err(e) if e.raw_os_error() == Some(ERROR_LOCK_VIOLATION) => {
-                // SAFETY: the read-only view covers the header.
-                unsafe { &*self.mapping.base.cast::<Header>() }.api_descriptor.load(Ordering::Acquire)
-            }
-            Err(_) => 0,
+            Err(e) => e.raw_os_error() == Some(ERROR_LOCK_VIOLATION),
         }
     }
 

@@ -7,7 +7,9 @@
 mod native;
 use perfr_frida_transport::Transport;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+#[cfg(unix)]
+use std::sync::OnceLock;
 
 // An injected mapping belongs to one process. A fork inherits both it and
 // possibly-held Rust locks; ignore child callbacks before touching those locks.
@@ -118,16 +120,21 @@ pub unsafe extern "C" fn perfr_frida_open(
                 (start, stop)
             }
             (None, None, None) => {
-                // Never replace a manual segment whose API could not be resolved.
-                // Subsequent captures reuse our already initialized API instance.
-                static OWN_API: OnceLock<bool> = OnceLock::new();
-                let initialized = *OWN_API.get_or_init(|| {
-                    if perfr_scope_ring::ScopeRingReader::open(std::process::id()).is_ok() {
-                        return false;
-                    }
-                    perfr_api::init().is_ok()
-                });
-                if !initialized {
+                // A segment with no descriptor is one of two things. Held
+                // by a live writer, it belongs to an SDK in this process
+                // from before the descriptor existed, whose API cannot be
+                // resolved: never replace that. Held by nobody, it is what
+                // a dead process with this pid left behind, and the sweep
+                // will not remove it while the pid is alive, which it now
+                // is. The two used to be taken for the first, and the
+                // answer kept: every arm failed for the life of the
+                // process, as it did after one init that failed for a
+                // reason that had passed. So nothing is remembered here;
+                // init is a pointer load once it has succeeded.
+                if reader.as_ref().is_some_and(|r| r.writer_alive()) {
+                    return 0;
+                }
+                if perfr_api::init().is_err() {
                     return 0;
                 }
                 (
@@ -255,6 +262,51 @@ mod tests {
         }
         perfr_frida_close(generation);
         assert_eq!(reader.calls(), total, "every completed call was counted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_segment_left_under_this_pid_by_a_dead_process_does_not_stop_hooks_arming() {
+        use perfr_scope_ring::{ScopeRingReader, ScopeRingWriter};
+        let _one = ONE_SESSION.lock().unwrap_or_else(|p| p.into_inner());
+        let pid = std::process::id();
+        let segment = perfr_scope_ring::shm::segment_directory().join(perfr_scope_ring::shm::shm_file_name(pid));
+        // What a process that had this pid before left in /dev/shm when it
+        // was killed: a segment that validates, and that nobody holds.
+        {
+            let writer = ScopeRingWriter::create(1, 8).unwrap();
+            let bytes = std::fs::read(&segment).unwrap();
+            drop(writer);
+            std::fs::write(&segment, bytes).unwrap();
+        }
+        let leftover = ScopeRingReader::open(pid).expect("the leftover is a valid segment");
+        assert!(!leftover.writer_alive());
+        // Arming gives this process a real segment. The other tests here
+        // stand in for the API with their own functions, which a segment
+        // that publishes the real one would take precedence over.
+        struct NoSegmentAfterwards;
+        impl Drop for NoSegmentAfterwards {
+            fn drop(&mut self) {
+                perfr_api::shutdown();
+            }
+        }
+        let _restore = NoSegmentAfterwards;
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let _controller = Transport::create(file.as_file(), pid).unwrap();
+        let path = std::ffi::CString::new(file.path().to_str().unwrap()).unwrap();
+        // The sweep cannot remove it, since the pid is alive: it is ours.
+        // Taken for a segment some other SDK in the process owned, it made
+        // every arm fail, this one and each one after.
+        let generation = unsafe { perfr_frida_open(path.as_ptr(), None, None, None) };
+        assert_ne!(generation, 0, "the hooks did not arm");
+        let ours = ScopeRingReader::open(pid).unwrap();
+        assert!(ours.writer_alive(), "the leftover was replaced by a segment this process holds");
+        assert_ne!(ours.api_descriptor(), 0);
+        perfr_frida_close(generation);
+        let again = unsafe { perfr_frida_open(path.as_ptr(), None, None, None) };
+        assert_ne!(again, 0, "and the next capture arms too");
+        perfr_frida_close(again);
     }
 
     #[test]

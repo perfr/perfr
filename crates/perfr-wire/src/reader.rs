@@ -33,9 +33,9 @@ impl<'a> Reader<'a> {
         self.offset >= self.bytes.len()
     }
 
-    /// Bytes consumed so far. A stream reader decodes as many whole events as
-    /// the buffer holds, then keeps everything from here on as the partial
-    /// tail of the next record.
+    /// Bytes consumed so far: the end of the last event read. A stream
+    /// reader decodes as many whole events as the buffer holds, then keeps
+    /// everything from here on as the partial tail of the next record.
     pub fn consumed(&self) -> usize {
         self.offset
     }
@@ -70,8 +70,20 @@ impl<'a> Reader<'a> {
         Ok(bytes.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().expect("8 bytes"))).collect())
     }
 
-    /// Reads the next event, or None at the clean end of the stream.
+    /// Reads the next event, or None at the clean end of the stream. After
+    /// an error the reader is back at the start of the record that failed,
+    /// so `consumed()` is where that record begins: the partial tail a
+    /// stream reader keeps, and the position a tool reports.
     pub fn next_event(&mut self) -> Result<Option<Event>, ReadError> {
+        let start = self.offset;
+        let result = self.read_event();
+        if result.is_err() {
+            self.offset = start;
+        }
+        result
+    }
+
+    fn read_event(&mut self) -> Result<Option<Event>, ReadError> {
         if self.is_empty() {
             return Ok(None);
         }
@@ -261,6 +273,89 @@ mod tests {
             let result: Result<Vec<Event>, _> = Reader::new(&bytes[..cut]).collect();
             assert!(result.is_err(), "cut at {cut} should error");
         }
+    }
+
+    fn encoded(event: &Event) -> Vec<u8> {
+        let mut writer = Writer::new();
+        writer.write(event);
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn every_event_cut_at_every_byte_is_truncation_and_leaves_the_reader_at_its_start() {
+        // A stream reader keeps `consumed()..` as the partial tail of the
+        // next record, so after a failed read that has to be where the
+        // record begins, for every event and wherever the buffer ends.
+        let first = encoded(&sample_events()[0]);
+        for event in sample_events() {
+            let mut bytes = first.clone();
+            bytes.extend_from_slice(&encoded(&event));
+            for cut in first.len() + 1..bytes.len() {
+                let mut reader = Reader::new(&bytes[..cut]);
+                assert_eq!(reader.next_event(), Ok(Some(sample_events()[0].clone())));
+                assert_eq!(reader.next_event(), Err(ReadError::Truncated), "{event:?} cut at {cut}");
+                assert_eq!(reader.consumed(), first.len(), "{event:?} cut at {cut}");
+            }
+            // Whole, it reads back and the reader is at the end.
+            let mut reader = Reader::new(&bytes);
+            assert_eq!(reader.next_event(), Ok(Some(sample_events()[0].clone())));
+            assert_eq!(reader.next_event(), Ok(Some(event)));
+            assert_eq!(reader.consumed(), bytes.len());
+            assert_eq!(reader.next_event(), Ok(None));
+        }
+    }
+
+    #[test]
+    fn a_malformed_record_leaves_the_reader_at_its_start() {
+        let first = encoded(&sample_events()[0]);
+
+        let mut unknown = first.clone();
+        unknown.extend_from_slice(&[0xEE, 1, 2, 3]);
+        let mut reader = Reader::new(&unknown);
+        reader.next_event().unwrap();
+        assert_eq!(reader.next_event(), Err(ReadError::UnknownTag(0xEE)));
+        assert_eq!(reader.consumed(), first.len(), "the position of the record, not of what follows its tag");
+
+        // An interned callstack whose type byte is out of range: tag, key,
+        // then the bad byte nine bytes into the record.
+        let mut bad_type = first.clone();
+        bad_type.push(EventTag::InternedCallstack as u8);
+        bad_type.extend_from_slice(&7u64.to_le_bytes());
+        bad_type.push(200);
+        bad_type.extend_from_slice(&0u32.to_le_bytes());
+        let mut reader = Reader::new(&bad_type);
+        reader.next_event().unwrap();
+        assert_eq!(reader.next_event(), Err(ReadError::BadCallstackType(200)));
+        assert_eq!(reader.consumed(), first.len());
+    }
+
+    #[test]
+    fn a_length_larger_than_the_buffer_is_truncation_not_an_allocation() {
+        // An interned string claiming four gigabytes, and a callstack
+        // claiming four billion frames.
+        let mut string = vec![EventTag::InternedString as u8];
+        string.extend_from_slice(&1u64.to_le_bytes());
+        string.extend_from_slice(&u32::MAX.to_le_bytes());
+        string.extend_from_slice(b"short");
+        assert_eq!(Reader::new(&string).next_event(), Err(ReadError::Truncated));
+
+        let mut callstack = vec![EventTag::InternedCallstack as u8];
+        callstack.extend_from_slice(&1u64.to_le_bytes());
+        callstack.push(CallstackType::Complete as u8);
+        callstack.extend_from_slice(&u32::MAX.to_le_bytes());
+        callstack.extend_from_slice(&[0u8; 64]);
+        assert_eq!(Reader::new(&callstack).next_event(), Err(ReadError::Truncated));
+    }
+
+    #[test]
+    fn every_callstack_type_round_trips_and_the_next_value_is_refused() {
+        for value in 0..=7u8 {
+            let callstack_type = CallstackType::from_u8(value).unwrap();
+            assert_eq!(callstack_type as u8, value);
+            let event = Event::InternedCallstack { key: 1, callstack_type, pcs: vec![value as u64] };
+            assert_eq!(Reader::new(&encoded(&event)).next_event(), Ok(Some(event)));
+        }
+        assert_eq!(CallstackType::from_u8(8), None);
     }
 
     #[test]

@@ -206,6 +206,9 @@ const TED_TRACK_UUID: u32 = 11;
 const FB_CPU: u32 = 1;
 const FB_EVENT: u32 = 2;
 const FB_COMPACT_SCHED: u32 = 4;
+const FB_FTRACE_CLOCK: u32 = 5;
+const FB_FTRACE_TIMESTAMP: u32 = 6;
+const FB_BOOT_TIMESTAMP: u32 = 7;
 const FE_TIMESTAMP: u32 = 1;
 const FE_PID: u32 = 2;
 const FE_PRINT: u32 = 3;
@@ -342,6 +345,37 @@ struct Clock {
     acc: u64,
     snap_units: u64,
     snap_trace_ns: i128,
+}
+
+impl Clock {
+    /// An absolute reading of this clock, in trace-clock nanoseconds.
+    fn to_trace_ns(&self, units: u64) -> i128 {
+        // Readings and the multiplier come from the file: 2^64 of each
+        // does not fit the product.
+        (i128::from(units) - i128::from(self.snap_units))
+            .saturating_mul(i128::from(self.mult_ns))
+            .saturating_add(self.snap_trace_ns)
+    }
+}
+
+/// How one ftrace bundle's timestamps become trace-clock nanoseconds: onto
+/// BOOTTIME first when the bundle is on another ftrace clock (it then
+/// carries one reading of that clock and the BOOTTIME it was taken at),
+/// and from BOOTTIME through the clock snapshots like any other packet.
+#[derive(Clone, Copy)]
+struct FtraceTime {
+    to_boot: i128,
+    boot: Option<Clock>,
+}
+
+impl FtraceTime {
+    fn ns(self, ts: u64) -> u64 {
+        let boot = (i128::from(ts) + self.to_boot).clamp(0, i128::from(u64::MAX)) as u64;
+        match self.boot {
+            Some(c) => c.to_trace_ns(boot).clamp(0, i128::from(u64::MAX)) as u64,
+            None => boot,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -591,22 +625,44 @@ impl PerfettoState {
             return;
         }
         let has = |id: u32| clocks.iter().any(|c| c.0 == id);
-        let trace_clock = match self.trace_clock {
-            Some(t) if has(t) => t,
-            _ => primary
-                .filter(|p| has(*p))
-                .or_else(|| has(CLOCK_BOOTTIME).then_some(CLOCK_BOOTTIME))
-                .or_else(|| has(CLOCK_MONOTONIC).then_some(CLOCK_MONOTONIC))
-                .unwrap_or(clocks[0].0),
+        // A snapshot that does not list the trace clock (a producer tying
+        // its own clock to MONOTONIC, after the service tied MONOTONIC to
+        // BOOTTIME) says nothing about trace time by itself. A builtin
+        // clock it shares with an earlier snapshot does: that clock's
+        // reading, converted, is when this snapshot was taken.
+        let shared = match self.trace_clock {
+            Some(t) if !has(t) => clocks.iter().find_map(|&(id, ts, inc, _)| {
+                let known = self.clocks.get(&(0, id)).filter(|k| id < SEQ_CLOCK_MIN && !inc && !k.incremental)?;
+                Some(known.to_trace_ns(ts))
+            }),
+            _ => None,
         };
-        if self.trace_clock.is_none() {
-            self.trace_clock = Some(trace_clock);
-        }
-        let Some(t) = clocks.iter().find(|c| c.0 == trace_clock) else {
-            return;
+        let trace_ns = match shared {
+            Some(ns) => ns,
+            None => {
+                let trace_clock = match self.trace_clock {
+                    Some(t) if has(t) => t,
+                    _ => primary
+                        .filter(|p| has(*p))
+                        .or_else(|| has(CLOCK_BOOTTIME).then_some(CLOCK_BOOTTIME))
+                        .or_else(|| has(CLOCK_MONOTONIC).then_some(CLOCK_MONOTONIC))
+                        .unwrap_or(clocks[0].0),
+                };
+                if self.trace_clock.is_none() {
+                    self.trace_clock = Some(trace_clock);
+                }
+                let Some(t) = clocks.iter().find(|c| c.0 == trace_clock) else {
+                    return;
+                };
+                i128::from(t.1).saturating_mul(i128::from(t.3))
+            }
         };
-        let trace_ns = i128::from(t.1) * i128::from(t.3);
         for (id, ts, inc, mult) in clocks {
+            // The relation a builtin clock already has to the trace clock
+            // came from a snapshot that listed both; this one did not.
+            if shared.is_some() && id < SEQ_CLOCK_MIN && self.clocks.contains_key(&(0, id)) {
+                continue;
+            }
             self.clocks.insert(
                 Self::clock_key(seq, id),
                 Clock {
@@ -635,10 +691,7 @@ impl PerfettoState {
         } else {
             raw
         };
-        let ns = i128::from(units) * i128::from(c.mult_ns)
-            - i128::from(c.snap_units) * i128::from(c.mult_ns)
-            + c.snap_trace_ns;
-        ns.clamp(0, i128::from(u64::MAX)) as u64
+        c.to_trace_ns(units).clamp(0, i128::from(u64::MAX)) as u64
     }
 
     fn on_packet_defaults(&mut self, seq: u32, buf: &[u8]) {
@@ -1268,14 +1321,26 @@ impl PerfettoState {
         let mut cpu = 0u32;
         let mut events: Vec<&[u8]> = Vec::new();
         let mut compact = None;
+        let (mut ftrace_clock, mut ftrace_ts, mut boot_ts) = (0u64, None, None);
         for (num, val) in fields(buf) {
             match num {
                 FB_CPU => cpu = val.u32(),
                 FB_EVENT => events.push(val.bytes()),
                 FB_COMPACT_SCHED => compact = Some(val.bytes()),
+                FB_FTRACE_CLOCK => ftrace_clock = val.u64(),
+                FB_FTRACE_TIMESTAMP => ftrace_ts = Some(val.i64()),
+                FB_BOOT_TIMESTAMP => boot_ts = Some(val.i64()),
                 _ => {}
             }
         }
+        let time = FtraceTime {
+            // Clock 0 is BOOTTIME itself.
+            to_boot: match (ftrace_clock, ftrace_ts, boot_ts) {
+                (1.., Some(f), Some(b)) => i128::from(b) - i128::from(f),
+                _ => 0,
+            },
+            boot: self.clocks.get(&(0, CLOCK_BOOTTIME)).filter(|c| !c.incremental).copied(),
+        };
         let mut out = Vec::new();
         let mut direct = Vec::new();
         for e in events {
@@ -1283,7 +1348,7 @@ impl PerfettoState {
             let mut payload = None;
             for (n, v) in fields(e) {
                 match n {
-                    FE_TIMESTAMP => ts = v.u64(),
+                    FE_TIMESTAMP => ts = time.ns(v.u64()),
                     FE_PID => pid = v.u32(),
                     FE_PRINT | FE_SCHED_SWITCH | FE_SCHED_WAKING => payload = Some((n, v.bytes())),
                     _ => {}
@@ -1347,14 +1412,14 @@ impl PerfettoState {
             }
         }
         if let Some(c) = compact {
-            self.compact_sched(&mut direct, ing, cpu, c);
+            self.compact_sched(&mut direct, ing, cpu, c, time);
         }
         ing.note_direct_events(&direct);
         out.extend(direct);
         out
     }
 
-    fn compact_sched(&mut self, out: &mut Vec<LiveEvent>, ing: &mut ChromeIngestor, cpu: u32, buf: &[u8]) {
+    fn compact_sched(&mut self, out: &mut Vec<LiveEvent>, ing: &mut ChromeIngestor, cpu: u32, buf: &[u8], time: FtraceTime) {
         let mut sw_ts: Vec<u64> = Vec::new();
         let mut sw_state: Vec<i64> = Vec::new();
         let mut sw_next: Vec<u32> = Vec::new();
@@ -1386,7 +1451,7 @@ impl PerfettoState {
             t = t.wrapping_add(*delta);
             let pid = wk_pid.get(i).copied().unwrap_or(0);
             let comm = wk_comm.get(i).and_then(|&c| table.get(c as usize)).map(String::as_str);
-            self.sched_waking(out, ing, t, pid, comm);
+            self.sched_waking(out, ing, time.ns(t), pid, comm);
         }
         let mut t = 0u64;
         for (i, delta) in sw_ts.iter().enumerate() {
@@ -1395,7 +1460,7 @@ impl PerfettoState {
             let state = sw_state.get(i).copied().unwrap_or(0);
             let comm = sw_comm.get(i).and_then(|&c| table.get(c as usize)).map(String::as_str);
             let prev = self.on_cpu.get(&cpu).map(|c| c.tid).unwrap_or(0);
-            self.sched_switch(out, ing, cpu, t, prev, state, next, None, comm);
+            self.sched_switch(out, ing, cpu, time.ns(t), prev, state, next, None, comm);
         }
     }
 
@@ -2138,6 +2203,145 @@ mod tests {
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].start_ns, 6_000_000);
         assert_eq!(evs[0].duration_ns, 500_000);
+    }
+
+    fn clock(id: u32, ts: u64, incremental: bool, mult: u64) -> Encoder {
+        let mut c = Encoder::new();
+        c.varint(CLK_ID, u64::from(id)).varint(CLK_TIMESTAMP, ts);
+        if incremental {
+            c.varint(CLK_IS_INCREMENTAL, 1);
+        }
+        if mult != 1 {
+            c.varint(CLK_UNIT_MULTIPLIER_NS, mult);
+        }
+        c
+    }
+
+    fn snapshot(seq: u32, clocks: &[Encoder], primary: Option<u32>, default_clock: Option<u32>) -> Vec<u8> {
+        let mut snap = Encoder::new();
+        for c in clocks {
+            snap.msg(CS_CLOCKS, c);
+        }
+        if let Some(p) = primary {
+            snap.varint(CS_PRIMARY_TRACE_CLOCK, u64::from(p));
+        }
+        let mut p = Encoder::new();
+        p.varint(P_SEQUENCE_ID, u64::from(seq)).msg(P_CLOCK_SNAPSHOT, &snap);
+        if let Some(d) = default_clock {
+            let mut defaults = Encoder::new();
+            defaults.varint(PDF_TIMESTAMP_CLOCK_ID, u64::from(d));
+            p.msg(P_PACKET_DEFAULTS, &defaults);
+        }
+        packet(&p)
+    }
+
+    /// The service's snapshot ties MONOTONIC to BOOTTIME, the trace clock.
+    /// A producer's snapshot then ties its own incremental clock to
+    /// MONOTONIC and lists nothing else. Its MONOTONIC reading is not a
+    /// trace-clock time: taken as one, the sequence's events (and every
+    /// later MONOTONIC timestamp) landed BOOTTIME - MONOTONIC early, which
+    /// is however long the machine has spent suspended.
+    #[test]
+    fn a_snapshot_without_the_trace_clock_is_anchored_through_a_clock_it_shares() {
+        const SUSPENDED: u64 = 6_000_000;
+        let mut trace = snapshot(
+            1,
+            &[clock(CLOCK_BOOTTIME, 4_000_000 + SUSPENDED, false, 1), clock(CLOCK_MONOTONIC, 4_000_000, false, 1)],
+            None,
+            None,
+        );
+        trace.extend(snapshot(
+            9,
+            &[clock(64, 0, true, 1000), clock(CLOCK_MONOTONIC, 5_000_000, false, 1)],
+            None,
+            Some(64),
+        ));
+        trace.extend(thread_track(11, 7, 70, "Main"));
+        // 2 us on the sequence clock: MONOTONIC 5_002_000.
+        trace.extend(te(2, 9, |e| {
+            e.varint(TE_TYPE, TYPE_INSTANT).varint(TE_TRACK_UUID, 11).string(TE_NAME, "on the sequence clock");
+        }));
+        // A packet stamped in MONOTONIC outright, on another sequence.
+        let mut e = Encoder::new();
+        e.varint(TE_TYPE, TYPE_INSTANT).varint(TE_TRACK_UUID, 11).string(TE_NAME, "in monotonic");
+        let mut p = Encoder::new();
+        p.varint(P_TIMESTAMP, 5_500_000)
+            .varint(P_TIMESTAMP_CLOCK_ID, u64::from(CLOCK_MONOTONIC))
+            .varint(P_SEQUENCE_ID, 3)
+            .msg(P_TRACK_EVENT, &e);
+        trace.extend(packet(&p));
+        let (ing, evs) = collect(&trace);
+        let at = |n: &str| evs.iter().find(|e| ing.intern.get(e.name_id) == Some(n)).unwrap().start_ns;
+        assert_eq!(at("on the sequence clock"), 5_002_000 + SUSPENDED);
+        assert_eq!(at("in monotonic"), 5_500_000 + SUSPENDED);
+    }
+
+    fn switch_bundle(cpu: u32, switches: &[(u64, i32, i32)], head: impl FnOnce(&mut Encoder)) -> Vec<u8> {
+        let mut bundle = Encoder::new();
+        bundle.varint(FB_CPU, u64::from(cpu));
+        head(&mut bundle);
+        for &(ts, prev, next) in switches {
+            let mut ss = Encoder::new();
+            ss.i32(SS_PREV_PID, prev).i64(SS_PREV_STATE, 1).i32(SS_NEXT_PID, next);
+            let mut ev = Encoder::new();
+            ev.varint(FE_TIMESTAMP, ts).varint(FE_PID, prev as u64).msg(FE_SCHED_SWITCH, &ss);
+            bundle.msg(FB_EVENT, &ev);
+        }
+        let mut p = Encoder::new();
+        p.msg(P_FTRACE_EVENTS, &bundle);
+        packet(&p)
+    }
+
+    /// ftrace events are stamped in BOOTTIME unless their bundle says
+    /// otherwise. Used raw, they line up with the rest of the trace only
+    /// when BOOTTIME is the trace clock.
+    #[test]
+    fn ftrace_timestamps_are_converted_to_the_trace_clock() {
+        const REALTIME: u32 = 1;
+        let slice = |evs: &[LiveEvent]| {
+            let s = evs.iter().find(|e| e.kind == kind::SCHEDULING_SLICE).expect("a scheduling slice");
+            (s.start_ns, s.duration_ns)
+        };
+        // The trace clock is REALTIME; BOOTTIME 1_000 is REALTIME 1_000_000.
+        let mut trace = snapshot(
+            1,
+            &[clock(REALTIME, 1_000_000, false, 1), clock(CLOCK_BOOTTIME, 1_000, false, 1)],
+            Some(REALTIME),
+            None,
+        );
+        trace.extend(switch_bundle(0, &[(1_100, 0, 21), (1_400, 21, 0)], |_| {}));
+        assert_eq!(slice(&collect(&trace).1), (1_000_100, 300));
+
+        // BOOTTIME is the trace clock: the timestamps are already right.
+        let mut trace = snapshot(
+            1,
+            &[clock(CLOCK_BOOTTIME, 1_000, false, 1), clock(CLOCK_MONOTONIC, 400, false, 1)],
+            None,
+            None,
+        );
+        trace.extend(switch_bundle(0, &[(1_100, 0, 21), (1_400, 21, 0)], |_| {}));
+        assert_eq!(slice(&collect(&trace).1), (1_100, 300));
+
+        // A bundle on another ftrace clock carries one reading of that
+        // clock and the BOOTTIME it was taken at.
+        let trace = switch_bundle(0, &[(600, 0, 21), (900, 21, 0)], |b| {
+            b.varint(FB_FTRACE_CLOCK, 2).i64(FB_FTRACE_TIMESTAMP, 500).i64(FB_BOOT_TIMESTAMP, 10_500);
+        });
+        assert_eq!(slice(&collect(&trace).1), (10_600, 300));
+
+        // Compact switches go through the same conversion.
+        let mut cs = Encoder::new();
+        cs.packed(CS_SWITCH_TIMESTAMP, &[600, 300]).packed(CS_SWITCH_PREV_STATE, &[0, 1]).packed(CS_SWITCH_NEXT_PID, &[21, 0]);
+        let mut bundle = Encoder::new();
+        bundle
+            .varint(FB_CPU, 0)
+            .varint(FB_FTRACE_CLOCK, 2)
+            .i64(FB_FTRACE_TIMESTAMP, 500)
+            .i64(FB_BOOT_TIMESTAMP, 10_500)
+            .msg(FB_COMPACT_SCHED, &cs);
+        let mut p = Encoder::new();
+        p.msg(P_FTRACE_EVENTS, &bundle);
+        assert_eq!(slice(&collect(&packet(&p)).1), (10_600, 300));
     }
 
     #[test]

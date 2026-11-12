@@ -27,7 +27,9 @@
 //! around two seconds. The symbolizer, which asks per sampled frame, uses
 //! the memoized form.
 
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 use std::collections::HashMap;
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 use std::sync::{Mutex, OnceLock};
 
 /// The readable form of `mangled`.
@@ -47,6 +49,7 @@ fn looks_mangled(name: &str) -> bool {
 /// As [`pretty`], memoized: for callers that ask the same few names many
 /// times (the symbolizer, once per sampled frame). Not for whole symbol
 /// tables — the memo would be the table.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 pub fn pretty_cached(mangled: &str) -> String {
     if !looks_mangled(mangled) {
         return mangled.to_string();

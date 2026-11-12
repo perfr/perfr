@@ -5239,20 +5239,17 @@ impl PerfrLiveApp {
         }
         let clip = ui.clip_rect();
         let top = ui.cursor().top();
-        let first = ((clip.top() - top) / row_h).floor().max(0.0) as usize;
-        let last = (((clip.bottom() - top) / row_h).ceil().max(0.0) as usize + 1).min(shown.len());
-        let first = first.min(last);
+        let rows = RowPitch::new(ui, row_h);
+        let (first, last) = rows.in_view(clip, top, shown.len());
         // Left-drag anywhere over the rows selects a range; registered before
         // the rows so a click still reaches each row's hook checkbox.
         let ordered_ids: Vec<u64> = shown.iter().map(|&i| self.functions[i].function_id).collect();
         let rows_rect = Rect::from_min_size(
             Pos2::new(ui.cursor().left(), top),
-            Vec2::new(avail_w, shown.len() as f32 * row_h),
+            Vec2::new(avail_w, shown.len() as f32 * rows.pitch),
         );
-        self.handle_row_drag_select(ui, rows_rect, top, row_h, &ordered_ids);
-        if first > 0 {
-            ui.allocate_exact_size(Vec2::new(avail_w, first as f32 * row_h), Sense::hover());
-        }
+        self.handle_row_drag_select(ui, rows_rect, top, rows.pitch, &ordered_ids);
+        rows.skip(ui, avail_w, first);
         let all_selected_hooked = self.selection_all_hooked();
         let mut actions: Vec<(HookAction, u64, String, String)> = Vec::new();
         for (n, &i) in shown[first..last].iter().enumerate() {
@@ -5378,9 +5375,7 @@ impl PerfrLiveApp {
                 theme::MUTED(),
             );
         }
-        if last < shown.len() {
-            ui.allocate_exact_size(Vec2::new(avail_w, (shown.len() - last) as f32 * row_h), Sense::hover());
-        }
+        rows.skip(ui, avail_w, shown.len() - last);
         for (action, id, name, module) in actions {
             self.apply_row_hook_action(action, id, &name, &module);
         }
@@ -8625,9 +8620,19 @@ impl PerfrLiveApp {
             return;
         }
         self.hooked_hint(ui);
-        if !self.report_selection.is_empty() {
-            ui.horizontal(|ui| self.selection_hook_controls(ui));
-        }
+        // The line is there with or without a selection, as on the tree
+        // tabs. Appearing with the first selected row, it pushed every row
+        // down a line under the pointer in the middle of the drag: the range
+        // under the pointer changed, could empty the selection, the line
+        // went again, and a drag over five rows ended with one selected.
+        ui.horizontal(|ui| {
+            ui.set_min_height(22.0);
+            if self.report_selection.is_empty() {
+                ui.label(RichText::new("Drag rows to select functions").color(theme::MUTED()).size(self.ui_tweaks.report_font));
+            } else {
+                self.selection_hook_controls(ui);
+            }
+        });
         let filter = self.report_filter.trim().to_lowercase();
         let mut rows: Vec<&crate::net::SamplingRow> = report
             .rows
@@ -8725,19 +8730,16 @@ impl PerfrLiveApp {
         });
         let clip = ui.clip_rect();
         let top = ui.cursor().top();
-        let first = ((clip.top() - top) / row_h).floor().max(0.0) as usize;
-        let last = (((clip.bottom() - top) / row_h).ceil().max(0.0) as usize + 1).min(rows.len());
-        let first = first.min(last);
+        let pitch = RowPitch::new(ui, row_h);
+        let (first, last) = pitch.in_view(clip, top, rows.len());
         // Left-drag over the rows selects a range for a batch hook toggle.
         let ordered_ids: Vec<u64> = rows.iter().map(|r| r.function_id).collect();
         let rows_rect = Rect::from_min_size(
             Pos2::new(ui.cursor().left(), top),
-            Vec2::new(avail_w, rows.len() as f32 * row_h),
+            Vec2::new(avail_w, rows.len() as f32 * pitch.pitch),
         );
-        self.handle_row_drag_select(ui, rows_rect, top, row_h, &ordered_ids);
-        if first > 0 {
-            ui.allocate_exact_size(Vec2::new(avail_w, first as f32 * row_h), Sense::hover());
-        }
+        self.handle_row_drag_select(ui, rows_rect, top, pitch.pitch, &ordered_ids);
+        pitch.skip(ui, avail_w, first);
         for (n, row) in rows[first..last].iter().enumerate() {
             let hooked = hooked_ids.contains(&row.function_id) && row.function_id != 0;
             let selected = self.report_selection.contains(&row.function_id) && row.function_id != 0;
@@ -8804,9 +8806,7 @@ impl PerfrLiveApp {
                 theme::MUTED(),
             );
         }
-        if last < rows.len() {
-            ui.allocate_exact_size(Vec2::new(avail_w, (rows.len() - last) as f32 * row_h), Sense::hover());
-        }
+        pitch.skip(ui, avail_w, rows.len() - last);
         for (action, id, name, module) in actions {
             self.apply_row_hook_action(action, id, &name, &module);
         }
@@ -8943,16 +8943,13 @@ impl PerfrLiveApp {
         let avail_w = ui.available_width().max(300.0);
         let clip = ui.clip_rect();
         let top = ui.cursor().top();
+        let pitch = RowPitch::new(ui, row_h);
         if let Some(row) = self.code_scroll_to.take() {
-            let y = top + row as f32 * row_h;
+            let y = top + row as f32 * pitch.pitch;
             ui.scroll_to_rect(Rect::from_min_size(Pos2::new(clip.left(), y), Vec2::new(1.0, row_h)), Some(egui::Align::TOP));
         }
-        let first = ((clip.top() - top) / row_h).floor().max(0.0) as usize;
-        let last = (((clip.bottom() - top) / row_h).ceil().max(0.0) as usize + 1).min(self.code_rows.len());
-        let first = first.min(last);
-        if first > 0 {
-            ui.allocate_exact_size(Vec2::new(avail_w, first as f32 * row_h), Sense::hover());
-        }
+        let (first, last) = pitch.in_view(clip, top, self.code_rows.len());
+        pitch.skip(ui, avail_w, first);
         let pointer = ui.ctx().pointer_hover_pos();
         // The widest line in view sets the horizontal extent, so the scroll
         // area can scroll sideways to the end of a long line.
@@ -9037,9 +9034,7 @@ impl PerfrLiveApp {
                 );
             }
         }
-        if last < self.code_rows.len() {
-            ui.allocate_exact_size(Vec2::new(avail_w, (self.code_rows.len() - last) as f32 * row_h), Sense::hover());
-        }
+        pitch.skip(ui, avail_w, self.code_rows.len() - last);
         if widest > avail_w {
             // Claim the width so ScrollArea::both offers the sideways scroll.
             ui.allocate_exact_size(Vec2::new(widest, 0.0), Sense::hover());
@@ -11806,6 +11801,43 @@ fn note_ui_rect_fmt(label: std::fmt::Arguments<'_>, rect: Rect) {
             rect.height()
         );
     });
+}
+
+/// The geometry of a list laid out by hand, one `allocate_exact_size` per
+/// row: each row is `row_h` tall and the layout puts an item spacing after
+/// it, so row `k` starts `k * pitch` below the first.
+///
+/// The lists took the row height for that distance. Which rows are in view,
+/// how much room the rows out of view are given, and which row a drag is
+/// over were all computed three pixels a row short: a drag over five rows
+/// selected seven, and further down a long list the rows drawn were not
+/// the ones the scroll bar pointed at.
+#[derive(Clone, Copy)]
+struct RowPitch {
+    pitch: f32,
+    spacing: f32,
+}
+
+impl RowPitch {
+    fn new(ui: &Ui, row_h: f32) -> Self {
+        let spacing = ui.spacing().item_spacing.y;
+        RowPitch { pitch: row_h + spacing, spacing }
+    }
+
+    /// The rows `first..last` that `clip` shows, of `len` rows starting at `top`.
+    fn in_view(self, clip: Rect, top: f32, len: usize) -> (usize, usize) {
+        let first = ((clip.top() - top) / self.pitch).floor().max(0.0) as usize;
+        let last = (((clip.bottom() - top) / self.pitch).ceil().max(0.0) as usize + 1).min(len);
+        (first.min(last), last)
+    }
+
+    /// Room for `rows` rows that are not drawn: with the spacing the layout
+    /// adds after it, exactly what the rows would have taken.
+    fn skip(self, ui: &mut Ui, width: f32, rows: usize) {
+        if rows > 0 {
+            ui.allocate_exact_size(Vec2::new(width, rows as f32 * self.pitch - self.spacing), Sense::hover());
+        }
+    }
 }
 
 /// A click on a column header: the same column flips the direction, a new

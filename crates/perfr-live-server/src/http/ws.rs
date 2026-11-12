@@ -44,10 +44,18 @@ pub(super) async fn send_frame(sink: &mut futures_util::stream::SplitSink<WebSoc
     let size = bytes.len() as f64;
     let scope = crate::scope(name);
     crate::value("ws frame bytes", size);
-    let ok = sink.send(Message::Binary(bytes)).await.is_ok();
+    let ok = matches!(tokio::time::timeout(SEND_TIMEOUT, sink.send(Message::Binary(bytes))).await, Ok(Ok(())));
     drop(scope);
     ok
 }
+
+/// How long one frame may take to leave for a viewer before the viewer is
+/// let go. A send waits for room in the socket, and a client that connects
+/// and never reads leaves none: its task then sat in the send for as long
+/// as the connection stayed open, holding its copy of the ring (a quarter
+/// of a gigabyte by default, for each such connection). A viewer that was
+/// merely slow reconnects and is started over.
+pub(super) const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Starts a viewer from the service's state as it is now: sends it the
 /// Hello, the names and the whole ring, and returns the receiver of every

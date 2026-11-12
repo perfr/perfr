@@ -27,20 +27,27 @@
 //! x86 only: `iced_x86` decodes x86. On other architectures every function is
 //! reported [`SafetyLevel::Unknown`] ("not analysed") rather than guessed at.
 
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic};
 
 /// `e_machine` for x86-64 and 32-bit x86 -- the ELF machines this analyser
 /// can decode.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 pub const EM_386: u16 = 3;
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 pub const EM_X86_64: u16 = 62;
 
 /// A near `jmp rel32` is five bytes; an inline trampoline (Frida) overwrites
 /// at least this much of the entry, so a control-flow instruction within the
 /// first five bytes is a relocation hazard, and a function shorter than this
 /// is too small to hook either way.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 const TRAMPOLINE_BYTES: u64 = 5;
 
 /// How safe a function is to hook, worst case first.
+// Where the analyser is not compiled (macOS, whose functions come from Frida)
+// every verdict is `Unknown`; the journal and the API still name each level.
+#[cfg_attr(not(any(test, target_os = "linux", target_os = "windows")), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SafetyLevel {
     /// A clean entry: decodes to an ordinary instruction with no hazard.
@@ -68,6 +75,8 @@ impl SafetyLevel {
 
 /// What the analysis found at the entry, as a fact code can test. The
 /// `reason` says the same for a person, and its wording is free to change.
+// As `SafetyLevel`: without the analyser only `None` is ever built.
+#[cfg_attr(not(any(test, target_os = "linux", target_os = "windows")), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hazard {
     /// Nothing, or nothing looked for (a module that was not analysed).
@@ -108,6 +117,7 @@ impl HookSafety {
         HookSafety::new(SafetyLevel::Unknown, Hazard::None, "not analysed (non-x86 module)", String::new(), String::new())
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     pub fn is_safe(&self) -> bool {
         matches!(self.level, SafetyLevel::Safe | SafetyLevel::Unknown)
     }
@@ -117,6 +127,7 @@ impl HookSafety {
     /// does not apply: uprobes relocate that one instruction out of line. A
     /// function too small for a return probe, or one this analyser calls
     /// unsafe, is not.
+    #[cfg(any(test, target_os = "linux"))]
     pub fn allows_uprobe(&self) -> bool {
         match self.level {
             SafetyLevel::Safe | SafetyLevel::Unknown => true,
@@ -127,10 +138,12 @@ impl HookSafety {
 }
 
 /// Whether this analyser can decode the given ELF machine.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 pub fn is_x86(machine: u16) -> bool {
     machine == EM_X86_64 || machine == EM_386
 }
 
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
 }
@@ -141,6 +154,7 @@ fn hex(bytes: &[u8]) -> String {
 ///
 /// Only call this for an x86 module (see [`is_x86`]); other machines get
 /// [`HookSafety::not_analysed`].
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 pub fn assess(code: &[u8], size: u64, is_64_bit: bool) -> HookSafety {
     if code.is_empty() {
         return HookSafety::new(SafetyLevel::Unsafe, Hazard::NotAnEntry, "no bytes at the function entry", String::new(), String::new());
@@ -217,6 +231,7 @@ pub fn assess(code: &[u8], size: u64, is_64_bit: bool) -> HookSafety {
 
 /// Assess from an ELF module's bytes: slices the entry window at `file_offset`
 /// and dispatches on the machine. `size` is the symbol size (0 unknown).
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 pub fn assess_in_module(bytes: &[u8], machine: u16, is_64_bit: bool, file_offset: u64, size: u64) -> HookSafety {
     if !is_x86(machine) {
         return HookSafety::not_analysed();

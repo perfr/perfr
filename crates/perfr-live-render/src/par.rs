@@ -30,6 +30,14 @@ pub struct WorkerSpan {
 )]
 const PARALLEL_MIN: usize = 8;
 
+/// The least a row task is given: this many cells (lanes times columns), a
+/// few hundred microseconds of column walk. Under it the pool is not used.
+#[cfg_attr(
+    all(target_arch = "wasm32", not(feature = "parallel")),
+    allow(dead_code)
+)]
+const MIN_CELLS_PER_TASK: usize = 96 * 1024;
+
 /// WASM pool size after a successful `initThreadPool`. Stays 1 (sequential)
 /// until the viewer calls [`set_wasm_pool_threads`].
 static WASM_THREADS: AtomicUsize = AtomicUsize::new(1);
@@ -356,7 +364,16 @@ where
         }
         return Vec::new();
     }
-    let chunk = chunk_size(items.len(), parallelism());
+    // A task has to be worth waking a worker for. Split one per thread, a
+    // zoomed-out frame of a few hundred lanes handed each of thirty-two
+    // workers a few tens of microseconds of columns: the frame took as long
+    // as on one thread, and twice that when the workers were slow to wake.
+    let chunk = chunk_size(items.len(), parallelism()).max(MIN_CELLS_PER_TASK.div_ceil(width));
+    if chunk >= items.len() {
+        // One chunk, walked here. It is still reported as a worker's span,
+        // so the self profile shows the raster whichever way it ran.
+        return rows_chunk(0, items, dest, width, &f, span_name, label.as_ref());
+    }
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;

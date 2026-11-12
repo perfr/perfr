@@ -1899,3 +1899,190 @@ fn hovering_a_flame_bar_names_it_with_its_samples() {
         page.texts
     );
 }
+
+/// A finished capture dense enough that the whole of it is drawn as pixel
+/// columns: `threads` threads of back-to-back scopes far narrower than a pixel.
+fn zoomed_out_page(threads: u32, scopes: u64) -> Page {
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        draw_as_with_a_gpu(app);
+        let mut frames = vec![hello(), LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000_000 }];
+        for t in 0..threads {
+            frames.push(LiveFrame::EventBatch {
+                events: (0..scopes).map(|i| scope(100, 200 + t, 2_000_000 + i * 1_000, 900, 7 + (i % 5) as u32)).collect(),
+            });
+        }
+        frames.push(LiveFrame::CaptureFinished);
+        feed(app, &frames);
+    });
+    page.frames(4);
+    // Fitted to its content: the capture fills the view, as when one is opened.
+    page.key(Key::Home);
+    page.frames(4);
+    assert!(page.app.t1 - page.app.t0 < 100e6, "the view is the capture's few tens of ms: {} .. {}", page.app.t0, page.app.t1);
+    assert_eq!(page.app.last_lod, perfr_live_render::TimelineLod::PixelColumns, "the capture is drawn as columns");
+    page
+}
+
+#[test]
+fn hovering_a_zoomed_out_view_moves_the_marks_and_rasterizes_nothing() {
+    let mut page = zoomed_out_page(6, 40_000);
+    let drawn = page.app.column_rasters;
+    assert!(drawn > 0, "the view was rasterized to begin with");
+    page.frames(5);
+    assert_eq!(page.app.column_rasters, drawn, "a still view is not drawn again");
+    // The pointer crosses the lanes: the scope under it changes on nearly
+    // every frame, and each change used to rasterize the whole view.
+    let mut hovered = std::collections::HashSet::new();
+    for step in 0..40 {
+        let at = Pos2::new(420.0 + step as f32 * 17.0, 150.0 + (step % 5) as f32 * 30.0);
+        page.frame(vec![Event::PointerMoved(at)]);
+        if let Some(pick) = page.app.hover {
+            hovered.insert((pick.tid, pick.start_ns));
+        }
+    }
+    assert!(hovered.len() > 4, "the pointer was over {} different scopes", hovered.len());
+    assert_eq!(page.app.column_rasters, drawn, "hovering rasterized the view again");
+    // What does change the picture still draws it: moving the view. (So
+    // does a click: selecting a scope focuses its thread, and that dims the
+    // columns of the others.)
+    page.frame(vec![Event::PointerMoved(Pos2::new(700.0, 125.0)), key_event(Key::W, true)]);
+    page.frames(3);
+    page.frame(vec![key_event(Key::W, false)]);
+    assert!(page.app.column_rasters > drawn, "a zoom was not drawn");
+}
+
+#[test]
+fn the_level_of_detail_is_decided_once_for_a_view_that_holds_still() {
+    let mut page = zoomed_out_page(4, 20_000);
+    let memo = page.app.lod_memo.expect("decided");
+    page.frames(5);
+    assert_eq!(page.app.lod_memo, Some(memo), "the same window and events: the same answer, kept");
+    // New events are a new question, whatever the window.
+    feed(&mut page.app, &[LiveFrame::EventBatch { events: vec![scope(100, 200, 2_500_000, 4_000_000, 9)] }]);
+    page.frames(2);
+    let after = page.app.lod_memo.expect("decided again");
+    assert_ne!(after.0, memo.0, "the index changed and the memo did not notice");
+    assert_eq!(after.1, perfr_live_render::TimelineLod::Instanced, "a scope wide enough to be a box is in view now");
+}
+
+/// Not a check: what a frame costs over a large capture, still and under
+/// each kind of input, at three zoom levels. The capture is a `.perfr.stream`
+/// named by `PERFR_PROBE_STREAM`; `PERFR_PROBE_ONLY=<scenario>` with
+/// `PERFR_PROBE_SECONDS=<n>` loops one scenario for a sampler to look at.
+/// `cargo test --release -p perfr-live-viewer --lib -- --ignored --nocapture render_frame_times`.
+#[test]
+#[ignore]
+fn render_frame_times() {
+    let Some(path) = std::env::var_os("PERFR_PROBE_STREAM") else {
+        println!("PERFR_PROBE_STREAM is not set");
+        return;
+    };
+    let only = std::env::var("PERFR_PROBE_ONLY").ok();
+    let seconds: f64 = std::env::var("PERFR_PROBE_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let bytes = std::fs::read(&path).expect("the stream file");
+    let load = std::time::Instant::now();
+    let mut page = Page::with(|app| {
+        app.static_capture = Some("capture.perfr.stream".into());
+        draw_as_with_a_gpu(app);
+    })
+    .sized(1920.0, 1080.0);
+    page.app.accept_stream(bytes);
+    page.frames(10);
+    println!(
+        "loaded {} events on {} lanes in {:.0} ms; pid {}",
+        page.app.index.event_count(),
+        page.app.index.lane_count(),
+        load.elapsed().as_secs_f64() * 1000.0,
+        std::process::id()
+    );
+    let lanes = Pos2::new(1100.0, 420.0);
+    let key = |key: Key, pressed: bool| Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
+
+    // One scenario: `step(page, i)` is the input of frame `i`.
+    let run = |page: &mut Page, name: &str, frames: usize, step: &mut dyn FnMut(&mut Page, usize)| {
+        if only.as_deref().is_some_and(|o| o != name) {
+            // Still drive the input, so the view is where the next scenario expects it.
+            for i in 0..frames {
+                step(page, i);
+            }
+            return;
+        }
+        let start = std::time::Instant::now();
+        let mut done = 0usize;
+        loop {
+            for i in 0..frames {
+                step(page, i);
+            }
+            done += frames;
+            if start.elapsed().as_secs_f64() >= seconds {
+                break;
+            }
+        }
+        let ms = start.elapsed().as_secs_f64() * 1000.0 / done as f64;
+        println!(
+            "{name:<28} {ms:8.3} ms/frame   view {:>10.3} ms wide, {} frames",
+            (page.app.t1 - page.app.t0) / 1e6,
+            done
+        );
+    };
+    let still = |page: &mut Page, _: usize| {
+        page.frame(Vec::new());
+    };
+    let hover = |page: &mut Page, i: usize| {
+        let x = 700.0 + ((i * 7) % 900) as f32;
+        page.frame(vec![Event::PointerMoved(Pos2::new(x, 300.0 + (i % 200) as f32))]);
+    };
+    // A drag that goes back and forth, so a long run stays inside the capture.
+    let pan = |page: &mut Page, i: usize| {
+        let phase = i % 120;
+        if phase == 0 {
+            page.frame(vec![Event::PointerMoved(lanes), pointer_button(lanes, true)]);
+        }
+        let dx = if phase < 60 { phase as f32 } else { (120 - phase) as f32 } * 6.0;
+        let at = Pos2::new(lanes.x - dx, lanes.y);
+        if phase == 119 {
+            page.frame(vec![Event::PointerMoved(at), pointer_button(at, false)]);
+        } else {
+            page.frame(vec![Event::PointerMoved(at)]);
+        }
+    };
+    let scroll = |page: &mut Page, i: usize| {
+        let dy = if (i / 40) % 2 == 0 { -30.0 } else { 30.0 };
+        page.frame(vec![Event::PointerMoved(lanes), wheel(dy)]);
+    };
+    let zoom = |page: &mut Page, frames: usize, key_code: Key| {
+        page.frame(vec![Event::PointerMoved(lanes), key(key_code, true)]);
+        page.frames(frames);
+        page.frame(vec![key(key_code, false)]);
+        page.frames(2);
+    };
+
+    for level in ["whole", "mid", "deep"] {
+        run(&mut page, &format!("{level}: still"), 120, &mut |p, i| still(p, i));
+        run(&mut page, &format!("{level}: hover"), 120, &mut |p, i| hover(p, i));
+        run(&mut page, &format!("{level}: pan drag"), 120, &mut |p, i| pan(p, i));
+        run(&mut page, &format!("{level}: scroll tracks"), 80, &mut |p, i| scroll(p, i));
+        if level != "deep" {
+            let before = page.app.t1 - page.app.t0;
+            let start = std::time::Instant::now();
+            let frames = if level == "whole" { 45 } else { 60 };
+            zoom(&mut page, frames, Key::W);
+            println!(
+                "{:<28} {:8.3} ms/frame   view {:.3} -> {:.3} ms",
+                format!("{level}: zoom in (W held)"),
+                start.elapsed().as_secs_f64() * 1000.0 / (frames + 4) as f64,
+                before / 1e6,
+                (page.app.t1 - page.app.t0) / 1e6
+            );
+        }
+    }
+    let start = std::time::Instant::now();
+    zoom(&mut page, 120, Key::S);
+    println!(
+        "{:<28} {:8.3} ms/frame   view back to {:.3} ms",
+        "zoom out (S held)",
+        start.elapsed().as_secs_f64() * 1000.0 / 124.0,
+        (page.app.t1 - page.app.t0) / 1e6
+    );
+}

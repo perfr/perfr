@@ -243,41 +243,6 @@ function debugString(val) {
     // TODO we could test for more things here, like `Set`s and `Map`s.
     return className;
 }
-
-let cachedFloat64ArrayMemory0 = null;
-
-function getFloat64ArrayMemory0() {
-    if (cachedFloat64ArrayMemory0 === null || cachedFloat64ArrayMemory0.buffer !== wasm.memory.buffer) {
-        cachedFloat64ArrayMemory0 = new Float64Array(wasm.memory.buffer);
-    }
-    return cachedFloat64ArrayMemory0;
-}
-
-function getArrayF64FromWasm0(ptr, len) {
-    ptr = ptr >>> 0;
-    return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
-}
-
-function getArrayU8FromWasm0(ptr, len) {
-    ptr = ptr >>> 0;
-    return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
-}
-
-function passArray8ToWasm0(arg, malloc) {
-    const ptr = malloc(arg.length * 1, 1) >>> 0;
-    getUint8ArrayMemory0().set(arg, ptr / 1);
-    WASM_VECTOR_LEN = arg.length;
-    return ptr;
-}
-/**
- * Called after JS `initThreadPool` resolves. `n == 1` keeps collect/raster
- * sequential (SAB missing / init failed).
- * @param {number} n
- */
-export function markWasmPoolReady(n) {
-    wasm.markWasmPoolReady(n);
-}
-
 /**
  * Browser entry: eframe WebRunner on the given canvas. Native window is not used.
  * JS must call `initThreadPool` (when present) *before* this, then
@@ -288,6 +253,15 @@ export function markWasmPoolReady(n) {
 export function start_eframe(canvas) {
     const ret = wasm.start_eframe(canvas);
     return ret;
+}
+
+/**
+ * Called after JS `initThreadPool` resolves. `n == 1` keeps collect/raster
+ * sequential (SAB missing / init failed).
+ * @param {number} n
+ */
+export function markWasmPoolReady(n) {
+    wasm.markWasmPoolReady(n);
 }
 
 /**
@@ -311,7 +285,7 @@ function __wbg_adapter_38(arg0, arg1) {
 }
 
 function __wbg_adapter_41(arg0, arg1, arg2) {
-    wasm.closure297_externref_shim(arg0, arg1, arg2);
+    wasm.closure268_externref_shim(arg0, arg1, arg2);
 }
 
 function takeFromExternrefTable0(idx) {
@@ -327,15 +301,15 @@ function __wbg_adapter_46(arg0, arg1) {
 }
 
 function __wbg_adapter_49(arg0, arg1, arg2) {
-    wasm.closure607_externref_shim(arg0, arg1, arg2);
+    wasm.closure622_externref_shim(arg0, arg1, arg2);
 }
 
 function __wbg_adapter_54(arg0, arg1, arg2) {
-    wasm.closure1321_externref_shim(arg0, arg1, arg2);
+    wasm.closure1335_externref_shim(arg0, arg1, arg2);
 }
 
-function __wbg_adapter_1536(arg0, arg1, arg2, arg3) {
-    wasm.closure3037_externref_shim(arg0, arg1, arg2, arg3);
+function __wbg_adapter_1527(arg0, arg1, arg2, arg3) {
+    wasm.closure3046_externref_shim(arg0, arg1, arg2, arg3);
 }
 
 const __wbindgen_enum_BinaryType = ["blob", "arraybuffer"];
@@ -393,106 +367,6 @@ const __wbindgen_enum_GpuVertexStepMode = ["vertex", "instance"];
 const __wbindgen_enum_RequestCredentials = ["omit", "same-origin", "include"];
 
 const __wbindgen_enum_ResizeObserverBoxOptions = ["border-box", "content-box", "device-pixel-content-box"];
-
-const LiveViewerFinalization = (typeof FinalizationRegistry === 'undefined')
-    ? { register: () => {}, unregister: () => {} }
-    : new FinalizationRegistry(ptr => wasm.__wbg_liveviewer_free(ptr >>> 0, 1));
-
-export class LiveViewer {
-
-    __destroy_into_raw() {
-        const ptr = this.__wbg_ptr;
-        this.__wbg_ptr = 0;
-        LiveViewerFinalization.unregister(this);
-        return ptr;
-    }
-
-    free() {
-        const ptr = this.__destroy_into_raw();
-        wasm.__wbg_liveviewer_free(ptr, 0);
-    }
-    /**
-     * `0` = pixel columns, `1` = instanced SDF primitives.
-     * @param {number} t0
-     * @param {number} t1
-     * @param {number} width
-     * @returns {number}
-     */
-    choose_lod(t0, t1, width) {
-        const ret = wasm.liveviewer_choose_lod(this.__wbg_ptr, t0, t1, width);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    lane_count() {
-        const ret = wasm.liveviewer_lane_count(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    event_count() {
-        const ret = wasm.liveviewer_event_count(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * `[t0, t1]` in nanoseconds, or empty if the index has no events.
-     * @returns {Float64Array}
-     */
-    time_bounds() {
-        const ret = wasm.liveviewer_time_bounds(this.__wbg_ptr);
-        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
-        return v1;
-    }
-    /**
-     * Packed instances: `f32 height`, `u32 count`, then `count * (x,y,w,h,color,r)`.
-     * @param {number} t0
-     * @param {number} t1
-     * @param {number} width
-     * @returns {Uint8Array}
-     */
-    collect_instances(t0, t1, width) {
-        const ret = wasm.liveviewer_collect_instances(this.__wbg_ptr, t0, t1, width);
-        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-        return v1;
-    }
-    constructor() {
-        const ret = wasm.liveviewer_new();
-        this.__wbg_ptr = ret >>> 0;
-        LiveViewerFinalization.register(this, this.__wbg_ptr, this);
-        return this;
-    }
-    reset() {
-        wasm.liveviewer_reset(this.__wbg_ptr);
-    }
-    /**
-     * Decode one or more length-prefixed live frames and insert events.
-     * @param {Uint8Array} bytes
-     * @returns {number}
-     */
-    ingest(bytes) {
-        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.liveviewer_ingest(this.__wbg_ptr, ptr0, len0);
-        return ret >>> 0;
-    }
-    /**
-     * Pixel-column rasterize. Returns packed RGBA8 (`lanes * width * 4`).
-     * @param {number} t0
-     * @param {number} t1
-     * @param {number} width
-     * @returns {Uint8Array}
-     */
-    rasterize(t0, t1, width) {
-        const ret = wasm.liveviewer_rasterize(this.__wbg_ptr, t0, t1, width);
-        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-        return v1;
-    }
-}
 
 const wbg_rayon_PoolBuilderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
@@ -2042,7 +1916,7 @@ function __wbg_get_imports() {
                 const a = state0.a;
                 state0.a = 0;
                 try {
-                    return __wbg_adapter_1536(a, state0.b, arg0, arg1);
+                    return __wbg_adapter_1527(a, state0.b, arg0, arg1);
                 } finally {
                     state0.a = a;
                 }
@@ -3425,36 +3299,36 @@ function __wbg_get_imports() {
         const ret = false;
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper2040 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 294, __wbg_adapter_38);
+    imports.wbg.__wbindgen_closure_wrapper1826 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 265, __wbg_adapter_38);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper2042 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 294, __wbg_adapter_41);
+    imports.wbg.__wbindgen_closure_wrapper1828 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 265, __wbg_adapter_41);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper2044 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 294, __wbg_adapter_41);
+    imports.wbg.__wbindgen_closure_wrapper1830 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 265, __wbg_adapter_41);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper3549 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 604, __wbg_adapter_46);
+    imports.wbg.__wbindgen_closure_wrapper3824 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 619, __wbg_adapter_46);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper3551 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 604, __wbg_adapter_49);
+    imports.wbg.__wbindgen_closure_wrapper3826 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 619, __wbg_adapter_49);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper3553 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 604, __wbg_adapter_49);
+    imports.wbg.__wbindgen_closure_wrapper3828 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 619, __wbg_adapter_49);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper5232 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 1322, __wbg_adapter_54);
+    imports.wbg.__wbindgen_closure_wrapper5509 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 1336, __wbg_adapter_54);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper5234 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 1322, __wbg_adapter_54);
+    imports.wbg.__wbindgen_closure_wrapper5511 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 1336, __wbg_adapter_54);
         return ret;
     };
     imports.wbg.__wbindgen_debug_string = function(arg0, arg1) {
@@ -3553,7 +3427,6 @@ function __wbg_finalize_init(instance, module, thread_stack_size) {
     __wbg_init.__wbindgen_wasm_module = module;
     cachedDataViewMemory0 = null;
     cachedFloat32ArrayMemory0 = null;
-    cachedFloat64ArrayMemory0 = null;
     cachedInt32ArrayMemory0 = null;
     cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;

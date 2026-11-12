@@ -36,7 +36,8 @@ export function attachViewer(profiler, options, controls) {
     const url = withEmbed(options.viewerUrl);
     // A cross-origin viewer is in another agent cluster. Posting it a
     // SharedArrayBuffer fails on its side, and the port in that message is lost.
-    const canShareMemory = new URL(url).origin === globalThis.location?.origin;
+    const viewerOrigin = new URL(url).origin;
+    const canShareMemory = viewerOrigin === globalThis.location?.origin;
     let frame = null;
     let shell = null;
     let win = null;
@@ -106,6 +107,12 @@ export function attachViewer(profiler, options, controls) {
         const data = ev.data;
         if (!data || data.source !== SOURCE || data.kind !== "ready")
             return;
+        // The port carries this page's whole capture and takes stop, start and
+        // clear. It goes to the viewer this page opened, and to nothing the
+        // frame or the window was navigated to since: checking the window
+        // alone handed it to whatever document was in it.
+        if (ev.origin !== viewerOrigin)
+            return;
         const from = ev.source;
         if (popup) {
             if (from !== win)
@@ -140,7 +147,7 @@ export function attachViewer(profiler, options, controls) {
         };
         sab = canShareMemory && sabAvailable() ? createByteRing(1 << 20) : null;
         usingSharedBuffer = sab !== null;
-        from?.postMessage({ source: SOURCE, kind: "port", sab }, "*", [channel.port2]);
+        from?.postMessage({ source: SOURCE, kind: "port", sab }, viewerOrigin, [channel.port2]);
         profiler.resync();
     };
     window.addEventListener("message", onWindowMessage);

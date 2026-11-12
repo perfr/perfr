@@ -29,6 +29,9 @@ export declare class Profiler {
     private scheduled;
     private flushTimer;
     private raf;
+    /** Set by {@link stop}. Recording calls are dropped here, encoder or not. */
+    private paused;
+    private pausedAt;
     constructor(capacity?: number);
     /** Ring length. Takes effect when the encoder loads; later calls are ignored. */
     setCapacity(capacity: number): void;
@@ -40,8 +43,9 @@ export declare class Profiler {
     onFlush(listener: FlushListener): () => void;
     scope<T>(name: string, fn: () => T, tid?: number): T;
     scopeAsync<T>(name: string, fn: () => Promise<T>, tid?: number): Promise<T>;
-    begin(name: string, tid?: number): number;
-    end(handle: number): void;
+    /** `time` is for a scope that began elsewhere, such as in a worker. */
+    begin(name: string, tid?: number, time?: number): number;
+    end(handle: number, time?: number): void;
     beginAsync(name: string, tid?: number): number;
     endAsync(handle: number): void;
     span(name: string, startNs: number, endNs: number, tid?: number): void;
@@ -52,12 +56,17 @@ export declare class Profiler {
     plot(name: string, value: number, tid?: number): void;
     nameThread(name: string, tid?: number): void;
     nameProcess(name: string): void;
+    /**
+     * Stop recording. This holds before the encoder has loaded too: what was
+     * queued until now is kept, what is recorded from here on is dropped.
+     */
     stop(): void;
     /**
      * Record again after {@link stop}. The ring is kept. The stream starts
      * over (hello, names, the ring) so an attached viewer stays consistent.
      */
     resume(): void;
+    /** Drop the ring and record again. Thread and process names are kept. */
     clear(): void;
     resync(): void;
     stats(): Stats;
@@ -73,6 +82,8 @@ export declare class Profiler {
     private schedule;
     private cancelSchedule;
     private replay;
+    /** Close what is open at {@link pausedAt} and end the stream. */
+    private stopRing;
     private emit;
     private nameBuiltins;
     private load;

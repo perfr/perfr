@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 import { nowNs } from "./clock.js";
-import { WORKER_BASE } from "./tracks.js";
+import { TID, WORKER_BASE } from "./tracks.js";
 const SOURCE = "perfr-worker";
 /**
  * Call once in a dedicated worker. Scopes recorded here are posted to the
@@ -73,7 +73,10 @@ class WorkerProfiler {
     }
     begin(name) {
         const h = this.local++;
-        this.open.set(h, { name, t: this.localNs(), async: false });
+        const t = this.localNs();
+        this.open.set(h, { name, t, async: false });
+        // Sent with the next batch; a begin alone does not need a message.
+        this.queue.push({ k: "begin", name, a: t, b: 0, h });
         return h;
     }
     end(handle) {
@@ -100,12 +103,10 @@ class WorkerProfiler {
         if (!open || open.async !== async)
             return;
         this.open.delete(handle);
-        this.queue.push({
-            k: async ? "async" : "span",
-            name: open.name,
-            a: open.t,
-            b: this.localNs(),
-        });
+        if (async)
+            this.queue.push({ k: "async", name: open.name, a: open.t, b: this.localNs() });
+        else
+            this.queue.push({ k: "end", name: open.name, a: this.localNs(), b: 0, h: handle });
         this.schedule();
     }
     scheduled = false;
@@ -129,7 +130,7 @@ class WorkerProfiler {
         if (shift !== 0) {
             for (const op of ops) {
                 op.a += shift;
-                if (op.k === "span" || op.k === "async")
+                if (op.k === "async")
                     op.b += shift;
             }
         }
@@ -142,7 +143,9 @@ let nextTid = WORKER_BASE;
  * into this profiler, and postMessage in both directions is marked on the
  * Worker messages track.
  */
-export function attachWorker(profiler, worker, options = {}) {
+export function attachWorker(profiler, worker, options = {}, 
+/** Whether the Worker messages track is on. Asked per message. */
+messagesOn = () => true) {
     const tid = options.tid ?? nextTid++;
     const name = options.name ?? `worker ${tid}`;
     profiler.nameThread(name, tid);
@@ -151,17 +154,33 @@ export function attachWorker(profiler, worker, options = {}) {
         worker.postMessage({ source: SOURCE, kind: "init", pageOrigin, tid, name });
     };
     sendInit();
+    /** The worker's handle for each of its open scopes, to this profiler's. */
+    const openScopes = new Map();
     worker.addEventListener("message", (ev) => {
         const data = ev.data;
-        if (!data || data.source !== SOURCE || data.kind !== "batch" || !data.ops)
+        // The track is of the app's messages. The profiler's own batches are
+        // its transport, and a mark for each would bury the app's under one
+        // every flush.
+        if (!data || data.source !== SOURCE) {
+            if (messagesOn())
+                profiler.mark(`recv ${name}`, TID.workerMsg);
+            return;
+        }
+        if (data.kind !== "batch" || !data.ops)
             return;
         const thread = data.tid ?? tid;
         if (data.name)
             profiler.nameThread(data.name, thread);
-        profiler.mark(`recv ${data.name ?? name}`, 14);
         for (const op of data.ops) {
-            if (op.k === "span")
-                profiler.span(op.name, op.a, op.b, thread);
+            if (op.k === "begin" && op.h != null) {
+                openScopes.set(op.h, profiler.begin(op.name, thread, op.a));
+            }
+            else if (op.k === "end" && op.h != null) {
+                const handle = openScopes.get(op.h);
+                openScopes.delete(op.h);
+                if (handle)
+                    profiler.end(handle, op.a);
+            }
             else if (op.k === "async")
                 profiler.spanAsync(op.name, op.a, op.b, thread);
             else if (op.k === "mark")
@@ -172,8 +191,8 @@ export function attachWorker(profiler, worker, options = {}) {
     });
     const orig = worker.postMessage.bind(worker);
     worker.postMessage = ((message, transfer) => {
-        if (!(message && typeof message === "object" && message.source === SOURCE)) {
-            profiler.mark(`send ${name}`, 14);
+        if (!(message && typeof message === "object" && message.source === SOURCE) && messagesOn()) {
+            profiler.mark(`send ${name}`, TID.workerMsg);
         }
         return orig(message, transfer);
     });

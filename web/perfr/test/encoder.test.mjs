@@ -113,8 +113,12 @@ test("wasm encoder round-trips nested scopes, async spans and values", async () 
   assert.ok(Math.abs(value - 59.5) < 0.01);
   assert.equal(fps.pid, 0xb10b0001);
 
-  const fixture = fileURLToPath(new URL("../../demo/sample.perfr.stream", import.meta.url));
-  writeFile(fixture, bytes);
+  // web/demo/sample.perfr.stream is this stream, committed. Regenerate it
+  // on purpose (PERFR_WRITE_FIXTURE=1), not as a side effect of testing.
+  if (process.env.PERFR_WRITE_FIXTURE === "1") {
+    const fixture = fileURLToPath(new URL("../../demo/sample.perfr.stream", import.meta.url));
+    writeFile(fixture, bytes);
+  }
 });
 
 test("ring drops the oldest event", async () => {

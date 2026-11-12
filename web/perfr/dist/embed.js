@@ -18,9 +18,11 @@ function isTyping(target) {
 /**
  * Mount the existing live viewer and stream this profiler's frames into it.
  * The viewer page (embed.js) accepts the stream on a MessageChannel. When the
- * page is cross-origin isolated, encoded bytes also go through a
- * SharedArrayBuffer; the channel is the fallback when that ring is full or
- * SharedArrayBuffer is missing.
+ * page is cross-origin isolated and the viewer is same-origin, encoded bytes
+ * go through a SharedArrayBuffer instead; the channel carries them when that
+ * ring is full or SharedArrayBuffer is missing. Every write is announced on
+ * the channel with its length, and the viewer reads the ring only as those
+ * messages arrive, so the two paths cannot overtake each other.
  *
  * Share in the viewer reads the ring back through the same channel, then
  * posts it with the viewer's existing Share dialog.
@@ -32,6 +34,9 @@ export function attachViewer(profiler, options, controls) {
     const popup = options.popup === true;
     const overlay = !popup && !options.container && options.overlay !== false;
     const url = withEmbed(options.viewerUrl);
+    // A cross-origin viewer is in another agent cluster. Posting it a
+    // SharedArrayBuffer fails on its side, and the port in that message is lost.
+    const canShareMemory = new URL(url).origin === globalThis.location?.origin;
     let frame = null;
     let shell = null;
     let win = null;
@@ -83,7 +88,7 @@ export function attachViewer(profiler, options, controls) {
         if (!port)
             return;
         if (sab && bytes.length && writeBytes(sab, bytes)) {
-            port.postMessage({ source: SOURCE, kind: "stats", stats });
+            port.postMessage({ source: SOURCE, kind: "stats", stats, sabBytes: bytes.length });
             return;
         }
         const copy = bytes.length ? bytes.slice() : new Uint8Array();
@@ -133,10 +138,8 @@ export function attachViewer(profiler, options, controls) {
                     controls ? controls.clear() : profiler.clear();
             }
         };
-        if (sabAvailable()) {
-            sab = createByteRing(1 << 20);
-            usingSharedBuffer = true;
-        }
+        sab = canShareMemory && sabAvailable() ? createByteRing(1 << 20) : null;
+        usingSharedBuffer = sab !== null;
         from?.postMessage({ source: SOURCE, kind: "port", sab }, "*", [channel.port2]);
         profiler.resync();
     };

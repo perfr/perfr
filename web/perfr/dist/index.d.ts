@@ -1,7 +1,7 @@
 import { type AttachViewerOptions, type ViewerHandle } from "./embed.js";
 import { Profiler } from "./profiler.js";
 import { type TrackSupport } from "./support.js";
-import { type TrackId, type TrackToggles } from "./tracks.js";
+import type { TrackId, TrackToggles } from "./tracks.js";
 import { type WorkerOptions } from "./worker.js";
 export { PAGE_PID, TID, WORKER_BASE, type TrackId, type TrackToggles } from "./tracks.js";
 export type { TrackSupport } from "./support.js";
@@ -80,10 +80,15 @@ export interface Perfr {
     takeSnapshot(): Uint8Array;
     readonly pagePid: number;
 }
+/**
+ * Both decorator shapes in one signature. The result is `any` because the
+ * compiler checks it against the decorated member's own type, which differs
+ * per use and per decorator mode; `unknown` there is a compile error.
+ */
 export type PerfrDecorator = (value: unknown, context?: {
     kind?: string;
     name?: string | symbol;
-}) => unknown;
+} | string | symbol, descriptor?: PropertyDescriptor) => any;
 export declare function createPerfr(): Perfr;
 /** The page-wide profiler. */
 export declare const perfr: Perfr;

@@ -45,5 +45,7 @@ declare class WorkerProfiler {
  * into this profiler, and postMessage in both directions is marked on the
  * Worker messages track.
  */
-export declare function attachWorker(profiler: Profiler, worker: Worker, options?: WorkerOptions): number;
+export declare function attachWorker(profiler: Profiler, worker: Worker, options?: WorkerOptions, 
+/** Whether the Worker messages track is on. Asked per message. */
+messagesOn?: () => boolean): number;
 export {};

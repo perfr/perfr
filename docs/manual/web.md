@@ -44,8 +44,8 @@ perfr.nameThread("main");
 ```
 
 `begin` / `end` are the same scopes without a callback. A zero handle means
-the call was dropped. `@perfr.decorate("physics")` wraps a method (stage-3
-decorators).
+the call was dropped. `@perfr.decorate("physics")` wraps a method, as a
+stage-3 decorator or as the older `experimentalDecorators` form.
 
 The first call loads the WASM encoder. Until it is ready, events are queued
 with the timestamps they actually had and then replayed in order, so nesting
@@ -86,8 +86,9 @@ The viewer is opened with `?embed=1`. `embed.js` on that page talks to your
 app over a `MessageChannel` and feeds the bytes into the viewer's existing
 WebSocket ingest, so the timeline, the track list and Share are the viewer's.
 When the page is cross-origin isolated (`Cross-Origin-Opener-Policy:
-same-origin` and `Cross-Origin-Embedder-Policy: require-corp`), encoded bytes
-also travel in a `SharedArrayBuffer`. Otherwise the channel copies them.
+same-origin` and `Cross-Origin-Embedder-Policy: require-corp`) and the viewer
+is served from the page's own origin, encoded bytes travel in a
+`SharedArrayBuffer`. Otherwise the channel copies them.
 Either way the viewer is the same build that opens `?capture=`.
 
 `?capture=` on the viewer URL is unchanged: embed mode does not install

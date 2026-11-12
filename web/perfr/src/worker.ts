@@ -4,7 +4,7 @@
 
 import { nowNs } from "./clock.js";
 import type { Profiler } from "./profiler.js";
-import { WORKER_BASE } from "./tracks.js";
+import { TID, WORKER_BASE } from "./tracks.js";
 
 const SOURCE = "perfr-worker";
 
@@ -13,12 +13,18 @@ export interface WorkerOptions {
   tid?: number;
 }
 
+/**
+ * A sync scope crosses as its begin and its end, not as one finished span,
+ * so the page nests it on this thread's stack the way it nests its own.
+ * `h` pairs the two.
+ */
 interface WorkerOp {
-  k: "span" | "async" | "mark" | "value";
+  k: "begin" | "end" | "async" | "mark" | "value";
   name: string;
   a: number;
   b: number;
   v?: number;
+  h?: number;
 }
 
 /**
@@ -94,7 +100,10 @@ class WorkerProfiler {
 
   begin(name: string): number {
     const h = this.local++;
-    this.open.set(h, { name, t: this.localNs(), async: false });
+    const t = this.localNs();
+    this.open.set(h, { name, t, async: false });
+    // Sent with the next batch; a begin alone does not need a message.
+    this.queue.push({ k: "begin", name, a: t, b: 0, h });
     return h;
   }
 
@@ -126,12 +135,8 @@ class WorkerProfiler {
     const open = this.open.get(handle);
     if (!open || open.async !== async) return;
     this.open.delete(handle);
-    this.queue.push({
-      k: async ? "async" : "span",
-      name: open.name,
-      a: open.t,
-      b: this.localNs(),
-    });
+    if (async) this.queue.push({ k: "async", name: open.name, a: open.t, b: this.localNs() });
+    else this.queue.push({ k: "end", name: open.name, a: this.localNs(), b: 0, h: handle });
     this.schedule();
   }
 
@@ -153,7 +158,7 @@ class WorkerProfiler {
     if (shift !== 0) {
       for (const op of ops) {
         op.a += shift;
-        if (op.k === "span" || op.k === "async") op.b += shift;
+        if (op.k === "async") op.b += shift;
       }
     }
     self.postMessage({ source: SOURCE, kind: "batch", tid: this.tid, name: this.label, ops });
@@ -167,7 +172,13 @@ let nextTid = WORKER_BASE;
  * into this profiler, and postMessage in both directions is marked on the
  * Worker messages track.
  */
-export function attachWorker(profiler: Profiler, worker: Worker, options: WorkerOptions = {}): number {
+export function attachWorker(
+  profiler: Profiler,
+  worker: Worker,
+  options: WorkerOptions = {},
+  /** Whether the Worker messages track is on. Asked per message. */
+  messagesOn: () => boolean = () => true,
+): number {
   const tid = options.tid ?? nextTid++;
   const name = options.name ?? `worker ${tid}`;
   profiler.nameThread(name, tid);
@@ -176,23 +187,36 @@ export function attachWorker(profiler: Profiler, worker: Worker, options: Worker
     worker.postMessage({ source: SOURCE, kind: "init", pageOrigin, tid, name });
   };
   sendInit();
+  /** The worker's handle for each of its open scopes, to this profiler's. */
+  const openScopes = new Map<number, number>();
   worker.addEventListener("message", (ev: MessageEvent) => {
     const data = ev.data as { source?: string; kind?: string; tid?: number; name?: string; ops?: WorkerOp[] };
-    if (!data || data.source !== SOURCE || data.kind !== "batch" || !data.ops) return;
+    // The track is of the app's messages. The profiler's own batches are
+    // its transport, and a mark for each would bury the app's under one
+    // every flush.
+    if (!data || data.source !== SOURCE) {
+      if (messagesOn()) profiler.mark(`recv ${name}`, TID.workerMsg);
+      return;
+    }
+    if (data.kind !== "batch" || !data.ops) return;
     const thread = data.tid ?? tid;
     if (data.name) profiler.nameThread(data.name, thread);
-    profiler.mark(`recv ${data.name ?? name}`, 14);
     for (const op of data.ops) {
-      if (op.k === "span") profiler.span(op.name, op.a, op.b, thread);
-      else if (op.k === "async") profiler.spanAsync(op.name, op.a, op.b, thread);
+      if (op.k === "begin" && op.h != null) {
+        openScopes.set(op.h, profiler.begin(op.name, thread, op.a));
+      } else if (op.k === "end" && op.h != null) {
+        const handle = openScopes.get(op.h);
+        openScopes.delete(op.h);
+        if (handle) profiler.end(handle, op.a);
+      } else if (op.k === "async") profiler.spanAsync(op.name, op.a, op.b, thread);
       else if (op.k === "mark") profiler.mark(op.name, thread, op.a);
       else if (op.k === "value") profiler.value(op.name, op.v ?? 0, thread, op.a);
     }
   });
   const orig = worker.postMessage.bind(worker);
   worker.postMessage = ((message: unknown, transfer?: Transferable[]) => {
-    if (!(message && typeof message === "object" && (message as { source?: string }).source === SOURCE)) {
-      profiler.mark(`send ${name}`, 14);
+    if (!(message && typeof message === "object" && (message as { source?: string }).source === SOURCE) && messagesOn()) {
+      profiler.mark(`send ${name}`, TID.workerMsg);
     }
     return orig(message as never, transfer as never);
   }) as Worker["postMessage"];

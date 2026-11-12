@@ -1,7 +1,11 @@
 // Copyright (c) 2026 The perfr Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-/** Byte ring in a SharedArrayBuffer. One writer, one reader. */
+/**
+ * Byte ring in a SharedArrayBuffer. One writer, one reader. The reader is
+ * the viewer page (`viewer-dist/embed.js`): it takes each write off the ring
+ * when the message announcing that write arrives.
+ */
 const HEADER = 16;
 export function sabAvailable() {
     return (typeof SharedArrayBuffer === "function" &&
@@ -29,22 +33,4 @@ export function writeBytes(sab, bytes) {
         data[(write + i) % cap] = bytes[i];
     Atomics.store(header, 0, (write + bytes.length) % cap);
     return true;
-}
-/** Bytes written since the previous read, or null when the ring is empty. */
-export function readBytes(sab) {
-    const header = new Uint32Array(sab, 0, 4);
-    const cap = Atomics.load(header, 2);
-    if (!cap)
-        return null;
-    const data = new Uint8Array(sab, HEADER, cap);
-    const read = Atomics.load(header, 1);
-    const write = Atomics.load(header, 0);
-    if (read === write)
-        return null;
-    const n = (write - read + cap) % cap;
-    const out = new Uint8Array(n);
-    for (let i = 0; i < n; i++)
-        out[i] = data[(read + i) % cap];
-    Atomics.store(header, 1, write);
-    return out;
 }

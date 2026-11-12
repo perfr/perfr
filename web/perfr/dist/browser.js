@@ -26,7 +26,8 @@ function supportedTypes() {
  * Turning a track off disconnects its observer; it does not delete events
  * already recorded.
  */
-export function startBrowser(profiler, initial) {
+export function startBrowser(profiler, initial, options = {}) {
+    const replayBuffered = options.replayBuffered !== false;
     const enabled = allTracks(true);
     if (initial === false) {
         for (const id of TRACK_IDS)
@@ -46,6 +47,9 @@ export function startBrowser(profiler, initial) {
         if (!types.includes(type) || typeof PerformanceObserver === "undefined")
             return;
         let obs = null;
+        // The buffer is read once. An observer armed again, after its track was
+        // switched off and on, would deliver the same entries a second time.
+        let buffered = replayBuffered;
         const arm = () => {
             if (obs || stopped)
                 return;
@@ -56,7 +60,8 @@ export function startBrowser(profiler, initial) {
                     cb(entry);
             });
             try {
-                obs.observe({ type, buffered: true, ...options });
+                obs.observe({ type, buffered, ...options });
+                buffered = false;
             }
             catch {
                 obs = null;
@@ -143,7 +148,8 @@ export function startBrowser(profiler, initial) {
                 profiler.value("js heap total", perf.memory.totalJSHeapSize, TID.gc, now);
             }
         };
-        const ua = performance.measureUserAgentSpecificMemory;
+        // Bound: called bare, a Performance method rejects with "Illegal invocation".
+        const ua = performance.measureUserAgentSpecificMemory?.bind(performance);
         let uaTimer = 0;
         const measureUa = () => {
             if (stopped || !enabled.gc || typeof ua !== "function")
@@ -293,7 +299,7 @@ export function startBrowser(profiler, initial) {
     }
     if (typeof performance?.getEntriesByType === "function") {
         const nav = performance.getEntriesByType("navigation")[0];
-        if (nav && enabled.navigation) {
+        if (nav && enabled.navigation && replayBuffered) {
             const piece = (name, a, b) => {
                 if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a || a < 0)
                     return;
@@ -348,7 +354,6 @@ export function startBrowser(profiler, initial) {
         let draws = 0;
         let drawMs = 0;
         let submits = 0;
-        let submitMs = 0;
         let raf = 0;
         const flushGpu = (t) => {
             if (stopped || !enabled.webgl)
@@ -363,7 +368,6 @@ export function startBrowser(profiler, initial) {
             if (submits > 0) {
                 profiler.value("webgpu submits", submits, TID.gpu, end);
                 submits = 0;
-                submitMs = 0;
             }
             raf = requestAnimationFrame(flushGpu);
         };
@@ -406,7 +410,6 @@ export function startBrowser(profiler, initial) {
                 gpuProto.submit = function (buffers) {
                     const a = performance.now();
                     const out = origSubmit.call(this, buffers);
-                    submitMs += performance.now() - a;
                     submits++;
                     const end = profiler.nowNs();
                     profiler.span("webgpu submit", end - (performance.now() - a) * 1e6, end, TID.gpu);

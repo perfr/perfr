@@ -42,12 +42,26 @@ function supportedTypes(): string[] {
   return PO?.supportedEntryTypes ? PO.supportedEntryTypes.slice() : [];
 }
 
+export interface BrowserOptions {
+  /**
+   * Also record what the browser buffered before the tracks started:
+   * earlier resources, paints, marks, and the navigation. Default true.
+   * Pass false when starting again over a ring that already holds them.
+   */
+  replayBuffered?: boolean;
+}
+
 /**
  * Browser timings as their own tracks. Every API is feature-detected.
  * Turning a track off disconnects its observer; it does not delete events
  * already recorded.
  */
-export function startBrowser(profiler: Profiler, initial?: boolean | TrackToggles): BrowserHandles {
+export function startBrowser(
+  profiler: Profiler,
+  initial?: boolean | TrackToggles,
+  options: BrowserOptions = {},
+): BrowserHandles {
+  const replayBuffered = options.replayBuffered !== false;
   const enabled = allTracks(true);
   if (initial === false) {
     for (const id of TRACK_IDS) enabled[id] = false;
@@ -70,6 +84,9 @@ export function startBrowser(profiler: Profiler, initial?: boolean | TrackToggle
   ) => {
     if (!types.includes(type) || typeof PerformanceObserver === "undefined") return;
     let obs: PerformanceObserver | null = null;
+    // The buffer is read once. An observer armed again, after its track was
+    // switched off and on, would deliver the same entries a second time.
+    let buffered = replayBuffered;
     const arm = () => {
       if (obs || stopped) return;
       obs = new PerformanceObserver((list) => {
@@ -77,7 +94,8 @@ export function startBrowser(profiler: Profiler, initial?: boolean | TrackToggle
         for (const entry of list.getEntries()) cb(entry as Entry);
       });
       try {
-        obs.observe({ type, buffered: true, ...options });
+        obs.observe({ type, buffered, ...options });
+        buffered = false;
       } catch {
         obs = null;
       }
@@ -161,9 +179,10 @@ export function startBrowser(profiler: Profiler, initial?: boolean | TrackToggle
         profiler.value("js heap total", perf.memory.totalJSHeapSize, TID.gc, now);
       }
     };
+    // Bound: called bare, a Performance method rejects with "Illegal invocation".
     const ua = (performance as Performance & {
       measureUserAgentSpecificMemory?: () => Promise<{ bytes: number }>;
-    }).measureUserAgentSpecificMemory;
+    }).measureUserAgentSpecificMemory?.bind(performance);
     let uaTimer = 0;
     const measureUa = () => {
       if (stopped || !enabled.gc || typeof ua !== "function") return;
@@ -314,7 +333,7 @@ export function startBrowser(profiler: Profiler, initial?: boolean | TrackToggle
 
   if (typeof performance?.getEntriesByType === "function") {
     const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
-    if (nav && enabled.navigation) {
+    if (nav && enabled.navigation && replayBuffered) {
       const piece = (name: string, a: number, b: number) => {
         if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a || a < 0) return;
         profiler.span(name, ms(a), ms(b), TID.navigation);
@@ -366,7 +385,6 @@ export function startBrowser(profiler: Profiler, initial?: boolean | TrackToggle
     let draws = 0;
     let drawMs = 0;
     let submits = 0;
-    let submitMs = 0;
     let raf = 0;
     const flushGpu = (t: number) => {
       if (stopped || !enabled.webgl) return;
@@ -380,7 +398,6 @@ export function startBrowser(profiler: Profiler, initial?: boolean | TrackToggle
       if (submits > 0) {
         profiler.value("webgpu submits", submits, TID.gpu, end);
         submits = 0;
-        submitMs = 0;
       }
       raf = requestAnimationFrame(flushGpu);
     };
@@ -421,7 +438,6 @@ export function startBrowser(profiler: Profiler, initial?: boolean | TrackToggle
         gpuProto.submit = function (this: unknown, buffers: unknown) {
           const a = performance.now();
           const out = origSubmit.call(this, buffers);
-          submitMs += performance.now() - a;
           submits++;
           const end = profiler.nowNs();
           profiler.span("webgpu submit", end - (performance.now() - a) * 1e6, end, TID.gpu);

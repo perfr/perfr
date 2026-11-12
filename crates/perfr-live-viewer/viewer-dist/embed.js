@@ -50,19 +50,28 @@
     if (typeof socket.onmessage === "function") socket.onmessage(ev);
   }
 
-  function drainSab() {
+  // Take one write off the shared ring. The page announces every write on
+  // the port with its length, and the ring is read only here, as that message
+  // arrives. Port messages are ordered, so frames in the ring and frames that
+  // fell back to the port reach the socket in the order they were encoded.
+  // Reading ahead (on a timer, or everything at once) would let a later ring
+  // write overtake an earlier port message: events ahead of the Hello that
+  // then drops them. `want` is absent from a page that does not send lengths;
+  // then everything written so far is taken.
+  function takeSab(want) {
     if (!sab) return;
     var header = new Uint32Array(sab, 0, 4);
     var cap = Atomics.load(header, 2);
     if (!cap) return;
     var read = Atomics.load(header, 1);
     var write = Atomics.load(header, 0);
-    if (read === write) return;
-    var data = new Uint8Array(sab, 16, cap);
     var n = (write - read + cap) % cap;
+    if (typeof want === "number" && want < n) n = want;
+    if (n <= 0) return;
+    var data = new Uint8Array(sab, 16, cap);
     var out = new Uint8Array(n);
     for (var i = 0; i < n; i++) out[i] = data[(read + i) % cap];
-    Atomics.store(header, 1, write);
+    Atomics.store(header, 1, (read + n) % cap);
     deliver(out);
   }
 
@@ -81,10 +90,9 @@
     if (data.kind === "frames") {
       applyStats(data.stats);
       if (data.bytes) deliver(new Uint8Array(data.bytes));
-      drainSab();
     } else if (data.kind === "stats") {
       applyStats(data.stats);
-      drainSab();
+      takeSab(data.sabBytes);
     } else if (data.kind === "export") {
       var wait = exportWait.get(data.id);
       if (wait) {
@@ -97,11 +105,15 @@
   window.addEventListener("message", function (ev) {
     var data = ev.data || {};
     if (data.source !== SOURCE || data.kind !== "port" || !ev.ports || !ev.ports[0]) return;
+    // Only the page that mounted this viewer may hand it a port: whatever
+    // holds the port feeds the timeline and answers Share's export. Another
+    // frame of that page, or a window that merely has a reference to this
+    // one, is not it.
+    if (ev.source !== hostWindow()) return;
     port = ev.ports[0];
     sab = data.sab || null;
     port.onmessage = onPortMessage;
     port.start();
-    if (sab) startPump();
     if (socket && socket.readyState === 1) {
       port.postMessage({ source: SOURCE, kind: "socket" });
     }
@@ -151,15 +163,19 @@
     });
   }
 
+  // The page's ring as one stream, or null when the page did not answer:
+  // no port yet, or no reply in three seconds (a page busy enough to need
+  // profiling can be). Null is not an empty capture, and must not be
+  // uploaded or saved as one.
   function requestExport() {
-    if (!port) return Promise.resolve(new Uint8Array());
+    if (!port) return Promise.resolve(null);
     var id = exportSeq++;
     var p = new Promise(function (resolve) {
       exportWait.set(id, resolve);
       setTimeout(function () {
         if (exportWait.has(id)) {
           exportWait.delete(id);
-          resolve(new Uint8Array());
+          resolve(null);
         }
       }, 3000);
     });
@@ -210,6 +226,9 @@
     }
     if (url.indexOf("/api/capture/export") !== -1 && url.indexOf("format=stream") !== -1) {
       return requestExport().then(function (bytes) {
+        if (!bytes) {
+          return new Response("the page did not answer the export request", { status: 504, headers: { "content-type": "text/plain" } });
+        }
         return new Response(bytes, { status: 200, headers: { "content-type": "application/octet-stream" } });
       });
     }
@@ -242,7 +261,7 @@
     var text = localApiPath(url) || "";
     if (text.indexOf("/api/capture/export") !== -1 && text.indexOf("format=stream") !== -1) {
       requestExport().then(function (bytes) {
-        if (!bytes.byteLength) return;
+        if (!bytes || !bytes.byteLength) return;
         var blob = new Blob([bytes], { type: "application/octet-stream" });
         var link = document.createElement("a");
         link.href = URL.createObjectURL(blob);
@@ -254,17 +273,6 @@
     }
     return realOpen.apply(window, arguments);
   };
-
-  var pumping = false;
-  function startPump() {
-    if (pumping) return;
-    pumping = true;
-    var pump = function () {
-      drainSab();
-      requestAnimationFrame(pump);
-    };
-    requestAnimationFrame(pump);
-  }
 
   var host = hostWindow();
   if (host) host.postMessage({ source: SOURCE, kind: "ready" }, "*");

@@ -5,6 +5,13 @@ import { nowNs } from "./clock.js";
 import { PAGE_PID, TID, threadName } from "./tracks.js";
 const QUEUE_CAP = 50_000;
 /**
+ * Flush this long after an event when no animation frame has come first.
+ * A hidden tab gets no animation frames, but its timers, fetches and workers
+ * still run, and their events would otherwise pile up in the queue and fall
+ * off its end.
+ */
+const FLUSH_FALLBACK_MS = 250;
+/**
  * Records into the WASM ring. Calls before the module has loaded are queued
  * with their original timestamps and replayed in order, so depth still matches
  * the nesting the page actually ran.
@@ -23,6 +30,9 @@ export class Profiler {
     scheduled = false;
     flushTimer = null;
     raf = 0;
+    /** Set by {@link stop}. Recording calls are dropped here, encoder or not. */
+    paused = false;
+    pausedAt = 0;
     constructor(capacity = 200_000) {
         this.capacity = capacity;
     }
@@ -50,6 +60,13 @@ export class Profiler {
         this.loading = this.load(wasmUrl).then(() => {
             this.nameBuiltins();
             this.flushNow();
+            // stop() ran before the encoder existed: the ring starts out stopped.
+            if (this.paused)
+                this.stopRing();
+        }, (err) => {
+            // A later start() may try again; do not hand this failure back forever.
+            this.loading = null;
+            throw err;
         });
         return this.loading;
     }
@@ -75,15 +92,16 @@ export class Profiler {
             this.endAsync(handle);
         }
     }
-    begin(name, tid = this.tid) {
+    /** `time` is for a scope that began elsewhere, such as in a worker. */
+    begin(name, tid = this.tid, time = nowNs()) {
         const h = this.localHandle++;
-        this.push({ k: "b", h, name, tid, t: nowNs(), async: false });
+        this.push({ k: "b", h, name, tid, t: time, async: false });
         return h;
     }
-    end(handle) {
+    end(handle, time = nowNs()) {
         if (!handle)
             return;
-        this.push({ k: "e", h: handle, t: nowNs(), async: false });
+        this.push({ k: "e", h: handle, t: time, async: false });
     }
     beginAsync(name, tid = this.tid) {
         const h = this.localHandle++;
@@ -119,24 +137,31 @@ export class Profiler {
     nameProcess(name) {
         this.push({ k: "pn", name });
     }
+    /**
+     * Stop recording. This holds before the encoder has loaded too: what was
+     * queued until now is kept, what is recorded from here on is dropped.
+     */
     stop() {
         this.flushNow();
-        this.wasm?.stop(nowNs());
-        this.emit();
+        this.paused = true;
+        this.pausedAt = nowNs();
+        this.stopRing();
     }
     /**
      * Record again after {@link stop}. The ring is kept. The stream starts
      * over (hello, names, the ring) so an attached viewer stays consistent.
      */
     resume() {
+        this.paused = false;
         this.wasm?.resume();
         this.emit();
     }
+    /** Drop the ring and record again. Thread and process names are kept. */
     clear() {
-        this.buf = [];
+        this.buf = this.buf.filter((op) => op.k === "tn" || op.k === "pn");
         this.wasmHandles.clear();
+        this.paused = false;
         this.wasm?.clear();
-        this.nameBuiltins();
         this.emit();
     }
     resync() {
@@ -150,7 +175,7 @@ export class Profiler {
                 capacity: this.capacity,
                 dropped: this.droppedQueue,
                 produced: 0,
-                capturing: true,
+                capturing: !this.paused,
             };
         }
         return {
@@ -200,6 +225,9 @@ export class Profiler {
         return this.wasm ? this.wasm.snapshot(nowNs()) : new Uint8Array();
     }
     push(op) {
+        // Stopped: drop the event, as the ring would. Names are not events.
+        if (this.paused && op.k !== "tn" && op.k !== "pn")
+            return;
         if (this.buf.length >= QUEUE_CAP) {
             this.buf.shift();
             this.droppedQueue++;
@@ -211,20 +239,13 @@ export class Profiler {
         if (this.scheduled)
             return;
         this.scheduled = true;
+        // Whichever fires first flushes; flushNow cancels the other.
+        const flush = () => this.flushNow();
         const raf = globalThis.requestAnimationFrame;
-        if (typeof raf === "function") {
-            this.raf = raf(() => {
-                this.scheduled = false;
-                this.raf = 0;
-                this.flushNow();
-            });
-            return;
-        }
-        this.flushTimer = setTimeout(() => {
-            this.scheduled = false;
-            this.flushTimer = null;
-            this.flushNow();
-        }, 16);
+        const hasRaf = typeof raf === "function";
+        if (hasRaf)
+            this.raf = raf(flush);
+        this.flushTimer = setTimeout(flush, hasRaf ? FLUSH_FALLBACK_MS : 16);
     }
     cancelSchedule() {
         if (this.raf && typeof globalThis.cancelAnimationFrame === "function") {
@@ -278,6 +299,15 @@ export class Profiler {
                     break;
             }
         }
+    }
+    /** Close what is open at {@link pausedAt} and end the stream. */
+    stopRing() {
+        if (!this.wasm)
+            return;
+        this.wasm.stop(this.pausedAt);
+        // The ring closed every open scope, so no handle from before is live.
+        this.wasmHandles.clear();
+        this.emit();
     }
     emit() {
         if (!this.wasm)

@@ -8,7 +8,10 @@
 //! Sync scopes nest on a per-thread stack, the same way the service's scope
 //! reader stamps depth. Async spans (`API_TRACK`) take the lowest free depth
 //! on that thread so overlapping spans — many resource loads at once — each
-//! get a lane. The ring drops the oldest event when it is full.
+//! get a lane. A lane is free once nothing is open in it and every finished
+//! span drawn in it has ended, so spans reported after the fact (Resource
+//! Timing) are laid out the same way as ones opened and closed live. The ring
+//! drops the oldest event when it is full.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -72,6 +75,10 @@ pub struct Session {
     sync_open: HashMap<u64, OpenScope>,
     sync_stack: HashMap<u32, Vec<u64>>,
     async_open: HashMap<u64, OpenScope>,
+    /// Per thread, the latest end of the finished async spans in each lane.
+    async_lane_end: HashMap<u32, Vec<u64>>,
+    /// Latest end of any event recorded since the last [`clear`].
+    newest_end_ns: u64,
     next_handle: u64,
     hello_pending: bool,
     finish_pending: bool,
@@ -100,6 +107,8 @@ impl Session {
             sync_open: HashMap::new(),
             sync_stack: HashMap::new(),
             async_open: HashMap::new(),
+            async_lane_end: HashMap::new(),
+            newest_end_ns: 0,
             next_handle: 1,
             hello_pending: true,
             finish_pending: false,
@@ -139,7 +148,7 @@ impl Session {
             dropped: self.dropped,
             produced: self.produced,
             oldest_start_ns: self.events.front().map(|e| e.start_ns).unwrap_or(0),
-            newest_end_ns: self.events.iter().map(|e| e.end_ns()).max().unwrap_or(0),
+            newest_end_ns: self.newest_end_ns,
             capturing: self.enabled,
         }
     }
@@ -201,12 +210,13 @@ impl Session {
 
     /// A sync scope that is already finished, at the current nesting depth.
     pub fn span(&mut self, name: &str, tid: u32, start_ns: u64, end_ns: u64) {
-        self.push_closed(name, tid, start_ns, end_ns, SpanKind::Sync, None);
+        self.push_closed(name, tid, start_ns, end_ns, SpanKind::Sync);
     }
 
+    /// An async span that is already finished, in the lowest lane that is
+    /// free at `start_ns`.
     pub fn span_async(&mut self, name: &str, tid: u32, start_ns: u64, end_ns: u64) {
-        let depth = self.alloc_async_depth(tid);
-        self.push_closed(name, tid, start_ns, end_ns, SpanKind::Async, Some(depth));
+        self.push_closed(name, tid, start_ns, end_ns, SpanKind::Async);
     }
 
     pub fn mark(&mut self, name: &str, tid: u32, now_ns: u64) {
@@ -250,20 +260,23 @@ impl Session {
     }
 
     /// Drop events and open scopes. Name ids stay, so a viewer that kept the
-    /// intern table does not attach an old string to a reused id.
+    /// intern table does not attach an old string to a reused id. Names that
+    /// were interned but not flushed yet are still sent: their ids stay valid
+    /// and later events use them.
     pub fn clear(&mut self) {
         self.events.clear();
         self.flushed = 0;
         self.sync_open.clear();
         self.sync_stack.clear();
         self.async_open.clear();
+        self.async_lane_end.clear();
+        self.newest_end_ns = 0;
         self.hello_pending = true;
         self.finish_pending = false;
         self.enabled = true;
         self.capture_start_set = false;
         self.process_dirty = true;
         self.pending_threads = self.threads.keys().copied().collect();
-        self.pending_names.clear();
     }
 
     /// Ask the next flush to resend hello, names and every event still in
@@ -332,11 +345,8 @@ impl Session {
         self.note_time(now_ns);
         let name_id = self.intern(name);
         let depth = match kind_of {
-            SpanKind::Sync => {
-                let stack = self.sync_stack.entry(tid).or_default();
-                (stack.len() as u8).min(MAX_DEPTH - 1)
-            }
-            SpanKind::Async => self.alloc_async_depth(tid),
+            SpanKind::Sync => self.sync_depth(tid),
+            SpanKind::Async => self.alloc_async_depth(tid, now_ns),
         };
         let handle = self.next_handle;
         self.next_handle = self.next_handle.wrapping_add(1).max(1);
@@ -386,7 +396,6 @@ impl Session {
         start_ns: u64,
         end_ns: u64,
         kind_of: SpanKind,
-        depth: Option<u8>,
     ) {
         if !self.enabled {
             return;
@@ -398,10 +407,10 @@ impl Session {
         };
         self.note_time(start_ns);
         let name_id = self.intern(name);
-        let depth = depth.unwrap_or_else(|| match kind_of {
+        let depth = match kind_of {
             SpanKind::Sync => self.sync_depth(tid),
-            SpanKind::Async => self.alloc_async_depth(tid),
-        });
+            SpanKind::Async => self.alloc_async_depth(tid, start_ns),
+        };
         self.push_event(LiveEvent {
             start_ns,
             duration_ns: end_ns.saturating_sub(start_ns),
@@ -419,16 +428,26 @@ impl Session {
     }
 
     fn sync_depth(&self, tid: u32) -> u8 {
+        // Clamp before narrowing: a stack 256 deep must not wrap to lane 0.
         self.sync_stack
             .get(&tid)
-            .map(|s| (s.len() as u8).min(MAX_DEPTH - 1))
+            .map(|s| s.len().min(usize::from(MAX_DEPTH - 1)) as u8)
             .unwrap_or(0)
     }
 
-    fn alloc_async_depth(&self, tid: u32) -> u8 {
+    /// Lowest async lane on `tid` that is free at `start_ns`: nothing is
+    /// still open in it, and every finished span drawn in it ended by then.
+    fn alloc_async_depth(&self, tid: u32, start_ns: u64) -> u8 {
         let mut used = [false; MAX_DEPTH as usize];
         for open in self.async_open.values().filter(|o| o.tid == tid) {
             used[open.depth as usize] = true;
+        }
+        if let Some(ends) = self.async_lane_end.get(&tid) {
+            for (lane, &end) in ends.iter().enumerate() {
+                if end > start_ns {
+                    used[lane] = true;
+                }
+            }
         }
         used.iter()
             .position(|&u| !u)
@@ -460,6 +479,15 @@ impl Session {
                 self.flushed -= 1;
             }
         }
+        if ev.kind == kind::API_TRACK {
+            let ends = self.async_lane_end.entry(ev.tid).or_default();
+            let lane = usize::from(ev.depth);
+            if ends.len() <= lane {
+                ends.resize(lane + 1, 0);
+            }
+            ends[lane] = ends[lane].max(ev.end_ns());
+        }
+        self.newest_end_ns = self.newest_end_ns.max(ev.end_ns());
         self.events.push_back(ev);
         self.produced = self.produced.saturating_add(1);
     }
@@ -776,6 +804,81 @@ mod tests {
         let events = events_of(&again);
         assert_eq!(events.len(), 2, "the ring is kept across stop and resume");
         assert!(s.flush().is_empty());
+    }
+
+    #[test]
+    fn finished_async_spans_that_overlap_take_separate_lanes() {
+        // Resource Timing reports loads after they finish, in end order.
+        let mut s = Session::new(16);
+        s.span_async("b.js", 9, 50, 60);
+        s.span_async("a.css", 9, 0, 100);
+        s.span_async("c.png", 9, 70, 90);
+        s.span_async("d.png", 9, 100, 120);
+        s.span_async("other thread", 10, 55, 58);
+        let events = events_of(&decode_all(&s.snapshot(200)).unwrap());
+        let depth_at = |tid: u32, start: u64| {
+            events
+                .iter()
+                .find(|e| e.tid == tid && e.start_ns == start)
+                .unwrap()
+                .depth
+        };
+        assert_eq!(depth_at(9, 50), 0);
+        assert_eq!(depth_at(9, 0), 1, "overlaps b.js, which already has lane 0");
+        assert_eq!(depth_at(9, 70), 0, "lane 0 is free again after b.js ended");
+        assert_eq!(depth_at(9, 100), 0);
+        assert_eq!(depth_at(10, 55), 0, "lanes are per thread");
+        // A span opened live does not land on a finished one either.
+        let live = s.begin_async("fetch", 9, 110);
+        s.end_async(live, 130);
+        let events = events_of(&decode_all(&s.snapshot(200)).unwrap());
+        let fetch = events.iter().find(|e| e.start_ns == 110).unwrap();
+        assert_eq!(fetch.depth, 1, "d.png holds lane 0 until 120");
+    }
+
+    #[test]
+    fn deep_recursion_stays_in_the_last_lane() {
+        let mut s = Session::new(1024);
+        let handles: Vec<u64> = (0..300).map(|i| s.begin("recurse", 1, i)).collect();
+        for (i, handle) in handles.into_iter().enumerate().rev() {
+            s.end(handle, 1_000 + i as u64);
+        }
+        let events = events_of(&decode_all(&s.snapshot(2_000)).unwrap());
+        let deepest = events.iter().find(|e| e.start_ns == 299).unwrap();
+        assert_eq!(deepest.depth, MAX_DEPTH - 1);
+        let at_256 = events.iter().find(|e| e.start_ns == 256).unwrap();
+        assert_eq!(at_256.depth, MAX_DEPTH - 1, "depth 256 must not wrap to 0");
+    }
+
+    #[test]
+    fn clear_still_sends_names_interned_before_it() {
+        let mut s = Session::new(8);
+        assert!(!s.flush().is_empty());
+        let open = s.begin("kept", 1, 1);
+        s.clear();
+        s.end(open, 2);
+        s.span("kept", 1, 3, 4);
+        let frames = decode_all(&s.flush()).unwrap();
+        let event = events_of(&frames)[0];
+        assert!(
+            frames.iter().any(|f| matches!(
+                f,
+                LiveFrame::InternedString { id, text } if *id == event.name_id && text == "kept"
+            )),
+            "the id the event uses must have been named in the live stream"
+        );
+    }
+
+    #[test]
+    fn newest_end_follows_the_ring_and_resets_on_clear() {
+        let mut s = Session::new(2);
+        s.span("a", 1, 1, 9);
+        s.span("b", 1, 2, 5);
+        assert_eq!(s.stats().newest_end_ns, 9);
+        s.clear();
+        assert_eq!(s.stats().newest_end_ns, 0);
+        s.span("c", 1, 3, 4);
+        assert_eq!(s.stats().newest_end_ns, 4);
     }
 
     #[test]

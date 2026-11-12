@@ -93,7 +93,11 @@ EM_JS(double, perfr_web_copy, (int which), {
   var bytes = !Module.perfr ? new Uint8Array()
     : which === 0 ? Module.perfr.takeFlush() : Module.perfr.takeSnapshot();
   if (!bytes) bytes = new Uint8Array();
+  // The previous buffer is ours to free: perfr_web.h says a pointer is
+  // invalid after the next flush or snapshot, so no caller frees it.
+  if (Module.__perfr_web_ptr) Module._free(Module.__perfr_web_ptr);
   var ptr = Module._malloc(bytes.length);
+  Module.__perfr_web_ptr = ptr;
   Module.HEAPU8.set(bytes, ptr);
   Module.__perfr_web_len = bytes.length;
   return ptr;

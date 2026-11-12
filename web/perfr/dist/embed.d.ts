@@ -39,9 +39,11 @@ export interface ViewerControls {
 /**
  * Mount the existing live viewer and stream this profiler's frames into it.
  * The viewer page (embed.js) accepts the stream on a MessageChannel. When the
- * page is cross-origin isolated, encoded bytes also go through a
- * SharedArrayBuffer; the channel is the fallback when that ring is full or
- * SharedArrayBuffer is missing.
+ * page is cross-origin isolated and the viewer is same-origin, encoded bytes
+ * go through a SharedArrayBuffer instead; the channel carries them when that
+ * ring is full or SharedArrayBuffer is missing. Every write is announced on
+ * the channel with its length, and the viewer reads the ring only as those
+ * messages arrive, so the two paths cannot overtake each other.
  *
  * Share in the viewer reads the ring back through the same channel, then
  * posts it with the viewer's existing Share dialog.

@@ -34,10 +34,18 @@ pub const STACK_WALK_GUID: [u8; 16] =
 /// The session itself: `SystemTraceControlGuid`, 9e814aad-3204-11d2-9a82-006008a86939.
 pub const SYSTEM_TRACE_CONTROL_GUID: [u8; 16] =
     guid(0x9e814aad, 0x3204, 0x11d2, [0x9a, 0x82, 0x00, 0x60, 0x08, 0xa8, 0x69, 0x39]);
-/// `EventTraceGuid`, the session's own events (its header, and the notices
-/// that a real-time consumer lost something): 68fdd900-4a3e-11d1-84f4-0000f80464e3.
+/// `EventTraceGuid`, the session's own events (its header and the header's
+/// extensions): 68fdd900-4a3e-11d1-84f4-0000f80464e3.
 pub const EVENT_TRACE_GUID: [u8; 16] =
     guid(0x68fdd900, 0x4a3e, 0x11d1, [0x84, 0xf4, 0x00, 0x00, 0xf8, 0x04, 0x64, 0xe3]);
+
+/// `RT_LostEvent`, the notices that a real-time consumer lost something:
+/// 6a399ae0-4bc6-4de9-870b-3657f8947e7e. A class of its own, not the
+/// session's: under `EventTraceGuid` the same opcode numbers are the
+/// header's `EndExtension` and its neighbours, which every session writes
+/// at start and which are not loss.
+pub const RT_LOST_EVENT_GUID: [u8; 16] =
+    guid(0x6a399ae0, 0x4bc6, 0x4de9, [0x87, 0x0b, 0x36, 0x57, 0xf8, 0x94, 0x7e, 0x7e]);
 
 /// A GUID in its in-memory (mixed-endian) byte layout, as `EVENT_RECORD`
 /// carries it.
@@ -67,7 +75,7 @@ pub mod opcode {
     pub const SAMPLED_PROFILE: u8 = 46;
     /// `StackWalk`: the frames of the event that preceded it.
     pub const STACK: u8 = 32;
-    /// `EventTrace` (`RT_LostEvent`): the real-time stream has a gap here.
+    /// `RT_LostEvent`: the real-time stream has a gap here.
     pub const RT_LOST_EVENT: u8 = 32;
     pub const RT_LOST_BUFFER: u8 = 33;
     pub const RT_LOST_FILE: u8 = 34;
@@ -321,9 +329,9 @@ pub fn decode(event: &RawEvent) -> KernelEvent {
             }
         }
         // RT_LostEvent has no payload: the opcode is the whole message.
-        (EVENT_TRACE_GUID, opcode::RT_LOST_EVENT) => KernelEvent::Lost { timestamp: ts, what: Lost::Events },
-        (EVENT_TRACE_GUID, opcode::RT_LOST_BUFFER) => KernelEvent::Lost { timestamp: ts, what: Lost::Buffer },
-        (EVENT_TRACE_GUID, opcode::RT_LOST_FILE) => KernelEvent::Lost { timestamp: ts, what: Lost::File },
+        (RT_LOST_EVENT_GUID, opcode::RT_LOST_EVENT) => KernelEvent::Lost { timestamp: ts, what: Lost::Events },
+        (RT_LOST_EVENT_GUID, opcode::RT_LOST_BUFFER) => KernelEvent::Lost { timestamp: ts, what: Lost::Buffer },
+        (RT_LOST_EVENT_GUID, opcode::RT_LOST_FILE) => KernelEvent::Lost { timestamp: ts, what: Lost::File },
         _ => KernelEvent::Other,
     }
 }
@@ -567,11 +575,15 @@ pub(crate) mod tests {
     #[test]
     fn the_sessions_lost_notices_decode_and_its_header_does_not() {
         for (opcode, what) in [(32, Lost::Events), (33, Lost::Buffer), (34, Lost::File)] {
-            assert_eq!(decode(&raw(&EVENT_TRACE_GUID, opcode, 2, &[])), KernelEvent::Lost { timestamp: 1000, what });
+            assert_eq!(decode(&raw(&RT_LOST_EVENT_GUID, opcode, 2, &[])), KernelEvent::Lost { timestamp: 1000, what });
+            // The session's own class reuses the numbers for its header's
+            // extensions, which every session writes when it starts: read as
+            // loss, a clean capture reported two gaps.
+            assert_eq!(decode(&raw(&EVENT_TRACE_GUID, opcode, 2, &[0; 16])), KernelEvent::Other);
         }
         // Opcode 0 is the session header, 35 nothing this decoder knows.
         assert_eq!(decode(&raw(&EVENT_TRACE_GUID, 0, 2, &[0; 64])), KernelEvent::Other);
-        assert_eq!(decode(&raw(&EVENT_TRACE_GUID, 35, 2, &[])), KernelEvent::Other);
+        assert_eq!(decode(&raw(&RT_LOST_EVENT_GUID, 35, 2, &[])), KernelEvent::Other);
         // 32 is also the stack walk's opcode: the provider tells them apart.
         assert_eq!(decode(&raw(&STACK_WALK_GUID, 32, 2, &[])), KernelEvent::Other);
     }

@@ -228,6 +228,9 @@ struct StoreInner {
     bytes: usize,
     /// 0 keeps every sample. A live capture sets a limit so a multi-minute
     /// session cannot retain every historical callstack.
+    // macOS takes no samples, so nothing is pushed there and the limit its
+    // live store is given is never consulted.
+    #[cfg_attr(not(any(test, target_os = "linux", target_os = "windows")), allow(dead_code))]
     byte_limit: usize,
 }
 
@@ -246,6 +249,7 @@ impl StoreInner {
     /// Drops the oldest samples, an eighth of the store at a time, until the
     /// byte budget holds. Always keeps the newest sample, even if that one
     /// row is itself over the budget.
+    #[cfg(any(test, target_os = "linux", target_os = "windows"))]
     fn trim_to_limit(&mut self) {
         if self.byte_limit == 0 || self.bytes <= self.byte_limit || self.samples.len() <= 1 {
             return;
@@ -361,6 +365,7 @@ fn merge_spans(spans: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
 }
 
 impl SampleStore {
+    #[cfg(any(test, target_os = "macos", target_os = "windows"))]
     pub fn new() -> SampleStore {
         SampleStore::default()
     }
@@ -384,10 +389,12 @@ impl SampleStore {
         self.record_frame(id, FrameInfo { name: name.to_string(), ..FrameInfo::default() });
     }
 
+    #[cfg(any(test, target_os = "linux", target_os = "windows"))]
     pub fn record_frame(&self, id: u32, info: FrameInfo) {
         self.inner.lock().unwrap().names.insert(id, info);
     }
 
+    #[cfg(any(test, target_os = "linux", target_os = "windows"))]
     pub fn push(&self, sample: StoredSample) {
         let mut inner = self.inner.lock().unwrap();
         if inner.samples.last().is_some_and(|last| last.timestamp_ns > sample.timestamp_ns) {

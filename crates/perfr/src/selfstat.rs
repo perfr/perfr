@@ -48,6 +48,7 @@ impl Default for SelfStat {
 /// The CPU ticks (user + system) from a `/proc/<pid>/stat` line. The comm
 /// field is in parentheses and may hold spaces, so fields are counted from
 /// after the last `)`.
+#[cfg(any(test, target_os = "linux"))]
 pub fn cpu_ticks_from_stat(stat: &str) -> Option<u64> {
     let after = &stat[stat.rfind(')')? + 1..];
     let mut fields = after.split_whitespace();
@@ -58,6 +59,7 @@ pub fn cpu_ticks_from_stat(stat: &str) -> Option<u64> {
 }
 
 /// Resident pages, the second number of `/proc/<pid>/statm`.
+#[cfg(any(test, target_os = "linux"))]
 pub fn resident_pages_from_statm(statm: &str) -> Option<u64> {
     statm.split_whitespace().nth(1)?.parse().ok()
 }

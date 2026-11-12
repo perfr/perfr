@@ -402,6 +402,14 @@ pub fn install_window_drop(pending: std::sync::Arc<std::sync::Mutex<Option<web_s
 
 /// Same-origin `?trace=/path.json` so a drop/Open session can be linked.
 /// Rejects absolute URLs and `..` — fetch stays on this origin.
+///
+/// The address of a page is written by whoever links to it, another
+/// site's page included, so what it names is fetched from this origin
+/// only, and by the browser's own rule rather than this file's reading of
+/// the path (`mode: same-origin`, redirects refused): `/\evil.example/x`
+/// passed every test here and is another site's URL to `fetch`. The file
+/// goes into a slot of its own, for the app to treat as what it is: a
+/// trace someone else chose, to draw and nothing more.
 #[cfg(target_arch = "wasm32")]
 pub fn install_query_trace(pending: PendingFile) {
     use wasm_bindgen::JsCast;
@@ -419,7 +427,10 @@ pub fn install_query_trace(pending: PendingFile) {
         let Some(window) = web_sys::window() else {
             return;
         };
-        let fetch = match JsFuture::from(window.fetch_with_str(&path)).await {
+        let init = web_sys::RequestInit::new();
+        init.set_mode(web_sys::RequestMode::SameOrigin);
+        init.set_redirect(web_sys::RequestRedirect::Error);
+        let fetch = match JsFuture::from(window.fetch_with_str_and_init(&path, &init)).await {
             Ok(v) => v,
             Err(_) => return,
         };
@@ -469,6 +480,19 @@ fn same_origin_trace_path(search: &str) -> Option<String> {
         if decoded.contains("://") || decoded.split('/').any(|s| s == "..") {
             return None;
         }
+        // A URL parser reads `\` as `/` and drops tabs and line breaks,
+        // so `/\host/x` and `/<tab>/host/x` are `//host/x`: another site.
+        // A query or a fragment has no place in a file's path either, and
+        // with one `/api/status?x=.json` passed for a trace.
+        if decoded.chars().any(|c| c.is_control() || matches!(c, '\\' | '?' | '#')) {
+            return None;
+        }
+        // The service's API is not a trace, and a capture is opened by the
+        // reader (a drop, the Open dialog), never by a link.
+        let lower = decoded.to_ascii_lowercase();
+        if lower.starts_with("/api/") || lower.ends_with(".perfr.zip") || lower.ends_with(".perfr.stream") {
+            return None;
+        }
         if is_trace_name(&decoded) {
             return Some(decoded);
         }
@@ -499,6 +523,17 @@ mod tests {
         assert!(same_origin_trace_path("?trace=//evil/x.json").is_none());
         assert!(same_origin_trace_path("?trace=/traces/../secret.json").is_none());
         assert!(same_origin_trace_path("?trace=/tmp/x.txt").is_none());
+        // What a URL parser turns into another site's address.
+        assert!(same_origin_trace_path("?trace=/%5Cevil.example/x.json").is_none());
+        assert!(same_origin_trace_path("?trace=/%09/evil.example/x.json").is_none());
+        assert!(same_origin_trace_path("?trace=/%0A/evil.example/x.json").is_none());
+        // The service's own API dressed as a trace, and a capture.
+        assert!(same_origin_trace_path("?trace=/api/status%3Fx%3D.json").is_none());
+        assert!(same_origin_trace_path("?trace=/api/capture/export%3Fformat%3Dbundle%26x%3D.perfr.zip").is_none());
+        assert!(same_origin_trace_path("?trace=/api/x.json").is_none());
+        assert!(same_origin_trace_path("?trace=/traces/x.json%23y.json").is_none());
+        assert!(same_origin_trace_path("?trace=/captures/week.perfr.zip").is_none());
+        assert!(same_origin_trace_path("?trace=/captures/week.PERFR.ZIP").is_none());
         assert_eq!(
             same_origin_trace_path("?trace=/traces/scroll.pftrace"),
             Some("/traces/scroll.pftrace".into())

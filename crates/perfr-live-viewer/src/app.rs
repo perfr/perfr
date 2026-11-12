@@ -1249,6 +1249,13 @@ pub struct PerfrLiveApp {
     log_ui: crate::logs::LogUi,
     #[cfg(target_arch = "wasm32")]
     pending_file: chrome_load::PendingFile,
+    /// The file `?trace=` named. Apart from `pending_file`: the reader
+    /// chose that one, and whoever wrote the link chose this one.
+    #[cfg(target_arch = "wasm32")]
+    query_file: chrome_load::PendingFile,
+    /// How many times this page asked the service to stop recording.
+    #[cfg(test)]
+    stop_requests: usize,
 }
 
 /// A committed rectangle ("marquee") selection: what to keep drawing, the stats
@@ -2033,9 +2040,16 @@ impl PerfrLiveApp {
             pending_file: {
                 let p = chrome_load::new_pending_file();
                 chrome_load::install_window_drop(p.clone());
+                p
+            },
+            #[cfg(target_arch = "wasm32")]
+            query_file: {
+                let p = chrome_load::new_pending_file();
                 chrome_load::install_query_trace(p.clone());
                 p
             },
+            #[cfg(test)]
+            stop_requests: 0,
         }
     }
 
@@ -2302,6 +2316,10 @@ impl PerfrLiveApp {
     }
 
     fn stop_record(&mut self) {
+        #[cfg(test)]
+        {
+            self.stop_requests += 1;
+        }
         self.recording = false;
         self.recording_confirmed = false;
         self.net.stop_capture();
@@ -2579,7 +2597,32 @@ impl PerfrLiveApp {
     }
 
     /// Ingest a `.perfr.stream` and keep the bytes so Share can post them.
+    /// The reader opened it, so whatever was recording stops for it.
     fn accept_stream(&mut self, bytes: Vec<u8>) {
+        self.stop_record();
+        self.show_stream(bytes);
+    }
+
+    /// A stream the page's address named (`?capture=`, the `capture` of a
+    /// `?story=`), not the reader. The address is written by whoever links
+    /// here, so opening it changes nothing on the service: it is shown
+    /// when nothing is recording and left alone when something is, and
+    /// either way no stop is sent. A link used to be enough to end
+    /// someone's capture.
+    fn accept_stream_by_address(&mut self, bytes: Vec<u8>) {
+        if self.busy_recording() {
+            self.fail("A capture is running: the one named in the address was not opened.".into());
+            return;
+        }
+        self.show_stream(bytes);
+    }
+
+    /// Whether this page or its service is recording, as far as is known.
+    fn busy_recording(&self) -> bool {
+        self.recording || self.status.capturing || self.status.demo
+    }
+
+    fn show_stream(&mut self, bytes: Vec<u8>) {
         self.held_stream.begin_load();
         self.clear_file_trace();
         self.index.clear();
@@ -2591,7 +2634,6 @@ impl PerfrLiveApp {
         self.hover = None;
         self.measure = None;
         self.sample_sels.clear();
-        self.stop_record();
         // A file is a stream from its first byte to its last. What an
         // earlier stream left half-read is not the head of this one, and a
         // frame this one ends in is not completed by the socket's next bytes.
@@ -2890,6 +2932,22 @@ impl PerfrLiveApp {
 
     fn begin_trace_load(&mut self, load: TraceLoad) {
         self.stop_record();
+        self.show_trace_load(load);
+    }
+
+    /// A trace the page's address named (`?trace=`). As
+    /// [`Self::accept_stream_by_address`]: drawn when nothing is recording,
+    /// and no stop is sent on its behalf.
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    fn begin_trace_load_by_address(&mut self, load: TraceLoad) {
+        if self.busy_recording() {
+            self.fail("A capture is running: the trace named in the address was not opened.".into());
+            return;
+        }
+        self.show_trace_load(load);
+    }
+
+    fn show_trace_load(&mut self, load: TraceLoad) {
         self.index.clear();
         self.log_ui.reset_capture();
         self.live_all.clear();
@@ -2945,6 +3003,14 @@ impl PerfrLiveApp {
     fn pump_trace_load(&mut self) {
         #[cfg(target_arch = "wasm32")]
         {
+            // What `?trace=` named: a trace to draw, never a capture to
+            // hand to the service (see `same_origin_trace_path`).
+            let linked = self.query_file.lock().ok().and_then(|mut g| g.take());
+            if let Some(file) = linked {
+                if !crate::share::is_stream_file(&file.name()) && !is_bundle_name(&file.name()) {
+                    self.begin_trace_load_by_address(chrome_load::start_wasm_file(file));
+                }
+            }
             let file = self.pending_file.lock().ok().and_then(|mut g| g.take());
             if let Some(file) = file {
                 if crate::share::is_stream_file(&file.name()) {
@@ -3391,7 +3457,11 @@ impl PerfrLiveApp {
         // A loaded stream replaces the capture, which drops any share still
         // in flight, before notes from that old attempt are applied.
         if let Some(bytes) = inbox.loaded_stream {
-            self.accept_stream(bytes);
+            if inbox.loaded_stream_by_address {
+                self.accept_stream_by_address(bytes);
+            } else {
+                self.accept_stream(bytes);
+            }
         }
         if let Some(text) = inbox.loaded_story {
             if let Err(message) = self.story.load_text(&text) {

@@ -2169,3 +2169,44 @@ fn the_functions_list_scrolls_smoothly_and_a_drag_selects_what_it_crosses() {
     assert!(tops.windows(2).all(|w| w[1] <= w[0]), "row 9 moved back down while scrolling: {tops:?}");
     assert!(tops[0] - tops[tops.len() - 1] > 40.0, "the list scrolled: {tops:?}");
 }
+
+#[test]
+fn what_the_address_names_is_shown_without_touching_a_capture() {
+    // A link to this page can name a capture or a trace, and anyone can
+    // write a link. Followed while the service records, it opens nothing
+    // and stops nothing.
+    let mut busy = app();
+    busy.apply_status(service_status(true));
+    busy.accept_stream_by_address(sampled_stream(3));
+    busy.begin_trace_load_by_address(TraceLoad::from_bytes("t.json".into(), b"[]".to_vec()));
+    assert_eq!(busy.stop_requests, 0, "no stop was sent");
+    assert!(!busy.held_stream.is_local() && busy.trace_name.is_none(), "and nothing was opened");
+    assert!(busy.notice.as_deref().is_some_and(|n| n.contains("capture is running")), "{:?}", busy.notice);
+
+    // The same while this page's own Record is still starting.
+    let mut starting = connected_app();
+    starting.start_record();
+    starting.accept_stream_by_address(sampled_stream(3));
+    assert!(starting.recording && !starting.held_stream.is_local());
+
+    // With nothing recording both are shown, and still nothing is sent:
+    // before the first status arrives a page cannot know, and a stop sent
+    // just in case is a stop.
+    let mut fresh = app();
+    fresh.accept_stream_by_address(sampled_stream(3));
+    assert!(fresh.held_stream.is_local());
+    assert_eq!(fresh.stop_requests, 0);
+    let mut idle = connected_app();
+    idle.begin_trace_load_by_address(TraceLoad::from_bytes("t.json".into(), b"[]".to_vec()));
+    assert_eq!(idle.trace_name.as_deref(), Some("t.json"));
+    assert_eq!(idle.stop_requests, 0);
+
+    // A file the reader opened is theirs to stop a capture with.
+    let mut reader = app();
+    reader.apply_status(service_status(true));
+    reader.accept_stream(sampled_stream(3));
+    assert_eq!(reader.stop_requests, 1);
+    assert!(reader.held_stream.is_local());
+    reader.begin_trace_load(TraceLoad::from_bytes("t.json".into(), b"[]".to_vec()));
+    assert_eq!(reader.stop_requests, 2);
+}

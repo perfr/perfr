@@ -63,7 +63,21 @@
     // COOP same-origin severs window.opener on a cross-origin round trip, so
     // the storage key is the signal that still arrives. Same-tab returns
     // stash a #share_token= into sessionStorage and keep booting.
+    //
+    // A token is taken from the address only when this origin sent the
+    // reader to sign in a moment ago (LOGIN_PENDING_KEY, perfr.share.pending,
+    // set by the viewer as it opens the sign-in page). Anyone can write a
+    // link to this page with a token of their own in it; taken as it came,
+    // that signed the reader in as the link's author, and the next capture
+    // they shared went to that account.
     (function () {
+      function signInWasAsked() {
+        try {
+          var at = Number(localStorage.getItem("perfr.share.pending"));
+          localStorage.removeItem("perfr.share.pending");
+          return at > 0 && Date.now() - at < 15 * 60 * 1000;
+        } catch (e) { return false; }
+      }
       function tokenFromHash(hash) {
         var q = String(hash || "").replace(/^#/, "");
         if (!q) return "";
@@ -80,9 +94,13 @@
       }
       var token = tokenFromHash(location.hash);
       var popup = window.name === "perfr-share-login";
+      if (token) {
+        // Out of the address either way, and kept only if it was asked for.
+        try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+        if (!signInWasAsked()) token = "";
+      }
       if (token && !popup) {
         try { sessionStorage.setItem("perfr.share.token", token); } catch (e) {}
-        try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
       }
       if (!popup) return;
       window.__perfrLoginPopup = true;

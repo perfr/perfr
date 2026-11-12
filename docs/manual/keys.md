@@ -59,4 +59,4 @@ More also lists “Pan time: A / D”, “Zoom: W / S” and “Scroll tracks: �
 | `?webgpu` | Try WebGPU instead of WebGL2 |
 | `?capture=` | Open a `.perfr.stream` with no service. The site’s embedded viewer uses this |
 | `?story=` | Open a story on that capture. `demo` is the story shipped with the viewer; any other value is a URL of a `perfr.story` document. `?capture=` still chooses the capture |
-| `?chrome=compact` | A short story bar, for an iframe. Share stays on that bar |
+| `?chrome=compact` | For an iframe: no capture controls, one story bar (Play, Previous, Next, the step list, Share, fullscreen) and the step's text under the timeline. Give the iframe `allow="fullscreen"`; without it the fullscreen button opens the page in a tab of its own |

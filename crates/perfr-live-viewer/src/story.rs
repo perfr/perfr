@@ -73,6 +73,34 @@ struct Drag {
 #[derive(Clone, Debug)]
 pub enum StoryCmd {
     AddStep,
+    /// Open the Share dialog. Only from a compact bar, which has no
+    /// transport bar above it to carry the button.
+    Share,
+    /// Enter (`true`) or leave fullscreen. Compact bar only, as `Share`.
+    Fullscreen(bool),
+}
+
+/// The two controls a compact page (`?chrome=compact`, an iframe) has lost
+/// with its transport bar, which the story bar draws at its right end. The
+/// viewer owns their state and gets a [`StoryCmd`] back for a click.
+#[derive(Clone, Copy, Default)]
+pub struct BarExtras<'a> {
+    /// `(enabled, hover text)`. `None` where there is nothing to post to.
+    pub share: Option<(bool, &'a str)>,
+    /// `(on, hover text)`. `None` hides the button.
+    pub fullscreen: Option<(bool, &'a str)>,
+}
+
+/// What a bar control looks like: a glyph painted from lines and triangles,
+/// so it does not depend on what the embedded font happens to carry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Glyph {
+    Play,
+    Pause,
+    Prev,
+    Next,
+    Expand,
+    Collapse,
 }
 
 /// Camera pose the viewer should apply this frame, if the story still owns it.
@@ -548,16 +576,17 @@ impl StorySession {
         self.applied = None;
     }
 
-    pub fn bar(&mut self, ui: &mut Ui) -> Vec<StoryCmd> {
+    pub fn bar(&mut self, ui: &mut Ui, extras: BarExtras<'_>) -> Vec<StoryCmd> {
         let mut cmds = Vec::new();
         if !self.visible() {
             return cmds;
         }
-        let narrow = ui.available_width() < 720.0;
+        let narrow = ui.ctx().screen_rect().width() < BAR_NARROW;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let playing = self.player.playing;
-            let play = ui.button(if playing { "Pause" } else { "Play" });
+            let play = glyph_button(ui, if playing { Glyph::Pause } else { Glyph::Play }, playing);
+            crate::app::note_ui_rect("story:play", play.rect);
             if play.on_hover_text("Play or pause (Alt+Space)").clicked() {
                 self.player.toggle_play();
                 if self.player.playing {
@@ -565,48 +594,77 @@ impl StorySession {
                     self.hold = true;
                 }
             }
-            if ui
-                .button("Prev")
-                .on_hover_text("Previous step ([ or Alt+Left)")
-                .clicked()
-            {
+            let prev = glyph_button(ui, Glyph::Prev, false);
+            crate::app::note_ui_rect("story:prev", prev.rect);
+            if prev.on_hover_text("Previous step ([ or Alt+Left)").clicked() {
                 self.step_by(-1);
             }
-            if ui
-                .button("Next")
-                .on_hover_text("Next step (] or Alt+Right)")
-                .clicked()
-            {
+            let next = glyph_button(ui, Glyph::Next, false);
+            crate::app::note_ui_rect("story:next", next.rect);
+            if next.on_hover_text("Next step (] or Alt+Right)").clicked() {
                 self.step_by(1);
             }
             let (index, count, title, kind) = self.step_label();
+            ui.add_space(4.0);
             ui.label(
-                RichText::new(format!("{}/{}", index, count.max(1)))
+                RichText::new(format!("{} / {}", index, count.max(1)))
                     .font(FontId::monospace(12.0))
-                    .color(theme::TEXT()),
+                    .color(theme::MUTED()),
             );
-            if !narrow {
-                ui.label(RichText::new(kind).size(11.0).color(theme::ACCENT()));
-                ui.label(RichText::new(title).size(12.0).color(theme::TEXT()));
-            }
-            if ui.selectable_label(self.list_open, "Steps").clicked() {
-                self.list_open = !self.list_open;
-            }
-            if ui.selectable_label(self.editing, "Edit").clicked() {
-                self.editing = !self.editing;
-                self.open = true;
-                if self.doc.is_none() {
-                    cmds.push(StoryCmd::AddStep);
+            // The right end first: what is left between it and the counter
+            // is the title's, which is cut with an ellipsis when it is long.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if let Some((on, tip)) = extras.fullscreen {
+                    let button = glyph_button(ui, if on { Glyph::Collapse } else { Glyph::Expand }, on);
+                    crate::app::note_ui_rect("story:fullscreen", button.rect);
+                    if button.on_hover_text(tip).clicked() {
+                        cmds.push(StoryCmd::Fullscreen(!on));
+                    }
                 }
-            }
-            if !self.compact
-                && ui
-                    .button("Close")
-                    .on_hover_text("Close the story. The capture stays open.")
-                    .clicked()
-            {
-                self.close();
-            }
+                if let Some((enabled, tip)) = extras.share {
+                    let button = ui
+                        .add_enabled(enabled, text_button("Share", false))
+                        .on_hover_text(tip)
+                        .on_disabled_hover_text(tip);
+                    crate::app::note_ui_rect("Share", button.rect);
+                    if button.clicked() {
+                        cmds.push(StoryCmd::Share);
+                    }
+                }
+                if !self.compact
+                    && ui
+                        .add(text_button("Close", false))
+                        .on_hover_text("Close the story. The capture stays open.")
+                        .clicked()
+                {
+                    self.close();
+                }
+                // A compact page is for reading: the editor is a click away
+                // on the full viewer, and its second row would take the
+                // height an iframe does not have.
+                if !self.compact && ui.add(text_button("Edit", self.editing)).clicked() {
+                    self.editing = !self.editing;
+                    self.open = true;
+                    if self.doc.is_none() {
+                        cmds.push(StoryCmd::AddStep);
+                    }
+                }
+                let steps = ui.add(text_button("Steps", self.list_open));
+                crate::app::note_ui_rect("story:steps", steps.rect);
+                if steps.on_hover_text("Every step of the story, with its text").clicked() {
+                    self.list_open = !self.list_open;
+                }
+                if !narrow {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add_space(4.0);
+                        if !kind.is_empty() {
+                            kind_chip(ui, &kind);
+                        }
+                        ui.add(egui::Label::new(RichText::new(title).size(12.5).color(theme::TEXT())).truncate());
+                    });
+                }
+            });
         });
         if self.editing {
             ui.horizontal(|ui| {
@@ -683,7 +741,9 @@ impl StorySession {
                 });
             }
         }
-        self.paint_progress(ui);
+        if let Some(index) = self.progress(ui) {
+            self.go_to(index);
+        }
         if !self.error.is_empty() {
             ui.label(
                 RichText::new(&self.error)
@@ -694,27 +754,100 @@ impl StorySession {
         cmds
     }
 
-    fn paint_progress(&self, ui: &mut Ui) {
-        let Some(doc) = &self.doc else {
-            return;
-        };
-        if doc.steps.is_empty() {
-            return;
+    /// One segment per step, filled as far as the story has played. A
+    /// click on a segment asks for that step, which is what the return is.
+    fn progress(&self, ui: &mut Ui) -> Option<usize> {
+        let doc = self.doc.as_ref()?;
+        let count = doc.steps.len();
+        if count == 0 {
+            return None;
         }
         let width = ui.available_width().max(1.0);
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 3.0), Sense::hover());
-        ui.painter().rect_filled(rect, 0.0, theme::HAIR());
-        let n = doc.steps.len() as f32;
-        let hold = doc.steps[self.player.step.min(doc.steps.len() - 1)]
-            .duration_ms
-            .max(1) as f32;
+        // Taller to the pointer than to the eye: three pixels are not a
+        // target anyone hits.
+        let (hit, resp) = ui.allocate_exact_size(Vec2::new(width, 9.0), Sense::click());
+        let bar = Rect::from_center_size(hit.center(), Vec2::new(hit.width(), if resp.hovered() { 5.0 } else { 3.0 }));
+        let current = self.player.step.min(count - 1);
+        let hold = doc.steps[current].duration_ms.max(1) as f32;
         let into = (self.player.elapsed_ms / hold).clamp(0.0, 1.0);
-        let frac = ((self.player.step as f32) + into) / n;
-        let done = Rect::from_min_max(
-            rect.min,
-            Pos2::new(rect.left() + rect.width() * frac, rect.bottom()),
-        );
-        ui.painter().rect_filled(done, 0.0, theme::ACCENT());
+        let hovered = resp.hover_pos().map(|p| segment_at(bar, count, p.x));
+        for i in 0..count {
+            let seg = segment_rect(bar, count, i);
+            // Dim, so what has played stands out from what has not on a
+            // scheme whose hairline is as light as its accent.
+            let base = if hovered == Some(i) { theme::MUTED() } else { theme::HAIR().gamma_multiply(0.45) };
+            ui.painter().rect_filled(seg, 1.5, base);
+            let fill = match i.cmp(&current) {
+                std::cmp::Ordering::Less => 1.0,
+                std::cmp::Ordering::Equal if self.player.playing || into > 0.0 => into.max(0.04),
+                std::cmp::Ordering::Equal => 1.0,
+                std::cmp::Ordering::Greater => 0.0,
+            };
+            if fill > 0.0 {
+                let done = Rect::from_min_max(seg.min, Pos2::new(seg.left() + seg.width() * fill, seg.bottom()));
+                ui.painter().rect_filled(done, 1.5, theme::ACCENT());
+            }
+        }
+        if let Some(i) = hovered {
+            let step = &doc.steps[i];
+            resp.clone().on_hover_text_at_pointer(format!("{}. {}", i + 1, step.title));
+        }
+        if resp.clicked() {
+            return resp.interact_pointer_pos().map(|p| segment_at(bar, count, p.x));
+        }
+        None
+    }
+
+    fn go_to(&mut self, index: usize) {
+        let len = self.doc.as_ref().map(|d| d.steps.len()).unwrap_or(0);
+        if self.player.go(index, len).is_some() {
+            self.retarget = true;
+            self.released = false;
+            self.hold = true;
+            self.snap = false;
+        }
+    }
+
+    /// The current step's title and text, under the timeline. Without it a
+    /// reader of an embedded story sees the camera move and the overlays
+    /// appear, and the sentences that say why only by opening the step list.
+    pub fn caption(&self, ctx: &Context) {
+        if self.editing {
+            return;
+        }
+        // The bar names the step when it has the width to; under that the
+        // caption does, so the title is on screen once either way.
+        let titled = ctx.screen_rect().width() < BAR_NARROW;
+        let Some(doc) = self.doc.as_ref() else {
+            return;
+        };
+        let Some(step) = doc.steps.get(self.player.step.min(doc.steps.len().saturating_sub(1))) else {
+            return;
+        };
+        if step.body.trim().is_empty() {
+            return;
+        }
+        egui::TopBottomPanel::bottom("perfr_story_caption")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::PANEL())
+                    .inner_margin(egui::Margin { left: 14, right: 14, top: 8, bottom: 10 })
+                    .stroke(Stroke::NONE),
+            )
+            .show_separator_line(false)
+            .show(ctx, |ui| {
+                // A measure a sentence reads well at, however wide the page.
+                let measure = ui.available_width().min(760.0);
+                if titled {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        kind_chip(ui, step.kind.label());
+                        ui.add(egui::Label::new(RichText::new(&step.title).size(13.0).strong().color(theme::TEXT())).truncate());
+                    });
+                    ui.add_space(2.0);
+                }
+                ui.label(lite_job_wrapped(&step.body, 12.5, theme::TEXT(), measure));
+            });
     }
 
     fn step_label(&self) -> (usize, usize, String, String) {
@@ -818,13 +951,7 @@ impl StorySession {
             });
         self.list_open = open;
         if let Some(index) = goto {
-            let len = self.doc.as_ref().map(|d| d.steps.len()).unwrap_or(0);
-            if self.player.go(index, len).is_some() {
-                self.retarget = true;
-                self.released = false;
-                self.hold = true;
-                self.snap = false;
-            }
+            self.go_to(index);
         }
     }
 
@@ -962,8 +1089,103 @@ impl StorySession {
         if !self.error.is_empty() {
             h += 16.0;
         }
-        h + 6.0
+        h + 10.0
     }
+}
+
+/// Under this width of page the bar has no room for the step's title, and
+/// the caption carries it.
+const BAR_NARROW: f32 = 720.0;
+
+/// The `i`th of `count` equal segments of `bar`, with a gap between two.
+fn segment_rect(bar: Rect, count: usize, i: usize) -> Rect {
+    let gap = if count > 1 && bar.width() / count as f32 > 6.0 { 2.0 } else { 0.0 };
+    let width = (bar.width() - gap * (count.saturating_sub(1)) as f32) / count.max(1) as f32;
+    let left = bar.left() + (width + gap) * i as f32;
+    Rect::from_min_max(Pos2::new(left, bar.top()), Pos2::new(left + width, bar.bottom()))
+}
+
+/// Which segment of `bar` the horizontal position `x` is over. A position
+/// in a gap, or past either end, goes to the nearest segment.
+fn segment_at(bar: Rect, count: usize, x: f32) -> usize {
+    if count == 0 || bar.width() <= 0.0 {
+        return 0;
+    }
+    let frac = ((x - bar.left()) / bar.width()).clamp(0.0, 1.0);
+    ((frac * count as f32) as usize).min(count - 1)
+}
+
+/// A bar button with a word on it, in the transport bar's own style.
+fn text_button(text: &str, on: bool) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text.to_string()).size(12.0).color(if on { theme::CANVAS() } else { theme::TEXT() }))
+        .fill(if on { theme::ACCENT() } else { theme::TRACK() })
+        .stroke(if on { Stroke::NONE } else { Stroke::new(1.0, theme::HAIR()) })
+        .min_size(Vec2::new(0.0, 22.0))
+        .corner_radius(4)
+}
+
+/// A bar button with a painted glyph on it.
+fn glyph_button(ui: &mut Ui, glyph: Glyph, on: bool) -> egui::Response {
+    let resp = ui.add(
+        egui::Button::new(RichText::new(" ").size(1.0))
+            .fill(if on { theme::ACCENT() } else { theme::TRACK() })
+            .stroke(if on { Stroke::NONE } else { Stroke::new(1.0, theme::HAIR()) })
+            .min_size(Vec2::new(28.0, 22.0))
+            .corner_radius(4),
+    );
+    let color = if on {
+        theme::CANVAS()
+    } else if resp.hovered() {
+        theme::TEXT()
+    } else {
+        theme::MUTED()
+    };
+    paint_glyph(ui.painter(), resp.rect.center(), glyph, color);
+    resp
+}
+
+fn paint_glyph(painter: &egui::Painter, c: Pos2, glyph: Glyph, color: Color32) {
+    let stroke = Stroke::new(1.5, color);
+    let tri = |points: [Pos2; 3]| egui::Shape::convex_polygon(points.to_vec(), color, Stroke::NONE);
+    match glyph {
+        Glyph::Play => {
+            painter.add(tri([c + Vec2::new(-3.5, -5.0), c + Vec2::new(-3.5, 5.0), c + Vec2::new(5.0, 0.0)]));
+        }
+        Glyph::Pause => {
+            for dx in [-3.0, 3.0] {
+                painter.rect_filled(Rect::from_center_size(c + Vec2::new(dx, 0.0), Vec2::new(3.0, 10.0)), 0.5, color);
+            }
+        }
+        Glyph::Prev | Glyph::Next => {
+            let d = if glyph == Glyph::Next { 1.0 } else { -1.0 };
+            painter.line_segment([c + Vec2::new(-2.0 * d, -4.5), c + Vec2::new(2.5 * d, 0.0)], stroke);
+            painter.line_segment([c + Vec2::new(2.5 * d, 0.0), c + Vec2::new(-2.0 * d, 4.5)], stroke);
+        }
+        Glyph::Expand | Glyph::Collapse => {
+            // Four corner brackets: pointing out to enter, in to leave.
+            let half = 5.5;
+            let arm = 3.4;
+            let (inset, dir) = if glyph == Glyph::Collapse { (2.2, -1.0) } else { (0.0, 1.0) };
+            for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                let corner = c + Vec2::new(sx * (half - inset), sy * (half - inset));
+                let stroke = Stroke::new(1.35, color);
+                painter.line_segment([corner, corner - Vec2::new(sx * arm * dir, 0.0)], stroke);
+                painter.line_segment([corner, corner - Vec2::new(0.0, sy * arm * dir)], stroke);
+            }
+        }
+    }
+}
+
+/// The step's kind as a small tag: `context`, `root cause`.
+fn kind_chip(ui: &mut Ui, kind: &str) {
+    let accent = theme::ACCENT();
+    egui::Frame::new()
+        .fill(accent.gamma_multiply(0.16))
+        .corner_radius(3)
+        .inner_margin(egui::Margin { left: 5, right: 5, top: 1, bottom: 1 })
+        .show(ui, |ui| {
+            ui.label(RichText::new(kind.replace('_', " ")).size(10.5).color(accent));
+        });
 }
 
 fn is_embedded(url: &str) -> bool {
@@ -1531,8 +1753,12 @@ fn lite_label(ui: &mut Ui, text: &str) {
 
 /// Paragraphs, `**bold**`, and `` `code` ``. Anything else is shown as text.
 fn lite_job(text: &str, size: f32, color: Color32) -> LayoutJob {
+    lite_job_wrapped(text, size, color, 280.0)
+}
+
+fn lite_job_wrapped(text: &str, size: f32, color: Color32, max_width: f32) -> LayoutJob {
     let mut job = LayoutJob::default();
-    job.wrap.max_width = 280.0;
+    job.wrap.max_width = max_width;
     for (i, paragraph) in text.split("\n\n").enumerate() {
         if i > 0 {
             job.append(
@@ -1722,6 +1948,31 @@ pub fn next_step_id(story: &Story) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_position_on_the_progress_strip_names_the_step_drawn_there() {
+        let bar = Rect::from_min_max(Pos2::new(100.0, 0.0), Pos2::new(600.0, 3.0));
+        // Five steps over 500 px: each owns a fifth, its gap included.
+        for (x, step) in [(100.0, 0), (199.0, 0), (201.0, 1), (350.0, 2), (599.0, 4)] {
+            assert_eq!(segment_at(bar, 5, x), step, "x = {x}");
+        }
+        // Past either end is the nearest step, not a panic or a sixth.
+        assert_eq!(segment_at(bar, 5, -40.0), 0);
+        assert_eq!(segment_at(bar, 5, 9_000.0), 4);
+        assert_eq!(segment_at(bar, 0, 300.0), 0);
+        // The segments tile the strip: the first starts at its left edge,
+        // the last ends at its right, and the middle of each is its own.
+        assert_eq!(segment_rect(bar, 5, 0).left(), bar.left());
+        assert!((segment_rect(bar, 5, 4).right() - bar.right()).abs() < 0.01);
+        for i in 0..5 {
+            assert_eq!(segment_at(bar, 5, segment_rect(bar, 5, i).center().x), i);
+        }
+        // One step is the whole strip, and many steps on a narrow strip
+        // give up their gaps rather than their width.
+        assert_eq!(segment_rect(bar, 1, 0), bar);
+        let narrow = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(60.0, 3.0));
+        assert!(segment_rect(narrow, 30, 7).width() > 1.9);
+    }
 
     fn section_texts(job: &LayoutJob) -> Vec<String> {
         job.sections

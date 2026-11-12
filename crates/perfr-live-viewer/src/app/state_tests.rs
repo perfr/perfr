@@ -662,14 +662,55 @@ fn x_starts_a_capture_with_the_self_pane_open() {
 }
 
 #[test]
+fn a_compact_story_page_has_fullscreen_on_its_bar_and_the_steps_text_on_screen() {
+    let labels = |page: &Page| -> Vec<String> {
+        let rects: Vec<serde_json::Value> = serde_json::from_str(&page.app.ui_readout).expect("the readout is JSON");
+        rects.iter().filter_map(|r| r[0].as_str().map(str::to_string)).collect()
+    };
+    // What an iframe gets: `?story=demo&chrome=compact`.
+    let mut page = Page::with(|app| {
+        app.story = crate::story::StorySession::from_query(Some("demo"), true);
+    });
+    page.frames(3);
+    let on_bar = labels(&page);
+    for label in ["story:play", "story:prev", "story:next", "story:steps", "story:fullscreen"] {
+        assert!(on_bar.iter().any(|l| l == label), "{label} is not on the bar: {on_bar:?}");
+    }
+    // One row: the fullscreen button is level with Play, at the right end.
+    let rect = |label: &str| {
+        let rects: Vec<serde_json::Value> = serde_json::from_str(&page.app.ui_readout).unwrap();
+        let r = rects.iter().find(|r| r[0] == label).unwrap().clone();
+        (r[1].as_f64().unwrap(), r[2].as_f64().unwrap())
+    };
+    let (play, full) = (rect("story:play"), rect("story:fullscreen"));
+    assert_eq!(play.1, full.1, "the two are on one row");
+    assert!(full.0 > play.0 + 200.0, "fullscreen is at the far end: {play:?} {full:?}");
+    // A page for reading: no editor, no transport bar.
+    assert!(!page.texts.iter().any(|t| t == "Edit" || t == "Close"), "{:?}", page.texts);
+    assert!(!on_bar.iter().any(|l| l == "Record"), "{on_bar:?}");
+    // The step's sentences are on screen without opening anything.
+    assert!(
+        page.texts.iter().any(|t| t.starts_with("This is the box3d demo capture")),
+        "the current step's text is not shown: {:?}",
+        page.texts
+    );
+    // The button asks for fullscreen; on the full viewer the story bar
+    // leaves that to the transport bar and keeps its editor.
+    let mut full_viewer = Page::with(|app| app.story.load_demo());
+    full_viewer.frames(3);
+    assert!(!labels(&full_viewer).iter().any(|l| l == "story:fullscreen"));
+    assert!(full_viewer.texts.iter().any(|t| t == "Edit"));
+}
+
+#[test]
 fn a_story_key_moves_one_step_with_the_self_pane_open() {
     let mut page = page_with_self_pane();
     page.app.story.load_demo();
     page.frames(3);
-    assert!(page.texts.iter().any(|t| t.starts_with("1/")), "the story bar shows step 1: {:?}", page.texts);
+    assert!(page.texts.iter().any(|t| t.starts_with("1 / ")), "the story bar shows step 1: {:?}", page.texts);
     page.key(Key::CloseBracket);
     page.frames(2);
-    assert!(page.texts.iter().any(|t| t.starts_with("2/")), "one press of ] is one step: {:?}", page.texts);
+    assert!(page.texts.iter().any(|t| t.starts_with("2 / ")), "one press of ] is one step: {:?}", page.texts);
 }
 
 #[test]

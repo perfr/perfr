@@ -1090,6 +1090,7 @@ impl Viewer {
     }
 
     /// Reads until nothing has arrived for `quiet`.
+    #[cfg(unix)]
     fn read_until_quiet(&mut self, quiet: std::time::Duration) {
         use tokio_tungstenite::tungstenite::{Error, Message};
         let mut last = std::time::Instant::now();

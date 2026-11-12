@@ -238,6 +238,13 @@ fn for_the_settings_owner<T>(f: impl FnOnce(Option<Owner>) -> T) -> T {
     f(Some(invoker))
 }
 
+/// Runs `f` with the filesystem rights of the user who started the service
+/// rather than root's, where the platform can (see [`FsIdentity`]): for a
+/// path that someone other than the operator chose.
+pub(crate) fn as_the_invoking_user<T>(f: impl FnOnce() -> T) -> T {
+    for_the_settings_owner(|_| f())
+}
+
 static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The `n`th temporary name next to `path` in this process.

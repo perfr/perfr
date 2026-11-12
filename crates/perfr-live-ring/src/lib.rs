@@ -56,14 +56,29 @@ struct SpillWriter {
 }
 
 impl SpillWriter {
+    /// The directory comes from whoever configures the ring, which over
+    /// HTTP is anyone who can call the service, and the service is often
+    /// root. So the file is never opened through a link someone left under
+    /// its name (`O_NOFOLLOW`: a link to `/etc/shadow` in a directory of
+    /// the caller's choosing was truncated and written over), and what it
+    /// holds is the capture, for its owner alone to read.
     fn create(dir: &Path) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(DEFAULT_SPILL_FILE_NAME);
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)?;
+        let mut options = OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&path)?;
+        #[cfg(unix)]
+        {
+            // A file that was already there keeps the mode it had.
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
         file.write_all(SPILL_MAGIC)?;
         file.write_all(&SPILL_VERSION.to_le_bytes())?;
         file.write_all(&(LIVE_EVENT_SIZE as u16).to_le_bytes())?;
@@ -515,6 +530,35 @@ mod tests {
         assert_eq!(stats.events_live + stats.dropped, 8_000);
         let (_, snap) = ring.snapshot();
         assert_eq!(snap.len() as u64, stats.events_live);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_spill_file_is_private_and_never_opened_through_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("perfr-live-spill-link-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Someone left a link under the spill file's name, to a file the
+        // service can write and they cannot.
+        let precious = dir.join("precious");
+        std::fs::write(&precious, b"do not truncate").unwrap();
+        let spill_dir = dir.join("spill");
+        std::fs::create_dir_all(&spill_dir).unwrap();
+        std::os::unix::fs::symlink(&precious, spill_dir.join(DEFAULT_SPILL_FILE_NAME)).unwrap();
+        assert!(EventRing::with_bytes((LIVE_EVENT_SIZE * 4) as u64, Some(&spill_dir)).is_err(), "a link is refused");
+        assert_eq!(std::fs::read(&precious).unwrap(), b"do not truncate");
+
+        // A file of its own, and one that was there with a wider mode:
+        // readable by its owner only.
+        let own = dir.join("own");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join(DEFAULT_SPILL_FILE_NAME), b"old").unwrap();
+        std::fs::set_permissions(own.join(DEFAULT_SPILL_FILE_NAME), std::fs::Permissions::from_mode(0o644)).unwrap();
+        let ring = EventRing::with_bytes((LIVE_EVENT_SIZE * 4) as u64, Some(&own)).unwrap();
+        let mode = std::fs::metadata(ring.spill_path().unwrap()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -1145,7 +1145,10 @@ impl LiveService {
     }
 
     pub fn replace_ring(&self, bytes: u64, spill: Option<PathBuf>) -> Result<(), String> {
-        let ring = EventRing::with_bytes(bytes, spill.as_deref()).map_err(|e| e.to_string())?;
+        // The spill directory is whatever `PUT /api/config` was given. As
+        // the user who started the service, it can be made and written
+        // where that user could have, and nowhere root alone can.
+        let ring = settings::as_the_invoking_user(|| EventRing::with_bytes(bytes, spill.as_deref())).map_err(|e| e.to_string())?;
         *self.ring.lock() = Arc::new(ring);
         let mut cfg = self.config.lock();
         cfg.ring_buffer_bytes = bytes;

@@ -12,6 +12,9 @@ workspace = true
 perfr-live-event = { path = "../perfr-live-event" }
 parking_lot = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 clap = { workspace = true }
 criterion = { workspace = true }

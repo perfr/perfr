@@ -420,6 +420,14 @@ pub(crate) fn function_id(module_path: &str, file_offset: u64) -> u64 {
     hash & 0x0000_FFFF_FFFF_FFFF
 }
 
+/// A Rust or C++ symbol made readable (`demangle.rs`): the Functions view,
+/// the hook scope names and the disassembly read names, and neither
+/// `_ZN5perfr7uprobes..` nor `_ZN6Render5Scene6Camera..Ev` is
+/// one. The same rule the symbolizer applies to sampled frames.
+fn pretty_name(mangled: &str) -> String {
+    crate::demangle::pretty(mangled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,13 +636,5 @@ mod tests {
         let total: u64 = counts.iter().sum();
         assert_eq!(total, index.len() as u64, "every function belongs to a module");
     }
-}
-
-/// A Rust or C++ symbol made readable (`demangle.rs`): the Functions view,
-/// the hook scope names and the disassembly read names, and neither
-/// `_ZN5perfr7uprobes..` nor `_ZN6Render5Scene6Camera..Ev` is
-/// one. The same rule the symbolizer applies to sampled frames.
-fn pretty_name(mangled: &str) -> String {
-    crate::demangle::pretty(mangled)
 }
 

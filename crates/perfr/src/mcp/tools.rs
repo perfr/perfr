@@ -178,10 +178,7 @@ impl Mcp {
             let error = rpc_error(-32600, "a JSON-RPC message is an object, or a non-empty array of them");
             return Some(json!({ "jsonrpc": "2.0", "id": null, "error": error }));
         }
-        let id = message.get("id").cloned();
-        if id.is_none() {
-            return None;
-        }
+        let id = message.get("id").cloned()?;
         let method = message.get("method").and_then(|m| m.as_str()).unwrap_or("");
         let params = message.get("params").cloned().unwrap_or(Value::Null);
         let result = match method {
@@ -388,7 +385,7 @@ impl Mcp {
         );
         let body = self.http.get_json(&path, Duration::from_secs(30))?;
         let status = body.get("status").and_then(|v| v.as_str()).unwrap_or("");
-        if status != "ready" && status != "" {
+        if status != "ready" && !status.is_empty() {
             return Err(format!("symbols are {status}; call perfr_attach and wait until it returns"));
         }
         let functions = body.get("functions").and_then(|v| v.as_array()).cloned().unwrap_or_default();

@@ -179,7 +179,10 @@ pub fn is_trace_name(name: &str) -> bool {
 #[cfg(target_arch = "wasm32")]
 pub type PendingFile = std::sync::Arc<std::sync::Mutex<Option<web_sys::File>>>;
 
+// A browser `File` is not `Send`. The `Arc` is shared between the page and
+// the event handlers the browser calls back, all on the page's one thread.
 #[cfg(target_arch = "wasm32")]
+#[allow(clippy::arc_with_non_send_sync)]
 pub fn new_pending_file() -> PendingFile {
     std::sync::Arc::new(std::sync::Mutex::new(None))
 }
@@ -198,7 +201,10 @@ pub fn start_open_dialog() -> Option<OpenPick> {
 
 /// What the native file dialog picked: a trace to parse, or a capture stream
 /// whose bytes Share can post unchanged.
+// One is made per file picked and moved once to the app: the size of the
+// larger variant is not carried anywhere.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::large_enum_variant)]
 pub enum OpenPick {
     Trace(TraceLoad),
     Stream(Vec<u8>),

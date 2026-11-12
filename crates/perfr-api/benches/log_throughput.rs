@@ -39,7 +39,7 @@ fn time(threads: usize, each: impl Fn() + Sync) -> (f64, f64) {
     // Warm the thread locals.
     std::thread::scope(|s| {
         for _ in 0..threads {
-            s.spawn(|| each());
+            s.spawn(&each);
         }
     });
     let started = Instant::now();
@@ -106,7 +106,6 @@ fn row(threads: usize, path: &str, events_per_s: f64, bytes: usize) {
     let mb = events_per_s * bytes as f64 / 1_000_000.0;
     let ns = 1e9 / events_per_s;
     println!(
-        "| {threads} | {path} | {:.0} | {:.1} | {:.1} |",
-        events_per_s, mb, ns
+        "| {threads} | {path} | {events_per_s:.0} | {mb:.1} | {ns:.1} |"
     );
 }

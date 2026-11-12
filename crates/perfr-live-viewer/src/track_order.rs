@@ -88,6 +88,7 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 
 /// The viewer's side: the text as edited, its parsed rules, and a file
 /// pick in flight.
+#[derive(Default)]
 pub struct State {
     pub text: String,
     pub rules: Rules,
@@ -96,12 +97,6 @@ pub struct State {
     pub synced: String,
     pub message: String,
     pub import: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        State { text: String::new(), rules: Rules::default(), synced: String::new(), message: String::new(), import: None }
-    }
 }
 
 impl State {
@@ -118,7 +113,7 @@ impl State {
 
     /// A settings reply from the service: adopt its text unless it is the
     /// one we last exchanged (an echo of our own PUT) or we are mid-edit.
-    pub fn from_settings(&mut self, text: &str) {
+    pub fn adopt_settings(&mut self, text: &str) {
         if text == self.synced {
             return;
         }
@@ -254,15 +249,15 @@ mod tests {
     #[test]
     fn a_settings_echo_does_not_clobber_an_edit() {
         let mut state = State::default();
-        state.from_settings("a\n");
+        state.adopt_settings("a\n");
         assert_eq!(state.rules.len(), 1);
         state.text = "a\nb\n".into();
         assert!(state.reparse());
         // The service replies with what we last synced: the edit stays.
-        state.from_settings("a\n");
+        state.adopt_settings("a\n");
         assert_eq!(state.text, "a\nb\n");
         // Something new from another browser is adopted.
-        state.from_settings("c\n");
+        state.adopt_settings("c\n");
         assert_eq!(state.text, "c\n");
         assert_eq!(state.rules.len(), 1);
     }

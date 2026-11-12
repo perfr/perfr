@@ -148,9 +148,14 @@ pub struct ThreadStateManager {
     tid_open_states: HashMap<i32, OpenState, BuildHasherDefault<TidHasher>>,
 }
 
+/// [`ThreadStateManager::on_initial_state`] was given a thread it already
+/// holds a state for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AlreadyKnown;
+
 /// What a transition produced: possibly a closed slice, possibly a warning to
-/// log. `Err(())` from [`ThreadStateManager::on_initial_state`] is the one
-/// fatal case.
+/// log. [`AlreadyKnown`] from [`ThreadStateManager::on_initial_state`] is the
+/// one fatal case.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
     pub slice: Option<Slice>,
@@ -164,9 +169,9 @@ impl ThreadStateManager {
 
     /// `OnInitialState`. `Err` when the thread is already known -- the C++
     /// `PERFR_CHECK`s there, and the shim must die the same way.
-    pub fn on_initial_state(&mut self, timestamp_ns: u64, tid: i32, state: i32) -> Result<(), ()> {
+    pub fn on_initial_state(&mut self, timestamp_ns: u64, tid: i32, state: i32) -> Result<(), AlreadyKnown> {
         if self.tid_open_states.contains_key(&tid) {
-            return Err(());
+            return Err(AlreadyKnown);
         }
         self.tid_open_states
             .insert(tid, OpenState::plain(state, timestamp_ns, false));

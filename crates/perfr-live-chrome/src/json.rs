@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-/// Incremental JSON helpers. Scan complete values without allocating a tree.
+//! Incremental JSON helpers. Scan complete values without allocating a tree.
 
 pub fn skip_ws(buf: &[u8], mut i: usize) -> usize {
     while i < buf.len() && buf[i].is_ascii_whitespace() {

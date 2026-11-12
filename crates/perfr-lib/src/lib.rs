@@ -68,6 +68,11 @@ fn session() -> Option<&'static Session> {
 
 /// Returns zero on failure, otherwise a generation identifying this capture.
 /// The path is supplied by our native controller and must be C-terminated.
+///
+/// # Safety
+///
+/// `path` is null or points at a NUL-terminated string that stays valid for
+/// the call.
 #[no_mangle]
 pub unsafe extern "C" fn perfr_frida_open(
     path: *const libc::c_char,

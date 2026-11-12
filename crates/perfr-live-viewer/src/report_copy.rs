@@ -77,21 +77,21 @@ impl ReportView {
             width[c] = h.chars().count();
         }
         for row in &chosen {
-            for c in 0..ncols {
+            for (c, w) in width.iter_mut().enumerate() {
                 let len = row.cols.get(c).map(|s| s.chars().count()).unwrap_or(0);
-                width[c] = width[c].max(len);
+                *w = (*w).max(len);
             }
         }
         let right = |c: usize| self.right.get(c).copied().unwrap_or(false);
         let mut out = String::new();
         let mut line = |cells: &[String]| {
             let mut row = String::new();
-            for c in 0..ncols {
+            for (c, w) in width.iter().enumerate() {
                 if c > 0 {
                     row.push_str("  ");
                 }
                 let cell = cells.get(c).map(String::as_str).unwrap_or("");
-                let pad = width[c].saturating_sub(cell.chars().count());
+                let pad = w.saturating_sub(cell.chars().count());
                 if right(c) {
                     row.push_str(&" ".repeat(pad));
                     row.push_str(cell);

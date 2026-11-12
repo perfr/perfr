@@ -422,8 +422,8 @@ mod tests {
         // which is what makes a migration mid-name harmless.
         let mut a = ScopeEvent { tid: 1, ..head(1) };
         let mut b = ScopeEvent { tid: 2, ..head(1) };
-        let a_chunks = split_name(&mut a, &"A".repeat(INLINE_TEXT * 2));
-        let b_chunks = split_name(&mut b, &"B".repeat(INLINE_TEXT * 2));
+        let a_chunks = split_name(&mut a, "A".repeat(INLINE_TEXT * 2));
+        let b_chunks = split_name(&mut b, "B".repeat(INLINE_TEXT * 2));
         let mut assembler = TextAssembler::new();
         assembler.accept(&a);
         assembler.accept(&b);

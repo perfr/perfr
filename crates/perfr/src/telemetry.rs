@@ -89,16 +89,11 @@ impl TelemetryHelper {
         let mut events = Vec::new();
         let mut reader = Reader::new(&self.pending);
         let mut consumed = 0usize;
-        loop {
-            match reader.next_event() {
-                Ok(Some(event)) => {
-                    consumed = reader.consumed();
-                    events.push(event);
-                }
-                // A truncated tail is the normal case mid-stream: stop and
-                // keep it for the next drain.
-                Ok(None) | Err(_) => break,
-            }
+        // A truncated tail is the normal case mid-stream: stop at it and
+        // keep it for the next drain.
+        while let Ok(Some(event)) = reader.next_event() {
+            consumed = reader.consumed();
+            events.push(event);
         }
         // A malformed (not merely truncated) record would stall the stream
         // forever; count it and drop the buffer rather than wedging.
@@ -221,7 +216,7 @@ mod tests {
 
         let mut pending: Vec<u8> = bytes[..split].to_vec();
         let mut reader = Reader::new(&pending);
-        assert!(matches!(reader.next_event(), Err(_)), "half a record must not decode");
+        assert!(reader.next_event().is_err(), "half a record must not decode");
 
         pending.extend_from_slice(&bytes[split..]);
         let mut reader = Reader::new(&pending);

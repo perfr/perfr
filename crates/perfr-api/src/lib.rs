@@ -729,7 +729,7 @@ mod tests {
             std::mem::offset_of!(ApiTableV1, log),
             8 + 12 * std::mem::size_of::<usize>()
         );
-        assert_eq!((table.now_ns)() > 0, true);
+        assert!((table.now_ns)() > 0);
         assert!(perfr_api_table_v1(API_ABI_VERSION + 1).is_null());
         assert!(perfr_api_table_v1(0).is_null());
     }

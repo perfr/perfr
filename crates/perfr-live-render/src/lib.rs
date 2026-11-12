@@ -988,7 +988,7 @@ pub fn generate_nested_scopes(
                 depth,
                 extra: 0,
                 _pad: 0,
-                name_id: (t as u32) * 1000 + i as u32,
+                name_id: t * 1000 + i as u32,
             });
             i += 1;
         }

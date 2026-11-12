@@ -42,7 +42,7 @@ pub(super) async fn static_asset(
 /// CORP lets same-origin assets (HTML, js, wasm, and
 /// `snippets/wasm-bindgen-rayon-*/…/workerHelpers.no-bundler.js`) load
 /// under `require-corp`. Applied to every response, not only viewer-dist.
-pub(super) const ISOLATION: [(&'static str, &'static str); 3] = [
+pub(super) const ISOLATION: [(&str, &str); 3] = [
     ("cross-origin-opener-policy", "same-origin"),
     ("cross-origin-embedder-policy", "require-corp"),
     ("cross-origin-resource-policy", "same-origin"),

@@ -8,6 +8,7 @@
 //!   - submit    -- userspace queued the job (pid/tid here)
 //!   - scheduled -- the driver put it on the hardware queue
 //!   - signaled  -- the GPU finished it
+//!
 //! When all three for a key have arrived (in any order) a `GpuJob` is
 //! emitted, with a hardware-start time inferred from queue occupancy and a
 //! depth assigned so overlapping jobs stack on separate timeline rows.
@@ -15,10 +16,14 @@
 //! The three phases come from different tracepoints depending on the driver,
 //! but they carry the same (context, seqno, timeline) shape, so one
 //! correlator serves them all:
-//!   - AMD (amdgpu):            amdgpu_cs_ioctl / amdgpu_sched_run_job /
-//!                              dma_fence_signaled
-//!   - NVIDIA-open (nouveau) &  drm_sched_job / drm_run_job /
-//!     any DRM gpu_scheduler:   dma_fence_signaled
+//!
+//! ```text
+//! AMD (amdgpu):            amdgpu_cs_ioctl / amdgpu_sched_run_job /
+//!                          dma_fence_signaled
+//! NVIDIA-open (nouveau) &  drm_sched_job / drm_run_job /
+//! any DRM gpu_scheduler:   dma_fence_signaled
+//! ```
+//!
 //! For the proprietary NVIDIA driver, which does not emit kernel tracepoints,
 //! CUDA kernel activity arrives already-correlated through CUPTI and is fed to
 //! `complete_job` directly -- see the `cupti` module.

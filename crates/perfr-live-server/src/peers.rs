@@ -1205,7 +1205,7 @@ mod tests {
         let remote_offset = 9_000_000_000i64;
         let mut sync = ClockSync::default();
         let t1 = 100_000u64;
-        sync.record(Probe::from_exchange(t1, (t1 + 100) as u64 + remote_offset as u64, (t1 + 110) as u64 + remote_offset as u64, t1 + 210).unwrap());
+        sync.record(Probe::from_exchange(t1, t1 + 100 + remote_offset as u64, t1 + 110 + remote_offset as u64, t1 + 210).unwrap());
         let mut ingest = Ingest::for_tests(2, "render-01", 12, sync);
         for frame in remote_frames(remote_offset) {
             ingest.bytes(&svc, &frame);

@@ -204,7 +204,7 @@ fn signal_stop_event(handle: &std::os::windows::io::OwnedHandle) {
         fn SetEvent(handle: *mut std::ffi::c_void) -> i32;
     }
     unsafe {
-        SetEvent(handle.as_raw_handle() as *mut std::ffi::c_void);
+        SetEvent(handle.as_raw_handle());
     }
 }
 

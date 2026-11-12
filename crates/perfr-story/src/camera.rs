@@ -274,8 +274,7 @@ mod tests {
 
     #[test]
     fn play_advances_by_each_steps_duration_and_stops_at_the_end() {
-        let mut player = Player::default();
-        player.playing = true;
+        let mut player = Player { playing: true, ..Default::default() };
         player.begin_transition(cam(0.0, 100.0, 0.0), cam(0.0, 50.0, 10.0), 100.0);
         let mid = player.tick(50.0, &[1_000, 1_000]);
         assert!(mid.camera.is_some());

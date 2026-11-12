@@ -835,8 +835,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_a_bad_document() {
-        let mut story = Story::default();
-        story.version = 9;
+        let mut story = Story { version: 9, ..Default::default() };
         story.steps.push(step("a"));
         story.steps.push(step("a"));
         story.steps[1].view.t0_ns = Some(50);
@@ -846,7 +845,7 @@ mod tests {
         story.steps[1].duration_ms = 0;
         let errors = validate(&story);
         let paths: Vec<_> = errors.iter().map(|e| e.path.as_str()).collect();
-        assert!(paths.iter().any(|p| *p == "version"), "{errors:?}");
+        assert!(paths.contains(&"version"), "{errors:?}");
         assert!(paths.iter().any(|p| p.contains("id")), "{errors:?}");
         assert!(paths.iter().any(|p| p.contains("duration")), "{errors:?}");
         assert!(paths.iter().any(|p| p.contains("t1_ns")), "{errors:?}");

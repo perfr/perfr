@@ -205,7 +205,7 @@ where
             .enumerate()
             .map(|(slot, part)| map_chunk(slot, part, &f, span_name, label))
             .collect();
-        return flatten_pieces(pieces);
+        flatten_pieces(pieces)
     }
     #[cfg(not(feature = "parallel"))]
     {
@@ -378,14 +378,14 @@ where
     {
         use rayon::prelude::*;
         let label = label.as_ref();
-        return dest
+        dest
             .par_chunks_mut(chunk * width)
             .zip(items.par_chunks(chunk))
             .enumerate()
             .flat_map(|(slot, (rows, part))| {
                 rows_chunk(slot, part, rows, width, &f, span_name, label)
             })
-            .collect();
+            .collect()
     }
     #[cfg(not(feature = "parallel"))]
     {

@@ -10,6 +10,7 @@
 //!     executing it directly.
 //!   - *inclusive*: samples with this function anywhere on the stack -- time
 //!     spent in it or anything it called.
+//!
 //! A function is counted at most once per sample for the inclusive number,
 //! so recursion cannot inflate it past the sample count.
 
@@ -1191,7 +1192,7 @@ mod tests {
         let functions = value["functions"].as_array().unwrap();
         let other = functions.iter().find(|f| f["name"] == "other").unwrap();
         assert_eq!(other["self"], 1);
-        assert!(functions.iter().find(|f| f["name"] == "inner").is_none());
+        assert!(!functions.iter().any(|f| f["name"] == "inner"));
     }
 
     #[test]

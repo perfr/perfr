@@ -657,25 +657,35 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = LogUi::default();
         let computed_at = |state: &LogUi| state.cache.as_ref().unwrap().stamp;
-        frame(&ctx, |ui| drop(show(ui, &mut state, &index, &intern, 0.0, 100.0)));
+        frame(&ctx, |ui| {
+            show(ui, &mut state, &index, &intern, 0.0, 100.0);
+        });
         assert_eq!(state.cache.as_ref().unwrap().matched, 1);
         // The same view of the same capture: the rows are reused as they are.
         state.cache.as_mut().unwrap().matched = 777;
-        frame(&ctx, |ui| drop(show(ui, &mut state, &index, &intern, 0.0, 100.0)));
+        frame(&ctx, |ui| {
+            show(ui, &mut state, &index, &intern, 0.0, 100.0);
+        });
         assert_eq!(state.cache.as_ref().unwrap().matched, 777, "not recomputed");
         // The view moved: recomputed at once.
-        frame(&ctx, |ui| drop(show(ui, &mut state, &index, &intern, 0.0, 50.0)));
+        frame(&ctx, |ui| {
+            show(ui, &mut state, &index, &intern, 0.0, 50.0);
+        });
         assert_eq!(state.cache.as_ref().unwrap().matched, 1);
         // Events arrived a moment after the list was built: the list waits
         // for its refresh interval instead of being rebuilt every frame.
         let before = computed_at(&state);
         index.insert(log_at(20, 7, 1, 2));
-        frame(&ctx, |ui| drop(show(ui, &mut state, &index, &intern, 0.0, 50.0)));
+        frame(&ctx, |ui| {
+            show(ui, &mut state, &index, &intern, 0.0, 50.0);
+        });
         assert_eq!(computed_at(&state), before, "inside the refresh interval");
         assert_eq!(state.cache.as_ref().unwrap().matched, 1);
         // ...and is rebuilt once that interval has passed.
         state.cache.as_mut().unwrap().computed_at = -1.0;
-        frame(&ctx, |ui| drop(show(ui, &mut state, &index, &intern, 0.0, 50.0)));
+        frame(&ctx, |ui| {
+            show(ui, &mut state, &index, &intern, 0.0, 50.0);
+        });
         assert_eq!(state.cache.as_ref().unwrap().matched, 2);
     }
 

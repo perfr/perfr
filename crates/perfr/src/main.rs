@@ -446,7 +446,7 @@ fn capture_file_linux(args: Args) {
     // library: static musl has no dlopen, but it has fork/exec, so the
     // helper links NVML/CUPTI and streams pod events over a pipe.
     let mut gpu_helper = args.gpu_helper.as_deref().and_then(|path| {
-        match TelemetryHelper::spawn(path, &[]) {
+        match TelemetryHelper::spawn(path, &serve::gpu_helper_args(None, target_pid)) {
             Ok(helper) => Some(helper),
             Err(error) => {
                 log::warn!("could not start GPU helper {path}: {error}");

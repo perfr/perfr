@@ -200,7 +200,11 @@ pub struct TaskNewtaskLayout {
 }
 
 impl TaskNewtaskLayout {
-    pub const DEFAULT: TaskNewtaskLayout = TaskNewtaskLayout { pid: 8, comm: 12, clone_flags: 28 };
+    /// `clone_flags` is an 8-byte field and the kernel's struct is not
+    /// packed, so it sits at 32, not directly after `comm` at 28. Read at
+    /// 28, `CLONE_THREAD` is tested against padding and a new thread is
+    /// taken for a new process whenever the format file cannot be parsed.
+    pub const DEFAULT: TaskNewtaskLayout = TaskNewtaskLayout { pid: 8, comm: 12, clone_flags: 32 };
 
     pub fn from_format(text: &str) -> Option<TaskNewtaskLayout> {
         let f = format_field_offsets(text);
@@ -213,9 +217,9 @@ impl TaskNewtaskLayout {
 }
 
 impl TaskNewtask {
-    /// Layout: common(8), pid(4), comm[16], clone_flags(8), oom_score_adj(2),
-    /// pad(14) = 52.
-    pub const LEN: usize = 52;
+    /// Layout: common(8), pid(4), comm[16], pad(4), clone_flags(8),
+    /// oom_score_adj(2), pad(6) = 48.
+    pub const LEN: usize = 48;
 
     pub fn parse(payload: &[u8]) -> Option<TaskNewtask> {
         TaskNewtask::parse_with(payload, &TaskNewtaskLayout::DEFAULT)
@@ -430,7 +434,23 @@ mod layout_tests {
     fn wakeup_and_newtask_layouts_parse_from_format() {
         let wake = "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n";
         assert_eq!(SchedWakeupLayout::from_format(wake), Some(SchedWakeupLayout::DEFAULT));
-        let newtask = "\tfield:pid_t pid;\toffset:8;\tsize:4;\n\tfield:char comm[16];\toffset:12;\tsize:16;\n\tfield:unsigned long clone_flags;\toffset:28;\tsize:8;\n";
+        let newtask = "\tfield:pid_t pid;\toffset:8;\tsize:4;\n\tfield:char comm[16];\toffset:12;\tsize:16;\n\tfield:unsigned long clone_flags;\toffset:32;\tsize:8;\n";
         assert_eq!(TaskNewtaskLayout::from_format(newtask), Some(TaskNewtaskLayout::DEFAULT));
+    }
+
+    /// The record as the kernel lays it out: `clone_flags` is an 8-byte
+    /// field, so it is aligned to 32 and four bytes of padding follow `comm`.
+    #[test]
+    fn the_default_newtask_layout_reads_clone_flags_past_the_alignment_padding() {
+        let mut payload = vec![0u8; TaskNewtask::LEN];
+        payload[8..12].copy_from_slice(&4242i32.to_le_bytes());
+        payload[12..18].copy_from_slice(b"worker");
+        payload[32..40].copy_from_slice(&(CLONE_THREAD | 0x100).to_le_bytes());
+        payload[40..42].copy_from_slice(&(-17i16).to_le_bytes()); // oom_score_adj
+        let parsed = TaskNewtask::parse(&payload).unwrap();
+        assert_eq!(parsed.tid, 4242);
+        assert_eq!(parsed.comm, "worker");
+        assert_eq!(parsed.clone_flags, CLONE_THREAD | 0x100);
+        assert_eq!(payload.len(), 48, "the size of trace_event_raw_task_newtask");
     }
 }

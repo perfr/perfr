@@ -377,6 +377,44 @@ fn nothing_from_before_the_capture_start_reaches_the_ring() {
 }
 
 #[test]
+fn restoring_stored_events_keeps_those_that_begin_before_the_capture_start() {
+    let span = |start_ns: u64, end_ns: u64| LiveEvent { start_ns, duration_ns: end_ns - start_ns, ..ev(0) };
+    let svc = LiveService::new(small_cfg()).unwrap();
+    let mut rx = svc.subscribe();
+    // A capture cut to [100, 200] and opened again: its start is the
+    // window's, and the events overlapping the window were stored whole.
+    svc.mark_capture_started(7, 100);
+    let stored = [span(10, 900), span(50, 150), span(120, 130), span(190, 260)];
+    let generation = svc.data_gen();
+    svc.restore_events(&stored);
+    assert_eq!(svc.ring().snapshot().1, stored);
+    assert_eq!(svc.dropped_before_start(), 0);
+    // The rest of what a push does still happens.
+    assert_eq!(svc.data_gen(), generation + 1);
+    // The capture ends where the events that begin in it do: the one that
+    // spans the window is held, and does not stretch the capture to 900.
+    assert_eq!(svc.live_end_ns(), 260);
+    assert_eq!(svc.cached_index().event_count(), 4);
+    assert_eq!(svc.cached_index().time_bounds(), Some((120, 260)));
+    let mut broadcast = Vec::new();
+    while let Ok(bytes) = rx.try_recv() {
+        for frame in decode_all(&bytes).unwrap() {
+            if let LiveFrame::EventBatch { events } = frame {
+                broadcast.extend(events);
+            }
+        }
+    }
+    assert_eq!(broadcast, stored);
+    // A live push is still held to the capture's start.
+    svc.push_events(&[span(50, 150), span(150, 160)]);
+    assert_eq!(svc.stats().events_live, 5);
+    assert_eq!(svc.dropped_before_start(), 1);
+    svc.push_event(span(50, 150));
+    assert_eq!(svc.stats().events_live, 5);
+    assert_eq!(svc.dropped_before_start(), 2);
+}
+
+#[test]
 fn a_provisional_start_after_the_real_one_is_not_broadcast() {
     let svc = LiveService::new(small_cfg()).unwrap();
     let mut rx = svc.subscribe();

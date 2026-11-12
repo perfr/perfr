@@ -66,6 +66,10 @@ struct ProcessInfoV3 {
     compute_instance_id: c_uint,
 }
 
+/// `nvmlDeviceGet{Compute,Graphics}RunningProcesses_v3`: one signature, two
+/// lists.
+type GetRunningProcesses = unsafe extern "C" fn(Device, *mut c_uint, *mut ProcessInfoV3) -> c_int;
+
 pub struct Nvml {
     handle: *mut c_void,
     device_get_count: unsafe extern "C" fn(*mut c_uint) -> c_int,
@@ -76,7 +80,8 @@ pub struct Nvml {
     device_get_temperature: unsafe extern "C" fn(Device, c_uint, *mut c_uint) -> c_int,
     device_get_power: unsafe extern "C" fn(Device, *mut c_uint) -> c_int,
     device_get_clock: unsafe extern "C" fn(Device, c_uint, *mut c_uint) -> c_int,
-    device_get_processes: Option<unsafe extern "C" fn(Device, *mut c_uint, *mut ProcessInfoV3) -> c_int>,
+    device_get_compute_processes: Option<GetRunningProcesses>,
+    device_get_graphics_processes: Option<GetRunningProcesses>,
     device_get_name: Option<unsafe extern "C" fn(Device, *mut c_char, c_uint) -> c_int>,
     system_get_driver_version: Option<unsafe extern "C" fn(*mut c_char, c_uint) -> c_int>,
     shutdown: unsafe extern "C" fn() -> c_int,
@@ -144,8 +149,12 @@ impl Nvml {
                 device_get_clock: required!(handle, "nvmlDeviceGetClockInfo", unsafe extern "C" fn(Device, c_uint, *mut c_uint) -> c_int),
                 // Optional: absent on older drivers, and only costs the
                 // per-process attribution.
-                device_get_processes: symbol(handle, "nvmlDeviceGetComputeRunningProcesses_v3")
-                    .map(|p| std::mem::transmute::<*mut c_void, unsafe extern "C" fn(Device, *mut c_uint, *mut ProcessInfoV3) -> c_int>(p)),
+                device_get_compute_processes: symbol(handle, "nvmlDeviceGetComputeRunningProcesses_v3")
+                    .map(|p| std::mem::transmute::<*mut c_void, GetRunningProcesses>(p)),
+                // A game or a compositor holds its memory through graphics
+                // contexts, which the compute list never shows.
+                device_get_graphics_processes: symbol(handle, "nvmlDeviceGetGraphicsRunningProcesses_v3")
+                    .map(|p| std::mem::transmute::<*mut c_void, GetRunningProcesses>(p)),
                 device_get_name: symbol(handle, "nvmlDeviceGetName")
                     .map(|p| std::mem::transmute::<*mut c_void, unsafe extern "C" fn(Device, *mut c_char, c_uint) -> c_int>(p)),
                 system_get_driver_version: symbol(handle, "nvmlSystemGetDriverVersion")
@@ -226,15 +235,19 @@ impl Nvml {
                 power_milliwatts: power_ok.then_some(power),
                 sm_clock_mhz: sm_ok.then_some(sm_clock),
                 memory_clock_mhz: memory_clock_ok.then_some(memory_clock),
-                processes: self.compute_processes(device),
+                processes: merge_process_lists(
+                    Nvml::running_processes(self.device_get_compute_processes, device),
+                    Nvml::running_processes(self.device_get_graphics_processes, device),
+                ),
             })
         }
     }
 
-    /// The processes holding memory on this device. NVML wants the array
-    /// sized by a first call that reports INSUFFICIENT_SIZE.
-    fn compute_processes(&self, device: Device) -> Vec<ProcessMemory> {
-        let Some(get_processes) = self.device_get_processes else { return Vec::new() };
+    /// The processes holding memory on this device, from one of NVML's two
+    /// lists; empty when the driver lacks that entry point. NVML wants the
+    /// array sized by a first call that reports INSUFFICIENT_SIZE.
+    fn running_processes(get_processes: Option<GetRunningProcesses>, device: Device) -> Vec<ProcessMemory> {
+        let Some(get_processes) = get_processes else { return Vec::new() };
         // SAFETY: the count-then-fill protocol NVML documents; the buffer is
         // sized to the count NVML asks for.
         unsafe {
@@ -260,6 +273,21 @@ impl Nvml {
                 .collect()
         }
     }
+}
+
+/// Every process holding memory on a device. NVML keeps compute (CUDA) and
+/// graphics (OpenGL, Vulkan) contexts on separate lists; a process with both
+/// kinds is on both, each entry carrying the same per-process total, so it
+/// is taken from the compute list alone rather than counted twice.
+fn merge_process_lists(compute: Vec<ProcessMemory>, graphics: Vec<ProcessMemory>) -> Vec<ProcessMemory> {
+    let mut merged = compute;
+    let compute_len = merged.len();
+    for process in graphics {
+        if !merged[..compute_len].iter().any(|listed| listed.pid == process.pid) {
+            merged.push(process);
+        }
+    }
+    merged
 }
 
 /// Static description of a device, for the capture's GpuInfo metadata.
@@ -320,5 +348,39 @@ impl Drop for Nvml {
             (self.shutdown)();
             libc::dlclose(self.handle);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process(pid: i32, used_bytes: u64) -> ProcessMemory {
+        ProcessMemory { pid, used_bytes }
+    }
+
+    #[test]
+    fn a_process_with_only_graphics_contexts_is_listed() {
+        let merged = merge_process_lists(vec![process(10, 100)], vec![process(20, 300)]);
+        assert_eq!(merged, vec![process(10, 100), process(20, 300)]);
+        assert_eq!(merge_process_lists(Vec::new(), vec![process(20, 300)]), vec![process(20, 300)]);
+    }
+
+    #[test]
+    fn a_process_on_both_lists_is_counted_once() {
+        // A game that also runs CUDA: both lists report its one total.
+        let merged = merge_process_lists(
+            vec![process(10, 100), process(20, 300)],
+            vec![process(20, 300), process(30, 50)],
+        );
+        assert_eq!(merged, vec![process(10, 100), process(20, 300), process(30, 50)]);
+    }
+
+    #[test]
+    fn several_contexts_of_one_kind_are_all_kept() {
+        // The sampler sums a pid's entries; dropping a repeat within one
+        // list would lose a context.
+        let merged = merge_process_lists(Vec::new(), vec![process(20, 300), process(20, 200)]);
+        assert_eq!(merged, vec![process(20, 300), process(20, 200)]);
     }
 }

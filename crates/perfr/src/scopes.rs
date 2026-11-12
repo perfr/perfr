@@ -252,12 +252,14 @@ impl ScopeSource {
 
     /// Segments read during this capture, those of processes that have
     /// since died included.
+    #[cfg(unix)]
     pub fn segment_count(&self) -> usize {
         self.segments.len() + self.segments_closed
     }
 
     /// Scopes started but not yet stopped, across every segment. A count that
     /// only grows is STOPs being lost, the same signal behind [`Self::events_lost`].
+    #[cfg(any(test, target_os = "linux", target_os = "windows"))]
     pub fn open_scopes(&self) -> usize {
         self.segments.iter().map(|s| s.open.len()).sum::<usize>() + self.orphaned.len()
     }
@@ -444,6 +446,7 @@ impl ScopeSource {
     /// capture loop calls it once before its setup (symbols, unwinder, rings
     /// -- half a second on a big target) so a hooked target's first burst is
     /// read out of the rings before it can lap them.
+    #[cfg(any(test, target_os = "linux", target_os = "windows"))]
     pub fn drain_now(&mut self, now_ns: u64, batch: &mut Vec<LiveEvent>) {
         self.drain(now_ns, batch);
     }
@@ -711,6 +714,7 @@ impl ScopeSource {
 
     /// [`Self::events_lost`] by thread and record kind, for the status line
     /// and the log. Empty when nothing was lost.
+    #[cfg(target_os = "linux")]
     pub fn loss_summary(&self) -> String {
         let mut keys: Vec<DropKey> = self.drop_totals.keys().copied().collect();
         keys.sort_unstable();
@@ -1025,6 +1029,7 @@ fn mark_cut(name: &[u8]) -> Vec<u8> {
     out
 }
 
+#[cfg(target_os = "linux")]
 fn kind_label(kind_id: u8) -> &'static str {
     match kind_id {
         rk::SCOPE_START => "scope_start",

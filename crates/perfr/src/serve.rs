@@ -36,9 +36,12 @@ use crate::windows::capture_loop;
 use crate::visible::VisibleProcesses;
 #[cfg(target_os = "linux")]
 use crate::symbolize::Symbolizer;
-use perfr_live_event::{kind, thread_state, LiveEvent};
+use perfr_live_event::LiveEvent;
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+use perfr_live_event::{kind, thread_state};
 #[cfg(target_os = "linux")]
 use perfr_thread_states::Slice;
+#[cfg(any(test, target_os = "linux"))]
 use perfr_wire::{Event as WireEvent, METRIC_UNKNOWN_U32, METRIC_UNKNOWN_U64};
 #[cfg(target_os = "linux")]
 use perfr_perf_records::reader::{parse_record_sample_with, SampleFlags, REGS_USER_ALL_COUNT};
@@ -82,6 +85,7 @@ const _: () = assert!(gpu_lane::JOB < FRAME_NAME_ID_BASE && FRAME_NAME_ID_END <=
 
 /// A synthetic pid for machine-wide GPU tracks, so they lane on their own
 /// rather than inside whatever process happened to be captured.
+#[cfg(any(test, target_os = "linux"))]
 const GPU_PID: u32 = 0xFFFF_FF01;
 
 /// Name ids for the GPU metric lanes. Fixed, so a lane keeps its identity
@@ -113,6 +117,7 @@ fn intern_gpu_lane_names(service: &LiveService) {
 /// those as value-over-time tracks. Unsupported metrics (the sentinels) are
 /// skipped rather than plotted as zero, so a card that cannot report power
 /// leaves a gap instead of a flat line at the bottom.
+#[cfg(any(test, target_os = "linux"))]
 fn gpu_events(event: &WireEvent) -> Vec<LiveEvent> {
     let mut out = Vec::new();
     match event {
@@ -197,6 +202,7 @@ impl FrameNames {
         FrameNames { service, store, ids: HashMap::new(), next: FRAME_NAME_ID_BASE, overflowed: false }
     }
 
+    #[cfg(target_os = "linux")]
     fn id_for(&mut self, name: &str) -> u32 {
         self.id_for_frame(&crate::symbolize::ResolvedFrame {
             name: name.to_string(),
@@ -338,6 +344,7 @@ impl SymbolState {
 /// Tells the running capture, if there is one, to stop and waits until
 /// `deadline` for its thread to finish. False when it had not by then, or
 /// when a start or a stop held the slot for that long.
+#[cfg(any(test, unix))]
 fn stop_capture_before(worker: &Mutex<Option<CaptureSlot>>, deadline: std::time::Instant) -> bool {
     let pause = std::time::Duration::from_millis(10);
     loop {
@@ -693,6 +700,7 @@ impl StartRequest {
 /// worth keeping -- what a core was doing includes the processes competing
 /// with the target. The second lanes by `(pid, tid)`, so keeping it for every
 /// process on the machine is what buries the target under hundreds of rows.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 pub(crate) fn scheduling_events(slice: &perfr_tracing_state::context_switches::SchedulingSlice) -> [LiveEvent; 2] {
     let start_ns = slice.out_timestamp_ns.saturating_sub(slice.duration_ns);
     let base = LiveEvent {
@@ -841,6 +849,7 @@ pub(crate) fn started_in_capture(e: &LiveEvent, capture_start_ns: u64) -> bool {
 /// bursty or steady-but-recovering producer never trips it -- only one that
 /// loses on every drain for `window_ns` straight does. `window_ns == 0`
 /// disables the stop entirely (the default).
+#[cfg(any(test, target_os = "linux"))]
 fn overflow_should_stop(
     overload_since_ns: Option<u64>,
     losing: bool,

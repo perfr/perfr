@@ -23,6 +23,7 @@
 //! attach needs a task port.
 
 use std::io::{self, BufRead, Write};
+#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::process::Command;
 

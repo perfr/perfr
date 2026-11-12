@@ -65,6 +65,7 @@ impl VisibleProcesses {
         visible
     }
 
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub fn len(&self) -> usize {
         self.allowed.len()
     }
@@ -76,6 +77,7 @@ impl VisibleProcesses {
         self.allowed.insert(pid);
     }
 
+    #[cfg(any(test, target_os = "linux", target_os = "windows"))]
     pub fn contains(&self, pid: u32) -> bool {
         self.allowed.contains(&pid)
     }
@@ -168,6 +170,7 @@ fn read_parent_map() -> Vec<(u32, u32)> {
 /// Parsing starts after the last `)` rather than splitting on whitespace from
 /// the front: the second field is the executable name in parentheses, and it
 /// can contain both spaces and parentheses.
+#[cfg(any(test, target_os = "linux"))]
 pub fn parent_from_stat(stat: &str) -> Option<u32> {
     let after_comm = &stat[stat.rfind(')')? + 1..];
     after_comm.split_whitespace().nth(1)?.parse().ok()

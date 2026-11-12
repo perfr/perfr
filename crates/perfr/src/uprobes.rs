@@ -257,6 +257,7 @@ impl LiveReturns {
         self.by_tid.values().any(|stack| stack.iter().any(|f| f.exit_ns.get() == u64::MAX))
     }
 
+    #[cfg(test)]
     fn frame_count(&self) -> usize {
         self.by_tid.values().map(|s| s.len()).sum()
     }
@@ -568,6 +569,7 @@ impl UprobeSession {
 
     /// Drains every CPU's ring and returns the calls that can now be closed:
     /// those older than the newest hit seen minus the reorder delay.
+    #[cfg(test)]
     pub fn poll(&mut self) -> Vec<CompletedCall> {
         self.ingest_rings();
         let horizon = self.newest_seen_ns.saturating_sub(REORDER_DELAY_NS);

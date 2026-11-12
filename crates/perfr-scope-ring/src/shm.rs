@@ -299,8 +299,13 @@ impl ScopeRingWriter {
             return Err(error);
         }
         let base = base.cast::<u8>();
-        // SAFETY: base is a fresh writable mapping of exactly `len` bytes.
-        unsafe { ring::init_region(base, ring_count, slots_per_ring, pid) };
+        // The file is all zero without our help: O_EXCL above means this
+        // call created it, empty, and POSIX has ftruncate extend a file with
+        // bytes that read as zero (tmpfs does it with a hole, which costs
+        // nothing until a page is written). So only the header is stored.
+        // SAFETY: base is a fresh writable mapping of exactly `len` bytes,
+        // every one of them zero.
+        unsafe { ring::init_zeroed_region(base, ring_count, slots_per_ring, pid) };
         // SAFETY: the region was just initialised at these dimensions.
         let rings = unsafe { Rings::from_raw(base, ring_count, slots_per_ring) };
         Ok(ScopeRingWriter { _owner_fd: owner_fd, mapping: Mapping { base, len }, rings, pid })
@@ -687,6 +692,44 @@ mod tests {
         let event = reader.rings().committed(0, 0).expect("the event crossed the boundary");
         assert_eq!(event.timestamp_ns, 1234);
         assert_eq!(event.tid, 7);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_default_segment_nobody_has_captured_commits_almost_no_memory() {
+        let _guard = exclusive();
+        let writer = ScopeRingWriter::create_default().expect("create");
+        let len = ring::layout_size(DEFAULT_RING_COUNT, DEFAULT_SLOTS_PER_RING);
+        let allocated = || {
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            // SAFETY: the writer's descriptor is open, stat is a live local.
+            assert_eq!(unsafe { libc::fstat(writer._owner_fd.as_raw_fd(), &mut stat) }, 0);
+            assert_eq!(stat.st_size as usize, len, "the segment is still its full size");
+            stat.st_blocks as usize * 512
+        };
+        // Creating the segment used to store a zero into every page of it,
+        // which made tmpfs back all 32 MiB for a process nobody was
+        // capturing. An eighth of the segment is far above the page or two
+        // the header needs, and holds on a tmpfs that hands out huge pages.
+        assert!(
+            allocated() < len / 8,
+            "{} of {len} bytes are backed by memory before anything was recorded",
+            allocated()
+        );
+
+        // Left as the kernel made it, the segment is still one a reader
+        // accepts, with every ring empty.
+        let reader = ScopeRingReader::open(writer.pid()).expect("a reader still validates it");
+        assert_eq!(reader.rings().ring_count(), DEFAULT_RING_COUNT);
+        assert_eq!(reader.rings().slots_per_ring(), DEFAULT_SLOTS_PER_RING);
+        for ring in 0..DEFAULT_RING_COUNT {
+            assert_eq!(reader.rings().write_cursor(ring), 0);
+        }
+        assert!(!writer.is_capturing());
+        assert!(reader.rings().committed(3, 0).is_none(), "nothing reads as written");
+        writer.rings().push(3, ScopeEvent { timestamp_ns: 1234, tid: 7, ..Default::default() });
+        assert_eq!(reader.rings().committed(3, 0).expect("and a record crosses").timestamp_ns, 1234);
+        assert!(allocated() < len / 8, "one record backs the pages it touched, not the segment");
     }
 
     #[test]

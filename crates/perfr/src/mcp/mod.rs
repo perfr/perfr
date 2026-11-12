@@ -271,6 +271,7 @@ fn handle_http(mut stream: TcpStream, mcp: &Mcp) -> Result<(), String> {
     let mut chunked = false;
     let mut origin = None;
     let mut host = String::new();
+    let mut content_type = String::new();
     for line in lines {
         let Some((name, value)) = line.split_once(':') else { continue };
         let value = value.trim();
@@ -282,6 +283,8 @@ fn handle_http(mut stream: TcpStream, mcp: &Mcp) -> Result<(), String> {
             origin = Some(value.to_string());
         } else if name.eq_ignore_ascii_case("host") {
             host = value.to_string();
+        } else if name.eq_ignore_ascii_case("content-type") {
+            content_type = value.to_string();
         }
     }
     if !host_is_loopback(&host) {
@@ -331,7 +334,11 @@ fn handle_http(mut stream: TcpStream, mcp: &Mcp) -> Result<(), String> {
             204,
             "text/plain",
             &[],
-            "Allow: POST, GET, DELETE, OPTIONS\r\nAccess-Control-Allow-Origin: http://127.0.0.1\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Mcp-Session-Id\r\n",
+            // No `Access-Control-Allow-*`: this is a browser's question
+            // whether a page may send JSON here, and no page may. The
+            // answer used to name `http://127.0.0.1`, which is a real
+            // origin: whatever serves this machine's port 80.
+            "Allow: POST, GET, DELETE, OPTIONS\r\n",
         );
     }
     if path != "/mcp" && path != "/" {
@@ -345,6 +352,15 @@ fn handle_http(mut stream: TcpStream, mcp: &Mcp) -> Result<(), String> {
     }
     if method != "POST" {
         return write_status(&mut stream, 405, "method not allowed");
+    }
+    // A page on another port of this machine has a loopback Origin, and a
+    // browser sends its POST without asking first as long as the body is
+    // labelled as a form or plain text would be: the page cannot read the
+    // answer, but the tool has run. JSON is what the protocol says a client
+    // sends, and a body so labelled is one a browser asks about first
+    // (OPTIONS, above), and is then told no.
+    if !is_json(&content_type) {
+        return write_status(&mut stream, 415, "the body must be sent as Content-Type: application/json");
     }
     if body.is_empty() {
         return write_status(&mut stream, 400, "expected a JSON-RPC body");
@@ -364,6 +380,11 @@ fn handle_http(mut stream: TcpStream, mcp: &Mcp) -> Result<(), String> {
         Some(response) => write_json(&mut stream, 200, &response),
         None => write_status(&mut stream, 202, ""),
     }
+}
+
+/// Whether a `Content-Type` is `application/json`, with or without parameters.
+fn is_json(content_type: &str) -> bool {
+    content_type.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json")
 }
 
 fn host_is_loopback(host: &str) -> bool {
@@ -1237,6 +1258,22 @@ mod tests {
         assert!(denied.contains("403"), "{denied}");
         let get = http_exchange(port, "GET", "/mcp", "", None);
         assert!(get.contains("405"), "{get}");
+        // A page on another port of this machine: a loopback Origin, and a
+        // body labelled so that the browser does not ask before sending it.
+        for label in ["text/plain", "application/x-www-form-urlencoded", "text/plain;charset=UTF-8"] {
+            let headers = format!("Content-Type: {label}\r\nOrigin: http://localhost:3000\r\nContent-Length: {}\r\n", body.len());
+            let blind = http_exchange(port, "POST", "/mcp", &headers, Some(&body));
+            assert!(blind.contains("415"), "{label}: {blind}");
+            assert!(!blind.contains("protocolVersion"), "{label}: {blind}");
+        }
+        let unlabelled = http_exchange(port, "POST", "/mcp", &format!("Content-Length: {}\r\n", body.len()), Some(&body));
+        assert!(unlabelled.contains("415"), "{unlabelled}");
+        // The browser's question before a JSON POST gets no permission.
+        let preflight = http_exchange(port, "OPTIONS", "/mcp", "Origin: http://127.0.0.1\r\nAccess-Control-Request-Method: POST\r\n", None);
+        assert!(preflight.contains("204"), "{preflight}");
+        assert!(!preflight.to_ascii_lowercase().contains("access-control-allow"), "{preflight}");
+        let with_charset = http_exchange(port, "POST", "/mcp", &format!("Content-Type: Application/JSON; charset=utf-8\r\nContent-Length: {}\r\n", body.len()), Some(&body));
+        assert!(with_charset.contains("200 OK"), "{with_charset}");
     }
 
     fn http_post(port: u16, body: &str, origin: Option<&str>) -> String {

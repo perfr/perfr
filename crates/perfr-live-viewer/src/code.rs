@@ -533,9 +533,6 @@ pub enum CodeRow {
     Source { line: usize },
     /// Instruction `index` of the disassembly.
     Asm { index: usize },
-    /// A line of another file the disassembly refers to (an inlined
-    /// callee, mostly): only its file and line, kept out of the way.
-    Note { text: String },
 }
 
 /// The rows of a view, in order. `Both` is the C++ `AnnotatingLine`
@@ -574,7 +571,7 @@ pub fn build_rows(mode: CodeMode, doc: Option<&CodeDoc>, disasm: Option<&Disasse
 /// The rows as plain text for the clipboard, one line each, mirroring what
 /// the panel paints minus the gutter: a source line as written (no line
 /// number, so it pastes back as code), an instruction as `address  text`
-/// with its `; target` when it calls somewhere, a note as its text. This is
+/// with its `; target` when it calls somewhere. This is
 /// what the Copy button hands over and, row for row, what a drag-selection
 /// across the whole view would yield.
 pub fn rows_to_text(rows: &[CodeRow], doc: Option<&CodeDoc>, disasm: Option<&Disassembly>) -> String {
@@ -594,7 +591,6 @@ pub fn rows_to_text(rows: &[CodeRow], doc: Option<&CodeDoc>, disasm: Option<&Dis
                     }
                 }
             }
-            CodeRow::Note { text } => out.push_str(text),
         }
         out.push('\n');
     }
@@ -793,9 +789,8 @@ mod tests {
             rows_to_text(&both, Some(&doc), Some(&d)),
             "int a;\n1000  mov eax, 1\n1005  call 0x2000  ; do_thing\n"
         );
-        // A note carries its own text; missing docs degrade to blank lines,
-        // never a panic.
-        let notes = vec![CodeRow::Note { text: "b.h:7".into() }, CodeRow::Source { line: 9 }];
-        assert_eq!(rows_to_text(&notes, Some(&doc), None), "b.h:7\n\n");
+        // Missing docs degrade to blank lines, never a panic.
+        let missing = vec![CodeRow::Source { line: 9 }];
+        assert_eq!(rows_to_text(&missing, Some(&doc), None), "\n");
     }
 }

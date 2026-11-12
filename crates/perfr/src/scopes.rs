@@ -1317,7 +1317,15 @@ mod log_tests {
 
         perfr_api::shutdown();
         perfr_api::init().expect("a second init");
-        source.drain_now(now(), &mut batch);
+        // The API is the process's, and a test elsewhere in this binary can
+        // initialise it at the same moment: each change is followed on the
+        // pass after it, so allow a few.
+        for _ in 0..20 {
+            source.drain_now(now(), &mut batch);
+            if !source.segments[0].reader.superseded() {
+                break;
+            }
+        }
         assert_eq!(source.segments.len(), 1, "still one segment for this process");
         assert!(!source.segments[0].reader.superseded(), "the capture went on reading the old segment");
 
@@ -1329,11 +1337,14 @@ mod log_tests {
             batch.iter().any(|e| e.kind == kind::LOG && text_of(&service, e) == "written to the new segment"),
             "nothing written after the second init reached the capture"
         );
-        let span = batch
-            .iter()
-            .find(|e| e.kind == kind::API_SCOPE && e.duration_ns > 0)
-            .expect("the scope open across the change is closed by its own stop");
-        assert_eq!(text_of(&service, span), "started before the shutdown");
+        // By name: the segment is the process's, and whatever other tests
+        // have running at the moment write their own scopes into it.
+        assert!(
+            batch
+                .iter()
+                .any(|e| e.kind == kind::API_SCOPE && e.duration_ns > 0 && text_of(&service, e) == "started before the shutdown"),
+            "the scope open across the change is closed by its own stop"
+        );
         assert_eq!(source.events_lost, 0);
     }
 

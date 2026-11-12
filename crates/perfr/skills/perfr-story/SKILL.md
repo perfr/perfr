@@ -7,7 +7,7 @@ description: Write a capture story for a perfr blog post or an iframe. Use when 
 
 A story is a JSON document (`format` `perfr.story`, `version` 1) of ordered steps. The viewer plays it over a capture: each step is a camera (time range, which tracks are open, where the rail is scrolled) and overlays anchored to the capture (a timestamp, a thread or track id, a scope id). Anchors are not screen pixels.
 
-The story is not part of the capture. Export it and keep it beside the `.perfr.stream`. The viewer opens both with `?capture=<stream url>&story=<story url>`. Add `chrome=compact` for an iframe. perfr-web can store the JSON as `captures/<id>.perfr.story` next to `captures/<id>.perfr.stream`; a short link can later resolve to those two URLs. This skill does not upload either file. `perfr_story_export` and `perfr_story_load` take a `path` only inside the MCP server's story directory, which is the directory it was started in unless `perfr mcp --story-dir <dir>` names another: pass a relative path. Export never replaces a file that is not already a story. To keep the document anywhere else, take the `json` the export returns and write it yourself.
+The story is not part of the capture. Export it and keep it beside the `.perfr.stream`. The viewer opens both with `?capture=<stream url>&story=<story url>`. Add `chrome=compact` for an iframe (see Embed, below, for the block to paste). perfr-web can store the JSON as `captures/<id>.perfr.story` next to `captures/<id>.perfr.stream`; a short link can later resolve to those two URLs. This skill does not upload either file. `perfr_story_export` and `perfr_story_load` take a `path` only inside the MCP server's story directory, which is the directory it was started in unless `perfr mcp --story-dir <dir>` names another: pass a relative path. Export never replaces a file that is not already a story. To keep the document anywhere else, take the `json` the export returns and write it yourself.
 
 ## Investigate first
 
@@ -62,9 +62,33 @@ The viewer URL, with the stream and the story each encoded:
 viewer/?capture=<encoded stream url>&story=<encoded story url>&chrome=compact
 ```
 
-`chrome=compact` hides the capture controls and keeps Play, the step list, and Share. `?capture=` still selects the capture; the story's `capture` field is used only when the page did not pass one.
+`chrome=compact` hides the capture controls and leaves one bar: Play, Previous and Next, the step's title, the step list, Share, and a fullscreen button. The current step's text is shown under the timeline. `?capture=` still selects the capture; the story's `capture` field is used only when the page did not pass one.
 
-In a post, the iframe is that URL. Under it, repeat the numbers in text so the post still says something if the frame does not load. Those numbers are the same tool readings, not a tighter claim.
+In a post, the iframe is that URL, and under it goes a small perfr credit that links to perfr.dev. Use this block as it is and change only the two URLs:
+
+```html
+<figure class="perfr-embed" style="margin:1.5em 0">
+  <iframe src="https://perfr.dev/viewer/?capture=<encoded stream url>&story=<encoded story url>&chrome=compact"
+          title="perfr capture: <the story's title>"
+          allow="fullscreen" loading="lazy"
+          style="width:100%;aspect-ratio:16/9;min-height:360px;border:0;border-radius:6px"></iframe>
+  <figcaption style="margin-top:6px;font:12px/1.4 system-ui,sans-serif">
+    <a href="https://perfr.dev" style="display:inline-flex;align-items:center;gap:6px;color:inherit;text-decoration:none;opacity:.8">
+      <picture>
+        <source srcset="https://perfr.dev/logo-dark.svg" media="(prefers-color-scheme: dark)">
+        <img src="https://perfr.dev/logo.svg" alt="perfr" height="14" style="display:block">
+      </picture>
+      <span>perfr.dev</span>
+    </a>
+  </figcaption>
+</figure>
+```
+
+- `allow="fullscreen"` is what lets the fullscreen button take the screen. Without it the button opens the capture in a tab of its own instead.
+- Keep the credit under every embedded capture: the perfr logo, 14 px high, and `perfr.dev`, both one link to `https://perfr.dev`. Do not restyle it into a banner, and do not drop it.
+- The frame wants at least 360 px of height: the bar, the timeline and the step's text share it.
+
+Under the figure, repeat the numbers in text so the post still says something if the frame does not load. Those numbers are the same tool readings, not a tighter claim.
 
 ## Worked outline: a Godot capture
 

@@ -120,31 +120,38 @@ fn union_bounds(ranges: &[SampleRange]) -> (u64, u64) {
 /// when its own thread was inside an instance at that moment -- the same
 /// scope running on another thread does not claim it.
 ///
-/// Instances of one name on one thread nest only through recursion, so
-/// `contains` is a binary search for the last instance that started before
-/// the sample plus a short walk back for recursive enclosers.
+/// A thread is inside an instance at `t` when one that started at or before
+/// `t` ends at or after it, so `contains` is a binary search for the
+/// instances that have started and one comparison with the latest end among
+/// them. The latest, not the nearest: under recursion the instance still
+/// open is the outer one, and any number of nested ones have started and
+/// ended since it began. A walk back over the last 8 instances stood here
+/// before, which lost every sample an outer instance took after its eighth
+/// nested call returned.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScopeRanges {
-    by_tid: FastMap<u32, Vec<(u64, u64)>>,
+    /// Per thread, `(start, end, latest end so far)` sorted by start: the
+    /// third is the greatest `end` of this instance and all before it.
+    by_tid: FastMap<u32, Vec<(u64, u64, u64)>>,
     instances: usize,
 }
-
-/// How far back to look for a recursive encloser once the nearest instance
-/// has ended before the sample. Deeper recursion of the same name is rare
-/// enough that a bounded walk is the right trade.
-const RECURSION_LOOKBACK: usize = 8;
 
 impl ScopeRanges {
     /// From `(tid, start, end)` instances in any order.
     pub fn from_instances(instances: impl IntoIterator<Item = (u32, u64, u64)>) -> ScopeRanges {
-        let mut by_tid: FastMap<u32, Vec<(u64, u64)>> = FastMap::default();
+        let mut by_tid: FastMap<u32, Vec<(u64, u64, u64)>> = FastMap::default();
         let mut n = 0usize;
         for (tid, start, end) in instances {
-            by_tid.entry(tid).or_default().push((start, end.max(start)));
+            by_tid.entry(tid).or_default().push((start, end.max(start), 0));
             n += 1;
         }
         for v in by_tid.values_mut() {
             v.sort_unstable();
+            let mut latest_end = 0;
+            for (_, end, latest) in v.iter_mut() {
+                latest_end = latest_end.max(*end);
+                *latest = latest_end;
+            }
         }
         ScopeRanges { by_tid, instances: n }
     }
@@ -156,22 +163,22 @@ impl ScopeRanges {
     /// True when thread `tid` was inside an instance at `t`.
     pub fn contains(&self, tid: u32, t: u64) -> bool {
         let Some(v) = self.by_tid.get(&tid) else { return false };
-        let i = v.partition_point(|(start, _)| *start <= t);
-        v[i.saturating_sub(RECURSION_LOOKBACK)..i].iter().rev().any(|(_, end)| *end >= t)
+        let i = v.partition_point(|(start, _, _)| *start <= t);
+        i > 0 && v[i - 1].2 >= t
     }
 
     /// The time windows to scan: every instance across every thread, merged
     /// where they overlap.
     pub fn windows(&self) -> Vec<(u64, u64)> {
-        let mut spans: Vec<(u64, u64)> = self.by_tid.values().flatten().copied().collect();
+        let mut spans: Vec<(u64, u64)> = self.by_tid.values().flatten().map(|&(start, end, _)| (start, end)).collect();
         spans.sort_unstable();
         merge_spans(spans)
     }
 
     /// Earliest start and latest end over every instance.
     pub fn bounds(&self) -> (u64, u64) {
-        let start = self.by_tid.values().flatten().map(|(s, _)| *s).min().unwrap_or(0);
-        let end = self.by_tid.values().flatten().map(|(_, e)| *e).max().unwrap_or(0);
+        let start = self.by_tid.values().flatten().map(|(s, _, _)| *s).min().unwrap_or(0);
+        let end = self.by_tid.values().flatten().map(|(_, e, _)| *e).max().unwrap_or(0);
         (start, end)
     }
 }
@@ -1230,6 +1237,73 @@ mod tests {
         assert_eq!(scope.windows(), vec![(100, 200), (300, 400)]);
         assert_eq!(scope.bounds(), (100, 400));
         assert!(ScopeRanges::default().windows().is_empty());
+    }
+
+    #[test]
+    fn an_outer_instance_keeps_its_samples_however_many_nested_ones_have_ended() {
+        // visit(root) calling visit(child) nine times: by the time the root
+        // is back in its own code, nine instances have started and ended
+        // since it began. All of them start before the sample; only the
+        // root still covers it.
+        let mut instances = vec![(7, 0, 1000)];
+        instances.extend((1..=9).map(|k| (7, 10 * k, 10 * k + 5)));
+        let scope = ScopeRanges::from_instances(instances);
+        assert_eq!(scope.instances(), 10);
+        assert!(scope.contains(7, 900), "in the root's own code after its ninth child returned");
+        assert!(scope.contains(7, 96), "between the ninth child and the end");
+        assert!(scope.contains(7, 17), "between two children");
+        assert!(scope.contains(7, 0) && scope.contains(7, 1000), "both ends are inside");
+        assert!(!scope.contains(7, 1001));
+        assert!(!scope.contains(8, 900), "another thread");
+        // A report over it counts the sample.
+        let store = SampleStore::new();
+        store.record_name(1, "own_code");
+        store.push(StoredSample { timestamp_ns: 900, tid: 7, frames: vec![1] });
+        let json = store.report_json_for_scope(&scope, "visit");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&json).unwrap()["samples"], 1, "{json}");
+    }
+
+    #[test]
+    fn scope_ranges_agree_with_a_scan_of_every_instance() {
+        // Random instances -- nested, overlapping, empty, inverted, many to
+        // a thread -- against the definition: some instance on that thread
+        // with start <= t <= end.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        for round in 0..200 {
+            let count = next(60) as usize;
+            let mut instances: Vec<(u32, u64, u64)> = Vec::new();
+            for _ in 0..count {
+                let tid = next(3) as u32;
+                let start = next(2_000);
+                // Mostly short, sometimes long enough to enclose dozens,
+                // sometimes ending before it starts (clamped to empty).
+                let end = match next(8) {
+                    0 => start + next(1_500),
+                    1 => start.saturating_sub(next(5)),
+                    _ => start + next(20),
+                };
+                instances.push((tid, start, end));
+            }
+            let scope = ScopeRanges::from_instances(instances.iter().copied());
+            assert_eq!(scope.instances(), count);
+            let inside = |tid: u32, t: u64| instances.iter().any(|&(i, start, end)| i == tid && start <= t && t <= end.max(start));
+            let mut probes: Vec<u64> = (0..300).map(|_| next(3_600)).collect();
+            // Every endpoint and its neighbours, where an off-by-one lives.
+            for &(_, start, end) in &instances {
+                probes.extend([start.saturating_sub(1), start, start + 1, end.saturating_sub(1), end, end + 1]);
+            }
+            for tid in 0..4 {
+                for &t in &probes {
+                    assert_eq!(scope.contains(tid, t), inside(tid, t), "round {round}: tid {tid} at {t} in {instances:?}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -25,7 +25,7 @@
 
 use perfr_maps::parse_maps;
 #[cfg(not(windows))]
-use perfr_maps::PROT_EXEC;
+use perfr_maps::{MemoryMapping, PROT_EXEC};
 use perfr_object::{detached_debug_file, load_symbols, parse_elf_metadata, ObjectSegment, SymbolTable};
 use perfr_object::{is_pe, parse_coff_metadata};
 use std::sync::{Arc, Mutex};
@@ -39,9 +39,9 @@ struct LoadedFile {
     segments: Vec<ObjectSegment>,
     /// Function symbols sorted by address, for binary search.
     symbols: Vec<(u64, u64, String)>,
-    /// Where the file's virtual addresses start: the first PT_LOAD's vaddr
-    /// minus its file offset for ELF, `ImageBase` for PE. A mapping's bias
-    /// is its load address minus this.
+    /// The virtual address of the file's first byte: the first PT_LOAD's
+    /// vaddr minus its file offset for ELF, `ImageBase` for PE, whose
+    /// headers are mapped there.
     image_base: u64,
 }
 
@@ -49,12 +49,11 @@ struct LoadedFile {
 struct Module {
     start: u64,
     end: u64,
-    /// `start - offset - image base`: subtracting it from a runtime address
-    /// gives the file's *virtual* address, which is what the symbol table
-    /// is keyed by. The image base (the first PT_LOAD's vaddr minus its
-    /// file offset) is zero for the usual layout and 0x200000 for Unreal's
-    /// binaries; without it, every lookup compared a file offset to virtual
-    /// addresses and the game's own functions came back as `module+0x..`.
+    /// The load bias of the image this mapping is a piece of: subtracting
+    /// it from a runtime address gives the file's *virtual* address, which
+    /// is what the symbol table is keyed by. Not this mapping's own
+    /// `start - offset`, nor that minus the image base: see
+    /// [`perfr_maps::load_bias`] for the two ways that went wrong.
     bias: u64,
     name: String,
     /// Absolute path of the file, empty for the vDSO; with the loadable
@@ -206,16 +205,29 @@ impl Symbolizer {
         let Ok(content) = std::fs::read(format!("/proc/{pid}/maps")) else {
             return Symbolizer { modules: Vec::new() };
         };
+        Symbolizer { modules: Self::modules_of(&parse_maps(&content), Self::load_files) }
+    }
+
+    /// The modules of a process with these mappings; `load` is where the
+    /// files behind them come from ([`Self::load_files`], or a test's own).
+    #[cfg(not(windows))]
+    fn modules_of(
+        mappings: &[MemoryMapping],
+        load: impl FnOnce(&[String]) -> Vec<(String, Arc<LoadedFile>)>,
+    ) -> Vec<Module> {
         // One spec per executable mapping (the resolver keeps a module per
         // mapping, each with its own bias), then load the symbols in parallel:
         // a big split debug file dominates and the modules are independent.
         let mut specs: Vec<ModuleSpec> = Vec::new();
-        for mapping in parse_maps(&content) {
+        // The mapping each spec was made from, for its bias.
+        let mut mapped: Vec<&MemoryMapping> = Vec::new();
+        for mapping in mappings {
             if mapping.perms & PROT_EXEC == 0 {
                 continue;
             }
             let Ok(path) = std::str::from_utf8(&mapping.pathname) else { continue };
             if path == "[vdso]" {
+                mapped.push(mapping);
                 specs.push(ModuleSpec {
                     start: mapping.start_address,
                     end: mapping.end_address,
@@ -229,6 +241,7 @@ impl Symbolizer {
             if path.is_empty() || !path.starts_with('/') {
                 continue;
             }
+            mapped.push(mapping);
             specs.push(ModuleSpec {
                 start: mapping.start_address,
                 end: mapping.end_address,
@@ -253,18 +266,20 @@ impl Symbolizer {
                 keys.push(key);
             }
         }
-        let files = Self::load_files(&keys);
-        let modules: Vec<Module> = specs
+        let files = load(&keys);
+        specs
             .into_iter()
-            .filter_map(|spec| {
+            .zip(mapped)
+            .filter_map(|(spec, mapping)| {
                 let file = files.iter().find(|(key, _)| *key == spec.file_key())?.1.clone();
-                // The vDSO's bias is its mapping's start; a file's is adjusted
-                // by the image base its segments declare (see `Module::bias`).
-                let bias = if spec.vdso { spec.bias } else { spec.bias.wrapping_sub(file.image_base) };
+                // The vDSO's bias is its mapping's start. A file's is its
+                // image's, which takes the file's other mappings to find:
+                // this one's `start - offset` is a page or more above it
+                // for anything lld linked (see `perfr_maps::load_bias`).
+                let bias = if spec.vdso { spec.bias } else { file_load_bias(mappings, mapping, &file) };
                 Some(Module { start: spec.start, end: spec.end, bias, name: spec.name, path: spec.path, file })
             })
-            .collect();
-        Symbolizer { modules }
+            .collect()
     }
 
     /// The symbol tables of `keys` (file paths, or [`VDSO`]): from the cache
@@ -397,7 +412,8 @@ impl Module {
         let Some((start, size, _)) = index.checked_sub(1).and_then(|i| symbols.get(i)) else {
             return 0;
         };
-        let inside = if *size == 0 { *start == file_address } else { file_address < start + size };
+        // `file_address - start`, as in `find_symbol`: the sum can overflow.
+        let inside = if *size == 0 { *start == file_address } else { file_address - start < *size };
         if !inside {
             return 0;
         }
@@ -423,6 +439,19 @@ pub(crate) fn module_layout(bytes: &[u8], path: &str) -> (Vec<ObjectSegment>, u6
     (segments, base)
 }
 
+/// The load bias of the image of `file` that `mapping` is a piece of.
+#[cfg(not(windows))]
+fn file_load_bias(mappings: &[MemoryMapping], mapping: &MemoryMapping, file: &LoadedFile) -> u64 {
+    // File offset 0 is at `image_base` in both formats -- an ELF's first
+    // PT_LOAD says so, a PE's headers are mapped there -- and the segments
+    // (sections, for PE) say how much further from its offset each of the
+    // file's other mappings can be.
+    let layout: Vec<(u64, u64)> = std::iter::once((0, file.image_base))
+        .chain(file.segments.iter().map(|segment| (segment.offset_in_file, segment.address)))
+        .collect();
+    perfr_maps::load_bias(mappings, mapping, &layout)
+}
+
 /// The first PT_LOAD's virtual address minus its file offset: where the
 /// file's virtual address space starts relative to its bytes. Zero for the
 /// usual layout, 0x200000 for a binary linked with an image base (Unreal).
@@ -443,7 +472,9 @@ fn find_symbol(symbols: &[(u64, u64, String)], address: u64) -> Option<&str> {
     if *size == 0 {
         (*start == address).then_some(name.as_str())
     } else {
-        (address < start + size).then_some(name.as_str())
+        // Not `address < start + size`: the size is the file's `st_size`,
+        // and the sum of a hostile one overflows. `start <= address` here.
+        (address - start < *size).then_some(name.as_str())
     }
 }
 
@@ -654,6 +685,22 @@ mod tests {
     }
 
     #[test]
+    fn a_symbol_whose_size_runs_past_the_address_space_still_contains_its_addresses() {
+        // Sizes come straight from `st_size`; start + size must not be
+        // computed, it need not fit.
+        let symbols = vec![(0x1000, 0x100, "alpha".to_string()), (0x4000, u64::MAX, "endless".to_string())];
+        assert_eq!(find_symbol(&symbols, 0x4000), Some("endless"));
+        assert_eq!(find_symbol(&symbols, 0x9000_0000), Some("endless"));
+        assert_eq!(find_symbol(&symbols, 0x3fff), None);
+        // The function id asks the same question of a module with a path;
+        // 0 because no segment says where in the file the symbol is.
+        let file = Arc::new(LoadedFile { segments: Vec::new(), symbols, image_base: 0 });
+        let module = Module { start: 0, end: u64::MAX, bias: 0, name: "x".into(), path: "/t/x".into(), file };
+        let frame = Symbolizer { modules: vec![module] }.resolve_frame(0x5000);
+        assert_eq!((frame.name.as_str(), frame.function_id), ("endless", 0));
+    }
+
+    #[test]
     fn an_address_below_everything_resolves_to_nothing() {
         assert_eq!(find_symbol(&symbols(), 0x0), None);
     }
@@ -741,16 +788,245 @@ mod tests {
         assert_eq!(sym.resolve_frame(0x1010).function_id, 0);
     }
 
+    /// One linked file as a process maps it: its `/proc/<pid>/maps` lines,
+    /// its PT_LOADs as `(offset, vaddr, file size)`, where it was loaded, and
+    /// a function of it as `(vaddr, size, file offset)`.
+    #[cfg(not(windows))]
+    struct Layout {
+        maps: &'static str,
+        path: &'static str,
+        segments: &'static [(u64, u64, u64)],
+        bias: u64,
+        function: (u64, u64, u64),
+    }
+
+    #[cfg(not(windows))]
+    impl Layout {
+        /// The modules the symbolizer builds for it, the file holding the
+        /// function and the function that sits a page below it.
+        fn modules(&self) -> Vec<Module> {
+            let (address, size, _) = self.function;
+            let segments: Vec<ObjectSegment> = self
+                .segments
+                .iter()
+                .map(|&(offset_in_file, address, size)| ObjectSegment {
+                    offset_in_file,
+                    size_in_file: size,
+                    address,
+                    size_in_memory: size,
+                })
+                .collect();
+            let file = Arc::new(LoadedFile {
+                image_base: image_base(&segments),
+                segments,
+                symbols: vec![(address - 0x1000, size, "a_page_below".to_string()), (address, size, "sampled".to_string())],
+            });
+            Symbolizer::modules_of(&parse_maps(self.maps.as_bytes()), |keys| {
+                assert_eq!(keys, [self.path.to_string()]);
+                vec![(self.path.to_string(), file)]
+            })
+        }
+
+        /// Every module has the file's bias, and an address in the function
+        /// gets the function's name and the id the function index gives it.
+        fn check(&self) {
+            let symbolizer = Symbolizer { modules: self.modules() };
+            let (address, _, file_offset) = self.function;
+            let frame = symbolizer.resolve_frame(self.bias + address + 8);
+            assert_eq!(frame.name, "sampled", "{}", self.path);
+            assert_eq!(frame.function_id, function_id(self.path, file_offset), "{}", self.path);
+            for module in &symbolizer.modules {
+                assert_eq!(module.bias, self.bias, "{}: bias of the mapping at {:#x}", self.path, module.start);
+            }
+        }
+    }
+
+    // The four layouts are one C file (forty padding functions, so a page
+    // below `pad_39` is another function) linked by GNU ld and by lld, as
+    // PIE and not: program headers from `readelf -lW`, mappings from
+    // `/proc/<pid>/maps` of the running binary, `pad_39` from `nm -S`.
+
+    #[cfg(not(windows))]
     #[test]
-    fn image_base_comes_from_the_first_load_segment() {
-        use perfr_object::ObjectSegment;
-        let seg = |offset_in_file, address| ObjectSegment { offset_in_file, size_in_file: 0x1000, address, size_in_memory: 0x1000 };
-        // The usual layout: file offset 0 at virtual address 0 -> no correction.
-        assert_eq!(image_base(&[seg(0, 0), seg(0x2000, 0x3000)]), 0);
-        // Unreal's Shipping binary: first PT_LOAD at 0x200000; the text
-        // segment's own vaddr - offset (0x201000) is not the answer.
-        assert_eq!(image_base(&[seg(0, 0x200000), seg(0x3081000, 0x3282000)]), 0x200000);
-        assert_eq!(image_base(&[]), 0);
+    fn a_gnu_ld_binary_resolves_with_the_bias_of_its_text_mapping() {
+        // GNU ld pads the file so text has the headers' `vaddr - offset`.
+        Layout {
+            maps: "\
+60c4121b0000-60c4121b1000 r--p 00000000 00:2f 169005                     /t/hot_bfd
+60c4121b1000-60c4121b3000 r-xp 00001000 00:2f 169005                     /t/hot_bfd
+60c4121b3000-60c4121b4000 r--p 00003000 00:2f 169005                     /t/hot_bfd
+60c4121b4000-60c4121b5000 r--p 00003000 00:2f 169005                     /t/hot_bfd
+60c4121b5000-60c4121b6000 rw-p 00004000 00:2f 169005                     /t/hot_bfd
+",
+            path: "/t/hot_bfd",
+            segments: &[(0, 0, 0x710), (0x1000, 0x1000, 0x1705), (0x3000, 0x3000, 0x5c8), (0x3da0, 0x4da0, 0x270)],
+            bias: 0x60c4121b0000,
+            function: (0x2600, 0x30, 0x2600),
+        }
+        .check();
+        // Not PIE: linked at 0x400000 and loaded there.
+        Layout {
+            maps: "\
+00400000-00401000 r--p 00000000 00:2f 189223                             /t/hot_bfd_nopie
+00401000-00402000 r-xp 00001000 00:2f 189223                             /t/hot_bfd_nopie
+00402000-00403000 r--p 00002000 00:2f 189223                             /t/hot_bfd_nopie
+00403000-00404000 r--p 00002000 00:2f 189223                             /t/hot_bfd_nopie
+00404000-00405000 rw-p 00003000 00:2f 189223                             /t/hot_bfd_nopie
+",
+            path: "/t/hot_bfd_nopie",
+            segments: &[(0, 0x400000, 0x5e8), (0x1000, 0x401000, 0x9d5), (0x2000, 0x402000, 0x5c0), (0x2df8, 0x403df8, 0x238)],
+            bias: 0,
+            function: (0x401920, 0x30, 0x1920),
+        }
+        .check();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn an_lld_binary_resolves_with_the_bias_of_its_image_not_of_its_text_mapping() {
+        // lld does not pad: text is at offset 0xc80 and vaddr 0x1c80, so
+        // its mapping's `start - offset` is a page above the image's start.
+        // With that as the bias, a sample in `pad_39` (0x3180) was named
+        // after `pad_07` (0x2180) and carried pad_07's function id.
+        Layout {
+            maps: "\
+5992b139a000-5992b139b000 r--p 00000000 00:2f 169012                     /t/hot_lld
+5992b139b000-5992b139e000 r-xp 00000000 00:2f 169012                     /t/hot_lld
+5992b139e000-5992b139f000 r--p 00002000 00:2f 169012                     /t/hot_lld
+5992b139f000-5992b13a0000 rw-p 00002000 00:2f 169012                     /t/hot_lld
+",
+            path: "/t/hot_lld",
+            segments: &[(0, 0, 0xc30), (0xc80, 0x1c80, 0x16e0), (0x2360, 0x4360, 0x228), (0x2588, 0x5588, 0x10)],
+            bias: 0x5992b139a000,
+            function: (0x3180, 0x30, 0x2180),
+        }
+        .check();
+        // Not PIE: lld's default image base, 0x200000, and the same bump.
+        Layout {
+            maps: "\
+00200000-00201000 r--p 00000000 00:2f 189230                             /t/hot_lld_nopie
+00201000-00203000 r-xp 00000000 00:2f 189230                             /t/hot_lld_nopie
+00203000-00204000 r--p 00001000 00:2f 189230                             /t/hot_lld_nopie
+00204000-00205000 rw-p 00001000 00:2f 189230                             /t/hot_lld_nopie
+",
+            path: "/t/hot_lld_nopie",
+            segments: &[(0, 0x200000, 0xb80), (0xb80, 0x201b80, 0x9e0), (0x1560, 0x203560, 0x1a0), (0x1700, 0x204700, 0x48)],
+            bias: 0,
+            function: (0x2023f0, 0x30, 0x13f0),
+        }
+        .check();
+        // An Unreal Shipping binary's program headers: first PT_LOAD at
+        // 0x200000, text 0x201000 from its file offset. (The mappings are
+        // written out from the headers, not copied from a process.)
+        Layout {
+            maps: "\
+00200000-03281000 r--p 00000000 103:02 77                                /t/Game-Linux-Shipping
+03282000-0b22a000 r-xp 03081000 103:02 77                                /t/Game-Linux-Shipping
+0b22b000-0b6f0000 rw-p 0b029000 103:02 77                                /t/Game-Linux-Shipping
+",
+            path: "/t/Game-Linux-Shipping",
+            segments: &[(0, 0x200000, 0x3080200), (0x3081000, 0x3282000, 0x7fa8000), (0xb029ec0, 0xb22bec0, 0x4c4000)],
+            bias: 0,
+            function: (0x3283000, 0x40, 0x3082000),
+        }
+        .check();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_pieces_of_a_text_mapping_split_by_hooks_share_one_bias() {
+        // The lld PIE above with its second text page made writable by a
+        // hook engine: three modules, of which the first is one page at
+        // file offset 0 -- the page the headers' mapping has too.
+        let layout = Layout {
+            maps: "\
+5992b139a000-5992b139b000 r--p 00000000 00:2f 169012                     /t/hot_lld
+5992b139b000-5992b139c000 r-xp 00000000 00:2f 169012                     /t/hot_lld
+5992b139c000-5992b139d000 rwxp 00001000 00:2f 169012                     /t/hot_lld
+5992b139d000-5992b139e000 r-xp 00002000 00:2f 169012                     /t/hot_lld
+5992b139e000-5992b139f000 r--p 00002000 00:2f 169012                     /t/hot_lld
+5992b139f000-5992b13a0000 rw-p 00002000 00:2f 169012                     /t/hot_lld
+",
+            path: "/t/hot_lld",
+            segments: &[(0, 0, 0xc30), (0xc80, 0x1c80, 0x16e0), (0x2360, 0x4360, 0x228), (0x2588, 0x5588, 0x10)],
+            bias: 0x5992b139a000,
+            function: (0x3180, 0x30, 0x2180),
+        };
+        assert_eq!(layout.modules().len(), 3);
+        layout.check();
+    }
+
+    /// A fixture from `testdata/` running as a child process, killed and
+    /// removed when the test is done with it.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    struct RunningFixture {
+        child: std::process::Child,
+        path: std::path::PathBuf,
+        /// Where the process itself sees its `marker` function.
+        marker: u64,
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    impl RunningFixture {
+        fn start(name: &str, image: &[u8]) -> RunningFixture {
+            use std::io::Read;
+            use std::os::unix::fs::PermissionsExt;
+            // Beside the test binary: a directory that is known to allow
+            // execution, which the temporary directory may not.
+            let path = std::env::current_exe().unwrap().with_file_name(format!("{name}-{}", std::process::id()));
+            std::fs::write(&path, image).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let mut tries = 0;
+            let mut child = loop {
+                match std::process::Command::new(&path).stdout(std::process::Stdio::piped()).spawn() {
+                    Ok(child) => break child,
+                    // ETXTBSY: another test forked while the file was open
+                    // for writing, and its child holds that descriptor
+                    // until it execs.
+                    Err(error) if error.raw_os_error() == Some(26) && tries < 200 => {
+                        tries += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{}: {error}", path.display()),
+                }
+            };
+            let mut address = [0u8; 8];
+            let read = child.stdout.take().unwrap().read_exact(&mut address);
+            let fixture = RunningFixture { child, path, marker: u64::from_le_bytes(address) };
+            read.expect("the fixture reports its marker's address");
+            fixture
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    impl Drop for RunningFixture {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn a_running_lld_linked_process_gets_the_names_and_ids_of_its_own_functions() {
+        // Real lld output run as real processes (see testdata/lld_layout.s):
+        // the address is the one the process computed for itself, so nothing
+        // here depends on this file's idea of a load bias.
+        let fixtures: [(&str, &[u8]); 2] = [
+            ("lld_layout_pie", include_bytes!("../testdata/lld_layout_pie")),
+            ("lld_layout_image_base", include_bytes!("../testdata/lld_layout_image_base")),
+        ];
+        for (name, image) in fixtures {
+            let fixture = RunningFixture::start(name, image);
+            let pid = fixture.child.id() as i32;
+            let symbolizer = Symbolizer::for_pid(pid);
+            let frame = symbolizer.resolve_frame(fixture.marker + 2);
+            assert_eq!(frame.name, "marker", "{name}: {frame:x?}");
+            let index = crate::functions::FunctionIndex::for_pid(pid);
+            let hit = index.by_id(frame.function_id).unwrap_or_else(|| panic!("{name}: no function has the id of {frame:x?}"));
+            assert_eq!(hit.name, "marker", "{name}");
+        }
     }
 
     #[test]

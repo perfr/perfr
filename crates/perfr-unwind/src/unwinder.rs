@@ -54,45 +54,50 @@ pub struct ProcessUnwinder {
     modules_loaded: usize,
 }
 
-/// One mapped file's aggregate: bias and address span.
+/// One mapped file's aggregate: its address span and its text.
 #[derive(Debug)]
-struct FileSpan {
-    base_avma: u64,
+struct FileSpan<'a> {
     start: u64,
     end: u64,
-    executable: bool,
+    /// The file's largest executable mapping, None when it has none. A
+    /// module has one base, so it has to be that of the loader's image, and
+    /// a file can have executable mappings that are not part of it: libffi
+    /// maps a page of its own text again for each table of trampolines.
+    text: Option<&'a MemoryMapping>,
+}
+
+/// The files mapped into a process, by path.
+fn file_spans(mappings: &[MemoryMapping]) -> HashMap<&[u8], FileSpan<'_>> {
+    let mut files: HashMap<&[u8], FileSpan> = HashMap::new();
+    for mapping in mappings {
+        if !is_file_backed(mapping) {
+            continue;
+        }
+        let entry = files.entry(&mapping.pathname).or_insert(FileSpan {
+            start: mapping.start_address,
+            end: mapping.end_address,
+            text: None,
+        });
+        entry.start = entry.start.min(mapping.start_address);
+        entry.end = entry.end.max(mapping.end_address);
+        let size = |m: &MemoryMapping| m.end_address.saturating_sub(m.start_address);
+        if mapping.perms & PROT_EXEC != 0 && entry.text.is_none_or(|text| size(mapping) > size(text)) {
+            entry.text = Some(mapping);
+        }
+    }
+    files
 }
 
 impl ProcessUnwinder {
     /// Builds an unwinder from the content of a `/proc/<pid>/maps`.
     pub fn from_maps_content(maps_content: &[u8]) -> ProcessUnwinder {
         let mappings = parse_maps(maps_content);
-        let mut files: HashMap<Vec<u8>, FileSpan> = HashMap::new();
-        for mapping in &mappings {
-            if !is_file_backed(mapping) {
-                continue;
-            }
-            let bias = mapping.start_address.wrapping_sub(mapping.offset);
-            let entry = files.entry(mapping.pathname.clone()).or_insert(FileSpan {
-                base_avma: bias,
-                start: mapping.start_address,
-                end: mapping.end_address,
-                executable: false,
-            });
-            entry.base_avma = entry.base_avma.min(bias);
-            entry.start = entry.start.min(mapping.start_address);
-            entry.end = entry.end.max(mapping.end_address);
-            entry.executable |= mapping.perms & PROT_EXEC != 0;
-        }
-
         let mut unwinder = ArchUnwinder::new();
         let mut modules_loaded = 0;
-        for (path, span) in &files {
-            if !span.executable {
-                continue;
-            }
+        for (path, span) in &file_spans(&mappings) {
+            let Some(text) = span.text else { continue };
             let Ok(path) = std::str::from_utf8(path) else { continue };
-            if let Some(module) = load_module(path, span.start..span.end, span.base_avma) {
+            if let Some(module) = load_module(path, span.start..span.end, &mappings, text) {
                 unwinder.add_module(module);
                 modules_loaded += 1;
             }
@@ -163,6 +168,34 @@ mod tests {
     use super::*;
     use perfr_perf_records::reader::{parse_record_sample, SampleFlags};
     use perfr_perf_records::{record_type, PerfEventHeader};
+
+    #[test]
+    fn a_files_text_is_its_largest_executable_mapping() {
+        // libffi in a process that uses closures: one page of its text is
+        // mapped a second time, below the library. The lowest
+        // `start - offset` of the file is that page's, 58 MB from where
+        // the library's unwind tables are.
+        let mappings = parse_maps(
+            b"\
+7481b7178000-7481b7179000 r-xp 0000b000 103:02 100825209                 /usr/lib/libffi.so.8
+7481baaa5000-7481baaa7000 r--p 00000000 103:02 100825209                 /usr/lib/libffi.so.8
+7481baaa7000-7481baab2000 r-xp 00002000 103:02 100825209                 /usr/lib/libffi.so.8
+7481baab2000-7481baab4000 r--p 0000d000 103:02 100825209                 /usr/lib/libffi.so.8
+7481baab5000-7481baab6000 rw-p 0000f000 103:02 100825209                 /usr/lib/libffi.so.8
+7481bab00000-7481bab01000 r--p 00000000 103:02 100825300                 /usr/share/data.bin
+7481bab01000-7481bab02000 rw-p 00000000 00:00 0                          [heap]
+",
+        );
+        let files = file_spans(&mappings);
+        assert_eq!(files.len(), 2, "the heap is not a file");
+        let libffi = &files[&b"/usr/lib/libffi.so.8"[..]];
+        assert_eq!((libffi.start, libffi.end), (0x7481b7178000, 0x7481baab6000));
+        let text = libffi.text.expect("libffi has text");
+        assert_eq!(text.start_address, 0x7481baaa7000);
+        let segments = [(0, 0), (0x2000, 0x2000), (0xd000, 0xd000), (0xec70, 0xfc70)];
+        assert_eq!(perfr_maps::load_bias(&mappings, text, &segments), 0x7481baaa5000);
+        assert!(files[&b"/usr/share/data.bin"[..]].text.is_none(), "nothing to unwind through");
+    }
 
     // Deep, non-inlinable recursion so samples land under a real call chain.
     #[inline(never)]

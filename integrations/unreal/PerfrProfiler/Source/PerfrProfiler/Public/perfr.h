@@ -174,10 +174,15 @@ static inline int perfr_available(void) { return 1; }
 #else /* PERFR_STATIC */
 
 /* ----------------------------------------------------------- dynamic mode --
- * One table pointer per process, defined here and collapsed across every
- * translation unit by the linker (weak on ELF and Mach-O, selectany on
- * COFF). It lives inside extern "C" so C and C++ files in the same program
- * share the one slot. */
+ * One table pointer per linked module, defined here and collapsed across
+ * every translation unit of that module by the linker (weak on ELF and
+ * Mach-O, selectany on COFF). It lives inside extern "C" so C and C++ files
+ * in the same module share the one slot.
+ *
+ * Per module, not per process: on Windows every DLL that includes this
+ * header has a slot of its own, and so does an ELF shared object built with
+ * hidden visibility. Each such module calls perfr_init() itself; they all
+ * end up with the same library and the same segment. */
 
 #if defined(_MSC_VER)
 #define PERFR_SHARED_ __declspec(selectany)
@@ -433,7 +438,13 @@ static inline const struct perfr_api_table_v1* perfr_api_load_(int* status) {
  *
  * Call it once, early, from the main thread. Concurrent calls are harmless --
  * both map the same library and publish the same table -- and a thread that
- * never called it sees the table the moment it is published. */
+ * never called it sees the table the moment it is published.
+ *
+ * A child made by fork() does not inherit the segment: every call in it is a
+ * no-op until it calls perfr_init() itself, which gives it one of its own. A
+ * program that daemonises, or forks workers, calls perfr_init() in the
+ * process that goes on to do the work. After perfr_shutdown(), perfr_init()
+ * makes a new segment. */
 static inline int perfr_init(void) {
   int status = 0;
   const struct perfr_api_table_v1* table = perfr_api_get_();

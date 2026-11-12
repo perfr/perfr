@@ -8924,7 +8924,7 @@ impl PerfrLiveApp {
             let painter = ui.painter().clone();
             let hovered = pointer.is_some_and(|p| rect.contains(p));
             let row = &self.code_rows[i];
-            let is_annotation = matches!(row, CodeRow::Source { .. } | CodeRow::Note { .. }) && self.code_mode == CodeMode::Both;
+            let is_annotation = matches!(row, CodeRow::Source { .. }) && self.code_mode == CodeMode::Both;
             if is_annotation {
                 painter.rect_filled(rect, 0.0, Color32::from_rgb(0x2C, 0x2F, 0x33));
             } else if hovered {
@@ -8933,8 +8933,8 @@ impl PerfrLiveApp {
                 painter.rect_filled(rect, 0.0, theme::REPORT_ROW_ALT());
             }
             let text_x = rect.left() + gutter_w + 8.0;
-            // The code text of the row as a coloured job, or None for a note
-            // (painted plainly below). Placed as a selectable label after the
+            // The code text of the row as a coloured job, or None when the
+            // document it indexes is gone. Placed as a selectable label after the
             // gutter, so a drag selects across rows and Ctrl+C (or the Copy
             // button) yields the text -- see `code::rows_to_text`.
             let job: Option<egui::text::LayoutJob> = match row {
@@ -8981,16 +8981,6 @@ impl PerfrLiveApp {
                     }
                     job
                 }),
-                CodeRow::Note { text } => {
-                    painter.text(
-                        Pos2::new(text_x, rect.center().y),
-                        Align2::LEFT_CENTER,
-                        text,
-                        FontId::monospace(font - 1.0),
-                        theme::MUTED(),
-                    );
-                    None
-                }
             };
             if let Some(job) = job {
                 // Measure for the horizontal extent, then place the same text

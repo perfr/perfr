@@ -215,9 +215,11 @@ mod tests {
     fn this_process_names_itself_and_its_threads() {
         let me = std::process::id();
         assert!(process_comm(me).is_some());
-        let tids = thread_ids(me);
         let current = perfr_scope_ring::platform::thread_id() as u32;
-        assert!(tids.contains(&current));
+        // A listing of a process's threads taken while others start and
+        // exit can pass over one that was there throughout (the other tests
+        // of this binary are those others), so one listing proves nothing.
+        assert!((0..50).any(|_| thread_ids(me).contains(&current)), "this thread is in no listing of its process");
         // Linux threads always have a comm; a Windows thread has a name only
         // once something set one, so give this one a description first.
         #[cfg(windows)]

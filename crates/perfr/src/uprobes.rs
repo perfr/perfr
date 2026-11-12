@@ -1562,6 +1562,20 @@ mod tests {
         unsafe { libc::read(read_end, std::ptr::from_mut(&mut byte).cast(), 1) == 0 }
     }
 
+    /// [`is_closed`], allowing for a copy of the write end in a child that
+    /// another test forked a moment ago: it goes when that child execs or
+    /// exits, not when this process closes its own.
+    fn closes(read_end: i32) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !is_closed(read_end) {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        true
+    }
+
     #[test]
     fn an_attached_event_is_closed_with_its_hook_and_the_rest_with_the_session() {
         // Any ring will do for the CPU's leader; this one needs no privilege.
@@ -1584,7 +1598,7 @@ mod tests {
         // Removing a hook closes its attached event; the leader owns the
         // ring the other probes of that CPU write into, and stays.
         assert!(session.remove_hook(1));
-        assert!(is_closed(watch_a));
+        assert!(closes(watch_a));
         assert!(!is_closed(watch_b));
         assert_ne!(unsafe { libc::fcntl(leader, libc::F_GETFD) }, -1, "the leader is open");
         assert_eq!(session.rings.len(), 1);
@@ -1595,7 +1609,7 @@ mod tests {
         assert!(!is_closed(watch_b));
         // ...until the session goes, which closes whatever is left.
         drop(session);
-        assert!(is_closed(watch_b));
+        assert!(closes(watch_b));
         unsafe {
             libc::close(watch_a);
             libc::close(watch_b);

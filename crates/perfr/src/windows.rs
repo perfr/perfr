@@ -48,6 +48,7 @@ extern "system" {
     fn GetCurrentProcess() -> Handle;
     fn QueryFullProcessImageNameW(process: Handle, flags: u32, name: *mut u16, size: *mut u32) -> i32;
     fn GetThreadDescription(thread: Handle, description: *mut *mut u16) -> i32;
+    fn GetProcessIdOfThread(thread: Handle) -> u32;
     fn LocalFree(memory: *mut c_void) -> *mut c_void;
     fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> Handle;
     fn Module32FirstW(snapshot: Handle, entry: *mut ModuleEntry32W) -> i32;
@@ -220,13 +221,20 @@ pub fn thread_ids(pid: u32) -> Vec<u32> {
 }
 
 /// A thread's description, if it was given one with `SetThreadDescription`.
-pub fn thread_comm(_pid: u32, tid: u32) -> Option<String> {
+pub fn thread_comm(pid: u32, tid: u32) -> Option<String> {
     // SAFETY: OpenThread takes a tid; a null result is checked.
     let handle = unsafe { OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, tid) };
     if handle.is_null() {
         return None;
     }
     let thread = Owned(handle);
+    // A thread id is the system's, not the process's: once the thread asked
+    // about has exited, the number can be another process's thread, and its
+    // description was handed back as this one's name.
+    // SAFETY: a live thread handle with query access.
+    if unsafe { GetProcessIdOfThread(thread.0) } != pid {
+        return None;
+    }
     let mut description: *mut u16 = std::ptr::null_mut();
     // SAFETY: the call allocates the string; LocalFree releases it below.
     if unsafe { GetThreadDescription(thread.0, &mut description) } < 0 || description.is_null() {

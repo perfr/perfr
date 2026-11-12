@@ -9,6 +9,9 @@ description = "libperfr: the manual-instrumentation API and, with `native`, the 
 edition = "2021"
 license = "BSD-2-Clause"
 
+[lints]
+workspace = true
+
 # `libperfr.so` / `libperfr.dylib`. Without `native` it is the manual API alone
 # (what the perfr-api wheel ships); with `native` it also carries the Gum
 # agent that perfr-hook injects. On Windows the DLL is built by

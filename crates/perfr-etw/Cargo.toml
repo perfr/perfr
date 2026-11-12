@@ -11,6 +11,9 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Event Tracing for Windows: the kernel logger as a scheduling, thread-state and sampling source for perfr"
 
+[lints]
+workspace = true
+
 # No bindings crate: the whole surface is a dozen advapi32/kernel32 calls,
 # declared by hand the way perfr-scope-ring::platform does, and the kernel
 # event layouts are fixed MOF structures decoded from raw bytes -- no TDH.

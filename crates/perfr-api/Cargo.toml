@@ -14,6 +14,9 @@ keywords = ["profiling", "tracing", "instrumentation", "perfr"]
 categories = ["development-tools::profiling"]
 include = ["src/**", "include/perfr.h", "README.md"]
 
+[lints]
+workspace = true
+
 # Two shapes: rlib for Rust callers, staticlib (libperfr_api.a / perfr_api.lib)
 # for C and C++ that link statically. The shared library every other caller
 # loads at run time, libperfr, is built by crates/perfr-lib from this crate.

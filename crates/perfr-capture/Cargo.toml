@@ -10,6 +10,9 @@ edition = "2021"
 license = "BSD-2-Clause"
 rust-version = "1.88"
 
+[lints]
+workspace = true
+
 [dependencies]
 perfr-live-protocol = { path = "../perfr-live-protocol" }
 perfr-live-event = { path = "../perfr-live-event" }

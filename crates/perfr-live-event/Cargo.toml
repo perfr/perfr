@@ -5,5 +5,8 @@ edition.workspace = true
 license.workspace = true
 description = "Tightly packed live-view events grounded in perfr_grpc_protos::ClientCaptureEvent"
 
+[lints]
+workspace = true
+
 [dependencies]
 serde = { workspace = true }

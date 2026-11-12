@@ -11,6 +11,9 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 # libc only, for shm_open/mmap and the clock. The producer path must not pull
 # in anything that could allocate or take a lock behind our back.
 [dependencies]

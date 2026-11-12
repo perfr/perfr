@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Binary framing for the perfr live viewer WebSocket stream"
 
+[lints]
+workspace = true
+
 [dependencies]
 perfr-live-event = { path = "../perfr-live-event" }
 # Pure-Rust deflate, for the optional compressed batch frame. No C, so the

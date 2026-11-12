@@ -11,6 +11,9 @@ repository = "https://github.com/perfr/perfr"
 rust-version = "1.88"
 description = "Streaming Chrome Trace Event Format ingest into 32-byte LiveEvents"
 
+[lints]
+workspace = true
+
 [dependencies]
 flate2 = { version = "1.0", default-features = true }
 perfr-live-event = { path = "../perfr-live-event" }

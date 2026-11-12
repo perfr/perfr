@@ -188,10 +188,11 @@ Frida devkits, and its debug build links a stub when they have not been
 downloaded.
 
 `tools/ci.sh` is what the `ci` workflow runs and what to run before pushing:
-rustfmt and clippy (both report-only until the tree is clean), the workspace
-tests under a memory cap, the static musl build of the service, the viewer
-checked for wasm32, and a check that this file names every crate and that
-the Unreal plugin's copy of `perfr.h` matches the original. `tools/ci.sh test wasm` runs only the named steps.
+rustfmt (report-only until the tree is clean under it), clippy (any warning
+fails), the workspace tests under a memory cap, the static musl build of the
+service, the viewer checked for wasm32, and a check that this file names
+every crate and that the Unreal plugin's copy of `perfr.h` matches the
+original. `tools/ci.sh test wasm` runs only the named steps.
 
 The end-to-end suite that drives a real service and a headless browser is
 `tools/e2e` ([README](../tools/e2e/README.md)); it is run by hand.

@@ -13,16 +13,19 @@
 #   tools/ci.sh test wasm      only the named steps
 #
 #   fmt      cargo fmt --check over the workspace            (report-only)
-#   clippy   cargo clippy over the workspace, all targets    (report-only)
+#   clippy   cargo clippy over the workspace, all targets, no warnings
 #   test     cargo test over the workspace, under a memory cap
 #   musl     the static release build of the service, as shipped
 #   wasm     the viewer compiled for wasm32
 #   docs     crates/README.md names every crate directory, and the Unreal
 #            plugin's copy of perfr.h is the header it was copied from
 #
-# fmt and clippy count what they find and pass anyway: the tree is not clean
-# under either yet, and a gate that starts red only teaches people to ignore
-# it. PERFR_CI_STRICT=1 turns both into failures; make that the default in
+# clippy fails on any warning: the tree is clean under it, and the lints the
+# project has decided against are switched off where that was decided
+# ([workspace.lints] in Cargo.toml, or an `allow` with its reason on the
+# item). fmt counts what it finds and passes anyway: the tree is not clean
+# under it yet, and a gate that starts red only teaches people to ignore
+# it. PERFR_CI_STRICT=1 turns it into a failure; make that the default in
 # the commit that brings the count to zero.
 #
 # The test step runs every crate, perfr-hook included: without the Frida
@@ -66,15 +69,16 @@ capped() {
   fi
 }
 
-# A report-only step: prints "<count> <what>" and fails only when strict.
+# Prints "<what>: <count>". A count that gates (third argument 1) fails the
+# step when it is not zero; a report-only one fails only when strict.
 report() {
-  local count=$1 what=$2
+  local count=$1 what=$2 gates=${3:-$STRICT}
   if [ "$count" -eq 0 ]; then
     echo "$what: none"
     return 0
   fi
   echo "$what: $count"
-  if [ "$STRICT" = 1 ]; then
+  if [ "$gates" = 1 ]; then
     return 1
   fi
   echo "(report-only; PERFR_CI_STRICT=1 makes this a failure)"
@@ -109,8 +113,8 @@ step_clippy() {
     return 1
   fi
   local failed=0
-  report "$errors" "clippy errors" || failed=1
-  report "$warnings" "clippy warnings" || failed=1
+  report "$errors" "clippy errors" 1 || failed=1
+  report "$warnings" "clippy warnings" 1 || failed=1
   return "$failed"
 }
 

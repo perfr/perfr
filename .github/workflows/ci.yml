@@ -55,7 +55,8 @@ jobs:
         run: tools/ci.sh wasm
 
   lint:
-    # Report-only until the tree is clean; see the header of tools/ci.sh.
+    # clippy gates; rustfmt is report-only until the tree is clean under it
+    # (see the header of tools/ci.sh).
     name: rustfmt, clippy, crate map
     runs-on: ubuntu-24.04
     timeout-minutes: 45

@@ -74,6 +74,8 @@ features = [
     "ProgressEvent",
     "RequestCredentials",
     "RequestInit",
+    "RequestMode",
+    "RequestRedirect",
     "Response",
     "Storage",
     "StorageEvent",

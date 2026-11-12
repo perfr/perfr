@@ -313,6 +313,10 @@ pub struct Inbox {
     /// A `.perfr.stream` just loaded from a file or `?capture=` URL. The
     /// app ingests it and keeps the bytes for Share.
     pub loaded_stream: Option<Vec<u8>>,
+    /// Whether that stream was named by the page's address (`?capture=`,
+    /// a story's `capture`) rather than opened by the reader. See
+    /// `PerfrLiveApp::accept_stream_by_address`.
+    pub loaded_stream_by_address: bool,
     /// A story document fetched from `?story=`.
     pub loaded_story: Option<String>,
     pub status: Option<StatusJson>,
@@ -737,6 +741,7 @@ mod wasm_impl {
                     Ok(bytes) => {
                         g.bytes_in += bytes.len() as u64;
                         g.loaded_stream = Some(bytes);
+                        g.loaded_stream_by_address = true;
                         g.ws_ok = true;
                         g.http_ok = true;
                     }
@@ -783,6 +788,7 @@ mod wasm_impl {
                     Ok(bytes) => {
                         g.bytes_in += bytes.len() as u64;
                         g.loaded_stream = Some(bytes);
+                        g.loaded_stream_by_address = true;
                         g.http_ok = true;
                     }
                     Err(e) => g.error = Some(format!("capture file: {e}")),
@@ -839,6 +845,11 @@ mod wasm_impl {
             let Some(window) = web_sys::window() else {
                 return false;
             };
+            // What lets the page that comes back take a token from its
+            // address: this page asked for one, just now.
+            if let Ok(Some(storage)) = window.local_storage() {
+                let _ = storage.set_item(crate::share::LOGIN_PENDING_KEY, &format!("{:.0}", js_sys::Date::now()));
+            }
             match window.open_with_url_and_target_and_features(
                 url,
                 crate::share::LOGIN_WINDOW_NAME,
@@ -1015,7 +1026,10 @@ mod wasm_impl {
                 .await;
                 let mut g = inbox.lock().unwrap_or_else(|p| p.into_inner());
                 match result {
-                    Ok(bytes) => g.loaded_stream = Some(bytes),
+                    Ok(bytes) => {
+                        g.loaded_stream = Some(bytes);
+                        g.loaded_stream_by_address = false;
+                    }
                     Err(e) => g.error = Some(format!("open capture: {e}")),
                 }
             });
@@ -1028,6 +1042,7 @@ mod wasm_impl {
                 share_login_signalled: std::mem::take(&mut inbox.share_login_signalled),
                 share_token: inbox.share_token.take(),
                 loaded_stream: inbox.loaded_stream.take(),
+                loaded_stream_by_address: std::mem::take(&mut inbox.loaded_stream_by_address),
                 loaded_story: inbox.loaded_story.take(),
                 status: inbox.status.take(),
                 settings: inbox.settings.take(),

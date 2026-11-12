@@ -69,6 +69,14 @@ pub const LOGIN_RESUME_KEY: &str = "perfr.share.resume";
 /// reaches the opener even when COOP has severed `window.opener`.
 pub const LOGIN_SIGNAL_KEY: &str = "perfr.share.logged_in";
 
+/// `localStorage` key set, to the time in milliseconds, when this page sends
+/// the reader to sign in. `index.html` takes a `#share_token=` only while
+/// it is there and recent, and removes it: a token in the address is
+/// otherwise anyone's to supply. A link to the viewer with the sender's own
+/// token in it signed the reader in as the sender, whose account the next
+/// shared capture then went to.
+pub const LOGIN_PENDING_KEY: &str = "perfr.share.pending";
+
 /// `localStorage` / `sessionStorage` key for the optional bearer.
 pub const SHARE_TOKEN_KEY: &str = "perfr.share.token";
 
@@ -1531,6 +1539,7 @@ mod tests {
         assert!(html.contains(LOGIN_WINDOW_NAME));
         assert!(html.contains(LOGIN_SIGNAL_KEY));
         assert!(html.contains(SHARE_TOKEN_KEY));
+        assert!(html.contains(LOGIN_PENDING_KEY));
         assert!(html.contains(SHARE_TOKEN_FRAGMENT));
         assert!(html.contains(LOGIN_MESSAGE_SOURCE));
     }

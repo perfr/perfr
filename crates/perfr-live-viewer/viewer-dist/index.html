@@ -52,7 +52,6 @@
       display: none; color: #ffffff; font: 13px/1.4 "Segoe UI", ui-sans-serif, system-ui, sans-serif;
       padding: 16px; max-width: 36rem;
     }
-    #fallback a { color: #64B5F6; }
   </style>
 </head>
 <body>
@@ -101,10 +100,11 @@
   </script>
   <canvas id="the_canvas_id" tabindex="0"></canvas>
   <div id="fallback">
-    eframe WASM failed to start.
-    <a href="fallback.html">Open the last-ditch HTML viewer</a>.
-    Rebuild with <code>build_wasm.sh</code> so
-    <code>perfr_live_viewer.js</code> / <code>.wasm</code> are served.
+    The viewer did not start. It needs WebAssembly and WebGL2 (or WebGPU):
+    a current Chrome, Edge, Firefox or Safari has both. The browser's
+    console has the reason.
+    If you built perfr yourself, run <code>build_wasm.sh</code> so
+    <code>perfr_live_viewer.js</code> and its <code>.wasm</code> are served.
   </div>
   <script src="embed.js"></script>
   <script type="module">

@@ -224,8 +224,7 @@ egui widgets in the perfr Fusion palette (`#353535` window, `#191919` inputs,
 egui `PaintCallback` — not millions of `RectShape`s.
 
 This workspace pins **rustc 1.88** via `rust-toolchain.toml` so current eframe
-(0.32) builds. `viewer-dist/fallback.html` is a last-ditch no-wasm page; it is
-not the UI we ship.
+(0.32) builds.
 
 ## Renderer (verified, not assumed)
 
@@ -243,8 +242,9 @@ When a sampled visible scope is wider than ~4 px the same view switches to
 **instanced SDF rounded rects** (plus an Evan Wallace analytical drop shadow
 in WGSL). That path walks only visible events. Do not CPU-blit a barcode for
 the zoomed-in case. The naive “fill every scope” raster stays in the crate so
-benches can compare. Without a WASM pack the page uses `GET /api/timeline`
-(instanced Canvas2D) or `GET /api/frame` (perfr-colored columns).
+benches can compare. The service can draw the same two forms itself, for a
+script or an agent: `GET /api/timeline` (the instanced listing as JSON) and
+`GET /api/frame` (perfr-colored columns).
 
 ```
 cargo bench -p perfr-live-render
@@ -316,7 +316,7 @@ does not match (the release workflow builds its own pack from the tag).
 Pull requests run `.github/scripts/check-viewer-pack.py`, which fails on
 that mismatch and when those sources changed without a new wasm.
 
-Without a WASM pack, `/` shows a link to `fallback.html` (HTML/JS last-ditch).
+Without a WASM pack, `/` says the viewer did not start and what it needs.
 
 ### Embed in the service
 

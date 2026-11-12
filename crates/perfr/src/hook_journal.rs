@@ -455,7 +455,7 @@ pub fn process_alive(pid: i32) -> bool {
     crate::windows::process_alive(pid)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 pub fn process_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
@@ -464,6 +464,13 @@ pub fn process_alive(pid: i32) -> bool {
         return false;
     };
     alive_from_stat(&stat, || thread_ids(pid).iter().any(|tid| *tid != pid))
+}
+
+/// Without a `/proc` to read the state from, the answer is the system's own:
+/// reading a file that is not there called every process dead.
+#[cfg(all(not(windows), not(target_os = "linux")))]
+pub fn process_alive(pid: i32) -> bool {
+    pid > 0 && perfr_scope_ring::platform::process_alive(pid as u32)
 }
 
 /// The verdict from the leader's `/proc/<pid>/stat` line; `has_other_threads`

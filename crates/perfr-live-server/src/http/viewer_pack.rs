@@ -48,8 +48,35 @@ pub(super) const ISOLATION: [(&str, &str); 3] = [
     ("cross-origin-resource-policy", "same-origin"),
 ];
 
+/// What every response says about how a browser may use it, beyond the
+/// isolation above.
+///
+/// * `frame-ancestors` (and `X-Frame-Options` for a browser that predates
+///   it): the viewer is not to be drawn inside another site's page, where
+///   that page decides what is painted over the Record and Share buttons.
+///   The check on `Sec-Fetch-Dest` refuses the same frame, but a browser
+///   sends that header only to an origin it trusts to keep it, which a LAN
+///   address over plain HTTP is not. Embedded captures are not affected:
+///   they load the viewer from the site that embeds them, never from a
+///   service.
+/// * `base-uri`, `form-action`, `object-src`: the page has no `<base>`, no
+///   form and no plugin, and nothing injected into it gets to add one.
+/// * `nosniff`: an answer is what its `Content-Type` says. Errors quote
+///   the path or name they were asked about, as `text/plain`.
+/// * `Referrer-Policy: same-origin`: the address of the viewer says what
+///   is being looked at (`?capture=`, `?trace=`), and no other site is
+///   told. Not `no-referrer`: under that policy a browser also sends
+///   `Origin: null` with the page's own beacons, which the origin rule
+///   then refuses, and the viewer's log lines stop arriving.
+pub(super) const HARDENING: [(&str, &str); 4] = [
+    ("content-security-policy", "frame-ancestors 'self'; base-uri 'none'; form-action 'none'; object-src 'none'"),
+    ("x-frame-options", "SAMEORIGIN"),
+    ("x-content-type-options", "nosniff"),
+    ("referrer-policy", "same-origin"),
+];
+
 pub(super) fn apply_isolation(mut resp: Response) -> Response {
-    for (k, v) in ISOLATION {
+    for (k, v) in ISOLATION.into_iter().chain(HARDENING) {
         if let (Ok(name), Ok(val)) = (
             header::HeaderName::from_bytes(k.as_bytes()),
             header::HeaderValue::from_str(v),

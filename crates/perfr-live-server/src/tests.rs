@@ -343,6 +343,7 @@ fn thread_and_process_names_are_replayed_to_a_late_subscriber() {
         ring_buffer_bytes: 1 << 20,
         spill_path: None,
         wire: crate::WireFormat::default(),
+        any_local_user: false,
     })
     .unwrap();
     svc.set_thread_name(7, 70, "Worker-1");
@@ -506,9 +507,8 @@ fn serve(svc: std::sync::Arc<LiveService>) -> Served {
         .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
         .unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = crate::http::router(svc);
     runtime.spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = crate::http::serve_on(listener, svc).await;
     });
     Served { addr, _runtime: runtime }
 }
@@ -834,6 +834,16 @@ fn clients_that_are_not_pages_keep_working_without_an_origin() {
         assert_eq!(from_page(&served, "POST", "/api/auto_profile", &host, None, Some(r#"{"on":false}"#)), 200, "{host}");
         assert_eq!(from_page(&served, "POST", "/api/capture/stop", &host, None, None), 200, "{host}");
     }
+    // This machine's name is no way to a service that listens on loopback
+    // only: nothing reaches it by that name, except a page served under
+    // the name by someone on the network who then points the name here.
+    let named = format!("render-01:{port}");
+    assert_eq!(from_page(&served, "GET", "/api/status", &named, None, None), 403);
+    assert_eq!(from_page(&served, "GET", "/ws", &named, Some(&format!("http://{named}")), None), 403);
+    assert_eq!(from_page(&served, "GET", "/api/status", &format!("render-01.local:{port}"), None, None), 403);
+    // On a service that listens on the network it is. (The rule reads the
+    // configured address; the listener of this test stays where it is.)
+    svc.config.lock().bind = format!("192.168.1.20:{port}").parse().unwrap();
     // A peer that was told `--connect render-01` or `--join render-01`
     // dials this machine by its own name, and by address otherwise.
     for host in [format!("render-01:{port}"), format!("RENDER-01:{port}"), format!("192.168.1.20:{port}")] {
@@ -902,6 +912,66 @@ fn the_host_and_origin_rules_by_case() {
     // An unnamed machine does not make the empty name acceptable.
     assert!(!crate::http::request_allowed(None, Some(":44766"), bind, ""));
     assert!(!crate::http::request_allowed(None, Some(""), bind, ""));
+    // Bound to loopback, the machine's name is not a way in, and addresses
+    // and localhost still are.
+    for loopback in ["127.0.0.1:44766", "[::1]:44766"] {
+        let bind: std::net::SocketAddr = loopback.parse().unwrap();
+        let ok = |origin: Option<&str>, host: Option<&str>| crate::http::request_allowed(origin, host, bind, "render-01");
+        assert!(!ok(None, Some("render-01:44766")), "{loopback}");
+        assert!(!ok(None, Some("render-01.local:44766")), "{loopback}");
+        assert!(!ok(Some("http://render-01:44766"), Some("render-01:44766")), "{loopback}");
+        assert!(ok(None, Some("127.0.0.1:44766")), "{loopback}");
+        assert!(ok(Some("http://localhost:44766"), Some("localhost:44766")), "{loopback}");
+    }
+}
+
+#[test]
+fn what_the_browser_says_of_the_page_decides_too() {
+    use axum::http::Method;
+    let allows = |site: Option<&'static str>, mode: Option<&'static str>, dest: Option<&'static str>, method: Method, path: &str| {
+        crate::http::FetchMetadata { site, mode, dest }.allows(&method, path)
+    };
+    // Not a browser, the viewer's own requests, and what the user typed.
+    assert!(allows(None, None, None, Method::POST, "/api/capture/start"));
+    assert!(allows(Some("same-origin"), Some("cors"), Some("empty"), Method::POST, "/api/capture/start"));
+    assert!(allows(Some("same-origin"), Some("websocket"), Some("websocket"), Method::GET, "/ws"));
+    assert!(allows(Some("none"), Some("navigate"), Some("document"), Method::GET, "/api/status"));
+    // A link to the viewer on another site, followed.
+    assert!(allows(Some("cross-site"), Some("navigate"), Some("document"), Method::GET, "/"));
+    assert!(allows(Some("same-site"), Some("navigate"), Some("document"), Method::GET, "/index.html"));
+    // The same site's image, script, frame and form; and a link straight
+    // into the API, which would hand the capture to the browser to save.
+    assert!(!allows(Some("cross-site"), Some("no-cors"), Some("image"), Method::GET, "/api/status"));
+    assert!(!allows(Some("cross-site"), Some("no-cors"), Some("script"), Method::GET, "/perfr_live_viewer.js"));
+    assert!(!allows(Some("cross-site"), Some("navigate"), Some("iframe"), Method::GET, "/"));
+    assert!(!allows(Some("cross-site"), Some("navigate"), Some("document"), Method::POST, "/"));
+    assert!(!allows(Some("cross-site"), Some("navigate"), Some("document"), Method::GET, "/api/capture/export"));
+    assert!(!allows(Some("cross-site"), Some("navigate"), Some("document"), Method::GET, "/ws"));
+    // Another port of this machine is another site's page all the same,
+    // and a value this does not know is not a pass.
+    assert!(!allows(Some("same-site"), Some("no-cors"), Some("image"), Method::GET, "/api/status"));
+    assert!(!allows(Some("something-new"), Some("cors"), Some("empty"), Method::GET, "/api/status"));
+}
+
+#[test]
+fn a_page_on_another_site_cannot_spend_the_service_or_frame_the_viewer() {
+    let (_svc, served) = serve_small();
+    let host = host_of(served.addr);
+    let fetch = |path: &str, site: &str, mode: &str, dest: &str| {
+        let headers = [("Host", host.as_str()), ("Sec-Fetch-Site", site), ("Sec-Fetch-Mode", mode), ("Sec-Fetch-Dest", dest)];
+        exchange(served.addr, "GET", path, &headers, None).0
+    };
+    // `<img src>` and `<script src>` from another site: no Origin, this
+    // machine's address as Host, and until now an answer.
+    assert_eq!(fetch("/api/status", "cross-site", "no-cors", "image"), 403);
+    assert_eq!(fetch("/api/capture/export?format=stream", "cross-site", "no-cors", "script"), 403);
+    assert_eq!(fetch("/api/status", "same-site", "no-cors", "image"), 403, "a page on another port of this machine");
+    // The viewer in a frame of that site's page.
+    assert_eq!(fetch("/", "cross-site", "navigate", "iframe"), 403);
+    // A link to the viewer followed from there, and the viewer's own requests.
+    assert_eq!(fetch("/", "cross-site", "navigate", "document"), 200);
+    assert_eq!(fetch("/api/status", "same-origin", "cors", "empty"), 200);
+    assert_eq!(fetch("/api/status", "none", "navigate", "document"), 200);
 }
 
 // ------------------------------------------------------ starting a capture ---

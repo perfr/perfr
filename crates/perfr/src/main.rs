@@ -104,6 +104,8 @@ struct Args {
     /// static service over a pipe.
     gpu_helper: Option<String>,
     host: Option<String>,
+    /// `--any-local-user`: every account on this machine may call the API.
+    any_local_user: bool,
     wire: perfr_live_server::WireFormat,
     /// `--out-arrow <dir>`: also write the capture as an Arrow dataset
     /// (events / samples / frames tables + manifest.json) in that directory.
@@ -126,6 +128,7 @@ fn parse_args() -> Args {
         out: None,
         gpu_helper: None,
         host: None,
+        any_local_user: false,
         wire: perfr_live_server::env_wire(),
         out_arrow: None,
         serve: None,
@@ -150,6 +153,7 @@ fn parse_args() -> Args {
             "--out-arrow" => args.out_arrow = iter.next(),
             "--gpu-helper" => args.gpu_helper = iter.next(),
             "--host" => args.host = iter.next(),
+            "--any-local-user" => args.any_local_user = true,
             "--join" => args.join = iter.next(),
             "--connect" => {
                 if let Some(list) = iter.next() {
@@ -317,6 +321,7 @@ fn main() {
             parsed.gpu_helper.clone().or_else(default_gpu_helper),
             parsed.wire,
             links,
+            parsed.any_local_user,
         ) {
             log::error!("could not start the live viewer: {error}");
             std::process::exit(2);
@@ -346,7 +351,7 @@ fn run_serve(opts: cli::ServeOpts) -> ! {
         },
         None => perfr_live_server::env_wire(),
     };
-    if let Err(error) = serve::run_on(&host, port, default_gpu_helper(), wire, serve::Links::default()) {
+    if let Err(error) = serve::run_on(&host, port, default_gpu_helper(), wire, serve::Links::default(), opts.any_local_user) {
         log::error!("could not start the live viewer: {error}");
         std::process::exit(2);
     }
@@ -365,6 +370,7 @@ fn run_capture(opts: cli::CaptureOpts) -> ! {
         out: opts.out,
         gpu_helper: opts.gpu_helper,
         host: None,
+        any_local_user: false,
         wire: perfr_live_server::env_wire(),
         out_arrow: opts.out_arrow,
         serve: None,

@@ -1174,6 +1174,7 @@ mod tests {
             ring_buffer_bytes: 1024 * 64,
             spill_path: None,
             wire: WireFormat::default(),
+            any_local_user: false,
         })
         .unwrap()
     }

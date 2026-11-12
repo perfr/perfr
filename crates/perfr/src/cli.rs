@@ -43,6 +43,7 @@ pub struct ServeOpts {
     pub port: Option<u16>,
     pub wire: Option<String>,
     pub no_preflight: bool,
+    pub any_local_user: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -219,6 +220,7 @@ pub fn front(args: &[String]) -> Front {
                 port: None,
                 wire: None,
                 no_preflight: true,
+                any_local_user: false,
             });
         }
         return Front::Legacy;
@@ -260,6 +262,7 @@ fn serve_opts(matches: &ArgMatches) -> ServeOpts {
         port: matches.get_one::<u16>("port").copied(),
         wire: matches.get_one::<String>("wire").cloned(),
         no_preflight: matches.get_flag("no-preflight"),
+        any_local_user: matches.get_flag("any-local-user"),
     }
 }
 
@@ -389,6 +392,9 @@ fn serve_cmd() -> Command {
             "With no --host, this binds 127.0.0.1, as `perfr` with no arguments and\n\
              `perfr --serve` do. --host 0.0.0.0 opens it to the network, where nothing\n\
              authenticates who connects.\n\n\
+             On this machine perfr answers the user who started it (through sudo too)\n\
+             and root, and refuses every other account (Linux). --any-local-user lets\n\
+             them all in.\n\n\
              Examples:\n  \
              perfr\n  \
              perfr serve --host 127.0.0.1 --port 44766",
@@ -411,6 +417,12 @@ fn serve_cmd() -> Command {
                 .long("wire")
                 .value_name("FORMAT")
                 .help("WebSocket batches: raw, packed, or deflate"),
+        )
+        .arg(
+            Arg::new("any-local-user")
+                .long("any-local-user")
+                .action(ArgAction::SetTrue)
+                .help("Let every account on this machine use the API, not only the user who started perfr"),
         )
 }
 

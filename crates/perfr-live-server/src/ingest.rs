@@ -294,6 +294,7 @@ mod tests {
             ring_buffer_bytes: 1024 * 32,
             spill_path: None,
             wire: crate::WireFormat::default(),
+            any_local_user: false,
         })
         .unwrap()
     }

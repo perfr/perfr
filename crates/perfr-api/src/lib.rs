@@ -869,6 +869,7 @@ mod tests {
         let parent = std::process::id();
         let service = ScopeRingReader::open(parent).unwrap();
         service.set_capturing(true);
+        let parent_tid = perfr_scope_ring::platform::thread_id() as u32;
         let in_parent = start(b"in the parent");
         assert_ne!(in_parent, 0);
         let my_ring = ring_for_thread(perfr_scope_ring::platform::thread_id(), service.rings().ring_count());
@@ -922,8 +923,17 @@ mod tests {
                     drain(service.rings(), &mut cursors, 0).slices.into_iter().flat_map(|s| s.events).collect()
                 };
                 // The forking thread is the child's only thread, and its
-                // id is the child's pid, not what the parent had cached.
-                if events.iter().filter(|e| e.scope_id == handle && e.tid == me).count() != 2 {
+                // records carry its id as the system gives it now, not the
+                // one the parent had cached. On Linux that is the child's
+                // pid; macOS numbers threads apart from processes.
+                let own = perfr_scope_ring::platform::thread_id() as u32;
+                if cfg!(target_os = "linux") && own != me {
+                    return Err("the child's only thread does not have the child's pid as its id");
+                }
+                if own == parent_tid {
+                    return Err("the child's thread has its parent's thread id");
+                }
+                if events.iter().filter(|e| e.scope_id == handle && e.tid == own).count() != 2 {
                     return Err("the child's scope is not in its segment under its own thread id");
                 }
                 Ok(())

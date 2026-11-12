@@ -339,32 +339,73 @@ where
     Link { rx: in_rx, tx: out_tx }
 }
 
+/// The longest target a link takes: a DNS name is 253 characters at most.
+const TARGET_MAX: usize = 300;
+
 /// `host`, `host:port`, `http://host:port/`, `ws://host:port` -- what a user
 /// types -- as the WebSocket URL of `path` on that service.
+///
+/// The target also arrives over HTTP (`POST /api/peers/connect`), is kept,
+/// listed by `GET /api/peers` and written to the log on every retry, so
+/// it is held to what a host and a port are made of: a `?`, an `@` or a
+/// space in it would end the authority early and send the dial somewhere
+/// other than what the listing shows.
 pub fn ws_url(target: &str, path: &str) -> Result<String, String> {
     let t = target.trim();
-    let t = t
-        .strip_prefix("http://")
-        .or_else(|| t.strip_prefix("ws://"))
-        .or_else(|| t.strip_prefix("https://"))
-        .or_else(|| t.strip_prefix("wss://"))
-        .unwrap_or(t);
-    let host_port = t.split('/').next().unwrap_or("").trim();
+    if t.len() > TARGET_MAX {
+        return Err(format!("a link target is at most {TARGET_MAX} characters"));
+    }
+    // A link is not encrypted. Asked for `https://` it used to dial in the
+    // clear and say nothing.
+    if t.starts_with("https://") || t.starts_with("wss://") {
+        return Err(format!("{target:?}: links between machines are not encrypted; give the host, or http://host:port"));
+    }
+    let t = t.strip_prefix("http://").or_else(|| t.strip_prefix("ws://")).unwrap_or(t);
+    let host_port = t.split('/').next().unwrap_or("");
     if host_port.is_empty() {
         return Err(format!("{target:?} names no host"));
     }
     // An IPv6 literal in brackets keeps its colons.
     let (host, port) = if let Some(rest) = host_port.strip_prefix('[') {
         let (h, after) = rest.split_once(']').ok_or_else(|| format!("{target:?}: unclosed IPv6 bracket"))?;
-        let port = after.strip_prefix(':').map(str::parse::<u16>).transpose().map_err(|e| e.to_string())?;
-        (format!("[{h}]"), port.unwrap_or(DEFAULT_PORT))
+        if h.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(format!("{target:?}: {h:?} is not an IPv6 address"));
+        }
+        let port = match after {
+            "" => DEFAULT_PORT,
+            _ => after
+                .strip_prefix(':')
+                .and_then(|p| p.parse::<u16>().ok())
+                .ok_or_else(|| format!("{target:?}: bad port {after:?}"))?,
+        };
+        (format!("[{h}]"), port)
     } else if let Some((h, p)) = host_port.rsplit_once(':') {
         (h.to_string(), p.parse::<u16>().map_err(|_| format!("{target:?}: bad port {p:?}"))?)
     } else {
         (host_port.to_string(), DEFAULT_PORT)
     };
+    let is_name = |h: &str| !h.is_empty() && h.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
+    if !host.starts_with('[') && !is_name(&host) {
+        return Err(format!("{target:?}: {host:?} is not a host name or an address"));
+    }
     Ok(format!("ws://{host}:{port}{path}"))
 }
+
+/// Text the other end of a link sent, to keep, list and log: one short
+/// line. A machine's name goes into every one of its process names, into
+/// `GET /api/peers` and into the log, and nothing on the link bounds it
+/// short of the 64 MiB a message may be.
+fn peer_text(text: &str, max: usize) -> String {
+    text.chars().filter(|c| !c.is_control()).take(max).collect()
+}
+
+/// The longest machine name a link takes, and the longest refusal.
+const PEER_NAME_MAX: usize = 64;
+const PEER_ERROR_MAX: usize = 200;
+
+/// The most cores a machine is taken to have: core lanes are numbered in a
+/// byte, across every machine of the capture.
+const PEER_CORES_MAX: u32 = 255;
 
 // ---------------------------------------------------------------------------
 // The hub's table of machines.
@@ -413,7 +454,7 @@ impl Peers {
         let machine = (1..=MAX_MACHINES).find(|m| !entries.contains_key(m))?;
         let core_base = entries
             .values()
-            .map(|e| e.info.core_base + e.info.cores)
+            .map(|e| e.info.core_base.saturating_add(e.info.cores))
             .max()
             .unwrap_or(local_cores)
             .max(local_cores);
@@ -655,7 +696,7 @@ impl Ingest {
                         continue;
                     };
                     if e.kind == kind::SCHEDULING_SLICE {
-                        let core = self.core_base + u32::from(e.extra);
+                        let core = self.core_base.saturating_add(u32::from(e.extra));
                         let Ok(core) = u8::try_from(core) else {
                             self.dropped += 1;
                             continue;
@@ -710,9 +751,17 @@ pub async fn hub_role(svc: Arc<LiveService>, mut link: Link, link_name: &str) ->
             Ok(Some(PeerMsg::Text(text))) => {
                 let msg: FromRemote = serde_json::from_str(&text).map_err(|e| format!("bad hello: {e}"))?;
                 if let Some(error) = msg.error {
-                    return Err(format!("remote refused: {error}"));
+                    return Err(format!("remote refused: {}", peer_text(&error, PEER_ERROR_MAX)));
                 }
-                if let Some(hello) = msg.hello {
+                if let Some(mut hello) = msg.hello {
+                    // As the remote wrote them, these are as long as a
+                    // message may be and hold what it likes.
+                    hello.host = peer_text(&hello.host, PEER_NAME_MAX);
+                    hello.os = peer_text(&hello.os, PEER_NAME_MAX);
+                    hello.cores = hello.cores.clamp(1, PEER_CORES_MAX);
+                    if hello.host.is_empty() {
+                        hello.host = "unnamed".into();
+                    }
                     break hello;
                 }
             }
@@ -786,7 +835,7 @@ pub async fn hub_role(svc: Arc<LiveService>, mut link: Link, link_name: &str) ->
                             Err(error) => { log::debug!("peer {}: bad message: {error}", hello.host); continue; }
                         };
                         if let Some(error) = msg.error {
-                            break Err(format!("{}: {error}", hello.host));
+                            break Err(format!("{}: {}", hello.host, peer_text(&error, PEER_ERROR_MAX)));
                         }
                         if let Some(pong) = msg.pong {
                             let t4 = svc.now_ns();
@@ -936,7 +985,7 @@ pub async fn remote_role(svc: Arc<LiveService>, mut link: Link, info: RemoteInfo
                     Err(error) => { log::debug!("hub: bad message: {error}"); continue; }
                 };
                 if let Some(error) = msg.error {
-                    break Err(format!("hub refused: {error}"));
+                    break Err(format!("hub refused: {}", peer_text(&error, PEER_ERROR_MAX)));
                 }
                 if let Some(ping) = msg.ping {
                     let t2 = svc.now_ns();
@@ -945,8 +994,8 @@ pub async fn remote_role(svc: Arc<LiveService>, mut link: Link, info: RemoteInfo
                     continue;
                 }
                 if let Some(welcome) = msg.welcome {
-                    hub_host = welcome.host.clone();
-                    log::info!("joined {} as machine {}", welcome.host, welcome.machine);
+                    hub_host = peer_text(&welcome.host, PEER_NAME_MAX);
+                    log::info!("joined {hub_host} as machine {}", welcome.machine);
                     // The hub labels tracks from names; send what is known
                     // so a process that was named before the link came up
                     // is not a bare number there.
@@ -1166,6 +1215,27 @@ mod tests {
         assert_eq!(ws_url("[::1]:9000", "/api/join").unwrap(), "ws://[::1]:9000/api/join");
         assert!(ws_url("", "/api/peer").is_err());
         assert!(ws_url("host:notaport", "/api/peer").is_err());
+        assert_eq!(ws_url("  render_01.lan:8080  ", "/api/peer").unwrap(), "ws://render_01.lan:8080/api/peer");
+        assert_eq!(ws_url("[fe80::1]", "/api/peer").unwrap(), "ws://[fe80::1]:44766/api/peer");
+        // Asked for an encrypted link, which there is none of: an error,
+        // not a link in the clear.
+        for target in ["https://hub", "wss://hub:443/x"] {
+            let error = ws_url(target, "/api/join").unwrap_err();
+            assert!(error.contains("not encrypted"), "{error}");
+        }
+        // Nothing that would end the authority early, carry credentials,
+        // or put a line break into the log.
+        for target in ["evil?x", "user:pw@host:80", "host name", "host\n[fake log line]", "ho#st", "[not-v6]:1", "[::1]x", ":80", "ws://"] {
+            assert!(ws_url(target, "/api/peer").is_err(), "{target:?}");
+        }
+        assert!(ws_url(&"a".repeat(301), "/api/peer").is_err());
+    }
+
+    #[test]
+    fn what_a_peer_says_of_itself_is_kept_short_and_on_one_line() {
+        assert_eq!(peer_text("render-01", 64), "render-01");
+        assert_eq!(peer_text("evil\n[2026-01-01] [ERROR] forged\x1b[2J", 64), "evil[2026-01-01] [ERROR] forged[2J");
+        assert_eq!(peer_text(&"x".repeat(1 << 20), 64).len(), 64);
     }
 
     fn service() -> Arc<LiveService> {

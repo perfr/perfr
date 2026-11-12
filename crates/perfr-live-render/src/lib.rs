@@ -65,6 +65,30 @@ pub use shaders::{BLIT_RECT_WGSL, INSTANCE_WGSL};
 /// Events per entry of [`Lane::block_span`].
 const SPAN_BLOCK: usize = 64;
 
+/// `from + s[from..].partition_point(pred)`, found by doubling steps from
+/// `from`: a handful of comparisons next to where the search starts when the
+/// answer is near it, and never worse than a binary search over the rest.
+/// `pred` must be true for a prefix of `s[from..]` and false after it.
+fn gallop<T>(s: &[T], from: usize, pred: impl Fn(&T) -> bool) -> usize {
+    if from >= s.len() || !pred(&s[from]) {
+        return from.min(s.len());
+    }
+    // `pred(s[lo])` holds throughout.
+    let mut lo = from;
+    let mut step = 1usize;
+    loop {
+        let hi = lo.saturating_add(step);
+        if hi >= s.len() {
+            return lo + 1 + s[lo + 1..].partition_point(&pred);
+        }
+        if !pred(&s[hi]) {
+            return lo + 1 + s[lo + 1..hi].partition_point(&pred);
+        }
+        lo = hi;
+        step <<= 1;
+    }
+}
+
 /// One horizontal lane of intervals, sorted by `start_ns`.
 ///
 /// perfr live scopes are non-overlapping per lane, so `end_ns` is also
@@ -95,6 +119,11 @@ pub struct Lane {
     /// in the events in view; with this a block that cannot hold the answer
     /// is passed in one comparison.
     block_span: Vec<u64>,
+    /// The longest span in the lane, 0 when it is empty. When that one is
+    /// too short to be drawn as a box, nothing in any window of the lane is,
+    /// and the LOD decision needs no search at all: zoomed out, that is
+    /// every lane on every frame.
+    longest_span: u64,
 }
 
 impl Default for Lane {
@@ -105,6 +134,7 @@ impl Default for Lane {
             latest_end: Vec::new(),
             version: 0,
             block_span: Vec::new(),
+            longest_span: 0,
         }
     }
 }
@@ -165,6 +195,8 @@ impl Lane {
                 *latest = end;
             }
         }
+        // An insert can only raise it; a retain recomputes it.
+        self.longest_span = self.longest_span.max(event_span_ns(&self.events[i]));
         if i + 1 == self.events.len() {
             let span = event_span_ns(&self.events[i]);
             match self.block_span.get_mut(i / SPAN_BLOCK) {
@@ -218,6 +250,7 @@ impl Lane {
             self.ends_sorted = self.ends_are_sorted();
             self.rebuild_latest_end();
             self.rebuild_block_span(0);
+            self.longest_span = self.block_span.iter().copied().max().unwrap_or(0);
         }
     }
 
@@ -334,6 +367,12 @@ impl Lane {
     /// it stops at the first such event and passes whole blocks that have
     /// none.
     pub(crate) fn any_duration(&self, t0: u64, t1: u64, wide: impl Fn(u64) -> bool) -> bool {
+        // Before the two searches below, each a dozen cold reads of the
+        // lane: a lane whose longest span is not wide has no wide duration
+        // anywhere.
+        if !wide(self.longest_span) {
+            return false;
+        }
         let i = self.first_ending_after(t0);
         let j = self.events.partition_point(|e| e.start_ns < t1);
         let hit = |k: usize| {
@@ -398,15 +437,47 @@ impl Lane {
             return;
         }
         let dt = (t1 - t0) as f64 / width as f64;
-        for x in 0..width {
+        let column = |x: usize| {
             let col0 = t0.saturating_add((x as f64 * dt) as u64);
             let col1 = t0
                 .saturating_add(((x + 1) as f64 * dt) as u64)
                 .max(col0.saturating_add(1));
-            out[x] = self
-                .overlapping(col0, col1)
-                .map(|e| e.color_for(intern))
-                .unwrap_or(chrome::TRACK);
+            (col0, col1)
+        };
+        if !self.ends_sorted {
+            // No order to walk along: each column asks from scratch.
+            for (x, px) in out[..width].iter_mut().enumerate() {
+                let (col0, col1) = column(x);
+                *px = self.last_overlapping(col0, col1).map(|e| e.color_for(intern)).unwrap_or(chrome::TRACK);
+            }
+            return;
+        }
+        // The columns go left to right and the events are in order of start
+        // and, here, of end: the range of events a column covers begins and
+        // ends at or after the one before it. Two cursors that only move
+        // forward find it in a few steps from where they were. Asked afresh
+        // per column, the same two bounds were two binary searches over the
+        // whole lane, each a dozen cache misses, and that was most of what a
+        // zoomed-out frame cost.
+        let (mut i, mut j) = (0usize, 0usize);
+        // The owner of the column before, and its colour: a scope a few
+        // columns wide is hashed to a colour once, not once per column.
+        let mut last: Option<(usize, u32)> = None;
+        for (x, px) in out[..width].iter_mut().enumerate() {
+            let (col0, col1) = column(x);
+            i = gallop(&self.events, i, |e| e.end_ns() <= col0);
+            j = gallop(&self.events, j.max(i), |e| e.start_ns < col1);
+            *px = match self.longest_in(i, j) {
+                None => chrome::TRACK,
+                Some(k) => match last {
+                    Some((owner, color)) if owner == k => color,
+                    _ => {
+                        let color = self.events[k].color_for(intern);
+                        last = Some((k, color));
+                        color
+                    }
+                },
+            };
         }
     }
 
@@ -473,6 +544,8 @@ pub struct TrackIndex {
     bounds: Bounds,
     /// See [`TrackIndex::set_extent_floor`]. 0 when there is none.
     extent_floor: u64,
+    /// See [`TrackIndex::revision`].
+    revision: u64,
 }
 
 /// Min/max over all events and over "real" ones -- a zero-width mark at t=0
@@ -527,7 +600,16 @@ impl TrackIndex {
         };
         lane.insert(event);
         self.events += 1;
+        self.revision = self.revision.wrapping_add(1);
         self.bounds.add(&event, self.extent_floor);
+    }
+
+    /// Changes whenever the events held change: an insert, a clear, a
+    /// retain. Two reads that agree bracket an index that answers every
+    /// question as it did, so a caller can keep an answer that cost a walk
+    /// (the level of detail of a view) for as long as this stands still.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Where the capture begins, when that is known apart from its events.
@@ -576,6 +658,7 @@ impl TrackIndex {
         self.bounds = Bounds::default();
         self.extent_floor = 0;
         self.lane_gen = self.lane_gen.wrapping_add(1);
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Drop every event the predicate rejects, and any lane left empty.
@@ -593,6 +676,7 @@ impl TrackIndex {
             self.lane_gen = self.lane_gen.wrapping_add(1);
         }
         self.events = self.lanes.values().map(Lane::len).sum();
+        self.revision = self.revision.wrapping_add(1);
         // Dropping events can move either bound; rescan (retain is rare).
         self.rescan_bounds();
     }
@@ -841,21 +925,23 @@ impl RasterizedFrame {
             };
             let h = (lod::lane_height(*key) * s).round().max(1.0) as u32;
             let y0 = ((y - origin).round()).max(0.0) as u32;
-            let src = self.row(row);
-            for dy in 0..h {
-                let yy = y0.saturating_add(dy);
-                if yy >= height {
-                    break;
-                }
-                let dest = (yy as usize) * self.width * 4;
-                for (i, p) in src.iter().enumerate() {
-                    let o = dest + i * 4;
-                    if o + 3 >= out.len() {
-                        break;
-                    }
-                    let rgba = if *p == chrome::TRACK { [0; 4] } else { argb_to_rgba8(*p) };
-                    out[o..o + 4].copy_from_slice(&rgba);
-                }
+            // The rows this lane covers, cut at the bottom of the image.
+            let rows = h.min(height.saturating_sub(y0)) as usize;
+            if rows == 0 {
+                continue;
+            }
+            let stride = self.width * 4;
+            let first = y0 as usize * stride;
+            // A lane is one row of colours drawn `rows` pixels tall: convert
+            // it once and copy the bytes down. Converting every pixel again
+            // for each row of its height was a tenth of a zoomed-out frame.
+            // The track colour is written too, as transparent: where two
+            // lanes' rows meet, the later lane's gap is what shows.
+            for (px, p) in out[first..first + stride].chunks_exact_mut(4).zip(self.row(row)) {
+                px.copy_from_slice(&if *p == chrome::TRACK { [0; 4] } else { argb_to_rgba8(*p) });
+            }
+            for dy in 1..rows {
+                out.copy_within(first..first + stride, first + dy * stride);
             }
         }
         (out, height)
@@ -1716,6 +1802,7 @@ mod block_span_tests {
     }
 
     fn check_blocks(lane: &Lane) {
+        assert_eq!(lane.longest_span, lane.events().iter().map(event_span_ns).max().unwrap_or(0), "the lane's longest span");
         let expect: Vec<u64> = lane
             .events()
             .chunks(SPAN_BLOCK)
@@ -1878,6 +1965,152 @@ mod block_span_tests {
         let _ = (time(&small, 20_000), time(&large, 2_000_000));
         let ratio = time(&large, 2_000_000) as f64 / time(&small, 20_000) as f64;
         assert!(ratio < 10.0, "100x the events before the window cost {ratio:.1}x");
+    }
+
+    #[test]
+    fn a_gallop_from_anywhere_before_the_answer_is_the_partition_point() {
+        let mut rng = Rng(7);
+        for _ in 0..200 {
+            let n = rng.below(400) as usize;
+            let mut v: Vec<u64> = (0..n).map(|_| rng.below(1_000)).collect();
+            v.sort();
+            let limit = rng.below(1_100);
+            let expect = v.partition_point(|x| *x < limit);
+            for from in [0, expect / 2, expect.saturating_sub(1), expect] {
+                assert_eq!(gallop(&v, from, |x| *x < limit), expect, "{n} values, limit {limit}, from {from}");
+            }
+        }
+        assert_eq!(gallop::<u64>(&[], 0, |_| true), 0);
+        assert_eq!(gallop(&[1u64, 2, 3], 3, |_| true), 3);
+        assert_eq!(gallop(&[1u64, 2, 3], 9, |_| true), 3, "a start past the end is the end");
+    }
+
+    #[test]
+    fn the_column_walk_owns_each_column_as_asking_afresh_would() {
+        // What each column held before the walk kept cursors: the answer of
+        // `last_overlapping`, asked per column from scratch.
+        let afresh = |lane: &Lane, t0: u64, t1: u64, width: usize| -> Vec<u32> {
+            let dt = (t1 - t0) as f64 / width as f64;
+            (0..width)
+                .map(|x| {
+                    let col0 = t0.saturating_add((x as f64 * dt) as u64);
+                    let col1 = t0.saturating_add(((x + 1) as f64 * dt) as u64).max(col0.saturating_add(1));
+                    lane.last_overlapping(col0, col1).map(|e| e.color_for(None)).unwrap_or(chrome::TRACK)
+                })
+                .collect()
+        };
+        let mut rng = Rng(1234);
+        for round in 0..60 {
+            let n = 1 + rng.below(5_000) as usize;
+            let mut lane = Lane::default();
+            let mut t = rng.below(1_000);
+            for k in 0..n {
+                let gap = 1 + rng.below(40);
+                // Scopes, zero-length marks, and now and then one that runs
+                // into the next (which breaks the order of ends).
+                let dur = match rng.below(10) {
+                    0 => 0,
+                    1 if round % 3 == 0 => gap + rng.below(60),
+                    _ => 1 + rng.below(gap),
+                };
+                lane.insert(ev(t, dur, (k % 251) as u32));
+                t += gap;
+            }
+            for width in [1usize, 2, 7, 64, 300, 1_700, 6_000] {
+                // Windows inside the lane, hanging off either end, far past
+                // it, and narrower than a pixel per nanosecond.
+                let windows = [
+                    (0, t + 100),
+                    (rng.below(t), rng.below(t) + t / 2 + 1),
+                    (t / 3, t / 3 + 1 + rng.below(50)),
+                    (t.saturating_sub(5), t + 10_000),
+                    (t + 50, t + 5_000),
+                    (0, 1),
+                ];
+                for (t0, t1) in windows {
+                    let t1 = t1.max(t0 + 1);
+                    let mut cols = vec![0u32; width];
+                    lane.rasterize_pixel_columns(t0, t1, width, &mut cols, None);
+                    assert_eq!(cols, afresh(&lane, t0, t1, width), "round {round}: {n} events, [{t0}, {t1}) at {width} px");
+                }
+            }
+        }
+        // At the top of the clock the column bounds saturate and stop moving.
+        let mut lane = Lane::default();
+        for k in 0..200u64 {
+            lane.insert(ev(u64::MAX - 4_000 + k * 20, 10, k as u32));
+        }
+        let mut cols = vec![0u32; 500];
+        lane.rasterize_pixel_columns(u64::MAX - 5_000, u64::MAX, 500, &mut cols, None);
+        assert_eq!(cols, afresh(&lane, u64::MAX - 5_000, u64::MAX, 500));
+    }
+
+    #[test]
+    fn a_placed_frame_is_each_lanes_row_drawn_as_tall_as_the_lane() {
+        // The image as it was built pixel by pixel, row by row.
+        let reference = |frame: &RasterizedFrame, layout: &[(LaneKey, f32)], scale: f32| -> (Vec<u8>, u32) {
+            let s = scale.max(0.01);
+            let ys: BTreeMap<LaneKey, f32> = layout.iter().copied().collect();
+            let placed = frame.placed_ys(layout, s);
+            let (origin, height) = RasterizedFrame::extent_of(&placed, s);
+            let mut out = vec![0u8; frame.width * height as usize * 4];
+            for (row, key) in frame.lanes.iter().enumerate() {
+                let Some(&y) = ys.get(key) else { continue };
+                let h = (lod::lane_height(*key) * s).round().max(1.0) as u32;
+                let y0 = ((y - origin).round()).max(0.0) as u32;
+                for dy in 0..h {
+                    let yy = y0 + dy;
+                    if yy >= height {
+                        break;
+                    }
+                    for (i, p) in frame.row(row).iter().enumerate() {
+                        let o = (yy as usize * frame.width + i) * 4;
+                        let rgba = if *p == chrome::TRACK { [0; 4] } else { argb_to_rgba8(*p) };
+                        out[o..o + 4].copy_from_slice(&rgba);
+                    }
+                }
+            }
+            (out, height)
+        };
+        let mut rng = Rng(99);
+        let mut index = TrackIndex::default();
+        let kinds = [kind::API_SCOPE, kind::SCHEDULING_SLICE, kind::THREAD_STATE, kind::FUNCTION_CALL];
+        for tid in 0..12u32 {
+            let mut t = 0u64;
+            for k in 0..(20 + rng.below(200)) {
+                let gap = 5 + rng.below(50);
+                index.insert(LiveEvent {
+                    start_ns: t,
+                    duration_ns: 1 + rng.below(gap),
+                    tid,
+                    pid: 7,
+                    kind: kinds[tid as usize % kinds.len()],
+                    depth: (tid % 3) as u8,
+                    extra: 0,
+                    _pad: 0,
+                    name_id: k as u32,
+                });
+                t += gap;
+            }
+        }
+        let keys: Vec<LaneKey> = index.lanes().map(|(k, _)| k).collect();
+        for scale in [1.0f32, 0.72, 1.5, 2.0] {
+            // Lanes stacked with gaps, and a second layout that leaves the
+            // last ones hanging below the image another lane's height sets.
+            let mut y = 3.0f32;
+            let layout: Vec<(LaneKey, f32)> = keys
+                .iter()
+                .map(|k| {
+                    let at = y;
+                    y += lod::lane_height(*k) + lane_gap(*k) + 2.0;
+                    (*k, at)
+                })
+                .collect();
+            for width in [1usize, 33, 640] {
+                let frame = index.rasterize_pixel_layout(0, 6_000, width, &keys, Some(&layout), None, None, false);
+                assert_eq!(frame.to_rgba8_placed(&layout, scale), reference(&frame, &layout, scale), "{width} px at scale {scale}");
+            }
+        }
     }
 
     #[test]

@@ -871,6 +871,7 @@ pub(crate) fn num_cpus_hint() -> usize {
 /// debug file) does not stall a whole static chunk. Order is not preserved --
 /// callers here sort or search afterwards. No thread pool crate: symbol
 /// loading is the only hot fan-out and `std::thread::scope` is enough.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 pub(crate) fn par_map<T, R, F>(items: &[T], f: F) -> Vec<R>
 where
     T: Sync,

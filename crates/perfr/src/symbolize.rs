@@ -23,18 +23,27 @@
 //! and applies it at the target's address. That one mapping is where a
 //! process that asks the time in a loop spends most of its samples.
 
+// macOS builds no symbolizer: its functions and their names come from Frida.
+// There only the file mapping at the end (`map_file`) is used, by the code
+// view, which is why everything else in this file carries the same cfg.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 use perfr_maps::parse_maps;
-#[cfg(not(windows))]
+#[cfg(all(not(windows), any(test, target_os = "linux")))]
 use perfr_maps::{MemoryMapping, PROT_EXEC};
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 use perfr_object::{detached_debug_file, load_symbols, parse_elf_metadata, ObjectSegment, SymbolTable};
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 use perfr_object::{is_pe, parse_coff_metadata};
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 use std::sync::{Arc, Mutex};
 
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 use crate::functions::{file_offset_of, function_id};
 
 /// What one file contributes: its loadable segments and its function
 /// symbols sorted by address. Loaded once per file and shared by every
 /// mapping of it, and kept across captures (see [`FILE_CACHE`]).
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 struct LoadedFile {
     segments: Vec<ObjectSegment>,
     /// Function symbols sorted by address, for binary search.
@@ -46,6 +55,7 @@ struct LoadedFile {
 }
 
 /// One executable mapping, and the symbols of the file behind it.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 struct Module {
     start: u64,
     end: u64,
@@ -63,6 +73,7 @@ struct Module {
     file: Arc<LoadedFile>,
 }
 
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 impl Module {
     fn symbols(&self) -> &[(u64, u64, String)] {
         &self.file.symbols
@@ -72,6 +83,7 @@ impl Module {
 /// A file as the cache knows it: its path, and the size and modification
 /// time that say whether the bytes on disk are still the ones loaded. The
 /// vDSO has no file and one image per kernel, so its identity is its name.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FileIdentity {
     key: String,
@@ -79,6 +91,7 @@ struct FileIdentity {
     mtime_ns: u128,
 }
 
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 impl FileIdentity {
     fn of(key: &str) -> FileIdentity {
         let meta = if key == VDSO { None } else { std::fs::metadata(key).ok() };
@@ -94,6 +107,7 @@ impl FileIdentity {
     }
 }
 
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 const VDSO: &str = "[vdso]";
 
 /// The files of the last symbolizer built. A capture rebuilds its symbolizer
@@ -102,19 +116,23 @@ const VDSO: &str = "[vdso]";
 /// needs from here and reads only what is new or changed on disk. Replaced
 /// wholesale on every build, so it never holds more than one process's
 /// worth of symbols.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 static FILE_CACHE: Mutex<Vec<(FileIdentity, Arc<LoadedFile>)>> = Mutex::new(Vec::new());
 
 /// One executable mapping's coordinates, before its symbols are loaded: the
 /// unit of work parallelised across [`crate::par_map`]. Plain data, so `Sync`.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 struct ModuleSpec {
     start: u64,
     end: u64,
+    #[cfg(not(windows))]
     bias: u64,
     name: String,
     path: String,
     vdso: bool,
 }
 
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 impl ModuleSpec {
     /// What the file behind this mapping is keyed by in the cache.
     fn file_key(&self) -> String {
@@ -122,6 +140,7 @@ impl ModuleSpec {
     }
 }
 
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 pub struct Symbolizer {
     modules: Vec<Module>,
 }
@@ -129,6 +148,7 @@ pub struct Symbolizer {
 /// A frame with everything the call trees display, and the id the
 /// function index gives the function the address is in, so a report row
 /// can be hooked (0 when the address is in no known function).
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedFrame {
     pub name: String,
@@ -137,9 +157,11 @@ pub struct ResolvedFrame {
     pub function_id: u64,
 }
 
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 impl Symbolizer {
     /// No modules: resolves every address to its hex form. For a capture
     /// without a target process.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub fn empty() -> Symbolizer {
         Symbolizer { modules: Vec::new() }
     }
@@ -171,7 +193,6 @@ impl Symbolizer {
             .map(|m| ModuleSpec {
                 start: m.base,
                 end: m.base.saturating_add(m.size),
-                bias: m.base,
                 name: basename(&m.path).to_string(),
                 path: m.path,
                 vdso: false,
@@ -336,6 +357,7 @@ impl Symbolizer {
     }
 
     /// Distinct files behind the mappings.
+    #[cfg(any(test, target_os = "linux"))]
     pub fn file_count(&self) -> usize {
         let mut seen: Vec<*const LoadedFile> = Vec::new();
         for module in &self.modules {
@@ -396,6 +418,7 @@ impl Symbolizer {
     }
 }
 
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 impl Module {
     /// The function index's id for the function containing `address`: the
     /// hash of the module path and the symbol's file offset, the same
@@ -417,12 +440,14 @@ impl Module {
 }
 
 /// The last path component, whichever separator the OS uses.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 pub(crate) fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// A module file's loadable segments (ELF) or sections (PE), and the
 /// virtual address its symbols are keyed from.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 pub(crate) fn module_layout(bytes: &[u8], path: &str) -> (Vec<ObjectSegment>, u64) {
     if is_pe(bytes) {
         return parse_coff_metadata(bytes, path).map(|m| (m.sections, m.image_base)).unwrap_or_default();
@@ -433,7 +458,7 @@ pub(crate) fn module_layout(bytes: &[u8], path: &str) -> (Vec<ObjectSegment>, u6
 }
 
 /// The load bias of the image of `file` that `mapping` is a piece of.
-#[cfg(not(windows))]
+#[cfg(all(not(windows), any(test, target_os = "linux")))]
 fn file_load_bias(mappings: &[MemoryMapping], mapping: &MemoryMapping, file: &LoadedFile) -> u64 {
     // File offset 0 is at `image_base` in both formats -- an ELF's first
     // PT_LOAD says so, a PE's headers are mapped there -- and the segments
@@ -448,6 +473,7 @@ fn file_load_bias(mappings: &[MemoryMapping], mapping: &MemoryMapping, file: &Lo
 /// The first PT_LOAD's virtual address minus its file offset: where the
 /// file's virtual address space starts relative to its bytes. Zero for the
 /// usual layout, 0x200000 for a binary linked with an image base (Unreal).
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 fn image_base(segments: &[ObjectSegment]) -> u64 {
     segments
         .iter()
@@ -457,12 +483,14 @@ fn image_base(segments: &[ObjectSegment]) -> u64 {
 }
 
 /// The name of the symbol `address` is in; see [`symbol_at`].
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 fn find_symbol(symbols: &[(u64, u64, String)], address: u64) -> Option<&str> {
     symbol_at(symbols, address).map(|(_, _, name)| name.as_str())
 }
 
 /// How many symbols before the last one starting at or below an address
 /// are also asked whether they contain it.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 const ENCLOSING_SYMBOLS: usize = 4;
 
 /// The symbol containing `address`, of a table in [`sort_symbols`] order:
@@ -476,6 +504,7 @@ const ENCLOSING_SYMBOLS: usize = 4;
 /// is still in the function around it. It is a few entries, not a search,
 /// because a symbol further back that reached this far would overlap
 /// everything in between.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 fn symbol_at(symbols: &[(u64, u64, String)], address: u64) -> Option<&(u64, u64, String)> {
     let index = symbols.partition_point(|(start, _, _)| *start <= address);
     symbols[..index].iter().rev().take(1 + ENCLOSING_SYMBOLS).find(|(start, size, _)| {
@@ -493,6 +522,7 @@ fn symbol_at(symbols: &[(u64, u64, String)], address: u64) -> Option<&(u64, u64,
 /// Rust and Itanium C++ names made readable, lazily and memoized; see
 /// `demangle.rs` for the rule (the C++ shims that once did this with
 /// `__cxa_demangle` are gone with LLVM, so this is the only demangler).
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 fn demangle(name: &str) -> String {
     crate::demangle::pretty_cached(name)
 }
@@ -500,6 +530,7 @@ fn demangle(name: &str) -> String {
 /// The function symbols of one ELF image, sorted by address: from its
 /// detached debug file when `path` names a file that has one, else its own
 /// `.symtab`, else its `.dynsym`.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 pub(crate) fn symbol_source(bytes: &[u8], path: Option<&str>) -> Result<Vec<perfr_object::Symbol>, String> {
     if is_pe(bytes) {
         return pe_symbols(bytes, path.unwrap_or_default());
@@ -526,6 +557,7 @@ pub(crate) fn symbol_source(bytes: &[u8], path: Option<&str>) -> Result<Vec<perf
 /// ranges (`[function@0x...]`) for every function neither named -- the
 /// same three sources C++ perfr's `CoffFile` read, merged by address with
 /// the named entry winning.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 fn pe_symbols(bytes: &[u8], path: &str) -> Result<Vec<perfr_object::Symbol>, String> {
     let metadata = parse_coff_metadata(bytes, path)?;
     let mut by_address: std::collections::BTreeMap<u64, perfr_object::Symbol> = std::collections::BTreeMap::new();
@@ -577,6 +609,7 @@ fn pe_symbols(bytes: &[u8], path: &str) -> Result<Vec<perfr_object::Symbol>, Str
 /// Where a module's PDB is: the path its CodeView record names, else a
 /// file of that name beside the module, else the module's own name with
 /// `.pdb`; each candidate must carry the record's GUID and age.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 pub(crate) fn find_pdb(module_path: &str, info: &perfr_object::PdbDebugInfo) -> Option<String> {
     let module = std::path::Path::new(module_path);
     let recorded = std::path::PathBuf::from(&info.pdb_file_path);
@@ -651,6 +684,7 @@ impl std::ops::Deref for FileBytes {
     }
 }
 
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 fn sorted_symbols(bytes: &[u8], path: Option<&str>) -> Vec<(u64, u64, String)> {
     let mut symbols: Vec<(u64, u64, String)> = symbol_source(bytes, path)
         .unwrap_or_default()
@@ -668,6 +702,7 @@ fn sorted_symbols(bytes: &[u8], path: Option<&str>) -> Vec<(u64, u64, String)> {
 /// alias sorted after the function it labels matched only the entry
 /// address and left the rest of the function without a name. Symbols equal
 /// in both keep the file's order.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 fn sort_symbols(symbols: &mut [(u64, u64, String)]) {
     symbols.sort_by_key(|(address, size, _)| (*address, *size));
 }
@@ -675,6 +710,7 @@ fn sort_symbols(symbols: &mut [(u64, u64, String)]) {
 /// This process's vDSO image, copied out of its own mapping. Every process
 /// on one kernel maps the same image, so its symbol table serves the
 /// target's `[vdso]` at the target's address.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 fn vdso_image() -> Option<Vec<u8>> {
     let content = std::fs::read("/proc/self/maps").ok()?;
     let mapping = parse_maps(&content)

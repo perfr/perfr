@@ -75,6 +75,11 @@ pub struct ServerConfig {
     /// How event batches go out on the WebSocket. `--wire raw|packed|deflate`
     /// / `PERFR_LIVE_WIRE`; packed by default.
     pub wire: WireFormat,
+    /// Let every account on this machine call the API, not only the user
+    /// who started the service (and root). Off unless asked for
+    /// (`--any-local-user`): the API has no authentication, and acts with
+    /// the service's rights for whoever calls it.
+    pub any_local_user: bool,
 }
 
 impl Default for ServerConfig {
@@ -87,6 +92,7 @@ impl Default for ServerConfig {
             ring_buffer_bytes: DEFAULT_RING_BYTES,
             spill_path: None,
             wire: WireFormat::default(),
+            any_local_user: false,
         }
     }
 }

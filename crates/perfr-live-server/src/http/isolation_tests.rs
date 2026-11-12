@@ -36,6 +36,24 @@ fn apply_isolation_sets_all_three_on_any_response() {
     );
 }
 
+#[test]
+fn every_response_says_it_is_not_to_be_framed_sniffed_or_named_to_other_sites() {
+    // An error as much as a page: a refusal is what a hostile page gets.
+    for status in [StatusCode::OK, StatusCode::FORBIDDEN, StatusCode::NOT_FOUND] {
+        let resp = apply_isolation(status.into_response());
+        let h = resp.headers();
+        let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
+        for directive in ["frame-ancestors 'self'", "base-uri 'none'", "form-action 'none'", "object-src 'none'"] {
+            assert!(csp.contains(directive), "{status}: {csp}");
+        }
+        assert_eq!(h.get("x-frame-options").unwrap(), "SAMEORIGIN");
+        assert_eq!(h.get("x-content-type-options").unwrap(), "nosniff");
+        // `no-referrer` would turn the Origin of the viewer's own beacons
+        // into `null`, which the origin rule refuses.
+        assert_eq!(h.get("referrer-policy").unwrap(), "same-origin");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sharing_rejects_partial_windows_running_captures_and_cross_origin_requests() {
     let svc = test_service();
@@ -110,6 +128,7 @@ fn test_service() -> std::sync::Arc<crate::LiveService> {
         ring_buffer_bytes: 1024 * 32,
         spill_path: None,
         wire: crate::WireFormat::default(),
+        any_local_user: false,
     })
     .unwrap()
 }

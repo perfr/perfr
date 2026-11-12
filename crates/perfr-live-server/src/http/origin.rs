@@ -3,14 +3,17 @@
 // found in the LICENSE file.
 
 //! Who may call the API: the check in front of every route, by the
-//! request's `Origin` and `Host`.
+//! request's `Origin` and `Host`, and by what the browser says of the page
+//! that sent it (`Sec-Fetch-Site`).
 
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::{header, StatusCode};
+use axum::http::header::HeaderName;
+use axum::http::{header, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 
+use super::peer::{Connection, Owners};
 use crate::LiveService;
 
 /// Answers 403 to a request that `request_allowed` turns down, before any
@@ -29,8 +32,29 @@ pub(super) async fn origin_middleware(
         let origin = text(header::ORIGIN);
         // HTTP/2 carries the host in the request target, not in a header.
         let host = text(header::HOST).or_else(|| req.uri().authority().map(|a| a.as_str()));
-        let bind = svc.config.lock().bind;
-        request_allowed(origin, host, bind, &svc.machine_name())
+        let (bind, any_local_user) = {
+            let config = svc.config.lock();
+            (config.bind, config.any_local_user)
+        };
+        // Who made the connection, before anything the request says: an
+        // account of this machine that is neither the service's, nor the
+        // one that started it, nor root, has no business here. Absent only
+        // when the router is driven without a listener.
+        let caller = req.extensions().get::<axum::extract::ConnectInfo<Connection>>().map(|info| info.0.caller);
+        if caller.is_some_and(|caller| !Owners::of_this_process().allow(caller, any_local_user)) {
+            return (
+                StatusCode::FORBIDDEN,
+                "perfr answers the user who started it. Another account on this machine may call it \
+                 only when it was started with --any-local-user",
+            )
+                .into_response();
+        }
+        let fetch = FetchMetadata {
+            site: text(HeaderName::from_static("sec-fetch-site")),
+            mode: text(HeaderName::from_static("sec-fetch-mode")),
+            dest: text(HeaderName::from_static("sec-fetch-dest")),
+        };
+        request_allowed(origin, host, bind, &svc.machine_name()) && fetch.allows(req.method(), req.uri().path())
     };
     if !allowed {
         return (
@@ -61,18 +85,68 @@ pub(super) async fn origin_middleware(
 ///   the viewer; a rebinding page cannot carry it, because it would have
 ///   had to be served under that name in the first place.
 ///
+///   That last step holds for public DNS, not for the network the machine
+///   sits on: mDNS answers `<machine>.local` for whoever on the link speaks
+///   first, and a DHCP-supplied resolver answers the bare name. Someone on
+///   the same network can serve a page under this machine's name and then
+///   point the name at 127.0.0.1. So the name counts only on a service
+///   that listens beyond loopback, which that same someone can call
+///   without any of this; a service bound to loopback is never reached by
+///   its machine's name in the first place.
+///
 /// A request with neither header is HTTP/1.0 from something that is not a
 /// browser, and is let through.
 pub(crate) fn request_allowed(origin: Option<&str>, host: Option<&str>, bind: std::net::SocketAddr, machine: &str) -> bool {
     let reachable = |host: &str| {
         let name = host_name(host);
-        host_needs_no_dns(name, bind) || is_machine_name(name, machine)
+        host_needs_no_dns(name, bind) || (!bind.ip().is_loopback() && is_machine_name(name, machine))
     };
     match (origin, host) {
         (Some(origin), Some(host)) => origin_is_host(origin, host) && reachable(host),
         (Some(_), None) => false,
         (None, Some(host)) => reachable(host),
         (None, None) => true,
+    }
+}
+
+/// What a browser says about the page behind a request (Fetch Metadata):
+/// headers a page cannot set or remove, sent with every request to an
+/// origin the browser trusts to keep them, which `http://127.0.0.1` and
+/// `http://localhost` are and a LAN address over plain HTTP is not.
+///
+/// `Origin` and `Host` leave one kind of request from another site alone:
+/// a GET the page does not read. `<img src="http://127.0.0.1:44766/api/..">`
+/// and an `<iframe>` of the viewer carry no `Origin`, and are addressed to
+/// this machine by address. The page learns nothing from the first (the
+/// answer is refused to it), but the service did the work, as often as the
+/// page asked; and the second puts the working viewer, Record button and
+/// all, under whatever the page draws over it. `Sec-Fetch-Site` names both
+/// for what they are.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct FetchMetadata<'a> {
+    pub site: Option<&'a str>,
+    pub mode: Option<&'a str>,
+    pub dest: Option<&'a str>,
+}
+
+impl FetchMetadata<'_> {
+    /// Whether the request may go on. One from this service's own pages
+    /// (`same-origin`), one the user made (`none`: the address bar, a
+    /// bookmark, a link in another program) and one that says nothing (not
+    /// a browser, or a page opened by LAN address) may. From any other
+    /// page, another port of this machine included, only following a link
+    /// to the viewer may: a top-level navigation, never a frame, and never
+    /// to the API.
+    pub(crate) fn allows(self, method: &Method, path: &str) -> bool {
+        match self.site {
+            None | Some("same-origin") | Some("none") => true,
+            Some(_) => {
+                method == Method::GET
+                    && self.mode == Some("navigate")
+                    && self.dest == Some("document")
+                    && !(path == "/ws" || path == "/api" || path.starts_with("/api/"))
+            }
+        }
     }
 }
 

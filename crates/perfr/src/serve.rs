@@ -3099,7 +3099,7 @@ fn capture_loop(
 
 /// Starts the live-viewer server and blocks. Returns only on error.
 pub fn run(port: u16, gpu_helper: Option<String>) -> Result<(), String> {
-    run_on("127.0.0.1", port, gpu_helper, perfr_live_server::env_wire(), Links::default())
+    run_on("127.0.0.1", port, gpu_helper, perfr_live_server::env_wire(), Links::default(), false)
 }
 
 /// The other machines this service links to at startup (`--join`,
@@ -3110,15 +3110,32 @@ pub struct Links {
     pub connect: Vec<String>,
 }
 
+/// Whether this process has root's rights, for the warning a network bind
+/// gets.
+fn running_as_root() -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: no arguments, cannot fail.
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 /// As [`run`], on a chosen host. `0.0.0.0` exposes the viewer on the LAN;
 /// `127.0.0.1` (the command line's default) keeps it to this machine, the
-/// choice for something with no authentication in front of it.
+/// choice for something with no authentication in front of it. On this
+/// machine it answers the user who started it and root; `any_local_user`
+/// (`--any-local-user`) lets every account in.
 pub fn run_on(
     host: &str,
     port: u16,
     gpu_helper: Option<String>,
     wire: perfr_live_server::WireFormat,
     links: Links,
+    any_local_user: bool,
 ) -> Result<(), String> {
     let log_path = match crate::logging::open_file(None) {
         Ok(path) => Some(path),
@@ -3132,7 +3149,17 @@ pub fn run_on(
         ring_buffer_bytes: 256 << 20,
         spill_path: None,
         wire,
+        any_local_user,
     };
+    if !config.bind.ip().is_loopback() {
+        // Said where it is seen, at start, and not only in --help.
+        log::warn!(
+            "listening on {}: anyone who can reach that address can use the whole API, which has no \
+             authentication{}. Leave --host out to serve this machine only.",
+            config.bind,
+            if running_as_root() { " and acts as root" } else { "" }
+        );
+    }
     let service = LiveService::new(config)?;
     intern_gpu_lane_names(&service);
     // The capture clock for the clock probes between machines, and this

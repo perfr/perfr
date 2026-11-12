@@ -22,12 +22,13 @@ use perfr_live_render::{
 use crate::{LiveService, ServerConfig};
 
 mod origin;
+mod peer;
 mod viewer_log;
 mod viewer_pack;
 mod ws;
 
 #[cfg(test)]
-pub(crate) use origin::request_allowed;
+pub(crate) use origin::{request_allowed, FetchMetadata};
 use origin::{origin_middleware, share_origin_allowed};
 use viewer_log::viewer_log;
 pub(crate) use viewer_log::ViewerLogBudget;
@@ -40,10 +41,17 @@ use ws::ws_upgrade;
 
 pub async fn serve(service: Arc<LiveService>) -> Result<(), String> {
     let bind = service.config.lock().bind;
-    let app = router(service);
     let listener = TcpListener::bind(bind)
         .await
         .map_err(|e| format!("bind {bind}: {e}"))?;
+    serve_on(listener, service).await
+}
+
+/// Serves `service` on a listener that is already bound. Every connection
+/// is handed to the routes with who made it (`peer::Connection`), which is
+/// what keeps the other accounts of this machine out.
+pub(crate) async fn serve_on(listener: TcpListener, service: Arc<LiveService>) -> Result<(), String> {
+    let app = router(service).into_make_service_with_connect_info::<peer::Connection>();
     axum::serve(listener, app)
         .await
         .map_err(|e| format!("http server: {e}"))

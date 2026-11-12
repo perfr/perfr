@@ -3192,6 +3192,13 @@ impl PerfrLiveApp {
     fn set_fullscreen(&mut self, ctx: &Context, on: bool) {
         if on {
             let api = fullscreen_api_enabled();
+            // An iframe without `allow="fullscreen"` cannot take the screen,
+            // and hiding the chrome inside its frame makes nothing bigger.
+            // The page in a tab of its own is what the reader asked for.
+            if !api && page_is_framed() {
+                open_page_in_new_tab();
+                return;
+            }
             set_page_fullscreen(ctx, true);
             if api {
                 self.pending_fs = 8;
@@ -4412,10 +4419,12 @@ impl PerfrLiveApp {
         });
     }
 
-    fn transport_share(&mut self, ui: &mut Ui) {
-        // The upload uses the browser. The native build has nothing to post to.
+    /// Whether Share can be used and what its hover text says. `None` on
+    /// the native build: the upload uses the browser, and there is nothing
+    /// to post to without one.
+    fn share_state(&self) -> Option<(bool, &'static str)> {
         if !cfg!(target_arch = "wasm32") {
-            return;
+            return None;
         }
         let enabled = self.can_share();
         let tip = if enabled {
@@ -4426,6 +4435,13 @@ impl PerfrLiveApp {
             "The capture is still loading."
         } else {
             "Nothing to share yet."
+        };
+        Some((enabled, tip))
+    }
+
+    fn transport_share(&mut self, ui: &mut Ui) {
+        let Some((enabled, tip)) = self.share_state() else {
+            return;
         };
         let button = ui.add_enabled(
             enabled,
@@ -11024,26 +11040,43 @@ impl eframe::App for PerfrLiveApp {
                         .show(ctx, |ui| self.transport(ui));
                 }
                 if self.story.visible() {
-                    let story_h = self.story.bar_height() + if self.story.compact { 28.0 } else { 0.0 };
+                    let story_h = self.story.bar_height();
+                    // A compact page has no transport bar: the two of its
+                    // controls a reader of a story still wants ride at the
+                    // right end of the story's.
+                    let extras = if self.story.compact {
+                        let on = self.fullscreen || self.immersive;
+                        crate::story::BarExtras {
+                            share: self.share_state(),
+                            fullscreen: Some((on, fullscreen_hint(on))),
+                        }
+                    } else {
+                        crate::story::BarExtras::default()
+                    };
                     egui::TopBottomPanel::top("perfr_story")
-                        .exact_height(story_h)
+                        .exact_height(story_h + sat[0] * f32::from(self.story.compact))
                         .frame(
                             Frame::new()
                                 .fill(theme::PANEL())
-                                .inner_margin(Margin { left: 6, right: 6, top: 4, bottom: 2 })
+                                .inner_margin(Margin {
+                                    left: 6 + sat_i8(sat[3]),
+                                    right: 6 + sat_i8(sat[1]),
+                                    top: 4 + if self.story.compact { sat_i8(sat[0]) } else { 0 },
+                                    bottom: 2,
+                                })
                                 .stroke(Stroke::NONE),
                         )
                         .show(ctx, |ui| {
-                            let cmds = self.story.bar(ui);
-                            if self.story.compact {
-                                ui.horizontal(|ui| self.transport_share(ui));
-                            }
+                            let cmds = self.story.bar(ui, extras);
                             for cmd in cmds {
                                 match cmd {
                                     crate::story::StoryCmd::AddStep => self.story_add_step(),
+                                    crate::story::StoryCmd::Share => self.open_share(),
+                                    crate::story::StoryCmd::Fullscreen(on) => self.set_fullscreen(ui.ctx(), on),
                                 }
                             }
                         });
+                    self.story.caption(ctx);
                 }
             }
 
@@ -11723,7 +11756,7 @@ fn about_commit_row(ui: &mut Ui, hash: &str) {
     });
 }
 
-fn note_ui_rect(label: &str, rect: Rect) {
+pub(crate) fn note_ui_rect(label: &str, rect: Rect) {
     note_ui_rect_fmt(format_args!("{label}"), rect);
 }
 
@@ -11907,6 +11940,49 @@ fn safe_area_insets() -> [f32; 4] {
     #[cfg(not(target_arch = "wasm32"))]
     {
         [0.0; 4]
+    }
+}
+
+/// What the fullscreen button does, for its hover text.
+fn fullscreen_hint(on: bool) -> &'static str {
+    if on {
+        "Exit fullscreen"
+    } else if !fullscreen_api_enabled() && page_is_framed() {
+        "Open in a tab of its own (this frame may not go fullscreen)"
+    } else {
+        "Enter fullscreen"
+    }
+}
+
+/// Whether the page is shown inside another page's frame.
+fn page_is_framed() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(window) = web_sys::window() else {
+            return false;
+        };
+        // `parent` is the window itself at the top; reading it across
+        // origins is allowed, and a failure to can only mean a frame.
+        match window.parent() {
+            Ok(Some(parent)) => !js_sys::Object::is(&parent, &window),
+            Ok(None) => false,
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
+}
+
+fn open_page_in_new_tab() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(window) = web_sys::window() {
+            if let Ok(href) = window.location().href() {
+                let _ = window.open_with_url_and_target(&href, "_blank");
+            }
+        }
     }
 }
 

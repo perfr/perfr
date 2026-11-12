@@ -482,6 +482,10 @@ fn stop_cleanly_on_signals(worker: Arc<Mutex<Option<CaptureSlot>>>) {
 fn forget_previous_capture(service: &LiveService) {
     service.set_auto_profile_status(serde_json::Value::Null);
     service.set_hook_crash("");
+    // The last capture's closing line ("target 1234 exited; capture
+    // stopped") is not this capture's state: left until the loop wrote its
+    // own, a client asking right after Record read it as the answer.
+    service.set_instrumentation_status("");
 }
 
 /// The index loaded for `pid`, if there is one, and the load's status word.
@@ -3727,8 +3731,10 @@ mod tests {
         let service = LiveService::new(ServerConfig { ring_buffer_bytes: 1 << 20, ..Default::default() }).unwrap();
         service.set_hook_crash(r#"{"summary":"target 7 crashed (segfault) with 1 hook(s) armed"}"#);
         service.set_auto_profile_status(serde_json::json!({"on": true}));
+        service.set_instrumentation_status("target 7 exited; capture stopped");
         super::forget_previous_capture(&service);
         assert_eq!(service.hook_crash(), "");
+        assert_eq!(service.instrumentation_status(), "", "the last capture's closing line");
         assert!(service.auto_profile_status.lock().is_null());
     }
 

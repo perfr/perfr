@@ -17,12 +17,13 @@
 use egui::Color32;
 
 /// What a file is, from its extension.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Language {
     Rust,
     C,
     Cpp,
     Asm,
+    #[default]
     Plain,
 }
 
@@ -417,12 +418,6 @@ pub struct CodeDoc {
     pub starts: Vec<LineState>,
 }
 
-impl Default for Language {
-    fn default() -> Self {
-        Language::Plain
-    }
-}
-
 impl CodeDoc {
     pub fn new(path: &str, text: &str) -> CodeDoc {
         let lang = Language::from_path(path);
@@ -772,11 +767,13 @@ mod tests {
     #[test]
     fn copy_text_is_the_listing_without_the_gutter() {
         let doc = CodeDoc::new("/x/a.c", "int a;\nint b;\nint c;");
-        let mut d = Disassembly::default();
-        d.lines = vec![
-            DisasmLine { address: 0x1000, text: "mov eax, 1".into(), line: 1, file: "/x/a.c".into(), ..Default::default() },
-            DisasmLine { address: 0x1005, text: "call 0x2000".into(), target: "do_thing".into(), line: 1, file: "/x/a.c".into(), ..Default::default() },
-        ];
+        let d = Disassembly {
+            lines: vec![
+                DisasmLine { address: 0x1000, text: "mov eax, 1".into(), line: 1, file: "/x/a.c".into(), ..Default::default() },
+                DisasmLine { address: 0x1005, text: "call 0x2000".into(), target: "do_thing".into(), line: 1, file: "/x/a.c".into(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
         // Source: the lines as written, so it pastes back as code.
         let src = build_rows(CodeMode::Source, Some(&doc), None);
         assert_eq!(rows_to_text(&src, Some(&doc), None), "int a;\nint b;\nint c;\n");

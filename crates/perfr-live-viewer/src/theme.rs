@@ -221,9 +221,9 @@ pub fn grey_argb(argb: u32, level: u32) -> u32 {
 }
 
 pub fn dim_argb(argb: u32) -> u32 {
-    let r = ((argb >> 16) & 0xFF) as u32;
-    let g = ((argb >> 8) & 0xFF) as u32;
-    let b = (argb & 0xFF) as u32;
+    let r = (argb >> 16) & 0xFF;
+    let g = (argb >> 8) & 0xFF;
+    let b = argb & 0xFF;
     let a = argb & 0xFF00_0000;
     let luma = (r * 54 + g * 183 + b * 19) / 256;
     let mix = |c: u32| (c * 22 + luma * 78) / 100 * 38 / 100;

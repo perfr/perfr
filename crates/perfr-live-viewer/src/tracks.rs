@@ -1422,10 +1422,7 @@ impl TrackStrip {
         let mut seen = 0usize;
         let mut inserted = false;
         for &(id, h) in skeleton {
-            let leaving = match id {
-                RowId::Process(_) | RowId::Machine(_) | RowId::Scheduler => true,
-                _ => false,
-            };
+            let leaving = matches!(id, RowId::Process(_) | RowId::Machine(_) | RowId::Scheduler);
             if leaving && current == Some(pid) && !inserted {
                 items.push(SkelItem::Hole(self.block_h(d.key)));
                 inserted = true;
@@ -2083,8 +2080,7 @@ mod tests {
         }
         idx.insert(scope(40, 4, 1));
         idx.insert(scope(perfr_live_event::dev::VIEWER_PID, 1, 30_000));
-        let mut strip = TrackStrip::default();
-        strip.order_hints = OrderHints { target: Some(30), service: Some(40) };
+        let mut strip = TrackStrip { order_hints: OrderHints { target: Some(30), service: Some(40) }, ..Default::default() };
         strip.sync(&idx, None);
         assert_eq!(strip.process_order[0], 30, "the target first");
         assert_eq!(strip.process_order[1], 11, "then the process that said the most");
@@ -2830,7 +2826,7 @@ mod tests {
         strip.tick(1.0, &idx, None);
         let ids: Vec<RowId> = strip.rows().iter().map(|r| r.id).collect();
         assert!(
-            !ids.iter().any(|id| *id == RowId::Scheduler),
+            !ids.contains(&RowId::Scheduler),
             "collapsing the machine must hide the scheduler: {ids:?}"
         );
         assert!(

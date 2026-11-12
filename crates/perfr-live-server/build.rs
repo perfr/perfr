@@ -172,8 +172,7 @@ fn main() {
         fs::copy(&path, out_dir.join(&copied)).unwrap();
         let mime = mime_for(&rel);
         code.push_str(&format!(
-            "        \"{}\" => Some((\"{}\", include_bytes!(\"{}\"))),\n",
-            rel, mime, copied
+            "        \"{rel}\" => Some((\"{mime}\", include_bytes!(\"{copied}\"))),\n"
         ));
     }
     code.push_str("        _ => None,\n    }\n}\n");

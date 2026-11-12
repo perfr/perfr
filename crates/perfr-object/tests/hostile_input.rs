@@ -60,6 +60,8 @@ fn u64_at(data: &[u8], at: usize) -> Option<usize> {
 /// bytes of every section (a dynamic table, a symbol table, a note, a
 /// DWARF unit header, an export directory, the first RUNTIME_FUNCTIONs).
 /// Most of a file is code and strings, and a mutation there tests nothing.
+// A list of ranges that starts with one, not a range meant to be collected.
+#[allow(clippy::single_range_in_vec_init)]
 fn structure_of(data: &[u8]) -> Vec<Range<usize>> {
     const SECTION_HEAD: usize = 256;
     let mut hot = vec![0..data.len().min(0x400)];

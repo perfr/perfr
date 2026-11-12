@@ -107,7 +107,7 @@ fn main() {
     let (ing, idx) = ingest(&path);
     let mut by_pid: std::collections::BTreeMap<u32, std::collections::BTreeMap<&str, usize>> =
         std::collections::BTreeMap::new();
-    for ((pid, tid), _) in &ing.thread_names {
+    for (pid, tid) in ing.thread_names.keys() {
         *by_pid.entry(*pid).or_default().entry(classify(*tid)).or_default() += 1;
     }
     println!("file\t{path}");

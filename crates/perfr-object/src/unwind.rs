@@ -71,7 +71,7 @@ where
     // reports, and the difference is observable: a section holding only CIEs
     // is "found but yields nothing" -- a different error from "not found" --
     // and real binaries in /usr/lib contain exactly that.
-    if let Some(section) = find_section::<Elf>(&header, endian, data, b"debug_frame") {
+    if let Some(section) = find_section::<Elf>(header, endian, data, b"debug_frame") {
         let mut frame = gimli::DebugFrame::new(&section.data, gimli_endian);
         frame.set_address_size(if header.is_type_64() { 8 } else { 4 });
         let bases = gimli::BaseAddresses::default();
@@ -81,7 +81,7 @@ where
         }
     }
 
-    if let Some(section) = find_section::<Elf>(&header, endian, data, b"eh_frame") {
+    if let Some(section) = find_section::<Elf>(header, endian, data, b"eh_frame") {
         let mut frame = gimli::EhFrame::new(&section.data, gimli_endian);
         frame.set_address_size(if header.is_type_64() { 8 } else { 4 });
         // Giving gimli the section's load address is what makes DW_EH_PE_pcrel

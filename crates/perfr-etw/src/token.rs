@@ -8,9 +8,12 @@
 
 use std::ffi::c_void;
 
+// These two carry the names Win32 gives them.
+#[allow(clippy::upper_case_acronyms)]
 type HANDLE = *mut c_void;
 
 #[repr(C)]
+#[allow(clippy::upper_case_acronyms)]
 struct LUID {
     low: u32,
     high: i32,

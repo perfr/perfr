@@ -314,7 +314,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         for line in BufReader::new(stream).lines() {
             let Ok(line) = line else { break };
-            writeln!(output, "{}", line)?;
+            writeln!(output, "{line}")?;
             output.flush()?;
         }
     }

@@ -1542,6 +1542,9 @@ impl PerfrLiveApp {
     /// Hands the selection to the page as `window.__perfr_sel`, so a harness
     /// driving the viewer headless can check what a click selected without
     /// reading pixels. Written only when it changes.
+    // One line of JSON, each field formatted next to the others: hoisting
+    // the nested `format!`s into locals would only move them out of order.
+    #[allow(clippy::format_in_format_args)]
     fn publish_selection(&mut self) {
         let focus = self.thread_focus();
         // Same string `perfr --version` prints. A harness reads it as `build`.
@@ -3436,7 +3439,7 @@ impl PerfrLiveApp {
         }
         if let Some(s) = inbox.settings {
             let text = s.get("track_order").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            self.track_order.from_settings(&text);
+            self.track_order.adopt_settings(&text);
             self.track_order_applied_s = -1.0;
             self.server_settings = Some(s);
         }
@@ -4006,19 +4009,19 @@ impl PerfrLiveApp {
         note_ui_rect("Presets", presets.rect);
         if presets.clicked() { self.presets.open = true; ui.close(); }
         ui.set_min_width(220.0);
-        if self.has_service() && (!self.status.hooks || !self.status.capturing) {
-            if ui
+        if self.has_service()
+            && (!self.status.hooks || !self.status.capturing)
+            && ui
                 .selectable_label(self.status.demo, "Demo")
                 .on_hover_text("Dummy scopes (no PerfrService attach)")
                 .clicked()
-            {
-                if self.status.demo || self.recording {
-                    self.stop_record();
-                } else {
-                    self.start_demo_path();
-                }
-                ui.close();
+        {
+            if self.status.demo || self.recording {
+                self.stop_record();
+            } else {
+                self.start_demo_path();
             }
+            ui.close();
         }
         if ui
             .button("Open…")
@@ -5181,7 +5184,7 @@ impl PerfrLiveApp {
             }
             self.selection_hook_controls(ui);
         });
-        let shown = if capped { &rows[..MAX_ROWS] } else { &rows[..] };
+        let shown = if capped { &rows[..MAX_ROWS] } else { rows };
         // Laid out by hand: only the rows inside the clip rect become
         // widgets, the rest are one allocation above and one below, so a
         // 50,000-row list costs what a screenful does.
@@ -5457,7 +5460,7 @@ impl PerfrLiveApp {
         self.paint_verbose_stats(ui);
         status_row(ui, "Frame rate", &format!("{:.0} fps", self.fps_ema));
         status_row(ui, "Stream", &format_rate(self.ws_rate_bps));
-        status_row(ui, "Renderer", &self.gpu_backend);
+        status_row(ui, "Renderer", self.gpu_backend);
         if ui.button("Retry symbol loading").clicked() {
             self.loaded_symbol_pid = None;
         }
@@ -7837,7 +7840,7 @@ impl PerfrLiveApp {
                 let mods = response.ctx.input(|i| i.modifiers);
                 // Shift adds to the selection; Ctrl is the zoom gesture and
                 // leaves the selection be. A plain drag starts a fresh one.
-                if !mods.shift && !(mods.ctrl || mods.command) {
+                if !(mods.shift || mods.ctrl || mods.command) {
                     self.sample_sels.clear();
                 }
                 let t = time_at_x(p.x, rect, self.t0, self.t1);
@@ -8909,7 +8912,7 @@ impl PerfrLiveApp {
         }
         if let Some(d) = &self.code_disasm {
             let src = match &self.code_doc {
-                Some(doc) if d.files.iter().any(|f| *f == doc.path) => doc.name().to_string(),
+                Some(doc) if d.files.contains(&doc.path) => doc.name().to_string(),
                 _ if d.files.is_empty() => "no line table in the module: disassembly only".to_string(),
                 _ => "source not loaded".to_string(),
             };
@@ -9353,10 +9356,8 @@ impl PerfrLiveApp {
                 .desired_width(f32::INFINITY)
                 .hint_text("# e.g.\nMyGame*\nperfr"),
         );
-        if edit.changed() {
-            if self.track_order.reparse() {
-                self.track_order_applied_s = -1.0;
-            }
+        if edit.changed() && self.track_order.reparse() {
+            self.track_order_applied_s = -1.0;
         }
         if edit.lost_focus() {
             self.sync_track_order_setting();
@@ -10903,10 +10904,10 @@ impl eframe::App for PerfrLiveApp {
                     }),
                 )
             });
-            let search_sel_changed = self.last_dirty.map_or(true, |d| {
+            let search_sel_changed = self.last_dirty.is_none_or(|d| {
                 d.selected != pick_key(self.selected)
                     || d.hover != pick_key(self.hover)
-                    || (d.search == 0) != !self.search_active()
+                    || (d.search == 0) == self.search_active()
             });
             self.idle_skip_chrome = skip_idle_chrome(
                 self.wants_live_repaint() || self.needs_repaint || self.follow,
@@ -12293,7 +12294,7 @@ fn fmt_bytes(bytes: f32) -> String {
     if mib >= 1.0 {
         format!("{mib:.1} MiB")
     } else {
-        format!("{:.0} B", bytes)
+        format!("{bytes:.0} B")
     }
 }
 
@@ -12781,7 +12782,7 @@ impl UiTweaks {
         let field = |key: &str| -> Option<f32> {
             let i = text.find(&format!("\"{key}\":"))? + key.len() + 3;
             let rest = &text[i..];
-            let end = rest.find(|c: char| c == ',' || c == '}').unwrap_or(rest.len());
+            let end = rest.find([',', '}']).unwrap_or(rest.len());
             // `NaN` parses, and `clamp` hands a NaN back as it came.
             rest[..end].trim().parse().ok().filter(|v: &f32| !v.is_nan())
         };
@@ -13188,7 +13189,7 @@ fn paint_quiet_grid(ui: &Ui, rect: Rect, t0: f64, t1: f64, light: bool) {
     let mut t = (t0 / major).floor() * major;
     // A step under an ulp of `t` would never advance it: bail rather than
     // spin (see `fit_content_window`).
-    if !(t + major > t) {
+    if !steps_forward(t, major) {
         return;
     }
     while t <= t1 {
@@ -13565,6 +13566,13 @@ fn scale_instances_ppp(instances: &mut [ScopeInstance], ppp: f32) {
     }
 }
 
+/// Whether adding `step` to `t` moves it forward. It does not when the step
+/// is under an ulp of `t`, zero, negative or not a number, and a tick loop
+/// over such a step would never end.
+fn steps_forward(t: f64, step: f64) -> bool {
+    t + step > t
+}
+
 fn tick_steps(span_ns: f64, width_px: f32) -> (f64, f64) {
     let target = span_ns / (width_px.max(1.0) as f64 / 92.0);
     let exp = target.max(1.0).log10().floor();
@@ -13601,7 +13609,7 @@ fn paint_timebar(ui: &Ui, rect: Rect, t0: f64, t1: f64, origin_ns: f64) {
     let span = (t1 - t0).max(1.0);
     let (_major, minor) = tick_steps(span, rect.width());
     let mut t = (t0 / minor).floor() * minor;
-    if !(t + minor > t) {
+    if !steps_forward(t, minor) {
         return;
     }
     // Signed: a window may start left of zero, and counting its first
@@ -13709,7 +13717,7 @@ fn paint_selection_overlay(
     // Where a band paints vertically: a per-thread selection sits on its
     // sample bar; anything else spans the whole height.
     let band_y = |m: &TimeMeasure| -> (f32, f32, bool) {
-        match m.sample_tid.and_then(|t| sample_band(t)) {
+        match m.sample_tid.and_then(sample_band) {
             Some((a, b)) => (a.max(rect.top()), b.min(rect.bottom()), true),
             None => (rect.top(), rect.bottom(), false),
         }
@@ -13892,7 +13900,7 @@ fn elide_to_width(s: &str, max_w: f32, measure: &mut impl FnMut(&str) -> f32) ->
     let mut lo = 0usize;
     let mut hi = chars.len();
     while lo < hi {
-        let mid = (lo + hi + 1) / 2;
+        let mid = (lo + hi).div_ceil(2);
         let mut cand: String = chars[..mid].iter().collect();
         cand.push('…');
         if measure(&cand) <= max_w {
@@ -14043,9 +14051,9 @@ fn paint_clip_labels(
 /// a dark one. Rec. 601 luma. The old code always used white, which a light
 /// scheme's paler accent boxes (Solarized yellow, say) washed out.
 fn label_ink(fill_argb: u32) -> Color32 {
-    let r = ((fill_argb >> 16) & 0xFF) as u32;
-    let g = ((fill_argb >> 8) & 0xFF) as u32;
-    let b = (fill_argb & 0xFF) as u32;
+    let r = (fill_argb >> 16) & 0xFF;
+    let g = (fill_argb >> 8) & 0xFF;
+    let b = fill_argb & 0xFF;
     let luma = (r * 54 + g * 183 + b * 19) / 256;
     if luma > 150 {
         Color32::from_rgb(0x14, 0x16, 0x1A)

@@ -518,9 +518,7 @@ impl StorySession {
     }
 
     fn push_overlay(&mut self, overlay: Overlay) -> Option<StoryCmd> {
-        let Some(doc) = self.doc.as_mut() else {
-            return None;
-        };
+        let doc = self.doc.as_mut()?;
         if doc.steps.is_empty() {
             self.pending_overlay = Some(overlay);
             return Some(StoryCmd::AddStep);

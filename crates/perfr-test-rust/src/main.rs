@@ -64,7 +64,7 @@ fn physics_worker(index: u32, stop: Arc<AtomicBool>, jobs: Arc<std::sync::Mutex<
         // Take a job if one is waiting: this is the other end of the arrow.
         let job = jobs.lock().ok().and_then(|rx| rx.try_recv().ok());
         if let Some(job) = job {
-            let run = perfr_api::scope(&format!("run job {}", job.index));
+            let run = perfr_api::scope(format!("run job {}", job.index));
             perfr_api::link(job.enqueued_at, run.handle());
             busy(1_500);
             drop(run);
@@ -250,7 +250,7 @@ fn main() {
             let _update = perfr_api::scope("update");
             busy(2_000);
             // A name built at runtime, and long enough to need continuations.
-            let _detail = perfr_api::scope(&format!(
+            let _detail = perfr_api::scope(format!(
                 "update entities: pass={} camera=({:.1},{:.1}) budget=16.6ms lod=adaptive",
                 frame % 4,
                 (frame as f32 * 0.7).sin() * 100.0,

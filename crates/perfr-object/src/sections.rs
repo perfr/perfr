@@ -64,7 +64,7 @@ where
         let trimmed = name
             .iter()
             .position(|b| !matches!(b, b'.' | b'_' | b'z'))
-            .map_or(&name[..], |start| &name[start..]);
+            .map_or(name, |start| &name[start..]);
         if trimmed != wanted {
             continue;
         }

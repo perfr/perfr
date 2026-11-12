@@ -1252,7 +1252,7 @@ mod tests {
         // onto a fraction of the rings; the mix has to survive both.
         const RINGS: usize = DEFAULT_RING_COUNT;
         for stride in [1u64, 4, 16, 4096] {
-            let mut counts = vec![0usize; RINGS];
+            let mut counts = [0usize; RINGS];
             const THREADS: u64 = 64_000;
             for i in 0..THREADS {
                 counts[ring_for_thread(100_000 + i * stride, RINGS)] += 1;

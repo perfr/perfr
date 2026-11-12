@@ -80,7 +80,7 @@ pub mod flags {
 /// instead of reserving a variable-length span. The name rides in the record
 /// as text, up to [`INLINE_TEXT`] bytes of it, for the reasons on `text`.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScopeEvent {
     /// CLOCK_MONOTONIC, the same clock perf timestamps use, so these
     /// interleave with scheduling and samples on one timeline.
@@ -133,21 +133,6 @@ const _: () = assert!(INLINE_TEXT == 32);
 pub const MAX_NAME_BYTES: usize = INLINE_TEXT * 256;
 
 pub const EVENT_SIZE: usize = 56;
-
-impl Default for ScopeEvent {
-    fn default() -> ScopeEvent {
-        ScopeEvent {
-            timestamp_ns: 0,
-            scope_id: 0,
-            tid: 0,
-            kind: 0,
-            depth: 0,
-            flags: 0,
-            text_len: 0,
-            text: [0; 32],
-        }
-    }
-}
 
 const _: () = assert!(std::mem::size_of::<ScopeEvent>() == EVENT_SIZE);
 const _: () = assert!(std::mem::align_of::<ScopeEvent>() == 8);

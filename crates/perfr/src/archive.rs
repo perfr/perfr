@@ -263,9 +263,9 @@ pub(crate) fn pack_tar_gz(files: &[(&str, &[u8], u32)]) -> Vec<u8> {
         raw.extend(tar_header(path, bytes.len() as u64, *mode));
         raw.extend_from_slice(bytes);
         let pad = (512 - (bytes.len() % 512)) % 512;
-        raw.extend(std::iter::repeat(0).take(pad));
+        raw.extend(std::iter::repeat_n(0, pad));
     }
-    raw.extend(std::iter::repeat(0).take(1024));
+    raw.extend(std::iter::repeat_n(0, 1024));
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&raw).unwrap();
     encoder.finish().unwrap()

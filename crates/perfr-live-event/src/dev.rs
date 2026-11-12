@@ -295,7 +295,7 @@ pub fn render_worker_tid(index: u32) -> u32 {
 }
 
 pub fn is_render_worker_tid(tid: u32) -> bool {
-    tid >= TID_RENDER_W0 && tid < TID_RENDER_W0 + RENDER_WORKER_COUNT
+    (TID_RENDER_W0..TID_RENDER_W0 + RENDER_WORKER_COUNT).contains(&tid)
 }
 
 pub fn render_worker_label(index: u32) -> &'static str {

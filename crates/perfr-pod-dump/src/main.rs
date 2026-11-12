@@ -86,7 +86,7 @@ fn main() {
                 println!("  cpu       {}", text(cpu_model));
                 println!("  cores     {cpu_cores} physical / {cpu_threads} logical");
                 println!("  ram       {:.1} GiB", *ram_total_bytes as f64 / (1u64 << 30) as f64);
-                println!("  captured  {} (unix ns)", capture_start_unix_ns);
+                println!("  captured  {capture_start_unix_ns} (unix ns)");
                 "SystemInfo"
             }
             Event::GpuInfo { device_index, pci_vendor_id, vram_total_bytes, name, driver_version, .. } => {

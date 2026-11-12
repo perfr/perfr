@@ -256,7 +256,7 @@ pub fn parse_record_sample_with(
             } else {
                 sample.stack_data = Some(copied.to_vec());
             }
-        } else if let Some(dest) = stack_dest.as_deref_mut() {
+        } else if let Some(dest) = stack_dest {
             // A record with no stack must not reuse the previous record's bytes.
             dest.clear();
         }

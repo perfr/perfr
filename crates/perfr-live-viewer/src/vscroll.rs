@@ -281,8 +281,7 @@ mod tests {
 
     #[test]
     fn tick_eases_then_stops() {
-        let mut i = VScrollInertia::default();
-        i.velocity = 400.0;
+        let mut i = VScrollInertia { velocity: 400.0, ..Default::default() };
         let mut y = 0.0;
         let max = 10_000.0;
         for _ in 0..8 {
@@ -300,8 +299,7 @@ mod tests {
 
     #[test]
     fn tick_clamps_and_cancels_at_bounds() {
-        let mut i = VScrollInertia::default();
-        i.velocity = -2_000.0;
+        let mut i = VScrollInertia { velocity: -2_000.0, ..Default::default() };
         let y = i.tick(10.0, 1.0 / 30.0, 400.0);
         assert_eq!(y, 0.0);
         assert_eq!(i.velocity(), 0.0);
@@ -315,8 +313,7 @@ mod tests {
 
     #[test]
     fn cancel_zeros_velocity() {
-        let mut i = VScrollInertia::default();
-        i.velocity = 900.0;
+        let mut i = VScrollInertia { velocity: 900.0, ..Default::default() };
         i.cancel();
         assert_eq!(i.velocity(), 0.0);
         assert!(!i.is_coasting());
@@ -325,8 +322,7 @@ mod tests {
 
     #[test]
     fn begin_drag_cancels_coast_and_follows_finger() {
-        let mut i = VScrollInertia::default();
-        i.velocity = 1_200.0;
+        let mut i = VScrollInertia { velocity: 1_200.0, ..Default::default() };
         i.begin_drag();
         assert!(!i.is_coasting());
         let y = i.drag(200.0, 40.0, 1.0 / 60.0, 1_000.0);

@@ -388,9 +388,9 @@ impl AutoProfiler {
             unhook(self, id, Why::OverBudget { per_s }, wait);
         }
         self.total_per_s = self.hooked.values().map(|h| h.per_s).sum();
-        if !(self.total_per_s > 0.0) {
-            self.total_per_s = 0.0;
-        }
+        // `max` returns the other operand for a NaN: a sum that is not a
+        // number, or below zero, is no load.
+        self.total_per_s = self.total_per_s.max(0.0);
 
         // Room under the budget and the cap: the next functions the samples
         // point at, by inclusive share. A quarter of the budget is kept free

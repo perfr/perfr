@@ -85,9 +85,11 @@ fn spill_from_service_ring_does_not_corrupt_live_snapshot() {
     let dir = std::env::temp_dir().join(format!("perfr-live-svc-spill-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let mut cfg = ServerConfig::default();
-    cfg.ring_buffer_bytes = (perfr_live_event::LIVE_EVENT_SIZE * 4) as u64;
-    cfg.spill_path = Some(dir.clone());
+    let cfg = ServerConfig {
+        ring_buffer_bytes: (perfr_live_event::LIVE_EVENT_SIZE * 4) as u64,
+        spill_path: Some(dir.clone()),
+        ..Default::default()
+    };
     let svc = LiveService::new(cfg).unwrap();
     for i in 0..10 {
         svc.push_event(ev(i));

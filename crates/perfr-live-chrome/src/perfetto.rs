@@ -355,7 +355,7 @@ struct Clock {
 
 impl Clock {
     /// An absolute reading of this clock, in trace-clock nanoseconds.
-    fn to_trace_ns(&self, units: u64) -> i128 {
+    fn to_trace_ns(self, units: u64) -> i128 {
         // Readings and the multiplier come from the file: 2^64 of each
         // does not fit the product.
         (i128::from(units) - i128::from(self.snap_units))

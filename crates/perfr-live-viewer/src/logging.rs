@@ -91,7 +91,7 @@ mod wasm {
             }
             let message = record.args().to_string();
             let target = record.target().to_string();
-            let console_line = wasm_bindgen::JsValue::from_str(&format!("[{}] {message}", target));
+            let console_line = wasm_bindgen::JsValue::from_str(&format!("[{target}] {message}"));
             match record.level() {
                 log::Level::Error => web_sys::console::error_1(&console_line),
                 log::Level::Warn => web_sys::console::warn_1(&console_line),

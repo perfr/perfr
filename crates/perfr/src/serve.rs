@@ -3363,7 +3363,7 @@ pub fn run_on(
             // of a large capture touches a few groups and the footer.
             Some((a, b)) => perfr_capture::slice_bundle_file(path, a, b).map(|(b, _)| b),
             None => std::fs::read(path)
-                .map_err(|e| perfr_capture::CaptureError::Io(e))
+                .map_err(perfr_capture::CaptureError::Io)
                 .and_then(|bytes| perfr_capture::CaptureBundle::from_zip(&bytes)),
         }
         .map_err(|e| format!("{path}: {e}"))?;
@@ -3480,7 +3480,7 @@ pub fn run_on(
                 }
                 match index {
                     Some(index) => {
-                        let (resolved, unknown) = hooks_from_ids(&index, &ids);
+                        let (resolved, unknown) = hooks_from_ids(&index, ids);
                         for id in &unknown {
                             log::warn!("no such function id {id}, hook skipped");
                         }
@@ -3539,10 +3539,9 @@ pub fn run_on(
                 let name_ids: Vec<u32> = hooks.iter().map(|h| scopes.intern_name(&h.name)).collect();
                 let label_ids: Vec<u32> =
                     hooks.iter().map(|h| scopes.intern_name(&format!("auto-unhooked: {}", h.name))).collect();
-                let session = crate::frida::FridaSession::arm(pid, &hooks, &name_ids, &label_ids, max_hook_calls_per_s).map_err(|error| {
+                let session = crate::frida::FridaSession::arm(pid, &hooks, &name_ids, &label_ids, max_hook_calls_per_s).inspect_err(|error| {
                     capture_running.store(false, Ordering::SeqCst);
-                    start_service.set_instrumentation_status(&error);
-                    error
+                    start_service.set_instrumentation_status(error);
                 })?;
                 // The hooks are live: read the target's segment from now on,
                 // not from the loop's first discovery tick.

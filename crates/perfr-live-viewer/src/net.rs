@@ -668,6 +668,11 @@ pub fn scale_frame_rgba(frame: &ServiceFrame, row_h: u32) -> (Vec<u8>, u32) {
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_impl {
+    // The socket and the upload request are browser handles, which are not
+    // `Send`. They sit in the same `Arc<Mutex<..>>` as the rest of what the
+    // page shares with the callbacks the browser runs, all on one thread.
+    #![allow(clippy::arc_with_non_send_sync)]
+
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -2145,6 +2150,19 @@ mod native_impl {
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_impl::Net;
 
+/// A query value, percent-encoded: paths carry `/`, spaces and worse.
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 3);
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'/') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2545,18 +2563,5 @@ mod tests {
         assert_eq!(hits.functions.len(), 1);
         assert_eq!(hits.functions[0].name, "foo::Bar");
     }
-}
-
-/// A query value, percent-encoded: paths carry `/`, spaces and worse.
-fn percent_encode(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() * 3);
-    for b in text.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'/') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 

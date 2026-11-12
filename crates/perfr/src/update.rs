@@ -206,7 +206,7 @@ pub fn run_with(
         .find(|asset| asset.name == asset_name)
         .cloned()
         .ok_or_else(|| format!("release {} has no {asset_name}", release.tag))?;
-    let checksum_asset = checksum_asset(&release, &asset_name);
+    let checksum_asset = checksum_asset(&release, asset_name);
     if opts.check {
         return Ok(check_report(&current, &latest, relation, manager.as_ref()));
     }

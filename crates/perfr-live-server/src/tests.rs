@@ -1603,7 +1603,7 @@ fn a_viewer_asset_is_served_with_an_etag_and_revalidated_by_it() {
         let condition = etag.map(|tag| format!("If-None-Match: {tag}\r\n")).unwrap_or_default();
         send_raw(served.addr, format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{condition}\r\n").as_bytes())
     };
-    for path in ["/", "/app.js", "/perfr_live_viewer_bg.wasm"] {
+    for path in ["/", "/perfr_live_viewer.js", "/perfr_live_viewer_bg.wasm"] {
         let (status, head, _) = fetch(path, None);
         assert_eq!(status, 200, "{path}");
         assert_eq!(header_of(&head, "cache-control").as_deref(), Some("no-cache"), "{path}");
@@ -1618,7 +1618,7 @@ fn a_viewer_asset_is_served_with_an_etag_and_revalidated_by_it() {
     }
     // Two assets do not share a tag.
     let tag = |path: &str| header_of(&fetch(path, None).1, "etag").unwrap();
-    assert_ne!(tag("/app.js"), tag("/index.html"));
+    assert_ne!(tag("/perfr_live_viewer.js"), tag("/index.html"));
     assert_eq!(tag("/"), tag("/index.html"));
 }
 

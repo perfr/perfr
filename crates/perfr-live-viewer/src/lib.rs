@@ -8,9 +8,7 @@
 //! widgets; the timeline is one `PaintCallback` (hybrid wgpu).
 //! Parsing of ELF/DWARF and protobuf stays on the service.
 
-use perfr_live_event::InternTable;
-use perfr_live_protocol::LiveFrame;
-use perfr_live_render::{choose_lod, TimelineLod, TrackIndex, INSTANCE_MIN_PX};
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
@@ -59,135 +57,6 @@ mod vscroll;
 #[cfg(feature = "egui")]
 pub use app::PerfrLiveApp;
 
-#[wasm_bindgen]
-pub struct LiveViewer {
-    index: TrackIndex,
-    intern: InternTable,
-    leftover: Vec<u8>,
-}
-
-#[wasm_bindgen]
-impl LiveViewer {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> LiveViewer {
-        console_error_panic_hook::set_once();
-        install_wasm_clock();
-        Self {
-            index: TrackIndex::default(),
-            intern: InternTable::default(),
-            leftover: Vec::new(),
-        }
-    }
-
-    /// Decode one or more length-prefixed live frames and insert events.
-    pub fn ingest(&mut self, bytes: &[u8]) -> u32 {
-        let mut leftover = std::mem::take(&mut self.leftover);
-        let mut consumed_frames = 0u32;
-        // This client has nowhere to show a fault. What matters is that the
-        // buffer is emptied on one, so a frame it cannot read no longer
-        // holds back, and piles up, everything sent after it.
-        let _ = frames::drain_frames(&mut leftover, bytes, |frame| {
-            self.apply_frame(frame);
-            consumed_frames += 1;
-        });
-        self.leftover = leftover;
-        consumed_frames
-    }
-
-    pub fn event_count(&self) -> u32 {
-        self.index.event_count() as u32
-    }
-
-    pub fn lane_count(&self) -> u32 {
-        self.index.lane_count() as u32
-    }
-
-    /// `[t0, t1]` in nanoseconds, or empty if the index has no events.
-    pub fn time_bounds(&self) -> Vec<f64> {
-        match self.index.time_bounds() {
-            Some((a, b)) => vec![a as f64, b as f64],
-            None => vec![],
-        }
-    }
-
-    /// Pixel-column rasterize. Returns packed RGBA8 (`lanes * width * 4`).
-    pub fn rasterize(&self, t0: f64, t1: f64, width: u32) -> Vec<u8> {
-        let width = width.max(1) as usize;
-        let t0 = t0.max(0.0) as u64;
-        let t1 = (t1 as u64).max(t0 + 1);
-        self.index
-            .rasterize_pixel(t0, t1, width, Some(&self.intern))
-            .to_rgba8()
-    }
-
-    /// `0` = pixel columns, `1` = instanced SDF primitives.
-    pub fn choose_lod(&self, t0: f64, t1: f64, width: u32) -> u32 {
-        let width = width.max(1) as usize;
-        let t0 = t0.max(0.0) as u64;
-        let t1 = (t1 as u64).max(t0 + 1);
-        match choose_lod(&self.index, t0, t1, width, INSTANCE_MIN_PX) {
-            TimelineLod::Instanced => 1,
-            TimelineLod::PixelColumns => 0,
-        }
-    }
-
-    /// Packed instances: `f32 height`, `u32 count`, then `count * (x,y,w,h,color,r)`.
-    pub fn collect_instances(&self, t0: f64, t1: f64, width: u32) -> Vec<u8> {
-        let width = width.max(1) as f32;
-        let t0 = t0.max(0.0) as u64;
-        let t1 = (t1 as u64).max(t0 + 1);
-        let frame = perfr_live_render::collect_instances(
-            &self.index,
-            t0,
-            t1,
-            width,
-            0.0,
-            Some(&self.intern),
-        );
-        let mut out = Vec::with_capacity(8 + frame.instances.len() * 24);
-        out.extend_from_slice(&frame.height.to_le_bytes());
-        out.extend_from_slice(&(frame.instances.len() as u32).to_le_bytes());
-        for i in &frame.instances {
-            out.extend_from_slice(&i.x.to_le_bytes());
-            out.extend_from_slice(&i.y.to_le_bytes());
-            out.extend_from_slice(&i.w.to_le_bytes());
-            out.extend_from_slice(&i.h.to_le_bytes());
-            out.extend_from_slice(&i.color.to_le_bytes());
-            out.extend_from_slice(&i.radius.to_le_bytes());
-        }
-        out
-    }
-
-    pub fn reset(&mut self) {
-        self.index.clear();
-        self.intern = InternTable::default();
-        self.leftover.clear();
-    }
-}
-
-impl LiveViewer {
-    fn apply_frame(&mut self, frame: LiveFrame) {
-        match frame {
-            LiveFrame::EventBatch { events } => {
-                for ev in events {
-                    self.index.insert(ev);
-                }
-            }
-            LiveFrame::InternedString { id, text } => {
-                self.intern.insert_id(id, &text);
-            }
-            LiveFrame::CaptureStarted { .. } => {
-                self.index.clear();
-            }
-            LiveFrame::CaptureFinished
-            | LiveFrame::Hello { .. }
-            | LiveFrame::Status { .. }
-            | LiveFrame::ThreadName { .. }
-            | LiveFrame::ProcessName { .. } => {}
-        }
-    }
-}
-
 /// `globalThis.performance.timeOrigin + .now()` — works on Window and
 /// DedicatedWorker, and is comparable *between* them.
 ///
@@ -232,9 +101,6 @@ fn wasm_now_ns() -> u64 {
 fn install_wasm_clock() {
     perfr_live_event::dev::set_now_hook(wasm_now_ns);
 }
-
-#[cfg(not(target_arch = "wasm32"))]
-fn install_wasm_clock() {}
 
 /// Called after JS `initThreadPool` resolves. `n == 1` keeps collect/raster
 /// sequential (SAB missing / init failed).
@@ -283,94 +149,4 @@ pub async fn start_eframe(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsVa
             Box::new(|cc| Ok(Box::new(PerfrLiveApp::new(cc)))),
         )
         .await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use perfr_live_event::{kind, LiveEvent, LIVE_EVENT_SIZE};
-    use perfr_live_protocol::{encode_frame, LiveFrame, VERSION};
-
-    #[test]
-    fn choose_lod_is_instanced_for_wide_scopes() {
-        let mut v = LiveViewer::new();
-        let ev = LiveEvent {
-            start_ns: 0,
-            duration_ns: 1_000_000,
-            tid: 1,
-            pid: 1,
-            kind: kind::API_SCOPE,
-            depth: 1,
-            extra: 0,
-            _pad: 0,
-            name_id: 1,
-        };
-        let bytes = encode_frame(&LiveFrame::EventBatch { events: vec![ev] });
-        assert_eq!(v.ingest(&bytes), 1);
-        assert_eq!(v.choose_lod(0.0, 1_000_000.0, 200), 1);
-        let packed = v.collect_instances(0.0, 1_000_000.0, 200);
-        assert!(packed.len() >= 8 + 24);
-        let count = u32::from_le_bytes(packed[4..8].try_into().unwrap());
-        assert_eq!(count, 1);
-        assert_eq!(v.choose_lod(0.0, 1_000_000_000.0, 200), 0);
-    }
-
-    #[test]
-    fn ingest_batch_and_rasterize() {
-        let mut v = LiveViewer::new();
-        let ev = LiveEvent {
-            start_ns: 0,
-            duration_ns: 100,
-            tid: 1,
-            pid: 1,
-            kind: kind::API_SCOPE,
-            depth: 0,
-            extra: 0,
-            _pad: 0,
-            name_id: 1,
-        };
-        let bytes = encode_frame(&LiveFrame::EventBatch { events: vec![ev] });
-        assert_eq!(v.ingest(&bytes), 1);
-        assert_eq!(v.event_count(), 1);
-        let pix = v.rasterize(0.0, 100.0, 8);
-        assert_eq!(pix.len(), 8 * 4);
-        assert!(pix.iter().any(|&b| b != 0));
-    }
-
-    #[test]
-    fn a_frame_of_an_unknown_type_does_not_hold_back_what_follows() {
-        let mut v = LiveViewer::new();
-        let ev = LiveEvent {
-            start_ns: 0,
-            duration_ns: 100,
-            tid: 1,
-            pid: 1,
-            kind: kind::API_SCOPE,
-            depth: 0,
-            extra: 0,
-            _pad: 0,
-            name_id: 1,
-        };
-        // Type 200, three bytes of payload: well formed, from some later build.
-        let mut bytes = vec![3, 0, 0, 0, 200, 1, 2, 3];
-        bytes.extend_from_slice(&encode_frame(&LiveFrame::EventBatch { events: vec![ev] }));
-        assert_eq!(v.ingest(&bytes), 1);
-        assert_eq!(v.event_count(), 1);
-        // And bytes that are no frame at all are dropped, not kept in front
-        // of everything that arrives later.
-        assert_eq!(v.ingest(&[0xFF; 32]), 0);
-        assert_eq!(v.ingest(&encode_frame(&LiveFrame::EventBatch { events: vec![ev] })), 1);
-        assert_eq!(v.event_count(), 2);
-    }
-
-    #[test]
-    fn hello_then_partial_frame_is_buffered() {
-        let mut v = LiveViewer::new();
-        let hello = encode_frame(&LiveFrame::Hello {
-            version: VERSION,
-            event_size: LIVE_EVENT_SIZE as u16,
-        });
-        assert_eq!(v.ingest(&hello[..3]), 0);
-        assert_eq!(v.ingest(&hello[3..]), 1);
-    }
 }

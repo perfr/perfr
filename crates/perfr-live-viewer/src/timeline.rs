@@ -150,6 +150,13 @@ pub enum TimelinePayload {
     Instanced {
         instances: Vec<ScopeInstance>,
     },
+    /// The column texture of the last `Pixel` payload stands; only the
+    /// hover and selection marks drawn over it are replaced. In the column
+    /// LOD the hovered scope changes with every move of the pointer, and
+    /// sending `Pixel` for it re-rasterized the whole view each time.
+    Overlay {
+        overlay: Vec<ScopeInstance>,
+    },
     /// Hover, selection or search moved and nothing else: only these
     /// instances' flag words change, written in place -- 4 bytes each
     /// instead of the whole buffer repacked and re-sent.
@@ -876,6 +883,9 @@ impl TimelineGpu {
                     return;
                 }
                 self.upload_columns(device, queue, rgba, *width, *height, layer);
+            }
+            TimelinePayload::Overlay { overlay } => {
+                self.upload_instances(device, queue, overlay, layer);
             }
             TimelinePayload::Instanced { instances } => {
                 {

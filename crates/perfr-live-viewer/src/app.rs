@@ -939,6 +939,9 @@ pub struct PerfrLiveApp {
     last_view_span: Option<u64>,
     last_dirty: Option<GpuDirtyKey>,
     last_lod: perfr_live_render::TimelineLod,
+    /// The level of detail last decided, and what it was decided for: the
+    /// window, the width, the index's revision and which timeline asked.
+    lod_memo: Option<((u64, u64, usize, u64, bool), perfr_live_render::TimelineLod)>,
     /// Dest of the last painted frame; `TimelinePayload::Keep` reuses it.
     last_view: Option<ViewUniforms>,
     clip_labels: ClipLabelCache,
@@ -1009,6 +1012,9 @@ pub struct PerfrLiveApp {
     /// nothing, so this is what a test can count.
     #[cfg(test)]
     report_requests: u32,
+    /// How often the column LOD rasterized the view, for the same reason.
+    #[cfg(test)]
+    column_rasters: u32,
     /// Set when the selection was made on one thread's sample bar.
     /// Which of the four report views is showing.
     report_tab: ReportTab,
@@ -1818,6 +1824,7 @@ impl PerfrLiveApp {
             last_view_span: None,
             last_dirty: None,
             last_lod: perfr_live_render::TimelineLod::PixelColumns,
+            lod_memo: None,
             last_view: None,
             clip_labels: ClipLabelCache::default(),
             skip_clip_labels: false,
@@ -1858,6 +1865,8 @@ impl PerfrLiveApp {
             last_report_request_s: 0.0,
             #[cfg(test)]
             report_requests: 0,
+            #[cfg(test)]
+            column_rasters: 0,
             report_tab: crate::dev::query_report_tab_from_location()
                 .and_then(|v| ReportTab::from_query(&v))
                 .unwrap_or(ReportTab::Flat),
@@ -5755,14 +5764,28 @@ impl PerfrLiveApp {
             let y_cull = YCull::from_clip(rect.min.y, clip.min.y, clip.height(), Y_CULL_PAD);
             let lod = {
                 let _lod = dev.scope(TID_RENDER, NAME_LOD);
-                choose_lod_hint(
-                    &self.index,
-                    t0,
-                    t1,
-                    width as usize,
-                    INSTANCE_MIN_PX,
-                    self.hover.map(|h| h.lane_key()),
-                )
+                // The answer is a walk over every lane when nothing in view
+                // is wide enough to draw as a box, which is the zoomed-out
+                // view exactly, and it depends on the events and the window
+                // alone (the hovered lane only decides where the walk looks
+                // first). Asked again every frame of a still view it was
+                // two thirds of that frame.
+                let key = (t0, t1, width as usize, self.index.revision(), self.in_self_pane);
+                match self.lod_memo {
+                    Some((k, lod)) if k == key => lod,
+                    _ => {
+                        let lod = choose_lod_hint(
+                            &self.index,
+                            t0,
+                            t1,
+                            width as usize,
+                            INSTANCE_MIN_PX,
+                            self.hover.map(|h| h.lane_key()),
+                        );
+                        self.lod_memo = Some((key, lod));
+                        lod
+                    }
+                }
             };
             self.lod_label = lod.as_str();
             self.last_lod = lod;
@@ -5869,7 +5892,9 @@ impl PerfrLiveApp {
                     }
                     // Keep redraws last frame's texture, so it must keep last
                     // frame's dest or the blit jumps between LOD rects.
-                    TimelinePayload::Keep if self.last_lod != perfr_live_render::TimelineLod::Instanced => {
+                    TimelinePayload::Keep | TimelinePayload::Overlay { .. }
+                        if self.last_lod != perfr_live_render::TimelineLod::Instanced =>
+                    {
                         let mut v = self.last_view.unwrap_or(view_body);
                         v.time = now;
                         v
@@ -6661,6 +6686,30 @@ impl PerfrLiveApp {
         ));
     }
 
+    /// The selected and the hovered scope as instances to draw over the
+    /// column texture, in body points. The hovered one is left out when it
+    /// is the selected one.
+    fn pick_overlay(&self, layout: &[(LaneKey, f32)], t0: u64, t1: u64, width: f32) -> Vec<ScopeInstance> {
+        let mut overlay = Vec::new();
+        let mut mark = |pick: ScopePick, flags: f32| {
+            if let Some(mut inst) =
+                overlay_instance(&self.index, layout, t0, t1, width, pick, self.tracks.scale, Some(&self.intern))
+            {
+                inst.flags = flags;
+                overlay.push(inst);
+            }
+        };
+        if let Some(selected) = self.selected {
+            mark(selected, FLAG_SELECTED);
+        }
+        if let Some(hovered) = self.hover {
+            if self.selected != Some(hovered) {
+                mark(hovered, FLAG_HOVER);
+            }
+        }
+        overlay
+    }
+
     fn timeline_payload(
         &mut self,
         t0: u64,
@@ -6749,6 +6798,11 @@ impl PerfrLiveApp {
             self.last_dirty = None;
         }
         let mode = upload_mode(self.last_dirty.as_ref(), &next_key);
+        // Hover or selection moved and nothing else did, the search and the
+        // thread focus included: those two dim the raster itself.
+        let pick_only = self
+            .last_dirty
+            .is_some_and(|prev| GpuDirtyKey { selected: next_key.selected, hover: next_key.hover, ..prev } == next_key);
         self.draw_readout = format!(
             "{{\"lod\":{},\"mode\":\"{:?}\",\"t0\":{},\"t1\":{},\"width\":{:.0},\"dest\":[{},{},{},{}],\"cull\":[{},{}],\"scroll\":{},\"events\":{},\"layout_gen\":{}}}",
             next_key.lod,
@@ -6796,6 +6850,19 @@ impl PerfrLiveApp {
             }
             scale_instances_ppp(&mut instances, ppp);
             return (TimelinePayload::Instanced { instances }, None);
+        }
+        if mode == UploadMode::Flags
+            && pick_only
+            && lod == perfr_live_render::TimelineLod::PixelColumns
+            && dragged.is_none()
+            && self.index.event_count() > 0
+        {
+            // The column texture on the GPU is this view's: the key says
+            // nothing it was drawn from has changed. Only the marks move.
+            let _up = dev.scope(TID_RENDER, NAME_UPLOAD);
+            let mut overlay = self.pick_overlay(&layout, t0, t1, width);
+            scale_instances_ppp(&mut overlay, ppp);
+            return (TimelinePayload::Overlay { overlay }, None);
         }
         if self.index.event_count() > 0 {
             let mut overlay = Vec::new();
@@ -6917,37 +6984,10 @@ impl PerfrLiveApp {
             }
             self.last_instances.clear();
             self.last_instanced_window = None;
-            if let Some(sel) = self.selected {
-                if let Some(mut inst) = overlay_instance(
-                    &self.index,
-                    &layout,
-                    t0,
-                    t1,
-                    width,
-                    sel,
-                    self.tracks.scale,
-                    Some(&self.intern),
-                ) {
-                    inst.flags = FLAG_SELECTED;
-                    overlay.push(inst);
-                }
-            }
-            if let Some(hov) = self.hover {
-                if self.selected.map(|s| s != hov).unwrap_or(true) {
-                    if let Some(mut inst) = overlay_instance(
-                        &self.index,
-                        &layout,
-                        t0,
-                        t1,
-                        width,
-                        hov,
-                        self.tracks.scale,
-                        Some(&self.intern),
-                    ) {
-                        inst.flags = FLAG_HOVER;
-                        overlay.push(inst);
-                    }
-                }
+            overlay.extend(self.pick_overlay(&layout, t0, t1, width));
+            #[cfg(test)]
+            {
+                self.column_rasters += 1;
             }
             let (bg, raster_spans) = {
                 // One scope, not three — see the note in the instanced arm.
@@ -12443,14 +12483,12 @@ fn count_visible_scopes(
         let Some(lane) = index.lane(*key) else {
             continue;
         };
-        let mut i = lane.first_ending_after(t0);
-        while let Some(e) = lane.events().get(i) {
-            if e.start_ns >= t1 {
-                break;
-            }
-            n = n.saturating_add(1);
-            i += 1;
-        }
+        // Every event from the first that ends after `t0` to the last that
+        // starts before `t1`: the events are in order of start, so that is
+        // a difference of two positions, not a walk between them.
+        let first = lane.first_ending_after(t0);
+        let past = lane.events().partition_point(|e| e.start_ns < t1).max(first);
+        n = n.saturating_add(u32::try_from(past - first).unwrap_or(u32::MAX));
     }
     n
 }

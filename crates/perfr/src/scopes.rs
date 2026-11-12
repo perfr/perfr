@@ -301,7 +301,9 @@ impl ScopeSource {
             return;
         }
         if let Ok(reader) = ScopeRingReader::open(self_pid) {
-            self.segments.push(Segment::adopt(self_pid, reader));
+            // Through the same door as any other process's, so the log says
+            // the service's own segment was opened too.
+            self.add_segment(self_pid, reader);
         }
     }
 

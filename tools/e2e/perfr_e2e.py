@@ -1040,7 +1040,11 @@ class WeekCapture:
 
 
 def _week_capture(run, seconds=4.0):
-    if WeekCapture.taken and run.service.get("/api/status")["events_live"] > 0:
+    # Still loaded only if the service holds that very capture: any scenario
+    # in between may have recorded or opened another one, and a flag set here
+    # does not hear of it. The ring's target says which capture it is.
+    status = run.service.get("/api/status")
+    if WeekCapture.taken and status["events_live"] > 0 and status.get("target_pid") == WeekCapture.pid and not status.get("capturing"):
         return
     app = Target(_build_app("rust"))
     try:
@@ -1375,14 +1379,16 @@ def live_tab(run):
 def batch_hook(run):
     if run.chrome is None:
         return "skipped: --no-shots"
-    _week_capture(run)
-    run.service.post("/api/symbols/load", {"pid": WeekCapture.pid})
-    run.wait_for(
-        lambda: run.service.get(f"/api/symbols/status?pid={WeekCapture.pid}").get("status") == "ready",
-        "symbols ready", timeout=40,
-    )
+    # The Functions pane lists what can be hooked in the selected process,
+    # and the viewer lets go of a process that has exited: the shared
+    # capture's target is gone by now, so this needs one that is running.
+    run.load_symbols()
+    run.capture(seconds=3.0)
+    run.stop_capture()
     run.open_viewer("?collapse=scheduler&report=functions")
     run.wait_for(lambda: run.sel().get("tab") == "Functions", "the Functions tab")
+    run.wait_for(lambda: run.sel().get("selected_pid") == run.target.pid or None,
+                 f"the viewer to pick the capture's target ({run.target.pid})", timeout=15)
     rows = run.wait_for(lambda: run.rects_matching("hook:") or None, "function rows", timeout=20)
     check_at_least(len(rows), 6, "function rows in the pane")
     # Drag over a range of rows, in the name area (not the checkbox column), to
@@ -1587,10 +1593,10 @@ def python_reader(run):
     probe = subprocess.run([PYARROW_PYTHON, "-c", "import pyarrow"], capture_output=True)
     if probe.returncode != 0:
         return f"skipped: {PYARROW_PYTHON} has no pyarrow (set PERFR_E2E_PYARROW_PYTHON)"
-    path = os.path.join(SCRATCH, "capture.perfr.zip")
-    if not os.path.exists(path):
-        _week_capture(run)
-        _export_bundle(run, "capture.perfr.zip")
+    # Exported here, every time: the scratch directory outlives a run, and a
+    # bundle left in it by another scenario or another day is not this capture.
+    _week_capture(run)
+    path = _export_bundle(run, "capture.perfr.zip")
     folder = os.path.join(SCRATCH, "capture-unzipped")
     shutil.rmtree(folder, ignore_errors=True)
     import zipfile

@@ -2086,3 +2086,86 @@ fn render_frame_times() {
         (page.app.t1 - page.app.t0) / 1e6
     );
 }
+
+#[test]
+fn a_drag_down_the_flat_report_selects_every_row_it_crosses() {
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.sampling = Some(crate::net::SamplingReport {
+            samples: 1_000,
+            rows: (0..12u64)
+                .map(|i| crate::net::SamplingRow {
+                    name: format!("stage_{i:02}"),
+                    module: "game".into(),
+                    self_count: 100 - i,
+                    inclusive_count: 200 - i,
+                    self_percent: 10.0 - i as f32 * 0.5,
+                    inclusive_percent: 20.0,
+                    function_id: i + 1,
+                })
+                .collect(),
+            ..Default::default()
+        });
+        app.open_right_tab(ReportTab::Flat);
+    });
+    page.frames(3);
+    let row = |page: &Page, i: usize| page.rect_of(&format!("report:stage_{i:02}")).unwrap_or_else(|| panic!("row {i} is not drawn"));
+    let first_top = row(&page, 0).top();
+    let x = row(&page, 1).center().x;
+    let (from, to) = (row(&page, 1).center().y, row(&page, 5).center().y);
+    page.frame(vec![Event::PointerMoved(Pos2::new(x, from))]);
+    page.frame(vec![pointer_button(Pos2::new(x, from), true)]);
+    // Down a row at a time. The selection only grows, and the rows stay
+    // where they are: the line of controls that comes with a selection used
+    // to push them down under the pointer, which then left the range empty,
+    // which took the line away again.
+    let mut sizes = Vec::new();
+    for step in 1..=16 {
+        let y = from + (to - from) * step as f32 / 16.0;
+        page.frame(vec![Event::PointerMoved(Pos2::new(x, y))]);
+        sizes.push(page.app.report_selection.len());
+        assert_eq!(row(&page, 0).top(), first_top, "the rows moved at step {step}: {sizes:?}");
+    }
+    page.frame(vec![pointer_button(Pos2::new(x, to), false)]);
+    page.frames(2);
+    assert!(sizes.windows(2).all(|w| w[1] >= w[0]), "the selection shrank on the way down: {sizes:?}");
+    let mut selected: Vec<u64> = page.app.report_selection.iter().copied().collect();
+    selected.sort();
+    assert_eq!(selected, vec![2, 3, 4, 5, 6], "rows 1 to 5, whose function ids are 2 to 6: {sizes:?}");
+}
+
+#[test]
+fn the_functions_list_scrolls_smoothly_and_a_drag_selects_what_it_crosses() {
+    let mut page = functions_page(400);
+    let name = |i: usize| format!("fn:engine::subsystem_{:03}::Component::update_stage_{i:06}", i % 311);
+    let row = |page: &Page, i: usize| page.rect_of(&name(i)).unwrap_or_else(|| panic!("row {i} is not drawn: {:?}", page.labels()));
+
+    // A drag from the third row to the eighth selects those six.
+    let x = row(&page, 2).center().x;
+    let (from, to) = (row(&page, 2).center().y, row(&page, 7).center().y);
+    page.frame(vec![Event::PointerMoved(Pos2::new(x, from))]);
+    page.frame(vec![pointer_button(Pos2::new(x, from), true)]);
+    for step in 1..=10 {
+        page.frame(vec![Event::PointerMoved(Pos2::new(x, from + (to - from) * step as f32 / 10.0))]);
+    }
+    page.frame(vec![pointer_button(Pos2::new(x, to), false)]);
+    page.frames(2);
+    let mut selected: Vec<u64> = page.app.report_selection.iter().copied().collect();
+    selected.sort();
+    assert_eq!(selected, vec![3, 4, 5, 6, 7, 8], "rows 2 to 7, whose function ids are 3 to 8");
+
+    // Scrolled a few pixels at a time, a row only ever moves up. The rows
+    // out of view were given the row height each and not the distance
+    // between rows, so every time one more left the top the rest jumped
+    // back down by the difference.
+    let over = row(&page, 6).center();
+    page.frame(vec![Event::PointerMoved(over)]);
+    let mut tops = vec![row(&page, 9).top()];
+    for _ in 0..24 {
+        page.frame(vec![wheel(-4.0)]);
+        page.frames(2);
+        tops.push(row(&page, 9).top());
+    }
+    assert!(tops.windows(2).all(|w| w[1] <= w[0]), "row 9 moved back down while scrolling: {tops:?}");
+    assert!(tops[0] - tops[tops.len() - 1] > 40.0, "the list scrolled: {tops:?}");
+}

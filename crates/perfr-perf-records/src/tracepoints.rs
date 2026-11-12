@@ -2,15 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The scheduling tracepoint payloads, ported from
-//! `src/LinuxTracing/KernelTracepoints.h`.
+//! The scheduling tracepoint payloads.
 //!
 //! A tracepoint sample's `RAW` payload is the tracepoint's own fields, laid
-//! out exactly as its `format` file in tracefs describes. The C++ hard-codes
-//! those layouts with `static_assert`s on the sizes rather than parsing the
-//! format file at runtime, and this does the same, offset for offset -- the
-//! offsets are ABI in practice, and a mismatch is the sort of thing the size
-//! assertions catch at compile time rather than in the field.
+//! out exactly as its `format` file in tracefs describes. The offsets are
+//! read from that file when a capture starts (`*Layout::from_format`); the
+//! compiled-in `DEFAULT` layouts are the fallback for a format file that
+//! cannot be read, and match the kernels measured so far.
 //!
 //! Reading is by explicit offset rather than by casting a packed struct, so
 //! nothing here needs `unsafe` and a short payload returns `None` instead of
@@ -27,11 +25,13 @@ fn i64_at(bytes: &[u8], offset: usize) -> Option<i64> {
     Some(i64::from_le_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?))
 }
 
-/// A fixed-width `char[16]` comm field, trimmed at the first NUL.
-fn comm_at(bytes: &[u8], offset: usize) -> Option<String> {
+/// A fixed-width `char[16]` comm field, trimmed at the first NUL. Lent from
+/// the payload: these are parsed for every context switch on the machine,
+/// and nothing downstream has yet wanted a name badly enough to own one.
+fn comm_at(bytes: &[u8], offset: usize) -> Option<&[u8]> {
     let raw = bytes.get(offset..offset + 16)?;
     let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
-    Some(String::from_utf8_lossy(&raw[..end]).into_owned())
+    Some(&raw[..end])
 }
 
 /// The `offset` and `size` of each named field in a tracepoint's tracefs
@@ -73,14 +73,15 @@ pub fn format_field_offsets(text: &str) -> std::collections::HashMap<String, (us
     out
 }
 
-/// `sched:sched_switch`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SchedSwitch {
-    pub prev_comm: String,
+/// `sched:sched_switch`. The comms are the bytes the kernel wrote, which
+/// need not be UTF-8.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SchedSwitch<'a> {
+    pub prev_comm: &'a [u8],
     pub prev_tid: i32,
     /// The task state bits; see [`thread_state_from_bits`].
     pub prev_state: i64,
-    pub next_comm: String,
+    pub next_comm: &'a [u8],
     pub next_tid: i32,
 }
 
@@ -118,17 +119,17 @@ impl SchedSwitchLayout {
     }
 }
 
-impl SchedSwitch {
+impl<'a> SchedSwitch<'a> {
     /// Layout: common(8), prev_comm[16], prev_pid(4), prev_prio(4),
     /// prev_state(8), next_comm[16], next_pid(4), next_prio(4), pad(4) = 68.
     pub const LEN: usize = 68;
 
     /// Parse with the compiled-in default layout.
-    pub fn parse(payload: &[u8]) -> Option<SchedSwitch> {
+    pub fn parse(payload: &'a [u8]) -> Option<SchedSwitch<'a>> {
         SchedSwitch::parse_with(payload, &SchedSwitchLayout::DEFAULT)
     }
 
-    pub fn parse_with(payload: &[u8], layout: &SchedSwitchLayout) -> Option<SchedSwitch> {
+    pub fn parse_with(payload: &'a [u8], layout: &SchedSwitchLayout) -> Option<SchedSwitch<'a>> {
         Some(SchedSwitch {
             prev_comm: comm_at(payload, layout.prev_comm)?,
             prev_tid: i32_at(payload, layout.prev_pid)?,
@@ -140,9 +141,9 @@ impl SchedSwitch {
 }
 
 /// `sched:sched_wakeup`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SchedWakeup {
-    pub comm: String,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SchedWakeup<'a> {
+    pub comm: &'a [u8],
     pub tid: i32,
 }
 
@@ -162,26 +163,26 @@ impl SchedWakeupLayout {
     }
 }
 
-impl SchedWakeup {
+impl<'a> SchedWakeup<'a> {
     /// Only the fixed head is read. Kernel v5.14 removed the `success` field
     /// (torvalds/linux 58b9987de86c) and the padding with it, so everything
     /// after `prio` is version-dependent and none of it is needed here.
     pub const FIXED_LEN: usize = 32;
 
-    pub fn parse(payload: &[u8]) -> Option<SchedWakeup> {
+    pub fn parse(payload: &'a [u8]) -> Option<SchedWakeup<'a>> {
         SchedWakeup::parse_with(payload, &SchedWakeupLayout::DEFAULT)
     }
 
-    pub fn parse_with(payload: &[u8], layout: &SchedWakeupLayout) -> Option<SchedWakeup> {
+    pub fn parse_with(payload: &'a [u8], layout: &SchedWakeupLayout) -> Option<SchedWakeup<'a>> {
         Some(SchedWakeup { comm: comm_at(payload, layout.comm)?, tid: i32_at(payload, layout.pid)? })
     }
 }
 
 /// `task:task_newtask`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TaskNewtask {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TaskNewtask<'a> {
     pub tid: i32,
-    pub comm: String,
+    pub comm: &'a [u8],
     /// The `clone(2)` flags; `CLONE_THREAD` set means a thread of the parent's
     /// process, clear means a new process. Zero when the record is too short
     /// to carry them.
@@ -200,7 +201,11 @@ pub struct TaskNewtaskLayout {
 }
 
 impl TaskNewtaskLayout {
-    pub const DEFAULT: TaskNewtaskLayout = TaskNewtaskLayout { pid: 8, comm: 12, clone_flags: 28 };
+    /// `clone_flags` is an 8-byte field and the kernel's struct is not
+    /// packed, so it sits at 32, not directly after `comm` at 28. Read at
+    /// 28, `CLONE_THREAD` is tested against padding and a new thread is
+    /// taken for a new process whenever the format file cannot be parsed.
+    pub const DEFAULT: TaskNewtaskLayout = TaskNewtaskLayout { pid: 8, comm: 12, clone_flags: 32 };
 
     pub fn from_format(text: &str) -> Option<TaskNewtaskLayout> {
         let f = format_field_offsets(text);
@@ -212,16 +217,16 @@ impl TaskNewtaskLayout {
     }
 }
 
-impl TaskNewtask {
-    /// Layout: common(8), pid(4), comm[16], clone_flags(8), oom_score_adj(2),
-    /// pad(14) = 52.
-    pub const LEN: usize = 52;
+impl<'a> TaskNewtask<'a> {
+    /// Layout: common(8), pid(4), comm[16], pad(4), clone_flags(8),
+    /// oom_score_adj(2), pad(6) = 48.
+    pub const LEN: usize = 48;
 
-    pub fn parse(payload: &[u8]) -> Option<TaskNewtask> {
+    pub fn parse(payload: &'a [u8]) -> Option<TaskNewtask<'a>> {
         TaskNewtask::parse_with(payload, &TaskNewtaskLayout::DEFAULT)
     }
 
-    pub fn parse_with(payload: &[u8], layout: &TaskNewtaskLayout) -> Option<TaskNewtask> {
+    pub fn parse_with(payload: &'a [u8], layout: &TaskNewtaskLayout) -> Option<TaskNewtask<'a>> {
         Some(TaskNewtask {
             tid: i32_at(payload, layout.pid)?,
             comm: comm_at(payload, layout.comm)?,
@@ -304,14 +309,92 @@ mod tests {
         payload
     }
 
+    /// A `sched_switch` sample as the tracepoint ring carries it: header,
+    /// the id fields, then the payload behind a u32 size.
+    fn sched_switch_record(prev_tid: i32, next_tid: i32) -> Vec<u8> {
+        let payload = sched_switch_payload(prev_tid, 0x01, next_tid);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&crate::record_type::SAMPLE.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&100u32.to_le_bytes()); // pid
+        bytes.extend_from_slice(&101u32.to_le_bytes()); // tid
+        bytes.extend_from_slice(&7_000u64.to_le_bytes()); // time
+        bytes.extend_from_slice(&9u64.to_le_bytes()); // stream id
+        bytes.extend_from_slice(&3u32.to_le_bytes()); // cpu
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        let size = bytes.len() as u16;
+        bytes[6..8].copy_from_slice(&size.to_le_bytes());
+        bytes
+    }
+
+    /// `cargo test --release -p perfr-perf-records -- --ignored --nocapture parsing_cost`
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn parsing_cost_of_a_sched_switch_record() {
+        use crate::reader::{parse_record_sample, parse_tracepoint_sample, sample_bits, SampleFlags};
+        let record = sched_switch_record(1234, 5678);
+        let flags = SampleFlags { sample_type: sample_bits::TID_TIME_STREAMID_CPU | sample_bits::RAW, regs_user_count: 0 };
+        const ROUNDS: u32 = 5_000_000;
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let mut sum = 0i64;
+            for _ in 0..ROUNDS {
+                let sample = parse_record_sample(std::hint::black_box(&record), flags, true).unwrap();
+                let switch = SchedSwitch::parse_with(sample.raw_data.as_deref().unwrap(), &SchedSwitchLayout::DEFAULT).unwrap();
+                sum += i64::from(switch.prev_tid) + i64::from(switch.next_tid) + sample.time as i64;
+            }
+            eprintln!(
+                "owned sample + sched_switch:    {:.1} ns/record ({sum})",
+                start.elapsed().as_nanos() as f64 / f64::from(ROUNDS)
+            );
+            let start = std::time::Instant::now();
+            let mut sum = 0i64;
+            for _ in 0..ROUNDS {
+                let sample = parse_tracepoint_sample(std::hint::black_box(&record)).unwrap();
+                let switch = SchedSwitch::parse_with(sample.raw, &SchedSwitchLayout::DEFAULT).unwrap();
+                sum += i64::from(switch.prev_tid) + i64::from(switch.next_tid) + sample.time as i64;
+            }
+            eprintln!(
+                "borrowed sample + sched_switch: {:.1} ns/record ({sum})",
+                start.elapsed().as_nanos() as f64 / f64::from(ROUNDS)
+            );
+        }
+    }
+
+    #[test]
+    fn a_tracepoint_sample_read_in_place_matches_the_owned_one() {
+        use crate::reader::{parse_record_sample, parse_tracepoint_sample, sample_bits, SampleFlags};
+        let record = sched_switch_record(1234, 5678);
+        let flags = SampleFlags { sample_type: sample_bits::TID_TIME_STREAMID_CPU | sample_bits::RAW, regs_user_count: 0 };
+        let owned = parse_record_sample(&record, flags, true).unwrap();
+        let lent = parse_tracepoint_sample(&record).unwrap();
+        assert_eq!((lent.pid, lent.tid, lent.time, lent.cpu), (owned.pid, owned.tid, owned.time, owned.cpu));
+        assert_eq!((lent.pid, lent.tid, lent.time, lent.cpu), (100, 101, 7_000, 3));
+        assert_eq!(Some(lent.raw), owned.raw_data.as_deref());
+        assert_eq!(SchedSwitch::parse(lent.raw).unwrap().next_tid, 5678);
+        // Cut anywhere, both refuse it; neither reads past the end.
+        for cut in 0..record.len() {
+            assert_eq!(parse_tracepoint_sample(&record[..cut]), None, "cut at {cut}");
+            assert!(parse_record_sample(&record[..cut], flags, true).is_none(), "cut at {cut}");
+        }
+        // A payload size that runs past the record.
+        let mut long = record.clone();
+        long[40..44].copy_from_slice(&(SchedSwitch::LEN as u32 + 1).to_le_bytes());
+        assert_eq!(parse_tracepoint_sample(&long), None);
+    }
+
     #[test]
     fn a_sched_switch_payload_yields_both_threads_and_the_state() {
-        let parsed = SchedSwitch::parse(&sched_switch_payload(1234, 0x01, 5678)).unwrap();
+        let payload = sched_switch_payload(1234, 0x01, 5678);
+        let parsed = SchedSwitch::parse(&payload).unwrap();
         assert_eq!(parsed.prev_tid, 1234);
         assert_eq!(parsed.next_tid, 5678);
         assert_eq!(parsed.prev_state, 0x01);
-        assert_eq!(parsed.prev_comm, "prev");
-        assert_eq!(parsed.next_comm, "next");
+        assert_eq!(parsed.prev_comm, b"prev");
+        assert_eq!(parsed.next_comm, b"next");
     }
 
     #[test]
@@ -334,14 +417,14 @@ mod tests {
     fn a_comm_is_trimmed_at_its_nul() {
         let mut payload = vec![0u8; SchedSwitch::LEN];
         payload[8..16].copy_from_slice(b"physics\0");
-        assert_eq!(SchedSwitch::parse(&payload).unwrap().prev_comm, "physics");
+        assert_eq!(SchedSwitch::parse(&payload).unwrap().prev_comm, b"physics");
     }
 
     #[test]
     fn a_comm_filling_all_sixteen_bytes_is_not_truncated() {
         let mut payload = vec![0u8; SchedSwitch::LEN];
         payload[8..24].copy_from_slice(b"0123456789abcdef");
-        assert_eq!(SchedSwitch::parse(&payload).unwrap().prev_comm, "0123456789abcdef");
+        assert_eq!(SchedSwitch::parse(&payload).unwrap().prev_comm, b"0123456789abcdef");
     }
 
     #[test]
@@ -430,7 +513,23 @@ mod layout_tests {
     fn wakeup_and_newtask_layouts_parse_from_format() {
         let wake = "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n";
         assert_eq!(SchedWakeupLayout::from_format(wake), Some(SchedWakeupLayout::DEFAULT));
-        let newtask = "\tfield:pid_t pid;\toffset:8;\tsize:4;\n\tfield:char comm[16];\toffset:12;\tsize:16;\n\tfield:unsigned long clone_flags;\toffset:28;\tsize:8;\n";
+        let newtask = "\tfield:pid_t pid;\toffset:8;\tsize:4;\n\tfield:char comm[16];\toffset:12;\tsize:16;\n\tfield:unsigned long clone_flags;\toffset:32;\tsize:8;\n";
         assert_eq!(TaskNewtaskLayout::from_format(newtask), Some(TaskNewtaskLayout::DEFAULT));
+    }
+
+    /// The record as the kernel lays it out: `clone_flags` is an 8-byte
+    /// field, so it is aligned to 32 and four bytes of padding follow `comm`.
+    #[test]
+    fn the_default_newtask_layout_reads_clone_flags_past_the_alignment_padding() {
+        let mut payload = vec![0u8; TaskNewtask::LEN];
+        payload[8..12].copy_from_slice(&4242i32.to_le_bytes());
+        payload[12..18].copy_from_slice(b"worker");
+        payload[32..40].copy_from_slice(&(CLONE_THREAD | 0x100).to_le_bytes());
+        payload[40..42].copy_from_slice(&(-17i16).to_le_bytes()); // oom_score_adj
+        let parsed = TaskNewtask::parse(&payload).unwrap();
+        assert_eq!(parsed.tid, 4242);
+        assert_eq!(parsed.comm, b"worker");
+        assert_eq!(parsed.clone_flags, CLONE_THREAD | 0x100);
+        assert_eq!(payload.len(), 48, "the size of trace_event_raw_task_newtask");
     }
 }

@@ -2908,7 +2908,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perfr"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "clap",
  "cpp_demangle",
@@ -2920,6 +2920,7 @@ dependencies = [
  "miniz_oxide 0.8.9",
  "object",
  "perfr-api",
+ "perfr-build-info",
  "perfr-capture",
  "perfr-etw",
  "perfr-frida-transport",
@@ -2930,6 +2931,7 @@ dependencies = [
  "perfr-perf-records",
  "perfr-perf-ring",
  "perfr-scope-ring",
+ "perfr-story",
  "perfr-thread-states",
  "perfr-tracing-state",
  "perfr-unwind",
@@ -2943,11 +2945,15 @@ dependencies = [
 
 [[package]]
 name = "perfr-api"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "libc",
  "perfr-scope-ring",
 ]
+
+[[package]]
+name = "perfr-build-info"
+version = "0.1.1"
 
 [[package]]
 name = "perfr-capture"
@@ -2962,18 +2968,6 @@ dependencies = [
  "perfr-live-event",
  "perfr-live-protocol",
  "serde_json",
-]
-
-[[package]]
-name = "perfr-collector"
-version = "0.1.1"
-dependencies = [
- "libc",
- "perfr-perf-merge",
- "perfr-perf-records",
- "perfr-perf-ring",
- "perfr-tracing-state",
- "perfr-wire",
 ]
 
 [[package]]
@@ -3106,7 +3100,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
- "tower-http",
 ]
 
 [[package]]
@@ -3119,10 +3112,12 @@ dependencies = [
  "egui-wgpu",
  "js-sys",
  "log",
+ "perfr-build-info",
  "perfr-live-chrome",
  "perfr-live-event",
  "perfr-live-protocol",
  "perfr-live-render",
+ "perfr-story",
  "rfd",
  "serde",
  "serde_json",
@@ -3148,10 +3143,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "perfr-perf-merge"
-version = "0.1.1"
-
-[[package]]
 name = "perfr-perf-records"
 version = "0.1.1"
 
@@ -3171,18 +3162,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "perfr-ptrace"
-version = "0.1.1"
-dependencies = [
- "libc",
- "perfr-maps",
-]
-
-[[package]]
 name = "perfr-scope-ring"
 version = "0.1.1"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "perfr-story"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3200,15 +3191,6 @@ version = "0.1.1"
 [[package]]
 name = "perfr-tracing-state"
 version = "0.1.1"
-
-[[package]]
-name = "perfr-trampoline"
-version = "0.1.1"
-dependencies = [
- "iced-x86",
- "perfr-maps",
- "perfr-ptrace",
-]
 
 [[package]]
 name = "perfr-unwind"
@@ -4240,22 +4222,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "tower-http"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e9cd434a998747dd2c4276bc96ee2e0c7a2eadf3cae88e52be55a05fa9053f5"
-dependencies = [
- "bitflags 2.13.1",
- "bytes",
- "http",
- "http-body",
- "http-body-util",
- "pin-project-lite",
- "tower-layer",
- "tower-service",
 ]
 
 [[package]]

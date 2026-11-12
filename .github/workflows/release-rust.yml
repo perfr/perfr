@@ -11,7 +11,20 @@
 #
 # workflow_dispatch with an empty tag builds the same artifacts and
 # does not create a release or a tag. Set tag to an existing perfr-v*
-# tag to attach a release to it. This workflow never creates a tag.
+# tag to build that tag's commit and attach a release to it, whichever
+# branch the run is started from. This workflow never creates a tag.
+#
+# The viewer job packs crates/perfr-live-viewer/viewer-dist, built for
+# this tag, as perfr-viewer.tar.gz plus perfr-viewer.tar.gz.sha256.
+# publish attaches both. The platform jobs embed that same pack.
+
+env:
+  # Empty on a manual run with no tag, so the stamp stays `dev+<hash>`.
+  PERFR_RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.tag || '' }}
+  # What every job checks out. A manual run for a tag starts from a branch:
+  # without this it would build the branch and publish the result under the
+  # tag. Empty (the event's own ref) in every other case.
+  PERFR_RELEASE_REF: ${{ github.event.inputs.tag && format('refs/tags/{0}', github.event.inputs.tag) || '' }}
 
 name: release-rust
 
@@ -34,12 +47,78 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  viewer:
+    name: Viewer pack
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PERFR_RELEASE_REF }}
+
+      # This job gates the other three. The binaries take their version from
+      # the tree, so a tag that names another version must not publish.
+      - name: Check the tag against the stamped version
+        if: env.PERFR_RELEASE_TAG != ''
+        run: tools/release/check_tag.sh "$PERFR_RELEASE_TAG"
+
+      - name: Pin the build stamp to this commit
+        run: |
+          set -euo pipefail
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          echo "PERFR_GIT_HASH=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
+
+      - name: Build the viewer and pack it
+        run: |
+          set -euo pipefail
+          ./crates/perfr-live-viewer/build_wasm.sh
+          # Paths inside the archive are relative to viewer-dist/, so a
+          # static host extracts it and serves index.html at the top.
+          tar -C crates/perfr-live-viewer/viewer-dist -czf perfr-viewer.tar.gz .
+          sha256sum perfr-viewer.tar.gz | tee perfr-viewer.tar.gz.sha256
+          tar -tzf perfr-viewer.tar.gz | grep -qE '(^|/)index.html$'
+          tar -tzf perfr-viewer.tar.gz | grep -qE '(^|/)perfr_live_viewer_bg.wasm$'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfr-viewer
+          path: |
+            perfr-viewer.tar.gz
+            perfr-viewer.tar.gz.sha256
+          if-no-files-found: error
+
   linux:
     name: Linux x86-64
+    needs: [viewer]
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PERFR_RELEASE_REF }}
+
+      - name: Pin the build stamp to this commit
+        run: |
+          set -euo pipefail
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          echo "PERFR_GIT_HASH=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: perfr-viewer
+          path: dist/viewer-pack
+
+      - name: Install the viewer pack built for this tag
+        run: |
+          set -euo pipefail
+          cd dist/viewer-pack
+          sha256sum -c perfr-viewer.tar.gz.sha256
+          cd ../..
+          rm -rf crates/perfr-live-viewer/viewer-dist
+          mkdir -p crates/perfr-live-viewer/viewer-dist
+          tar -C crates/perfr-live-viewer/viewer-dist -xzf dist/viewer-pack/perfr-viewer.tar.gz
+          test -f crates/perfr-live-viewer/viewer-dist/index.html
+          test -f crates/perfr-live-viewer/viewer-dist/perfr_live_viewer_bg.wasm
 
       - name: Rust toolchain
         run: |
@@ -84,8 +163,8 @@ jobs:
         run: |
           set -euo pipefail
           pkg=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/perfr/Cargo.toml | head -1)
-          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-            ver="${GITHUB_REF_NAME#perfr-}"
+          if [ -n "${PERFR_RELEASE_TAG:-}" ]; then
+            ver="${PERFR_RELEASE_TAG#perfr-}"
           else
             ver="v${pkg}-dev"
           fi
@@ -147,12 +226,38 @@ jobs:
 
   macos:
     name: macOS universal
+    needs: [viewer]
     runs-on: macos-15
     timeout-minutes: 120
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PERFR_RELEASE_REF }}
+
+      - name: Pin the build stamp to this commit
+        run: |
+          set -euo pipefail
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          echo "PERFR_GIT_HASH=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: perfr-viewer
+          path: dist/viewer-pack
+
+      - name: Install the viewer pack built for this tag
+        run: |
+          set -euo pipefail
+          cd dist/viewer-pack
+          shasum -a 256 -c perfr-viewer.tar.gz.sha256
+          cd ../..
+          rm -rf crates/perfr-live-viewer/viewer-dist
+          mkdir -p crates/perfr-live-viewer/viewer-dist
+          tar -C crates/perfr-live-viewer/viewer-dist -xzf dist/viewer-pack/perfr-viewer.tar.gz
+          test -f crates/perfr-live-viewer/viewer-dist/index.html
+          test -f crates/perfr-live-viewer/viewer-dist/perfr_live_viewer_bg.wasm
 
       - name: Rust toolchain
         run: rustup toolchain install 1.88.0 --profile minimal
@@ -167,8 +272,8 @@ jobs:
         run: |
           set -euo pipefail
           pkg=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/perfr/Cargo.toml | head -1)
-          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-            ver="${GITHUB_REF_NAME#perfr-}"
+          if [ -n "${PERFR_RELEASE_TAG:-}" ]; then
+            ver="${PERFR_RELEASE_TAG#perfr-}"
           else
             ver="v${pkg}-dev"
           fi
@@ -235,6 +340,7 @@ jobs:
 
   windows:
     name: Windows x86-64
+    needs: [viewer]
     runs-on: windows-2022
     timeout-minutes: 45
     defaults:
@@ -242,6 +348,39 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PERFR_RELEASE_REF }}
+
+      - name: Pin the build stamp to this commit
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $epoch = git log -1 --format=%ct
+          $hash = git rev-parse --short=12 HEAD
+          "SOURCE_DATE_EPOCH=$epoch" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+          "PERFR_GIT_HASH=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: perfr-viewer
+          path: dist/viewer-pack
+
+      - name: Install the viewer pack built for this tag
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sidecar = Get-Content -Raw dist\viewer-pack\perfr-viewer.tar.gz.sha256
+          $expected = ($sidecar -split '\s+')[0].Trim().ToLowerInvariant()
+          $actual = (Get-FileHash -Algorithm SHA256 dist\viewer-pack\perfr-viewer.tar.gz).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "viewer pack checksum mismatch: $actual" }
+          if (Test-Path crates\perfr-live-viewer\viewer-dist) {
+            Remove-Item -Recurse -Force crates\perfr-live-viewer\viewer-dist
+          }
+          New-Item -ItemType Directory -Force crates\perfr-live-viewer\viewer-dist | Out-Null
+          tar -C crates\perfr-live-viewer\viewer-dist -xzf dist\viewer-pack\perfr-viewer.tar.gz
+          foreach ($required in 'index.html', 'perfr_live_viewer_bg.wasm') {
+            if (-not (Test-Path (Join-Path crates\perfr-live-viewer\viewer-dist $required))) {
+              throw "missing $required in the viewer pack"
+            }
+          }
 
       - name: Rust toolchain
         run: rustup toolchain install 1.88.0 --profile minimal
@@ -256,8 +395,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $pkg = (Select-String -Path crates\perfr\Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
-          if ($env:GITHUB_REF_TYPE -eq 'tag') {
-            $ver = $env:GITHUB_REF_NAME -replace '^perfr-', ''
+          if ($env:PERFR_RELEASE_TAG) {
+            $ver = $env:PERFR_RELEASE_TAG -replace '^perfr-', ''
           } else {
             $ver = "v$pkg-dev"
           }
@@ -327,6 +466,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PERFR_RELEASE_REF }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -418,6 +559,11 @@ jobs:
               "debug archive, not this zip. Call-stack sampling, the scheduler and thread states come from the kernel "
               "logger (ETW) and need an elevated prompt; manual scopes and Frida hooks do not. No auto-profiling, no "
               "kernel hook engine, no GPU helper.\n\n"
+              "**Viewer** (`perfr-viewer.tar.gz`): the live viewer built for this tag, "
+              "a gzip tar of `crates/perfr-live-viewer/viewer-dist` with paths relative to that "
+              "directory (`index.html` at the top, plus the wasm glue, `.wasm`, `snippets/` and "
+              "`stories/`). `perfr-viewer.tar.gz.sha256` is the `sha256sum` sidecar. perfr.dev "
+              "embeds this asset instead of the viewer at the top of `main`.\n\n"
               "Checksums: `SHA256SUMS` and the per-archive `.sha256` files.\n\n"
               "Install (fails with a clear message until a non-prerelease `perfr-v*` tag exists):\n\n"
               "```\n"

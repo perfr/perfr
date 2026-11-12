@@ -20,10 +20,12 @@
 //! binary, because cargo is not asked to strip. A source file is served only if
 //! a disassembly named it or it sits under `PERFR_SOURCE_ROOTS`: the
 //! service often runs as root, and a file endpoint that took any path
-//! would be a way to read anything.
+//! would be a way to read anything. Both tests are made on the file a path
+//! resolves to, not on its spelling, so `..` and symlinks cannot walk a
+//! request out of what was allowed.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Formatter, Instruction, IntelFormatter, OpKind};
@@ -37,8 +39,13 @@ const MAX_INSTRUCTIONS: usize = 8_000;
 /// Source files above this are refused: a generated file, not code.
 const MAX_SOURCE_BYTES: u64 = 8 << 20;
 
-/// The source files a disassembly has named, and so may be read.
-pub type SourceAllowList = Arc<Mutex<HashSet<String>>>;
+/// The source files a disassembly has named, and so may be read. Each is
+/// held as the canonical path it resolved to when it was named: debug info
+/// spells files through `..` (an include directory relative to the
+/// compilation directory) and through symlinked checkouts, and a request is
+/// matched after the same resolution. A name that resolved to nothing is
+/// kept as written, only so the request for it can say the file is missing.
+pub type SourceAllowList = Arc<Mutex<HashSet<PathBuf>>>;
 
 fn address_of_offset(segments: &[ObjectSegment], offset: u64) -> Option<u64> {
     segments
@@ -175,11 +182,7 @@ fn disassemble_function(
         ));
     }
     let truncated = count > MAX_INSTRUCTIONS;
-    if let Ok(mut set) = allow.lock() {
-        for f in &files {
-            set.insert(f.clone());
-        }
-    }
+    allow_named(allow, &files);
     let files_json: Vec<String> = files.iter().map(|f| json_str(f)).collect();
     // Where the function is declared, for the source view to open on.
     let (decl_file, decl_line) = match perfr_object::declaration_location(debug_data, address) {
@@ -208,19 +211,53 @@ fn source_roots() -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn allow_named(allow: &SourceAllowList, files: &[String]) {
+    let resolved: Vec<PathBuf> =
+        files.iter().map(|f| std::fs::canonicalize(f).unwrap_or_else(|_| PathBuf::from(f))).collect();
+    if let Ok(mut set) = allow.lock() {
+        set.extend(resolved);
+    }
+}
+
 /// A source file, as `{"path","text"}`, if a disassembly named it or it is
 /// under a configured root.
 pub fn source_json(path: &str, allow: &SourceAllowList) -> Result<String, String> {
-    let allowed = allow.lock().map(|s| s.contains(path)).unwrap_or(false)
-        || source_roots().iter().any(|r| path.starts_with(r.as_str()));
+    source_json_under(path, allow, &source_roots())
+}
+
+fn source_json_under(path: &str, allow: &SourceAllowList, roots: &[String]) -> Result<String, String> {
+    let named = |file: &Path| allow.lock().map(|s| s.contains(file)).unwrap_or(false);
+    let not_served = || format!("{path}: not a file a disassembly named, and not under PERFR_SOURCE_ROOTS");
+    // The file the path leads to is what gets checked and what gets read:
+    // a string test on the path as written let `<root>/../../etc/passwd`
+    // and a symlink under a root through.
+    let file = match std::fs::canonicalize(path) {
+        Ok(file) => file,
+        // Sources named by a binary built elsewhere are usually not on this
+        // machine, and the viewer shows this error. Any other path gets the
+        // answer a refused one gets, so the endpoint does not tell a caller
+        // which paths exist.
+        Err(e) => return Err(if named(Path::new(path)) { format!("{path}: {e}") } else { not_served() }),
+    };
+    // `Path::starts_with` compares whole components: `/home/me/src` is not
+    // a root of `/home/me/src-private`.
+    let allowed =
+        named(&file) || roots.iter().filter_map(|r| std::fs::canonicalize(r).ok()).any(|r| file.starts_with(&r));
     if !allowed {
-        return Err(format!("{path}: not a file a disassembly named, and not under PERFR_SOURCE_ROOTS"));
+        return Err(not_served());
     }
-    let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+    let meta = std::fs::metadata(&file).map_err(|e| format!("{path}: {e}"))?;
+    // A line table can name a device or a FIFO; reading one never ends or
+    // never starts.
+    if !meta.is_file() {
+        return Err(format!("{path}: not a regular file"));
+    }
     if meta.len() > MAX_SOURCE_BYTES {
         return Err(format!("{path}: {} bytes is not a source file", meta.len()));
     }
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let text = std::fs::read_to_string(&file).map_err(|e| format!("{path}: {e}"))?;
+    // The path as asked for: the viewer matches it against the file name
+    // on each instruction.
     Ok(format!("{{\"path\":{},\"text\":{}}}", json_str(path), json_str(&text)))
 }
 
@@ -249,4 +286,152 @@ pub fn example_disassembly_json(allow: &SourceAllowList) -> Result<String, Strin
         .or_else(|| index.functions().filter(own).filter(|f| f.size > 400 && f.size < 4000).max_by_key(|f| f.size))
         .ok_or_else(|| "no function of the service's own binary to disassemble".to_string())?;
     disassemble_function(index, pick, allow)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `src/a.c`, `src/sub/`, `include/x.h`, `src-private/secret.c` and
+    /// `secret.txt`. The directory's path is used as the system gave it:
+    /// canonical, it is a verbatim path on Windows, where the `/` and `..`
+    /// these tests put in a request are not resolved.
+    fn tree() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().to_path_buf();
+        for sub in ["src/sub", "include", "src-private"] {
+            std::fs::create_dir_all(base.join(sub)).unwrap();
+        }
+        std::fs::write(base.join("src/a.c"), "int a;\n").unwrap();
+        std::fs::write(base.join("include/x.h"), "int x;\n").unwrap();
+        std::fs::write(base.join("src-private/secret.c"), "private\n").unwrap();
+        std::fs::write(base.join("secret.txt"), "secret\n").unwrap();
+        (dir, base)
+    }
+
+    fn at(base: &Path, relative: &str) -> String {
+        format!("{}/{relative}", base.display())
+    }
+
+    fn served(result: Result<String, String>) -> (String, String) {
+        let value: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+        (value["path"].as_str().unwrap().to_string(), value["text"].as_str().unwrap().to_string())
+    }
+
+    fn refused(result: Result<String, String>) -> String {
+        match result {
+            Ok(body) => panic!("served: {body}"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn a_path_that_climbs_out_of_a_source_root_is_refused() {
+        let (_dir, base) = tree();
+        let allow = SourceAllowList::default();
+        let roots = [at(&base, "src")];
+        let climbing = at(&base, "src/../secret.txt");
+        let error = refused(source_json_under(&climbing, &allow, &roots));
+        assert!(error.contains("not under PERFR_SOURCE_ROOTS"), "{error}");
+        // `..` that stays inside the root is still that file, and the reply
+        // carries the spelling that was asked for: the viewer matches on it.
+        let inside = at(&base, "src/sub/../a.c");
+        assert_eq!(served(source_json_under(&inside, &allow, &roots)), (inside.clone(), "int a;\n".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_under_a_root_that_points_outside_it_is_refused() {
+        let (_dir, base) = tree();
+        std::os::unix::fs::symlink(base.join("secret.txt"), base.join("src/link.c")).unwrap();
+        let allow = SourceAllowList::default();
+        let error = refused(source_json_under(&at(&base, "src/link.c"), &allow, &[at(&base, "src")]));
+        assert!(error.contains("not under PERFR_SOURCE_ROOTS"), "{error}");
+    }
+
+    #[test]
+    fn a_root_admits_whole_components_not_a_string_prefix() {
+        let (_dir, base) = tree();
+        let allow = SourceAllowList::default();
+        let sibling = at(&base, "src-private/secret.c");
+        let error = refused(source_json_under(&sibling, &allow, &[at(&base, "src")]));
+        assert!(error.contains("not under PERFR_SOURCE_ROOTS"), "{error}");
+        // Both sides are resolved, so a root may be spelled with a trailing
+        // slash or with `..` in it.
+        for root in [at(&base, "src/"), at(&base, "include/../src")] {
+            let (_, text) = served(source_json_under(&at(&base, "src/a.c"), &allow, &[root]));
+            assert_eq!(text, "int a;\n");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_is_a_symlink_admits_the_files_it_leads_to() {
+        let (_dir, base) = tree();
+        std::os::unix::fs::symlink(base.join("src"), base.join("checkout")).unwrap();
+        let allow = SourceAllowList::default();
+        let roots = [at(&base, "checkout")];
+        for path in [at(&base, "src/a.c"), at(&base, "checkout/a.c")] {
+            let (echoed, text) = served(source_json_under(&path, &allow, &roots));
+            assert_eq!((echoed, text.as_str()), (path.clone(), "int a;\n"));
+        }
+    }
+
+    #[test]
+    fn only_a_regular_file_is_served() {
+        let (_dir, base) = tree();
+        let allow = SourceAllowList::default();
+        let error = refused(source_json_under(&at(&base, "src/sub"), &allow, &[at(&base, "src")]));
+        assert!(error.contains("not a regular file"), "{error}");
+        #[cfg(unix)]
+        {
+            // What a line table can name and `read` would happily drain.
+            allow_named(&allow, &["/dev/null".to_string()]);
+            let error = refused(source_json_under("/dev/null", &allow, &[]));
+            assert!(error.contains("not a regular file"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_file_named_with_dot_dot_segments_is_served_under_that_name() {
+        let (_dir, base) = tree();
+        let allow = SourceAllowList::default();
+        // An include directory relative to the compilation directory.
+        let named = at(&base, "src/../include/x.h");
+        allow_named(&allow, &[named.clone()]);
+        assert_eq!(served(source_json_under(&named, &allow, &[])), (named.clone(), "int x;\n".to_string()));
+        // The list holds the file, not the spelling.
+        let plain = at(&base, "include/x.h");
+        assert_eq!(served(source_json_under(&plain, &allow, &[])), (plain.clone(), "int x;\n".to_string()));
+        let error = refused(source_json_under(&at(&base, "src/../secret.txt"), &allow, &[]));
+        assert!(error.contains("not a file a disassembly named"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_file_replaced_by_a_symlink_is_no_longer_the_file_that_was_named() {
+        let (_dir, base) = tree();
+        let allow = SourceAllowList::default();
+        let named = at(&base, "src/a.c");
+        allow_named(&allow, &[named.clone()]);
+        std::fs::remove_file(&named).unwrap();
+        std::os::unix::fs::symlink(base.join("secret.txt"), &named).unwrap();
+        let error = refused(source_json_under(&named, &allow, &[]));
+        assert!(error.contains("not a file a disassembly named"), "{error}");
+    }
+
+    #[test]
+    fn a_named_file_that_is_not_on_this_machine_says_so_and_no_other_path_does() {
+        let (_dir, base) = tree();
+        let allow = SourceAllowList::default();
+        // A build-machine path: the common case for a distribution binary.
+        let named = at(&base, "build/glibc/../sysdeps/x.c");
+        allow_named(&allow, &[named.clone()]);
+        let error = refused(source_json_under(&named, &allow, &[]));
+        assert!(!error.contains("not a file a disassembly named"), "{error}");
+        // A path nothing named gets one answer whether or not it exists.
+        let missing = refused(source_json_under(&at(&base, "build/other.c"), &allow, &[]));
+        let present = refused(source_json_under(&at(&base, "secret.txt"), &allow, &[]));
+        assert_eq!(missing.replace("build/other.c", "secret.txt"), present);
+    }
 }

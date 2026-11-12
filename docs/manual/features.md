@@ -26,11 +26,13 @@ Instructions for the manual writer:
 ## 1. Getting started
 
 - **One binary.** `perfr --serve 44766` serves the viewer (a WASM
-  page embedded in the binary) and the HTTP/WebSocket API on one port. The
-  banner prints the local URL and every LAN address, so the page opens from
-  another machine on the network. `--host` picks the bind address (default
-  `0.0.0.0`); `--wire raw|packed|deflate` (env `PERFR_LIVE_WIRE`) picks the
-  WebSocket encoding, default `packed`. Screenshot: `01-viewer-idle.png`.
+  page embedded in the binary) and the HTTP/WebSocket API on one port,
+  on this machine only. `--host` picks the bind address (default
+  `127.0.0.1`); with `--host 0.0.0.0` the banner prints every LAN address
+  as well and the page opens from another machine on the network, where
+  nothing authenticates who connects. `--wire raw|packed|deflate` (env
+  `PERFR_LIVE_WIRE`) picks the WebSocket encoding, default `packed`.
+  Screenshot: `01-viewer-idle.png`.
 - **Windows.** The same binary shape (`perfr.exe`, the viewer embedded)
   on x86-64. Sampling, the scheduler and thread states come from the NT
   Kernel Logger and need the service started from an elevated prompt; the
@@ -117,8 +119,11 @@ Left to right, in clusters separated by thin rules. A filled pill is on.
   is separate from the per-thread hide (right-click) and its "N hidden /
   all" count. `?tracks=physics+render` opens the viewer with it filled.
   Screenshot: `45-track-filter.png`.
-- **Viewer build.** The More menu ends with the viewer's build (UTC time
-  and commit), also `build` in `window.__perfr_sel`. The service serves
+- **About.** More → About shows the perfr version, the short commit hash
+  (linked to that commit on GitHub), the build date, and the release tag
+  when the build is a release. A local build's version is `dev` plus the
+  hash. The monospace line in the window is what `perfr --version` prints,
+  and the same string is `build` in `window.__perfr_sel`. The service serves
   the viewer with `Cache-Control: no-cache` and an ETag, so a restarted
   service is never a stale tab: a plain reload picks up the new viewer.
 - **Stats line.** Live event count, visible count, draw count, the transport
@@ -381,9 +386,11 @@ in the URL opens a tab on load.
   the service disassembles the function out of the process's module
   (Intel syntax, call and branch targets named), walks the module's line
   table for it, and the tab opens with the function's source file when
-  the line table names one and the file is under a root the service is
-  allowed to serve (`PERFR_SOURCE_ROOTS`, the current directory by
-  default; nothing outside those roots is ever read). Three ways to read
+  the line table names one and the file is on this machine. The service
+  reads a source file only if a disassembly named it or it is under a
+  root listed in `PERFR_SOURCE_ROOTS` (colon-separated). Both tests are
+  made on the file the path resolves to, so `..` and symlinks do not
+  reach outside, and only regular files are read. Three ways to read
   it, in the segmented control: **Source** alone, **Disassembly** alone,
   and **Both**, the C++ perfr `AnnotatingLine` layout: the instructions
   are the text, and each source line is inserted, on a raised row, above
@@ -582,7 +589,12 @@ in the URL opens a tab on load.
   `/api/sampling/report` and `/api/sampling/tree` (with `t0`, `t1`, `tid`
   or `scope=<name id>`), `/api/timeline`, `/api/frame`, `/api/config`,
   `/api/self/start|stop`, `/api/demo/start|stop`, and the `/ws` event
-  stream.
+  stream. There is no authentication, so the service decides by `Host` and
+  `Origin` who it answers: its own viewer and clients that are not web
+  pages (curl, `perfr mcp`, a peer), addressing it by IP address, as
+  `localhost`, or by the machine's own host name (`name` or `name.local`).
+  A page on another origin, or one whose DNS name was pointed at the
+  service, gets 403 on every route including the WebSockets.
 - **Readouts for a harness.** The page publishes `window.__perfr_sel`
   (selection, focus, tab, wire, socket rate, view, event count),
   `window.__perfr_ui` (the rectangle of every pill, report tab, menu item,

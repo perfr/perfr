@@ -100,8 +100,10 @@ jobs:
           python tools/e2e/frida_smoke.py --service dist/windows/perfr.exe --agent dist/windows/libperfr.dll --helper dist/windows/perfr-hook.exe --target target/e2e/perfr-frida-target.exe
           python tools/e2e/frida_smoke.py --service dist/windows/perfr.exe --agent dist/windows/libperfr.dll --helper dist/windows/perfr-hook.exe --target target/e2e/perfr-frida-target.exe --inflight
       - name: Capture the scheduler and samples with the kernel logger
+        # --require: the runner is elevated, so "the kernel logger is
+        # unavailable" is a failure here, not the skip it is on a desk.
         run: |
-          python tools/e2e/windows_etw_smoke.py --service dist/windows/perfr.exe --target dist/windows/PerfrTestRust.exe
+          python tools/e2e/windows_etw_smoke.py --service dist/windows/perfr.exe --target dist/windows/PerfrTestRust.exe --require
       - uses: actions/upload-artifact@v4
         with:
           name: perfr-windows-x86_64

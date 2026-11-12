@@ -14,7 +14,6 @@ use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tower_http::cors::CorsLayer;
 
 use perfr_live_event::argb_to_css;
 use perfr_live_render::{
@@ -75,6 +74,7 @@ pub fn router(service: Arc<LiveService>) -> Router {
         .route("/api/logs", get(capture_logs))
         .route("/api/symbols/modules", get(symbols_modules))
         .route("/api/capture/export", get(capture_export))
+        .route("/api/capture/targets", get(capture_targets))
         .route("/api/capture/share", post(capture_share))
         .route("/api/capture/open", post(capture_open))
         .route("/api/capture/clear", post(capture_clear))
@@ -86,12 +86,93 @@ pub fn router(service: Arc<LiveService>) -> Router {
             post(capture_import).layer(axum::extract::DefaultBodyLimit::max(IMPORT_BODY_LIMIT)),
         )
         .route("/*path", get(static_asset))
-        .layer(CorsLayer::permissive())
+        // In front of every route, the WebSocket upgrades included: there
+        // is no authentication behind this, so who may call is decided
+        // here, once. See `request_allowed`.
+        .layer(axum::middleware::from_fn_with_state(service.clone(), origin_middleware))
         // Outermost: HTML, js, wasm, worker snippets, and API all get
         // COOP/COEP/CORP so SharedArrayBuffer is not blocked by a missing
         // header on one worker URL.
         .layer(axum::middleware::from_fn(isolation_middleware))
         .with_state(service)
+}
+
+/// Answers 403 to a request that `request_allowed` turns down, before any
+/// handler or body extractor sees it.
+async fn origin_middleware(
+    State(svc): State<Arc<LiveService>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    // Decided in a block of its own: the borrows of `req` must end before
+    // the request moves on, or the future is not `Send`.
+    let allowed = {
+        // A header that is not text is not a name we know: it reads as
+        // present and empty, which matches nothing.
+        let text = |name: header::HeaderName| req.headers().get(name).map(|v| v.to_str().unwrap_or_default());
+        let origin = text(header::ORIGIN);
+        // HTTP/2 carries the host in the request target, not in a header.
+        let host = text(header::HOST).or_else(|| req.uri().authority().map(|a| a.as_str()));
+        let bind = svc.config.lock().bind;
+        request_allowed(origin, host, bind, &svc.machine_name())
+    };
+    if !allowed {
+        return (
+            StatusCode::FORBIDDEN,
+            "perfr answers its own viewer and clients that are not web pages, addressed by IP address, as localhost or by this machine's own host name",
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
+/// Whether a request may reach the API, by its `Origin` and `Host`. Nothing
+/// behind this is authenticated and the service often runs as root, so the
+/// two things a browser lets a hostile page do have to be refused here:
+///
+/// * A page on another site can send requests to this port. Reads and JSON
+///   writes need the server's consent (CORS), which is no longer given, but
+///   a POST with no body and a WebSocket handshake need none. Every such
+///   request names the page in `Origin`; it is let through only when that
+///   page is this service's own viewer (`share_origin_allowed`).
+/// * A page whose DNS name is re-pointed at this machine after it loaded
+///   (rebinding) is same-origin to the browser, and its GETs carry no
+///   `Origin` at all. Its `Host` is still the attacker's name, so every
+///   request must be addressed to a name the attacker's DNS has no say in:
+///   an IP literal, `localhost`, the bound address, or this machine's own
+///   name (`is_machine_name`). The last is what a peer told
+///   `--connect <machine>` dials and what someone on the LAN types to open
+///   the viewer; a rebinding page cannot carry it, because it would have
+///   had to be served under that name in the first place.
+///
+/// A request with neither header is HTTP/1.0 from something that is not a
+/// browser, and is let through.
+pub(crate) fn request_allowed(origin: Option<&str>, host: Option<&str>, bind: std::net::SocketAddr, machine: &str) -> bool {
+    let reachable = |host: &str| {
+        let name = host_name(host);
+        host_needs_no_dns(name, bind) || is_machine_name(name, machine)
+    };
+    match (origin, host) {
+        (Some(origin), Some(host)) => origin_is_host(origin, host) && reachable(host),
+        (Some(_), None) => false,
+        (None, Some(host)) => reachable(host),
+        (None, None) => true,
+    }
+}
+
+/// Whether `name` is the host name this service took from the OS at start,
+/// bare or as the `.local` name mDNS answers for it. Public DNS serves
+/// neither for anyone else: the first has no dot to delegate, the second is
+/// reserved for the local link.
+fn is_machine_name(name: &str, machine: &str) -> bool {
+    if machine.is_empty() {
+        return false;
+    }
+    let bare = match name.len().checked_sub(".local".len()) {
+        Some(cut) if name.is_char_boundary(cut) && name[cut..].eq_ignore_ascii_case(".local") => &name[..cut],
+        _ => name,
+    };
+    bare.eq_ignore_ascii_case(machine)
 }
 
 async fn isolation_middleware(
@@ -461,6 +542,32 @@ async fn sampling_tree(
 /// a few hundred megabytes; the ring itself is 256 MiB by default.
 const IMPORT_BODY_LIMIT: usize = 4 << 30;
 
+#[derive(Deserialize)]
+struct TargetsQuery {
+    #[serde(default)]
+    q: String,
+    t0: Option<u64>,
+    t1: Option<u64>,
+}
+
+/// `GET /api/capture/targets?q=&t0=&t1=` -- threads, scopes and per-core
+/// busy fraction in a window. A missing `t0` is the start of the capture;
+/// a `t1` that is absent, 0, or not after `t0` is its end.
+/// The busy fraction is scheduling-slice coverage, not a claim about the program.
+async fn capture_targets(State(svc): State<Arc<LiveService>>, Query(q): Query<TargetsQuery>) -> Json<serde_json::Value> {
+    let index = svc.cached_index();
+    let (start, end) = index.time_bounds().unwrap_or((0, 1));
+    let (t0, t1) = match (q.t0, q.t1) {
+        (Some(a), Some(b)) if b > a => (a, b),
+        (Some(a), _) => (a, end.max(a.saturating_add(1))),
+        (None, Some(b)) if b > start => (start, b),
+        (None, _) => (start, end),
+    };
+    let intern = svc.intern.lock();
+    let (threads, processes) = svc.capture_names();
+    Json(super::targets::summarize(&index, &intern, &threads, &processes, t0, t1, &q.q))
+}
+
 /// `GET /api/capture/export?format=ipc|parquet|bundle|stream&t0=..&t1=..` --
 /// the capture as one file, offered as a download. `ipc` (the default) is an
 /// Arrow IPC file of the events, `parquet` the same as Parquet, `bundle` a
@@ -558,6 +665,9 @@ async fn capture_export(
 
 /// Publish a stopped capture (or selected slice) to the configured bucket.
 async fn capture_share(State(svc): State<Arc<LiveService>>, Query(q): Query<ExportQuery>, headers: axum::http::HeaderMap) -> Response {
+    // Stricter than the rule every route is behind (`request_allowed`): an
+    // upload leaves the machine, so the page asking must have been opened
+    // by address or as localhost, not by the machine's name.
     if let Some(origin) = headers.get(header::ORIGIN) {
         let origin = origin.to_str().unwrap_or_default();
         let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or_default();
@@ -598,20 +708,32 @@ async fn capture_share(State(svc): State<Arc<LiveService>>, Query(q): Query<Expo
 /// attack needs a name the attacker controls, which resolves to us only
 /// after the page loaded; such a name matches none of these.
 fn share_origin_allowed(origin: &str, host: &str, bind: std::net::SocketAddr) -> bool {
+    origin_is_host(origin, host) && host_needs_no_dns(host_name(host), bind)
+}
+
+/// Whether the page named by `origin` was served by the very `host` (name
+/// and port) this request is addressed to.
+fn origin_is_host(origin: &str, host: &str) -> bool {
     let Some(origin_host) = origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) else {
         return false;
     };
-    if origin_host.is_empty() || origin_host != host {
-        return false;
-    }
+    !origin_host.is_empty() && origin_host == host
+}
+
+/// The name in a `Host` header, without its port.
+fn host_name(host: &str) -> &str {
     // `[::1]:8080` is bracketed; `1.2.3.4:8080` and `localhost:8080` are not.
-    let name = match host.strip_prefix('[') {
+    match host.strip_prefix('[') {
         Some(rest) => rest.split(']').next().unwrap_or_default(),
         None => match host.rsplit_once(':') {
             Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
             _ => host,
         },
-    };
+    }
+}
+
+/// Whether `name` reaches this service whatever DNS says.
+fn host_needs_no_dns(name: &str, bind: std::net::SocketAddr) -> bool {
     name.eq_ignore_ascii_case("localhost")
         || name.parse::<std::net::IpAddr>().is_ok()
         || name.eq_ignore_ascii_case(&bind.ip().to_string())
@@ -731,11 +853,37 @@ async fn capture_clear(State(svc): State<Arc<LiveService>>) -> Response {
 /// opens the bundle at that path on the service's machine as the current
 /// capture -- the whole file, or just the window, which the file's
 /// row-group statistics let the service cut without reading the rest.
+/// The path must be a regular file no larger than an import may be.
 #[derive(Deserialize)]
 struct OpenBody {
     path: String,
     t0: Option<u64>,
     t1: Option<u64>,
+}
+
+/// Whether `path` is something the open hook may read whole: a regular
+/// file, not empty, and no larger than `max_len`. The hook reads to the end
+/// of whatever it is given, so a FIFO parks a blocking thread until someone
+/// writes to it, `/dev/zero` is read until memory runs out, and a file under
+/// `/proc` (regular, but of length 0 whatever it produces) can do either;
+/// an empty file is no capture anyway. The file can still change between
+/// this look and the read: this stops a path that was never a capture, not
+/// a race.
+pub(crate) fn check_capture_file(path: &str, max_len: u64) -> Result<(), String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{path}: not a regular file"));
+    }
+    if meta.len() == 0 {
+        return Err(format!("{path}: the file is empty"));
+    }
+    if meta.len() > max_len {
+        return Err(format!(
+            "{path}: {} bytes, and a capture file can be {max_len} at most",
+            meta.len()
+        ));
+    }
+    Ok(())
 }
 
 async fn capture_open(State(svc): State<Arc<LiveService>>, Json(body): Json<OpenBody>) -> Response {
@@ -748,7 +896,11 @@ async fn capture_open(State(svc): State<Arc<LiveService>>, Json(body): Json<Open
         (None, None) => None,
         _ => return (StatusCode::BAD_REQUEST, "give both t0 and t1, or neither").into_response(),
     };
-    match tokio::task::spawn_blocking(move || open(&body.path, window)).await {
+    let opened = tokio::task::spawn_blocking(move || {
+        check_capture_file(&body.path, IMPORT_BODY_LIMIT as u64)?;
+        open(&body.path, window)
+    });
+    match opened.await {
         Ok(Ok(summary)) => ([(header::CONTENT_TYPE, "application/json")], summary).into_response(),
         Ok(Err(error)) => {
             let status = if error.starts_with("busy") { StatusCode::CONFLICT } else { StatusCode::BAD_REQUEST };
@@ -1420,7 +1572,66 @@ async fn put_settings(State(svc): State<Arc<LiveService>>, Json(body): Json<crat
     }
 }
 
+/// The smallest ring `PUT /api/config` takes: under this a capture is a
+/// fraction of a second, which nobody means to ask for.
+pub(crate) const MIN_RING_BYTES: u64 = 1 << 20;
+
+/// The largest, on a machine with memory to spare.
+pub(crate) const MAX_RING_BYTES: u64 = 8 << 30;
+
+/// The largest ring this machine takes: half of its memory, and never over
+/// [`MAX_RING_BYTES`]. The ring is allocated and written in full when it is
+/// created, so a size the machine cannot back is not a slow request but the
+/// end of the process: the allocation fails (or its size overflows) and a
+/// release build aborts. With the memory size unknown the fixed cap alone
+/// applies.
+pub(crate) fn max_ring_bytes(physical_memory: Option<u64>) -> u64 {
+    physical_memory
+        .map_or(MAX_RING_BYTES, |total| (total / 2).min(MAX_RING_BYTES))
+        .max(MIN_RING_BYTES)
+}
+
+pub(crate) fn check_ring_bytes(bytes: u64, max: u64) -> Result<(), String> {
+    if (MIN_RING_BYTES..=max).contains(&bytes) {
+        return Ok(());
+    }
+    Err(format!(
+        "ring_buffer_bytes must be between {MIN_RING_BYTES} (1 MiB) and {max} ({} MiB: half of this \
+         machine's memory, {} GiB at most); got {bytes}",
+        max >> 20,
+        MAX_RING_BYTES >> 30,
+    ))
+}
+
+/// The machine's physical memory, when the platform says.
+#[cfg(target_os = "linux")]
+fn physical_memory_bytes() -> Option<u64> {
+    // `MemTotal:       65843088 kB`
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = meminfo.lines().find(|line| line.starts_with("MemTotal:"))?;
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    kib.checked_mul(1024)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn physical_memory_bytes() -> Option<u64> {
+    // SAFETY: sysconf takes no pointers; -1 is its "not known".
+    let (pages, page_size) = unsafe { (libc::sysconf(libc::_SC_PHYS_PAGES), libc::sysconf(libc::_SC_PAGESIZE)) };
+    if pages <= 0 || page_size <= 0 {
+        return None;
+    }
+    (pages as u64).checked_mul(page_size as u64)
+}
+
+#[cfg(not(unix))]
+fn physical_memory_bytes() -> Option<u64> {
+    None
+}
+
 async fn put_config(State(svc): State<Arc<LiveService>>, Json(body): Json<ConfigBody>) -> Response {
+    if let Err(error) = check_ring_bytes(body.ring_buffer_bytes, max_ring_bytes(physical_memory_bytes())) {
+        return (StatusCode::BAD_REQUEST, error).into_response();
+    }
     let spill = body
         .spill_path
         .filter(|s| !s.is_empty())
@@ -2106,11 +2317,16 @@ mod isolation_tests {
                 .expect("curl");
             String::from_utf8_lossy(&out.stdout).to_string()
         };
-        let ok = post(r#"{"path":"/tmp/x.perfr.zip","t0":900,"t1":100}"#);
-        assert!(ok.contains("/tmp/x.perfr.zip:Some((100, 900))"), "{ok}");
-        let whole = post(r#"{"path":"/tmp/x.perfr.zip"}"#);
-        assert!(whole.contains("/tmp/x.perfr.zip:None"), "{whole}");
-        assert!(post(r#"{"path":"/tmp/x.perfr.zip","t0":5}"#).contains("400"));
+        // The route only passes on a regular file, so there has to be one.
+        let file = std::env::temp_dir().join(format!("perfr-open-hook-test-{}.perfr.zip", std::process::id()));
+        std::fs::write(&file, b"stands in for a bundle").unwrap();
+        let path = file.to_str().unwrap();
+        let ok = post(&serde_json::json!({"path": path, "t0": 900, "t1": 100}).to_string());
+        assert!(ok.contains(&format!("{path}:Some((100, 900))")), "{ok}");
+        let whole = post(&serde_json::json!({"path": path}).to_string());
+        assert!(whole.contains(&format!("{path}:None")), "{whole}");
+        assert!(post(&serde_json::json!({"path": path, "t0": 5}).to_string()).contains("400"));
+        let _ = std::fs::remove_file(&file);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

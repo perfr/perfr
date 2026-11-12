@@ -23,7 +23,7 @@ run reports the arming refusal and stops. The service binary is
 `target/release/perfr` (build it first).
 
 Output: a per-function scorecard on the console and in
-`docs/hook-test/report.md` (+ `.json`):
+`target/hook-test/report.md` (+ `.json`; `--report` to move it):
 
 - **received** — armed, and N of its calls were recorded. The hook works.
 - **no-events** — armed, but nothing arrived in the window (the function was

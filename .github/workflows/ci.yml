@@ -1,0 +1,88 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# The Linux gate: every crate's tests, the lints, the wasm viewer and the
+# static service. All of it is tools/ci.sh, one step per job step, so the
+# same checks run on a developer's machine with the same command.
+#
+# The other workflows stay what they are: frida-rust, macos-rust and
+# windows-rust drive real captures on their platforms, live-viewer has the
+# viewer's benches and its release-mode complexity test.
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: cargo test --workspace, wasm viewer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install 1.88.0 --profile minimal --target wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-test
+      # No Frida devkits here on purpose: perfr-hook links its stub, which is
+      # the configuration a new checkout has. frida-rust tests the real one.
+      - name: Test every crate
+        run: tools/ci.sh test
+      - name: Check the viewer for wasm32
+        run: tools/ci.sh wasm
+
+  lint:
+    # Report-only until the tree is clean; see the header of tools/ci.sh.
+    name: rustfmt, clippy, crate map
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-lint
+      - name: Format, lint, and check the crate map
+        run: tools/ci.sh fmt clippy docs
+
+  musl:
+    # The static service is what ships, and until now it was first built when
+    # a tag had already been pushed. A release build is slow, so it runs on
+    # main and on request, not on every push to a pull request.
+    name: static musl service
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install 1.88.0 --profile minimal --target x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-musl
+      - name: Build the static service
+        run: tools/ci.sh musl

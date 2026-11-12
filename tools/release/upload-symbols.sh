@@ -5,8 +5,8 @@
 #
 # Upload symbol-store directories to the Perfr R2/S3 bucket.
 #
-# This step is meant to be skipped. With no bucket or no credentials it
-# prints why and exits 0. The release already carries the same tree as
+# This step is meant to be skipped. With no bucket, no credentials or no
+# aws CLI it prints why and exits 0. The release already carries the same tree as
 # perfr-<version>-<target>-symstore.tar.gz.
 #
 #   PERFR_SYMBOL_STORE_BUCKET            bucket name (required to upload)
@@ -46,10 +46,18 @@ export AWS_ACCESS_KEY_ID="$key"
 export AWS_SECRET_ACCESS_KEY="$secret"
 export AWS_DEFAULT_REGION="${PERFR_SYMBOL_STORE_REGION:-auto}"
 
+# No aws CLI is a skip too. This used to pip-install whatever awscli was
+# newest, in the one job that holds the bucket keys and the token that
+# publishes the release; an unpinned package from the network does not
+# belong there. GitHub's Ubuntu runners ship the CLI.
 if ! command -v aws >/dev/null 2>&1; then
-    echo "symbol store upload: installing awscli"
-    python3 -m pip install --user 'awscli>=1.32,<2'
-    export PATH="${HOME}/.local/bin:${PATH}"
+    message="symbol store upload: skipped, there is no aws CLI on this machine. The symstore archives are still release assets; unpack and sync them to upload later."
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+        echo "::warning title=Symbol store upload skipped::${message}"
+    else
+        echo "$message" >&2
+    fi
+    exit 0
 fi
 
 prefix="${PERFR_SYMBOL_STORE_PREFIX:-}"

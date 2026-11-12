@@ -31,12 +31,14 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
 const SKILL: &str = include_str!("../skills/perfr/SKILL.md");
 const SETUP_SKILL: &str = include_str!("../skills/perfr-setup/SKILL.md");
+const STORY_SKILL: &str = include_str!("../skills/perfr-story/SKILL.md");
 
 const MCP_BEGIN: &str = "# BEGIN perfr mcp";
 const MCP_END: &str = "# END perfr mcp";
@@ -223,11 +225,12 @@ fn selected(action: &SkillAction) -> Result<Vec<Agent>, String> {
         })
 }
 
-fn skill_paths(agent: Agent, env: &SkillEnv, scope: Scope) -> [PathBuf; 2] {
+fn skill_paths(agent: Agent, env: &SkillEnv, scope: Scope) -> Vec<PathBuf> {
     let root = skill_root(agent, env, scope);
-    [
+    vec![
         root.join("perfr").join("SKILL.md"),
         root.join("perfr-setup").join("SKILL.md"),
+        root.join("perfr-story").join("SKILL.md"),
     ]
 }
 
@@ -247,6 +250,8 @@ fn skill_root(agent: Agent, env: &SkillEnv, scope: Scope) -> PathBuf {
 fn body_for(path: &Path) -> &'static str {
     if path.ends_with(Path::new("perfr-setup").join("SKILL.md")) {
         SETUP_SKILL
+    } else if path.ends_with(Path::new("perfr-story").join("SKILL.md")) {
+        STORY_SKILL
     } else {
         SKILL
     }
@@ -444,12 +449,15 @@ fn merge_json(path: &Path, agent: Agent, action: &SkillAction) -> Result<String,
     let existing = if path.is_file() {
         match fs::read_to_string(path) {
             Ok(text) if text.trim().is_empty() => Value::Object(Map::new()),
-            Ok(text) => serde_json::from_str(&text).map_err(|_| {
-                format!(
-                    "could not parse {} as JSON; left it unchanged. Add the perfr server by hand",
-                    path.display()
-                )
-            })?,
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(value) => value,
+                // A line, not an error: an error here ends the whole run
+                // with the skills already on disk and nothing said about
+                // them, and the agents after this one are never reached.
+                Err(_) => {
+                    return Ok("could not parse it as JSON, so it is unchanged; add the perfr server by hand to".into());
+                }
+            },
             Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
         }
     } else {
@@ -463,7 +471,7 @@ fn merge_json(path: &Path, agent: Agent, action: &SkillAction) -> Result<String,
     }
     let mut root = existing;
     let desired = match agent {
-        Agent::OpenCode => opencode_entry(&root),
+        Agent::OpenCode => opencode_server(),
         _ => mcp_stdio(),
     };
     let current = mcp_value(&root, agent);
@@ -479,8 +487,7 @@ fn merge_json(path: &Path, agent: Agent, action: &SkillAction) -> Result<String,
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         let text = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())? + "\n";
-        fs::write(path, text)
-            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        write_config(path, &text)?;
     }
     Ok(if action.dry_run {
         "would register MCP in".to_string()
@@ -489,14 +496,27 @@ fn merge_json(path: &Path, agent: Agent, action: &SkillAction) -> Result<String,
     })
 }
 
-fn opencode_entry(root: &Value) -> Value {
-    if root.get("mcp").and_then(|mcp| mcp.get("servers")).is_some() || root.get("mcp").is_none() {
-        opencode_server()
-    } else if mcp_looks_like_v1(root.get("mcp")) {
-        opencode_server()
-    } else {
-        opencode_server()
-    }
+/// Writes an agent's config. These are files the agent itself reads and
+/// rewrites while it runs (`~/.claude.json` is Claude Code's state file, and
+/// it is usually Claude Code that is running `perfr skill install`), so an
+/// existing one is replaced by a rename: a reader sees the old file or the
+/// new one, never the empty or half-written one a truncating write shows.
+fn write_config(path: &Path, text: &str) -> Result<(), String> {
+    let failed = |error: std::io::Error| format!("cannot write {}: {error}", path.display());
+    // A dotfile kept as a symlink stays one: the file it points at is replaced.
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let (Ok(meta), Some(dir)) = (fs::metadata(&target), target.parent()) else {
+        return fs::write(&target, text).map_err(failed);
+    };
+    // A directory that takes no new file: write in place, as before.
+    let Ok(mut staged) = tempfile::Builder::new().prefix(".perfr-").tempfile_in(dir) else {
+        return fs::write(&target, text).map_err(failed);
+    };
+    staged.write_all(text.as_bytes()).map_err(failed)?;
+    // The staging file is private to this user; the config keeps the mode
+    // it had (0600 for one that holds tokens).
+    fs::set_permissions(staged.path(), meta.permissions()).map_err(failed)?;
+    staged.persist(&target).map(|_| ()).map_err(|error| failed(error.error))
 }
 
 fn mcp_looks_like_v1(mcp: Option<&Value>) -> bool {
@@ -590,7 +610,7 @@ fn remove_json(path: &Path, agent: Agent, action: &SkillAction) -> Result<String
     }
     if !action.dry_run {
         let text = serde_json::to_string_pretty(&root).unwrap_or_else(|_| "{}".into()) + "\n";
-        fs::write(path, text).map_err(|error| error.to_string())?;
+        write_config(path, &text)?;
     }
     let verb = if action.dry_run {
         "would remove MCP from"
@@ -662,6 +682,12 @@ fn merge_toml(path: &Path, action: &SkillAction) -> Result<String, String> {
         if next.contains(MCP_BEGIN) {
             next = remove_marked_block(&next);
         }
+        // What is left is a table somebody wrote by hand, and `--force` was
+        // given. Appending beside it would define the table twice, which is
+        // not TOML any more: the agent then loads none of its config.
+        if next.contains("[mcp_servers.perfr]") {
+            next = remove_perfr_tables(&next);
+        }
         if !next.is_empty() && !next.ends_with('\n') {
             next.push('\n');
         }
@@ -669,13 +695,37 @@ fn merge_toml(path: &Path, action: &SkillAction) -> Result<String, String> {
             next.push('\n');
         }
         next.push_str(&toml_block());
-        fs::write(path, next).map_err(|error| error.to_string())?;
+        write_config(path, &next)?;
     }
     Ok(if action.dry_run {
         "would register MCP in".to_string()
     } else {
         "registered MCP in".to_string()
     })
+}
+
+/// `text` without the `[mcp_servers.perfr]` table and its sub-tables
+/// (`[mcp_servers.perfr.env]`): each from its header to the next header.
+/// Text surgery, as the rest of the TOML handling here: a header is a line
+/// that starts with `[`.
+fn remove_perfr_tables(text: &str) -> String {
+    let mut next = String::new();
+    let mut cutting = false;
+    for line in text.split_inclusive('\n') {
+        let head = line.trim_start();
+        if head.starts_with('[') {
+            cutting = head.starts_with("[mcp_servers.perfr]") || head.starts_with("[mcp_servers.perfr.");
+        }
+        if !cutting {
+            next.push_str(line);
+        }
+    }
+    let kept = next.trim_end_matches('\n').len();
+    next.truncate(kept);
+    if !next.is_empty() {
+        next.push('\n');
+    }
+    next
 }
 
 fn remove_toml(path: &Path, action: &SkillAction) -> String {
@@ -689,7 +739,7 @@ fn remove_toml(path: &Path, action: &SkillAction) -> String {
         );
     }
     if !action.dry_run {
-        let _ = fs::write(path, remove_marked_block(&current));
+        let _ = write_config(path, &remove_marked_block(&current));
     }
     let verb = if action.dry_run {
         "would remove MCP from"
@@ -783,6 +833,9 @@ mod tests {
             assert!(!body.contains("annotation"));
         }
         assert!(SETUP_SKILL.contains("name: perfr-setup"));
+        assert!(STORY_SKILL.contains("name: perfr-story"));
+        assert!(STORY_SKILL.contains("Hypothesis"));
+        assert!(STORY_SKILL.contains("cores_busy"));
         assert!(SETUP_SKILL.contains("perfr doctor"));
         assert!(SKILL.contains("perfr_capabilities"));
     }
@@ -812,8 +865,10 @@ mod tests {
         let text = install(&env, &action("all", false, false, false)).unwrap();
         let claude_skill = home.join(".claude/skills/perfr/SKILL.md");
         let setup = home.join(".claude/skills/perfr-setup/SKILL.md");
+        let story_skill = home.join(".claude/skills/perfr-story/SKILL.md");
         assert_eq!(fs::read_to_string(&claude_skill).unwrap(), SKILL);
         assert_eq!(fs::read_to_string(&setup).unwrap(), SETUP_SKILL);
+        assert_eq!(fs::read_to_string(&story_skill).unwrap(), STORY_SKILL);
         let claude_json: Value =
             serde_json::from_str(&fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
         assert_eq!(claude_json["mcpServers"]["perfr"]["command"], "perfr");
@@ -832,10 +887,12 @@ mod tests {
         let list_text = list(&env, &action("claude", false, false, false));
         assert!(list_text.contains("installed"), "{list_text}");
         assert!(list_text.contains("perfr-setup"), "{list_text}");
+        assert!(list_text.contains("perfr-story"), "{list_text}");
 
         let removed = uninstall(&env, &action("claude", false, false, false)).unwrap();
         assert!(!claude_skill.exists(), "{removed}");
         assert!(!setup.exists(), "{removed}");
+        assert!(!story_skill.exists(), "{removed}");
         let after: Value =
             serde_json::from_str(&fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
         assert!(after["mcpServers"].get("perfr").is_none(), "{after}");
@@ -928,5 +985,111 @@ mod tests {
         let replaced = install(&env, &action("claude", false, false, true)).unwrap();
         assert!(replaced.contains("wrote"), "{replaced}");
         assert_eq!(fs::read_to_string(&path).unwrap(), SKILL);
+    }
+
+    #[test]
+    fn force_replaces_a_hand_written_toml_table_instead_of_adding_a_second_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        let config = home.join(".codex/config.toml");
+        let by_hand = "model = \"o3\"\n\n\
+            [mcp_servers.perfr]\n\
+            command = \"/opt/perfr/bin/perfr\"\n\
+            args = [\"mcp\"]\n\n\
+            [mcp_servers.perfr.env]\n\
+            PERFR_LOG = \"debug\"\n\n\
+            [mcp_servers.other]\n\
+            command = \"other\"\n";
+        fs::write(&config, by_hand).unwrap();
+        let env = env_with(&home, &home);
+        let kept = install(&env, &action("codex", false, false, false)).unwrap();
+        assert!(kept.contains("pass --force"), "{kept}");
+        assert_eq!(fs::read_to_string(&config).unwrap(), by_hand);
+
+        let forced = install(&env, &action("codex", false, false, true)).unwrap();
+        assert!(forced.contains("registered MCP in"), "{forced}");
+        let toml = fs::read_to_string(&config).unwrap();
+        // A table defined twice is invalid TOML, and the agent then loads
+        // none of its config.
+        assert_eq!(toml.matches("[mcp_servers.perfr]").count(), 1, "{toml}");
+        assert!(!toml.contains("/opt/perfr/bin/perfr"), "{toml}");
+        assert!(!toml.contains("[mcp_servers.perfr.env]"), "{toml}");
+        assert!(toml.starts_with("model = \"o3\"\n"), "{toml}");
+        assert!(toml.contains("[mcp_servers.other]\ncommand = \"other\"\n"), "{toml}");
+        assert!(toml.ends_with(&toml_block()), "{toml}");
+
+        // And the result is one the next run recognises as its own.
+        let again = install(&env, &action("codex", false, false, false)).unwrap();
+        assert!(again.contains("MCP already registered"), "{again}");
+        assert_eq!(fs::read_to_string(&config).unwrap(), toml);
+    }
+
+    #[test]
+    fn a_config_that_does_not_parse_is_reported_and_the_other_agents_still_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(home.join(".claude.json"), "{ // not JSON\n").unwrap();
+        let mut env = env_with(&home, &home);
+        env.commands.insert("codex".into());
+        let text = install(&env, &action("all", false, false, false)).unwrap();
+        assert!(text.contains("claude: wrote"), "{text}");
+        assert!(text.contains("claude: could not parse"), "{text}");
+        assert!(text.contains("by hand"), "{text}");
+        assert_eq!(fs::read_to_string(home.join(".claude.json")).unwrap(), "{ // not JSON\n");
+        // Codex comes after Claude: it used to be skipped with the error.
+        assert!(text.contains("codex: registered MCP in"), "{text}");
+        assert!(home.join(".codex/config.toml").is_file());
+        assert!(home.join(".agents/skills/perfr/SKILL.md").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_config_is_replaced_whole_and_never_seen_half_written() {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        let config = home.join(".claude.json");
+        let before = r#"{"numStartups": 7}"#;
+        fs::write(&config, before).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        // The agent has the file open while perfr edits it.
+        let mut reader = fs::File::open(&config).unwrap();
+        let env = env_with(&home, &home);
+        install(&env, &action("claude", false, false, false)).unwrap();
+        let mut seen = String::new();
+        reader.read_to_string(&mut seen).unwrap();
+        assert_eq!(seen, before, "a reader that was already in sees the old file, complete");
+        let after: Value = serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(after["numStartups"], 7);
+        assert_eq!(after["mcpServers"]["perfr"]["command"], "perfr");
+        assert_eq!(fs::metadata(&config).unwrap().permissions().mode() & 0o777, 0o600);
+        let litter: Vec<_> = fs::read_dir(&home)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != ".claude" && name != ".claude.json")
+            .collect();
+        assert!(litter.is_empty(), "{litter:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_config_kept_as_a_symlink_stays_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let dotfiles = dir.path().join("dotfiles");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(&dotfiles).unwrap();
+        fs::write(dotfiles.join("claude.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("claude.json"), home.join(".claude.json")).unwrap();
+        let env = env_with(&home, &home);
+        install(&env, &action("claude", false, false, false)).unwrap();
+        assert!(fs::symlink_metadata(home.join(".claude.json")).unwrap().file_type().is_symlink());
+        let real: Value =
+            serde_json::from_str(&fs::read_to_string(dotfiles.join("claude.json")).unwrap()).unwrap();
+        assert_eq!(real["mcpServers"]["perfr"]["command"], "perfr");
     }
 }

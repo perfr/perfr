@@ -48,6 +48,8 @@ no hooks armed: uprobes need CAP_SYS_ADMIN. Run the service with sudo, or: sudo 
 
 Frida does not use that capability. Its note on the HOOKS row is “requires permission to attach to the target”.
 
+`perfr setup` does not grant it, and neither does `perfr setup --yes`: they apply the sysctls and at most `cap_perfmon,cap_sys_ptrace`. `perfr setup --uprobes` is the explicit request. It puts `cap_sys_admin,cap_perfmon,cap_dac_read_search+ep` on the binary, after asking when run at a terminal, and every later run of that binary holds them.
+
 `CAP_SYS_ADMIN` is root in all but name. A passwordless sudo rule on a binary you can overwrite is a root shell for anything running as you. Fine on a personal machine, not on a shared one.
 
 ## A kernel without uprobes

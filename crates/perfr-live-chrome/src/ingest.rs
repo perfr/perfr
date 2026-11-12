@@ -1270,7 +1270,14 @@ fn systrace_mark_event(mark: &str, ts: f64) -> Option<ChromeEvent> {
 fn compact_args(v: &Value) -> String {
     let mut text = serde_json::to_string(v).unwrap_or_default();
     if text.len() > MAX_ARG_CHARS {
-        text.truncate(MAX_ARG_CHARS);
+        // serde_json leaves non-ASCII text unescaped, so the limit can fall
+        // inside a character, and `truncate` panics off a boundary. Byte 0
+        // is always one, so this stops.
+        let mut cut = MAX_ARG_CHARS;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
         text.push('…');
     }
     text

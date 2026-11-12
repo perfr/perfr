@@ -13,14 +13,14 @@ open it.
 perfr, formerly Orbit, is a Rust re-implementation of
 [Orbit](https://github.com/google/orbit) by its original author. The capture
 service (`perfr`) and the browser viewer are the Rust work. The original C++
-application is not in this tree; its history is on the `cpp` branch of the
-Orbit repository.
+application is not in this tree; [crates/README.md](crates/README.md#history)
+says where its history is.
 
 Both systems attach to a process that is already running. Both can hook
 functions with Frida, and both take manual scopes from Rust, C, C++, and
 Python. This tree also has bindings for C#, Lua, Zig, Swift, Java, Kotlin,
-and Julia, exercised on Linux against `libperfr`, plus a Mojo package that
-has not been compiled here and a note on why there is no GDScript extension.
+Julia, and Mojo, exercised on Linux against `libperfr`, and a note on why
+there is no GDScript extension.
 A loaded capture in the viewer is capped at a 2 GiB heap. What else
 each system records is in the table below.
 
@@ -137,6 +137,8 @@ Sampling and the scheduler need an elevated prompt on Windows and are not in the
 One viewer can show the processes of several machines on one timeline. The
 service whose page you open is the hub; on every other machine start the
 service with `--join <hub-host>:44766` (or, from the hub, `--connect host,...`).
+The side that is dialed runs with `--host 0.0.0.0`; without it a service
+listens on its own machine only.
 The hub measures each link's clock offset with round-trip probes and moves
 every remote event onto its own clock; the remotes' processes appear in the
 hub's list as `name @host`, and Record on the hub records everywhere.
@@ -147,7 +149,7 @@ limits.
 
 | | |
 |---|---|
-| Linux x86-64 | Sampling at a fixed 1 kHz with DWARF unwinding, scheduler, thread states, Frida hooks, manual scopes, disassembly. Auto-profiling uses the kernel hook engine and needs root or `CAP_SYS_ADMIN`. The release binary is static musl, about 12 MB with the viewer embedded. |
+| Linux x86-64 | Sampling at a fixed 1 kHz with DWARF unwinding, scheduler, thread states, Frida hooks, manual scopes, disassembly. Auto-profiling uses the kernel hook engine and needs root or `CAP_SYS_ADMIN`. The release binary is static musl, about 25 MB with the viewer embedded. |
 | Linux arm64 | The service compiles. It is not run in CI, and the published static binary is x86-64 only. |
 | macOS (Intel and Apple silicon) | Manual scopes and Frida function hooks. Native tests pass on both architectures. Attaching needs a task port; code signing, the hardened runtime, and SIP can refuse it. Shared-cache images whose symbols Frida cannot read may be missing from the function list. No call-stack sampling, scheduler, thread states, live disassembly, GPU lanes, or auto-profiling. The release binary is universal and ad-hoc signed, not notarized. |
 | Windows x86-64 | Sampling at a fixed 1 kHz with the kernel's stack walks, scheduler, thread states, Frida hooks, manual scopes, disassembly (no source lines yet), symbols from PDBs and export tables. The scheduler, thread states and sampling come from the NT Kernel Logger (ETW) and need an elevated prompt; scopes and hooks do not. No auto-profiling, kernel hook engine, or GPU lanes. The release binaries link the C runtime statically and are not code-signed. |
@@ -163,9 +165,13 @@ helper and agent beside it, and serves the viewer:
 ./run.sh --http-port N   # another port
 ```
 
-It needs a Rust toolchain and nothing else; `rust-toolchain.toml` pins the
-version. The viewer pack is committed, so the front end builds only when you
-change it (`crates/perfr-live-viewer/build_wasm.sh`).
+It needs a Rust toolchain (`rust-toolchain.toml` pins the version) and a C
+compiler. The first run also needs `curl`, `xz` and the network: it downloads
+the pinned Frida devkits, about 100 MB, into `target/frida-devkits`. The
+viewer pack is committed, so the front end builds only when you
+change it (`crates/perfr-live-viewer/build_wasm.sh`); rebuild it in that
+change, and again on `main` if another viewer change merged behind the
+branch. CI rejects a pull request that leaves the committed pack stale.
 
 Linux x86-64, static binary, with the Frida files beside it:
 
@@ -207,5 +213,5 @@ is the API, the browser tracks, and those limits.
 - [Manual](docs/manual/index.md)
 - [Blog](https://perfr.dev/blog/)
 - [The crates](crates/README.md) and [the tree, drawn](https://perfr.dev/blog/26-where-everything-lives.html)
-- [Design notes](docs/design/)
+- [Design notes](docs/design/); plans that were carried out and reviews of code that is gone are in [docs/design/archive](docs/design/archive/)
 - [Website sources](https://github.com/perfr/perfr-web), served at [perfr.dev](https://perfr.dev)

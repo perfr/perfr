@@ -74,13 +74,12 @@ Frida devkits are downloaded once, checksum-verified, from the pinned
 release named in `tools/frida/devkits.sh`.
 
 A bare `cargo build --workspace` at the repository root does **not** work on
-Windows: the workspace includes Linux-only crates (`perfr-ptrace`,
-`perfr-trampoline`, `perfr-unwind` -- ptrace-based user-space
-instrumentation) that do not compile there and are not in the Windows
-service's dependency tree. Build the Windows set with the script above, or
+Windows: the workspace includes Linux-only crates (such as `perfr-unwind`)
+that do not compile there and are not in the Windows service's dependency
+tree. Build the Windows set with the script above, or
 the specific `-p` targets below.
 
-Piece by piece, from `rust\`:
+Piece by piece, from the repository root:
 
 ```powershell
 cargo +1.88.0 test -p perfr-scope-ring -p perfr-api -p perfr-etw   # producer and ETW crates

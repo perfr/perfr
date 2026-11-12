@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "perfr"
-version = "0.1.1"
+version = "0.1.3"
 description = "perfr: a low-overhead profiler. The capture service and web viewer in one command, plus the C/C++ and Python instrumentation API."
 readme = "README.md"
 license = "BSD-2-Clause"
@@ -22,7 +22,7 @@ classifiers = [
 ]
 # Pinned to the same release: the service and the instrumentation library must
 # speak the same ring protocol, and both wheels are cut from one build.
-dependencies = ["perfr-api==0.1.1"]
+dependencies = ["perfr-api==0.1.3"]
 
 [project.scripts]
 perfr = "perfr:main"

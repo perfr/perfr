@@ -26,7 +26,7 @@ of that archive; it does not expose service-only code/symbol lookup operations.
 
 ## Deploy
 
-The AWS CLI must be installed on the machine running PerfrService. Credentials
+The AWS CLI must be installed on the machine running the perfr service. Credentials
 stay on that machine: use its ordinary AWS profile, environment credentials or
 instance/task role. The WASM viewer never receives write credentials.
 
@@ -85,7 +85,7 @@ aws iam attach-user-policy --user-name perfr-sharing \
 
 In AWS Console → IAM → Users → perfr-sharing → Security credentials →
 Create access key, select the CLI use case. Save the access key ID and secret
-access key, then configure them on the machine running PerfrService:
+access key, then configure them on the machine running the perfr service:
 
 ```sh
 aws configure --profile perfr-sharing
@@ -104,7 +104,7 @@ appropriate. An SSO upload profile is also supported if its permission set
 includes the upload policy, but shared URLs expire when that session's AWS
 credentials expire.
 
-### Configure and start PerfrService
+### Configure and start perfr
 
 Set these in the service's environment (including the region for the bucket):
 
@@ -128,7 +128,7 @@ Run `aws sts get-caller-identity` with the same identity and environment as the
 service to verify it can find credentials. A successful identity check confirms
 credentials are loaded; the first Share verifies the S3 permissions.
 
-If PerfrService runs under sudo or systemd, its environment and home directory
+If perfr runs under sudo or systemd, its environment and home directory
 can differ from your shell. Set `AWS_PROFILE=perfr-sharing`,
 `AWS_CONFIG_FILE=/home/YOUR_USER/.aws/config`, and
 `AWS_SHARED_CREDENTIALS_FILE=/home/YOUR_USER/.aws/credentials` in the service's

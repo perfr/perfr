@@ -20,9 +20,11 @@ Real time plus an explicit wait is the only thing that photographs a frame.
 import base64
 import json
 import os
+import shutil
 import socket
 import struct
 import subprocess
+import tempfile
 import time
 import urllib.request
 
@@ -124,7 +126,10 @@ class Chrome:
 
     def __init__(self, port=9333, width=1600, height=1000, binary="google-chrome"):
         self.port = port
-        self.profile = f"/tmp/perfr-e2e-chrome-{port}"
+        # A fresh profile per browser, removed in close(). One fixed
+        # directory per port carried localStorage and caches from run to run,
+        # and on a tmpfs /tmp the leftovers of many runs were memory.
+        self.profile = tempfile.mkdtemp(prefix=f"perfr-e2e-chrome-{port}-")
         self.proc = subprocess.Popen(
             [
                 binary,
@@ -230,3 +235,5 @@ class Chrome:
             self.proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             self.proc.kill()
+            self.proc.wait()
+        shutil.rmtree(self.profile, ignore_errors=True)

@@ -40,12 +40,6 @@ pub struct CoffMetadata {
     pub pdb_debug_info: Option<PdbDebugInfo>,
 }
 
-/// The error `GetDebugPdbInfo` returns when the image carries no CodeView
-/// record. Matched by `CoffFileTest.FailsWithErrorIfPdbDataNotPresent`.
-pub fn no_pdb_debug_info_error() -> String {
-    "Object file does not have debug PDB info.".to_owned()
-}
-
 /// Parses the PE/COFF metadata of `data`.
 pub fn parse_coff_metadata(data: &[u8], file_path: &str) -> Result<CoffMetadata, String> {
     match object::FileKind::parse(data) {

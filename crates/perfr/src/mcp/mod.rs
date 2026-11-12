@@ -17,6 +17,7 @@ mod tools;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -26,7 +27,7 @@ use serde_json::{json, Value};
 use tools::Mcp;
 
 const HELP: &str = "\
-perfr mcp [--url http://127.0.0.1:44766] [--allow-remote]
+perfr mcp [--url http://127.0.0.1:44766] [--allow-remote] [--story-dir <dir>]
 perfr mcp --http [127.0.0.1:44767] [--url http://127.0.0.1:44766]
 
 Speaks the Model Context Protocol. The default is JSON-RPC on stdin, which
@@ -36,6 +37,11 @@ streamable HTTP and refuses any bind that is not loopback.
 --url is the perfr to drive. It must be loopback unless
 --allow-remote is set. The service has no authentication; remote means
 anyone who can reach it can attach to processes.
+
+--story-dir is the only directory perfr_story_load and perfr_story_export
+read and write files in. The default is the directory the server is started
+in. With --http there is no default: anything on this machine can post to
+the port, so those tools take a path only when --story-dir is given.
 
 The service has to be running already:
     perfr --host 127.0.0.1
@@ -51,36 +57,21 @@ pub fn entry() -> i32 {
     }
 }
 
+struct Options {
+    url: String,
+    allow_remote: bool,
+    http: Option<Option<String>>,
+    story_dir: Option<String>,
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(2).collect();
-    let mut url = "http://127.0.0.1:44766".to_string();
-    let mut allow_remote = false;
-    let mut http: Option<Option<String>> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--help" | "-h" => {
-                eprintln!("{HELP}");
-                return Ok(());
-            }
-            "--no-preflight" => {}
-            "--allow-remote" => allow_remote = true,
-            "--url" => {
-                i += 1;
-                url = args.get(i).cloned().ok_or("--url needs http://127.0.0.1:44766")?;
-            }
-            "--http" => {
-                let next = args.get(i + 1).filter(|s| !s.starts_with('-'));
-                if next.is_some() {
-                    i += 1;
-                }
-                http = Some(next.cloned());
-            }
-            other => return Err(format!("unknown argument {other}")),
-        }
-        i += 1;
-    }
-    let mcp = Arc::new(Mcp::connect(&url, allow_remote, tools::Platform::host())?);
+    let Some(Options { url, allow_remote, http, story_dir }) = parse_args(&args)? else {
+        eprintln!("{HELP}");
+        return Ok(());
+    };
+    let story_dir = story_dir_for(story_dir.as_deref(), http.is_some())?;
+    let mcp = Arc::new(Mcp::connect(&url, allow_remote, tools::Platform::host())?.with_story_dir(story_dir));
     if let Some(bind) = http {
         let addr = parse_loopback(bind.as_deref().unwrap_or("127.0.0.1:44767"))?;
         serve_http(mcp, addr)?;
@@ -88,6 +79,64 @@ fn run() -> Result<(), String> {
     } else {
         serve_stdio(&mcp)
     }
+}
+
+/// Where the story tools may read and write files, if anywhere.
+fn story_dir_for(flag: Option<&str>, http: bool) -> Result<Option<PathBuf>, String> {
+    match flag {
+        Some(dir) if Path::new(dir).is_dir() => Ok(Some(PathBuf::from(dir))),
+        Some(dir) => Err(format!("--story-dir {dir} is not a directory")),
+        // No default over HTTP: the port has no authentication, so a default
+        // would let any local process write story files as this user,
+        // wherever the server happened to be started.
+        None if http => Ok(None),
+        // Over stdin the caller is the agent that spawned this process, in
+        // the directory it works in.
+        None => Ok(Some(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))),
+    }
+}
+
+/// `None` when the arguments ask for the help text.
+fn parse_args(args: &[String]) -> Result<Option<Options>, String> {
+    let mut url = "http://127.0.0.1:44766".to_string();
+    let mut allow_remote = false;
+    let mut http: Option<Option<String>> = None;
+    let mut story_dir: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        // clap, which sees the arguments first, takes `--flag=value` as well
+        // as `--flag value`; what it let through must not fail here.
+        let (flag, inline) = match args[i].split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value.to_string())),
+            _ => (args[i].as_str(), None),
+        };
+        match (flag, inline) {
+            ("--help" | "-h", None) => return Ok(None),
+            ("--no-preflight", None) => {}
+            ("--allow-remote", None) => allow_remote = true,
+            ("--url", Some(value)) => url = value,
+            ("--url", None) => {
+                i += 1;
+                url = args.get(i).cloned().ok_or("--url needs http://127.0.0.1:44766")?;
+            }
+            ("--http", Some(value)) => http = Some(Some(value)),
+            ("--http", None) => {
+                let next = args.get(i + 1).filter(|s| !s.starts_with('-'));
+                if next.is_some() {
+                    i += 1;
+                }
+                http = Some(next.cloned());
+            }
+            ("--story-dir", Some(value)) => story_dir = Some(value),
+            ("--story-dir", None) => {
+                i += 1;
+                story_dir = Some(args.get(i).cloned().ok_or("--story-dir needs a directory")?);
+            }
+            _ => return Err(format!("unknown argument {}", args[i])),
+        }
+        i += 1;
+    }
+    Ok(Some(Options { url, allow_remote, http, story_dir }))
 }
 
 fn parse_loopback(text: &str) -> Result<SocketAddr, String> {
@@ -219,6 +268,7 @@ fn handle_http(mut stream: TcpStream, mcp: &Mcp) -> Result<(), String> {
     let method = parts.next().unwrap_or("");
     let path = parts.next().unwrap_or("/");
     let mut content_length = 0usize;
+    let mut chunked = false;
     let mut origin = None;
     let mut host = String::new();
     for line in lines {
@@ -226,6 +276,8 @@ fn handle_http(mut stream: TcpStream, mcp: &Mcp) -> Result<(), String> {
         let value = value.trim();
         if name.eq_ignore_ascii_case("content-length") {
             content_length = value.parse().unwrap_or(0);
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            chunked = value.to_ascii_lowercase().contains("chunked");
         } else if name.eq_ignore_ascii_case("origin") {
             origin = Some(value.to_string());
         } else if name.eq_ignore_ascii_case("host") {
@@ -244,14 +296,35 @@ fn handle_http(mut stream: TcpStream, mcp: &Mcp) -> Result<(), String> {
         return write_status(&mut stream, 413, "body larger than 1MB");
     }
     let mut body = buf[header_end + 4..].to_vec();
-    while body.len() < content_length {
-        let n = stream.read(&mut tmp).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
+    if chunked {
+        // A client that streams its request sends no Content-Length. Read
+        // until the last chunk is in; the framing costs a few bytes a chunk,
+        // so the wire may run somewhat past the body limit.
+        body = loop {
+            match tools::decode_chunks(&body, 1024 * 1024) {
+                Ok(Some(decoded)) => break decoded,
+                Ok(None) if body.len() > 2 * 1024 * 1024 => {
+                    return write_status(&mut stream, 413, "body larger than 1MB");
+                }
+                Ok(None) => {}
+                Err(error) => return write_status(&mut stream, 400, &error),
+            }
+            let n = stream.read(&mut tmp).map_err(|e| e.to_string())?;
+            if n == 0 {
+                return write_status(&mut stream, 400, "the chunked body ended early");
+            }
+            body.extend_from_slice(&tmp[..n]);
+        };
+    } else {
+        while body.len() < content_length {
+            let n = stream.read(&mut tmp).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&tmp[..n]);
         }
-        body.extend_from_slice(&tmp[..n]);
+        body.truncate(content_length);
     }
-    body.truncate(content_length);
     if method == "OPTIONS" {
         return write_bytes(
             &mut stream,
@@ -456,6 +529,9 @@ mod tests {
         if method == "GET" && path == "/api/sampling/callstacks" {
             return (200, r#"{"order":"outermost_first","samples":4,"total_stacks":1,"offset":0,"limit":8,"stacks":[{"tid":7,"count":4,"percent":100.0,"frame_count":2,"truncated":false,"frames":["main","inner"]}]}"#.into());
         }
+        if method == "GET" && path == "/api/capture/targets" {
+            return (200, r#"{"t0_ns":0,"t1_ns":1000,"threads":[{"pid":9,"tid":3,"name":"Worker","process":"box3d"}],"thread_total":1,"scopes":[{"scope_id":9,"name":"SolveContacts","pid":9,"tid":3,"count":4,"total_ns":400}],"scope_total":1,"cores":[{"core":0,"busy":0.5},{"core":1,"busy":0.0}],"core_count":2,"cores_busy":1,"busy_at":0.05,"note":"readings of the capture"}"#.into());
+        }
         if method == "GET" && path == "/api/functions/stats" {
             return (200, r#"{"events_scanned":10,"total":1,"offset":0,"limit":15,"order":"total","rows":[{"pid":9,"name":"perfr_frida_test_inner","kind":"hook","count":180,"total_ns":180000,"avg_ns":1000,"min_ns":800,"max_ns":1200,"stddev_ns":50}]}"#.into());
         }
@@ -478,6 +554,158 @@ mod tests {
         serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
     }
 
+    /// The message of a tool call that has to be refused.
+    fn refused(mcp: &Mcp, name: &str, args: Value) -> String {
+        let response = call(mcp, 1, "tools/call", json!({"name": name, "arguments": args}));
+        let result = &response["result"];
+        assert_eq!(result["isError"], true, "{name} was not refused: {result}");
+        let payload: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        payload["error"].as_str().unwrap().to_string()
+    }
+
+    /// A server whose story directory is `<tmp>/stories`, with one story
+    /// loaded. `<tmp>` itself holds a story and a source file the tools must
+    /// not reach.
+    fn story_server() -> (tempfile::TempDir, std::path::PathBuf, Mcp) {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().to_path_buf();
+        std::fs::create_dir(base.join("stories")).unwrap();
+        std::fs::write(base.join("main.rs"), "fn main() {}\n").unwrap();
+        let url = spawn_service(Arc::new(Mutex::new(Vec::new())));
+        let mcp = mcp(&url).with_story_dir(Some(base.join("stories")));
+        let story = tool(&mcp, 1, "perfr_story_create", json!({"title": "tour"}));
+        std::fs::write(base.join("outside.perfr.story"), story["story"].to_string()).unwrap();
+        (dir, base, mcp)
+    }
+
+    #[test]
+    fn story_files_are_read_and_written_inside_the_story_directory() {
+        let (_dir, base, mcp) = story_server();
+        let exported = tool(&mcp, 2, "perfr_story_export", json!({"path": "tour.perfr.story"}));
+        assert_eq!(exported["path"], "tour.perfr.story");
+        let written = std::fs::read_to_string(base.join("stories/tour.perfr.story")).unwrap();
+        assert_eq!(written, exported["json"].as_str().unwrap());
+        // Parents are still created, and `..` that stays inside is a path
+        // like any other.
+        tool(&mcp, 3, "perfr_story_export", json!({"path": "drafts/v2/tour.json"}));
+        assert!(base.join("stories/drafts/v2/tour.json").is_file());
+        tool(&mcp, 4, "perfr_story_export", json!({"path": "drafts/../again.json"}));
+        assert!(base.join("stories/again.json").is_file());
+        let loaded = tool(&mcp, 5, "perfr_story_load", json!({"path": "drafts/v2/tour.json"}));
+        assert_eq!(loaded["title"], "tour");
+    }
+
+    #[test]
+    fn a_story_path_outside_the_story_directory_is_refused() {
+        let (_dir, base, mcp) = story_server();
+        let source = base.join("main.rs");
+        let outside = base.join("outside.perfr.story");
+        let new_file = base.join("new.json");
+        for path in [
+            source.to_str().unwrap(),
+            new_file.to_str().unwrap(),
+            "../main.rs",
+            "../new.json",
+            "drafts/../../new.json",
+        ] {
+            let error = refused(&mcp, "perfr_story_export", json!({"path": path}));
+            assert!(error.contains("--story-dir"), "{path}: {error}");
+        }
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "fn main() {}\n");
+        assert!(!new_file.exists());
+        for path in [outside.to_str().unwrap(), "../outside.perfr.story"] {
+            let error = refused(&mcp, "perfr_story_load", json!({"path": path}));
+            assert!(error.contains("--story-dir"), "{path}: {error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_in_the_story_directory_does_not_lead_out_of_it() {
+        let (_dir, base, mcp) = story_server();
+        std::os::unix::fs::symlink(&base, base.join("stories/up")).unwrap();
+        // Dangling: writing through it would create the file it names.
+        std::os::unix::fs::symlink(base.join("new.json"), base.join("stories/dangling.json")).unwrap();
+        for path in ["up/main.rs", "up/new.json", "dangling.json"] {
+            let error = refused(&mcp, "perfr_story_export", json!({"path": path}));
+            assert!(error.contains("--story-dir"), "{path}: {error}");
+        }
+        assert_eq!(std::fs::read_to_string(base.join("main.rs")).unwrap(), "fn main() {}\n");
+        assert!(!base.join("new.json").exists());
+        let error = refused(&mcp, "perfr_story_load", json!({"path": "up/outside.perfr.story"}));
+        assert!(error.contains("--story-dir"), "{error}");
+    }
+
+    #[test]
+    fn export_replaces_a_story_and_nothing_else() {
+        let (_dir, base, mcp) = story_server();
+        let stories = base.join("stories");
+        std::fs::write(stories.join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(stories.join("package.json"), "{\"name\": \"x\"}\n").unwrap();
+        std::fs::write(stories.join("notes.bin"), [0xffu8, 0xfe, 0x00]).unwrap();
+        for name in ["main.rs", "package.json", "notes.bin"] {
+            let before = std::fs::read(stories.join(name)).unwrap();
+            let error = refused(&mcp, "perfr_story_export", json!({"path": name}));
+            assert!(error.contains("not a perfr.story"), "{name}: {error}");
+            assert_eq!(std::fs::read(stories.join(name)).unwrap(), before, "{name}");
+        }
+        // An earlier export is what the tool is for replacing, valid or
+        // not: a story someone broke by hand is still a story.
+        tool(&mcp, 2, "perfr_story_export", json!({"path": "tour.perfr.story"}));
+        std::fs::write(stories.join("tour.perfr.story"), "{\"format\": \"perfr.story\", \"version\": 0}").unwrap();
+        let again = tool(&mcp, 3, "perfr_story_export", json!({"path": "tour.perfr.story"}));
+        assert_eq!(
+            std::fs::read_to_string(stories.join("tour.perfr.story")).unwrap(),
+            again["json"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn without_a_story_directory_the_story_tools_take_no_path() {
+        let url = spawn_service(Arc::new(Mutex::new(Vec::new())));
+        let mcp = mcp(&url);
+        let story = tool(&mcp, 1, "perfr_story_create", json!({"title": "tour"}));
+        let name = format!("perfr-mcp-test-{}.perfr.story", std::process::id());
+        let error = refused(&mcp, "perfr_story_export", json!({"path": name}));
+        assert!(error.contains("--story-dir"), "{error}");
+        assert!(!std::path::Path::new(&name).exists());
+        let error = refused(&mcp, "perfr_story_load", json!({"path": "Cargo.toml"}));
+        assert!(error.contains("--story-dir"), "{error}");
+        // The document itself still goes both ways.
+        let exported = tool(&mcp, 2, "perfr_story_export", json!({}));
+        assert_eq!(exported["path"], Value::Null);
+        let loaded = tool(&mcp, 3, "perfr_story_load", json!({"json": story["story"].to_string()}));
+        assert_eq!(loaded["title"], "tour");
+    }
+
+    #[test]
+    fn story_dir_is_a_flag_of_the_stdin_parser_in_both_spellings() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for list in [&["--story-dir", "stories"][..], &["--story-dir=stories"][..]] {
+            let options = parse_args(&args(list)).unwrap().unwrap();
+            assert_eq!(options.story_dir.as_deref(), Some("stories"), "{list:?}");
+        }
+        let options = parse_args(&args(&["--http", "--story-dir", "s", "--url", "http://127.0.0.1:1"])).unwrap().unwrap();
+        assert_eq!(options.http, Some(None));
+        assert_eq!(options.story_dir.as_deref(), Some("s"));
+        assert_eq!(options.url, "http://127.0.0.1:1");
+        assert!(parse_args(&args(&["--story-dir"])).is_err());
+        assert!(parse_args(&args(&[])).unwrap().unwrap().story_dir.is_none());
+    }
+
+    #[test]
+    fn the_http_transport_has_no_story_directory_unless_one_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let named = dir.path().to_str().unwrap();
+        assert_eq!(story_dir_for(None, true).unwrap(), None);
+        assert_eq!(story_dir_for(Some(named), true).unwrap().as_deref(), Some(dir.path()));
+        assert_eq!(story_dir_for(Some(named), false).unwrap().as_deref(), Some(dir.path()));
+        assert_eq!(story_dir_for(None, false).unwrap(), std::env::current_dir().ok());
+        let missing = dir.path().join("missing");
+        let error = story_dir_for(Some(missing.to_str().unwrap()), false).unwrap_err();
+        assert!(error.contains("not a directory"), "{error}");
+    }
+
     #[test]
     fn initialize_lists_the_tools_with_schemas() {
         let routes = Arc::new(Mutex::new(Vec::new()));
@@ -490,13 +718,136 @@ mod tests {
         assert!(mcp.handle(&json!({"jsonrpc":"2.0","method":"notifications/initialized"})).is_none());
         let listed = call(&mcp, 2, "tools/list", json!({}));
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 29);
         assert!(tools.iter().any(|spec| spec["name"] == "perfr_logs"));
         for spec in tools {
             assert!(spec["description"].as_str().unwrap().len() > 40, "{spec}");
             assert_eq!(spec["inputSchema"]["type"], "object");
             assert!(spec["inputSchema"].get("properties").is_some(), "{spec}");
         }
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"perfr_story_create"), "{names:?}");
+        assert!(names.contains(&"perfr_story_cpu"), "{names:?}");
+    }
+
+    #[test]
+    fn a_story_is_authored_and_checked_against_the_capture() {
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let url = spawn_service(hits.clone());
+        let mcp = mcp(&url);
+        let created = tool(
+            &mcp,
+            1,
+            "perfr_story_create",
+            json!({
+                "title": "box3d",
+                "summary": "A tour. It does not state a core count.",
+                "capture": "captures/box3d.perfr.stream"
+            }),
+        );
+        assert_eq!(created["format"], "perfr.story");
+        assert_eq!(created["version"], 1);
+        tool(
+            &mcp,
+            2,
+            "perfr_story_add_step",
+            json!({
+                "step": {
+                    "id": "cores",
+                    "kind": "evidence",
+                    "title": "Scheduler",
+                    "body": "Count the busy lanes.",
+                    "duration_ms": 4000,
+                    "view": { "fit": "content", "focused": [{ "kind": "scheduler" }] }
+                }
+            }),
+        );
+        tool(
+            &mcp,
+            3,
+            "perfr_story_set_view",
+            json!({
+                "id": "cores",
+                "view": {
+                    "t0_frac": 0.2,
+                    "t1_frac": 0.8,
+                    "fit": "span",
+                    "focused": [{ "kind": "scheduler" }]
+                }
+            }),
+        );
+        tool(
+            &mcp,
+            4,
+            "perfr_story_add_overlay",
+            json!({
+                "step_id": "cores",
+                "overlay": {
+                    "kind": "callout",
+                    "id": "note",
+                    "text": "One lane per core.",
+                    "anchor": { "time_frac": 0.5, "track": { "kind": "scheduler" }, "y": 0.2 }
+                }
+            }),
+        );
+        let checked = tool(&mcp, 5, "perfr_story_validate", json!({}));
+        assert_eq!(checked["ok"], true);
+        let exported = tool(&mcp, 6, "perfr_story_export", json!({}));
+        let again = tool(
+            &mcp,
+            7,
+            "perfr_story_load",
+            json!({"json": exported["json"]}),
+        );
+        assert_eq!(again["steps"][0]["id"], "cores");
+        let threads = tool(
+            &mcp,
+            8,
+            "perfr_story_find_threads",
+            json!({"query": "work"}),
+        );
+        assert_eq!(threads["threads"][0]["tid"], 3);
+        let scopes = tool(
+            &mcp,
+            9,
+            "perfr_story_find_scopes",
+            json!({"query": "solve", "t0_ns": 0, "t1_ns": 1000}),
+        );
+        assert_eq!(scopes["scopes"][0]["scope_id"], 9);
+        let cpu = tool(
+            &mcp,
+            10,
+            "perfr_story_cpu",
+            json!({"t0_ns": 0, "t1_ns": 1000}),
+        );
+        assert_eq!(cpu["cores_busy"], 1);
+        assert_eq!(cpu["core_count"], 2);
+        let hot = tool(
+            &mcp,
+            11,
+            "perfr_story_hotspots",
+            json!({"t0_ns": 10, "t1_ns": 20, "limit": 1}),
+        );
+        assert_eq!(hot["supported"], true);
+        assert_eq!(hot["hotspots"][0]["name"], "fn0");
+        let paths: Vec<String> = hits
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|h| h.path.clone())
+            .collect();
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.starts_with("/api/capture/targets?") && p.contains("q=work")),
+            "{paths:?}"
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.contains("start_ns=10") && p.contains("end_ns=20")),
+            "{paths:?}"
+        );
     }
 
     #[test]
@@ -586,6 +937,270 @@ mod tests {
         assert_eq!(stacks["supported"], false);
         assert!(hits.lock().unwrap().iter().all(|hit| hit.path != "/api/capture/start"));
         assert!(hits.lock().unwrap().iter().all(|hit| !hit.path.starts_with("/api/sampling")));
+    }
+
+    #[test]
+    fn what_the_agent_is_told_matches_the_build_and_the_platform_table() {
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let url = spawn_service(hits);
+        let mcp = Mcp::connect(&url, false, tools::Platform::windows()).unwrap();
+        let init = call(&mcp, 1, "initialize", json!({}));
+        assert_eq!(init["result"]["serverInfo"]["version"], crate::build_info::package_version());
+        // Windows samples (`Platform::windows`). Text that calls sampling
+        // Linux-only keeps an agent there from ever asking for the report.
+        let caps = tool(&mcp, 2, "perfr_capabilities", json!({}));
+        assert_eq!(caps["features"]["sampling"]["supported"], true);
+        let instructions = init["result"]["instructions"].as_str().unwrap().to_string();
+        let listed = call(&mcp, 3, "tools/list", json!({})).to_string();
+        for text in [&instructions, &listed] {
+            assert!(!text.contains("scheduler are Linux-only"), "{text}");
+            assert!(!text.contains("on Linux, perfr_sampling_report"), "{text}");
+            assert!(!text.contains("Default on for Linux, unsupported on macOS"), "{text}");
+            assert!(!text.contains("the scheduler, kernel uprobes and auto-profiling are Linux-only"), "{text}");
+        }
+        assert!(instructions.contains("Windows"), "{instructions}");
+        // And a refusal does not explain itself with another platform's name.
+        let mut none = tools::Platform::windows();
+        none.sampling = false;
+        let mcp = Mcp::connect(&url, false, none).unwrap();
+        let report = tool(&mcp, 4, "perfr_sampling_report", json!({}));
+        assert_eq!(report["supported"], false);
+        assert!(!report["message"].as_str().unwrap().contains("macOS"), "{report}");
+        assert!(report["message"].as_str().unwrap().contains("perfr_function_stats"), "{report}");
+    }
+
+    #[test]
+    fn a_batch_is_answered_as_a_batch() {
+        let url = spawn_service(Arc::new(Mutex::new(Vec::new())));
+        let mcp = mcp(&url);
+        // The 2025-03-26 revision this server offers allows an array. It has
+        // no id of its own, and used to be dropped as a notification: the
+        // client waited for a reply that never came.
+        let replies = mcp
+            .handle(&json!([
+                {"jsonrpc":"2.0","id":1,"method":"ping"},
+                {"jsonrpc":"2.0","method":"notifications/initialized"},
+                {"jsonrpc":"2.0","id":"b","method":"no/such"},
+            ]))
+            .unwrap();
+        let replies = replies.as_array().unwrap();
+        assert_eq!(replies.len(), 2, "{replies:?}");
+        assert_eq!(replies[0]["id"], 1);
+        assert_eq!(replies[0]["result"], json!({}));
+        assert_eq!(replies[1]["id"], "b");
+        assert_eq!(replies[1]["error"]["code"], -32601);
+        // Only notifications: nothing to say.
+        assert!(mcp.handle(&json!([{"jsonrpc":"2.0","method":"notifications/initialized"}])).is_none());
+        // Not a request at all: said so, rather than left unanswered.
+        for junk in [json!([]), json!(7), json!("ping")] {
+            let reply = mcp.handle(&junk).unwrap();
+            assert_eq!(reply["error"]["code"], -32600, "{junk}: {reply}");
+            assert_eq!(reply["id"], Value::Null);
+        }
+        let mixed = mcp.handle(&json!([7, {"jsonrpc":"2.0","id":3,"method":"ping"}])).unwrap();
+        assert_eq!(mixed[0]["error"]["code"], -32600, "{mixed}");
+        assert_eq!(mixed[1]["id"], 3);
+    }
+
+    #[test]
+    fn the_http_transport_reads_a_chunked_body() {
+        let url = spawn_service(Arc::new(Mutex::new(Vec::new())));
+        let mcp = Arc::new(Mcp::connect(&url, false, tools::Platform::linux()).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(stream) = conn else { continue };
+                let mcp = mcp.clone();
+                thread::spawn(move || {
+                    let _ = handle_http(stream, &mcp);
+                });
+            }
+        });
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"ping"}).to_string();
+        let (head, tail) = body.split_at(9);
+        let chunked = format!("{:x}\r\n{head}\r\n{:x};ext=1\r\n{tail}\r\n0\r\n\r\n", head.len(), tail.len());
+        let headers = "Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n";
+        let ok = http_exchange(port, "POST", "/mcp", headers, Some(&chunked));
+        assert!(ok.contains("200 OK"), "{ok}");
+        assert!(ok.contains("\"result\":{}"), "{ok}");
+        // A chunk size that is not one is refused, not waited on.
+        let bad = http_exchange(port, "POST", "/mcp", headers, Some("zz\r\n{}\r\n0\r\n\r\n"));
+        assert!(bad.contains("400"), "{bad}");
+        // A size no body can have must not take the server down with it.
+        let huge = http_exchange(port, "POST", "/mcp", headers, Some("ffffffffffffffff\r\n{}\r\n0\r\n\r\n"));
+        assert!(huge.contains("413") || huge.contains("400"), "{huge}");
+        let again = http_exchange(port, "POST", "/mcp", headers, Some(&chunked));
+        assert!(again.contains("200 OK"), "{again}");
+    }
+
+    #[test]
+    fn every_flag_takes_its_value_after_an_equals_sign_as_clap_does() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // clap sees the arguments first and accepts these; this parser then
+        // called them unknown.
+        let options = parse_args(&args(&["--url=http://127.0.0.1:9", "--http=127.0.0.1:44767", "--story-dir=s"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(options.url, "http://127.0.0.1:9");
+        assert_eq!(options.http, Some(Some("127.0.0.1:44767".to_string())));
+        assert_eq!(options.story_dir.as_deref(), Some("s"));
+        assert!(parse_args(&args(&["--allow-remote=yes"])).is_err());
+        assert!(parse_args(&args(&["--nope=1"])).is_err());
+    }
+
+    #[test]
+    fn a_story_edit_that_leaves_the_story_invalid_is_undone() {
+        let url = spawn_service(Arc::new(Mutex::new(Vec::new())));
+        let mcp = mcp(&url);
+        let step = |id: &str, duration_ms: u32| {
+            json!({"id": id, "kind": "evidence", "title": id, "body": "", "duration_ms": duration_ms,
+                   "view": { "fit": "content", "focused": [{ "kind": "scheduler" }] }})
+        };
+        let callout = |id: &str, time_frac: f64| {
+            json!({"kind": "callout", "id": id, "text": "here",
+                   "anchor": { "time_frac": time_frac, "track": { "kind": "scheduler" }, "y": 0.2 }})
+        };
+        // Every tool that needs a story says which tools make one.
+        for (name, args) in [
+            ("perfr_story_get", json!({})),
+            ("perfr_story_add_step", json!({"step": step("a", 1000)})),
+            ("perfr_story_update_step", json!({"id": "a", "title": "t"})),
+            ("perfr_story_remove_step", json!({"id": "a"})),
+            ("perfr_story_set_view", json!({"id": "a", "view": {"fit": "content"}})),
+            ("perfr_story_add_overlay", json!({"step_id": "a", "overlay": callout("n", 0.5)})),
+            ("perfr_story_remove_overlay", json!({"step_id": "a", "overlay_id": "n"})),
+            ("perfr_story_reorder", json!({"id": "a", "index": 0})),
+            ("perfr_story_validate", json!({})),
+            ("perfr_story_export", json!({})),
+        ] {
+            let error = refused(&mcp, name, args);
+            assert_eq!(error, "no story loaded; call perfr_story_create or perfr_story_load", "{name}");
+        }
+        tool(&mcp, 1, "perfr_story_create", json!({"title": "t"}));
+        tool(&mcp, 2, "perfr_story_add_step", json!({"step": step("a", 1000)}));
+        tool(&mcp, 3, "perfr_story_add_step", json!({"step": step("b", 2000)}));
+        tool(&mcp, 4, "perfr_story_add_overlay", json!({"step_id": "a", "overlay": callout("n", 0.5)}));
+        let before = tool(&mcp, 5, "perfr_story_get", json!({}))["story"].clone();
+        assert_eq!(before["steps"].as_array().unwrap().len(), 2);
+
+        // Each of these parses, applies, and fails validation: the story is as it was.
+        for (name, args, says) in [
+            ("perfr_story_add_step", json!({"step": step("c", 0)}), "steps[2].duration_ms: expected 1..=120000"),
+            ("perfr_story_add_step", json!({"step": step("c", 0), "index": 0}), "steps[0].duration_ms: expected 1..=120000"),
+            ("perfr_story_update_step", json!({"id": "b", "title": "changed", "duration_ms": 0}), "steps[1].duration_ms: expected 1..=120000"),
+            ("perfr_story_set_view", json!({"id": "a", "view": {"fit": "content", "t0_frac": 2.0}}), "steps[0].view.t0_frac: expected a fraction from 0 to 1"),
+            ("perfr_story_add_overlay", json!({"step_id": "b", "overlay": callout("m", 7.0)}), "steps[1].overlays[0]"),
+        ] {
+            let error = refused(&mcp, name, args);
+            assert!(error.contains(says), "{name}: {error}");
+            assert_eq!(tool(&mcp, 6, "perfr_story_get", json!({}))["story"], before, "{name}");
+        }
+        // An edit the story itself refuses changes nothing either.
+        for (name, args, says) in [
+            ("perfr_story_add_step", json!({"step": step("a", 1000)}), "step id a is already used"),
+            ("perfr_story_update_step", json!({"id": "zz", "title": "t"}), "no step zz"),
+            ("perfr_story_remove_step", json!({"id": "zz"}), "no step zz"),
+            ("perfr_story_reorder", json!({"id": "zz", "index": 0}), "no step zz"),
+        ] {
+            let error = refused(&mcp, name, args);
+            assert_eq!(error, says, "{name}");
+            assert_eq!(tool(&mcp, 7, "perfr_story_get", json!({}))["story"], before, "{name}");
+        }
+
+        // And the edits that are fine go through, each answering with the story.
+        let updated = tool(&mcp, 8, "perfr_story_update_step", json!({"id": "b", "title": "changed", "duration_ms": 500}));
+        assert_eq!(updated["steps"][1]["title"], "changed");
+        assert_eq!(updated["steps"][1]["duration_ms"], 500);
+        let moved = tool(&mcp, 9, "perfr_story_reorder", json!({"id": "b", "index": 0}));
+        assert_eq!(moved["steps"][0]["id"], "b");
+        let bare = tool(&mcp, 10, "perfr_story_remove_overlay", json!({"step_id": "a", "overlay_id": "n"}));
+        assert_eq!(bare["steps"][1]["overlays"], 0);
+        let one = tool(&mcp, 11, "perfr_story_remove_step", json!({"id": "a"}));
+        assert_eq!(one["steps"].as_array().unwrap().len(), 1);
+        assert_eq!(one["story"]["steps"][0]["id"], "b");
+    }
+
+    #[test]
+    fn the_sampling_report_and_the_story_hotspots_page_the_same_rows() {
+        let url = spawn_service(Arc::new(Mutex::new(Vec::new())));
+        let mcp = mcp(&url);
+        let report = tool(&mcp, 1, "perfr_sampling_report", json!({"limit": 1}));
+        let mut hotspots = tool(&mcp, 2, "perfr_story_hotspots", json!({"limit": 1}));
+        assert_eq!(report["supported"], true);
+        assert_eq!(report["limit"], 1);
+        assert_eq!(report["hotspots"].as_array().unwrap().len(), 1);
+        assert!(report["hotspots"][0]["self_percent"].is_number(), "{report}");
+        // The story tool adds a note; the rest is the same reading.
+        assert!(hotspots.as_object_mut().unwrap().remove("note").is_some());
+        assert_eq!(report, hotspots);
+        let keys: Vec<&String> = report.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["hotspots", "limit", "offset", "samples", "supported", "total_functions"]);
+    }
+
+    /// The real service, bare: its router with nothing behind the capture
+    /// and symbol hooks. Returns its URL and the runtime that serves it.
+    fn spawn_real_service() -> (String, tokio::runtime::Runtime) {
+        use perfr_live_server::{LiveService, ServerConfig};
+        let service = LiveService::new(ServerConfig { ring_buffer_bytes: 1 << 20, ..ServerConfig::default() }).unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        // `serve` binds the configured address itself, so the port is chosen
+        // here and handed over; taken in between, the next one is tried.
+        for _ in 0..20 {
+            let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            service.config.lock().bind = SocketAddr::from(([127, 0, 0, 1], port));
+            let serving = runtime.spawn(perfr_live_server::http::serve(service.clone()));
+            for _ in 0..200 {
+                if serving.is_finished() {
+                    break;
+                }
+                if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                    return (format!("http://127.0.0.1:{port}"), runtime);
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        panic!("the service did not come up on a loopback port");
+    }
+
+    #[test]
+    fn every_service_call_the_tools_make_is_a_route_of_the_real_service() {
+        // The other tests answer from a mock whose paths were typed in by
+        // hand next to the code under test. This one asks the router the
+        // service is built from. Nothing is captured here, so most answers
+        // are an empty reading or a refusal; a path or a method the router
+        // does not have is what must not come back.
+        let (url, _runtime) = spawn_real_service();
+        let mcp = mcp(&url);
+        let caps = tool(&mcp, 1, "perfr_capabilities", json!({}));
+        assert_eq!(caps["service_reachable"], true, "{caps}");
+        assert_eq!(caps["capture"]["capturing"], false, "{caps}");
+        let pid = std::process::id();
+        let calls = [
+            ("perfr_list_processes", json!({"query": "perfr", "limit": 5})),
+            ("perfr_attach", json!({"pid": pid, "timeout_ms": 50})),
+            ("perfr_search_functions", json!({"pid": pid, "query": "main"})),
+            ("perfr_arm_hooks", json!({"pid": pid, "names": ["main"]})),
+            ("perfr_unhook", json!({"all": true})),
+            ("perfr_start_capture", json!({"pid": pid, "sampling": false, "scheduler": false})),
+            ("perfr_capture_status", json!({})),
+            ("perfr_stop_capture", json!({})),
+            ("perfr_sampling_report", json!({})),
+            ("perfr_callstacks", json!({"limit": 3})),
+            ("perfr_function_stats", json!({"query": "x", "order": "count"})),
+            ("perfr_logs", json!({"limit": 5, "scope": "a b"})),
+            ("perfr_story_find_threads", json!({"query": "x"})),
+            ("perfr_story_find_scopes", json!({"t0_ns": 1, "t1_ns": 2})),
+            ("perfr_story_cpu", json!({})),
+            ("perfr_story_hotspots", json!({"t0_ns": 1, "t1_ns": 2})),
+        ];
+        for (name, args) in calls {
+            let response = call(&mcp, 2, "tools/call", json!({"name": name, "arguments": args}));
+            let text = response["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{name}: {response}"));
+            for gone in ["HTTP 404", "HTTP 405", "has no /api/"] {
+                assert!(!text.contains(gone), "{name} asked the service for something it does not serve: {text}");
+            }
+        }
     }
 
     #[test]

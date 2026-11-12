@@ -25,13 +25,6 @@ jobs:
     - name: Check license headers
       run: ./.github/scripts/check-license-headers.sh
       shell: bash
-    - name: 'Upload missing license headers'
-      uses: actions/upload-artifact@v4
-      if: success() || failure()
-      with:
-        name: missing_license_headers
-        path: missing_license_headers.txt
-        retention-days: 1
 
   release-script:
     runs-on: ubuntu-22.04
@@ -42,3 +35,21 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y shellcheck
     - name: Test the release script
       run: tools/release/test_release.sh
+    - name: Test the installer
+      run: tools/install/test_install.sh
+    - name: Test the debug-info splitter
+      run: python3 tools/release/test_split_debug.py
+
+  # perfr.dev refuses a viewer pack whose source id does not match the
+  # checkout. Catch that on the pull request, including a source change
+  # that only rewrites viewer-dist/VERSION and leaves the wasm behind.
+  viewer-pack:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: '0'
+    - name: Check the committed viewer pack matches its sources
+      run: python3 .github/scripts/check-viewer-pack.py
+      shell: bash

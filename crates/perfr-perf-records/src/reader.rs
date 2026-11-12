@@ -2,20 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Parsing of whole ring-buffer records, dynamic tails included, ported from
-//! `src/LinuxTracing/PerfEventReaders.cpp`.
+//! Parsing of whole ring-buffer records, dynamic tails included.
 //!
-//! `parse_record_sample` is the Rust twin of the C++ `ConsumeRecordSample`:
-//! the same flag-driven cursor walk over the same field order, including its
-//! quirks -- the stack copy takes only `dyn_size` of the `stack_size` bytes,
-//! `dyn_size` itself is read only when stack data is copied while the cursor
-//! still advances past it, and the callchain ips advance the cursor even
-//! when not copied. The one deliberate difference: where the C++ trusts the
-//! kernel and reads unchecked, this returns `None` on a truncated record
-//! instead of reading out of bounds.
+//! `parse_record_sample` is a flag-driven cursor walk over the fields of a
+//! `PERF_RECORD_SAMPLE` in the order the perf ABI fixes. Three things about
+//! it are deliberate: the stack copy takes only `dyn_size` of the
+//! `stack_size` bytes the kernel reserves, `dyn_size` itself is read only
+//! when stack data is copied while the cursor still advances past it, and
+//! the callchain ips advance the cursor even when not copied. Every read is
+//! bounds-checked: a truncated record is `None`, never a read past the end.
 //!
-//! Byte-for-byte agreement with the C++ consumers on kernel-produced records
-//! is checked by `rust/tools/differential/perf_reader_differential.cpp`.
+//! The walk came from the C++ tracer's `ConsumeRecordSample` and was once
+//! compared with it record for record; that comparison is gone with the
+//! C++, and what holds these parsers now is their unit tests, which build
+//! each record shape by hand, and the live tests of the crates that read
+//! real rings.
 
 use crate::{
     FromLe, MmapUpToPgoff, PerfEventHeader, SampleIdTidTimeStreamidCpu,
@@ -268,19 +269,35 @@ pub fn parse_record_sample_with(
     Some(sample)
 }
 
-/// Where the event's capture timestamp lives, mirroring how TracerImpl
-/// reads it before deferring a record: a PERF_RECORD_SAMPLE opens with the
-/// sample id right after the header (`ReadSampleRecordTime`), every other
-/// record carries it in the `sample_id_all` tail.
-pub fn record_timestamp(bytes: &[u8]) -> Option<u64> {
-    let header = PerfEventHeader::parse(bytes)?;
-    if { header.kind } == crate::record_type::SAMPLE {
-        let start = PerfEventHeader::SIZE;
-        return SampleIdTidTimeStreamidCpu::parse(bytes.get(start..)?).map(|id| id.time);
-    }
-    parse_sample_id_all(bytes).map(|id| id.time)
+/// A sample of a tracepoint event (`TID | TIME | STREAM_ID | CPU | RAW`):
+/// who emitted it, when, and the tracepoint's own fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TracepointSample<'a> {
+    pub pid: u32,
+    pub tid: u32,
+    pub time: u64,
+    pub cpu: u32,
+    /// The payload, lent from the record: `tracepoints` gives it shape.
+    pub raw: &'a [u8],
 }
 
+/// Reads a tracepoint sample where it lies. The scheduler's tracepoints
+/// fire for every context switch and wakeup on the machine, and each record
+/// is looked at before any filter can drop it; `parse_record_sample` copies
+/// the payload into a fresh `Vec` for each one.
+pub fn parse_tracepoint_sample(bytes: &[u8]) -> Option<TracepointSample<'_>> {
+    let mut cursor = Cursor { bytes, offset: 0 };
+    let _header: PerfEventHeader = cursor.read()?;
+    let pid = cursor.read()?;
+    let tid = cursor.read()?;
+    let time = cursor.read()?;
+    let _stream_id: u64 = cursor.read()?;
+    let cpu = cursor.read()?;
+    let _res: u32 = cursor.read()?;
+    let raw_size: u32 = cursor.read()?;
+    let raw = cursor.read_bytes(raw_size as usize)?;
+    Some(TracepointSample { pid, tid, time, cpu, raw })
+}
 
 /// `PERF_RECORD_MISC_SWITCH_OUT` in `perf_event_header::misc`: set when a
 /// context-switch record marks the thread switching OUT (cleared for a
@@ -317,11 +334,12 @@ pub fn parse_context_switch(bytes: &[u8]) -> Option<ContextSwitch> {
     })
 }
 
-/// Twin of `ReadPerfSampleIdAll`: `sample_id_all` puts the sample id at the
-/// very end of every non-SAMPLE record.
+/// `sample_id_all` puts the sample id at the very end of every non-SAMPLE
+/// record. A record that is nothing but its header and that id is a whole
+/// one: the per-task `PERF_RECORD_SWITCH` is exactly that, 40 bytes.
 pub fn parse_sample_id_all(bytes: &[u8]) -> Option<SampleIdTidTimeStreamidCpu> {
     let start = bytes.len().checked_sub(SampleIdTidTimeStreamidCpu::SIZE)?;
-    if start <= PerfEventHeader::SIZE {
+    if start < PerfEventHeader::SIZE {
         return None;
     }
     SampleIdTidTimeStreamidCpu::parse(&bytes[start..])
@@ -512,6 +530,93 @@ mod tests {
             parse_record_sample(&bytes, SampleFlags::callchain_sample(), true).unwrap();
         assert_eq!(sample.ips_size, 3);
         assert_eq!(sample.ips.unwrap(), vec![0xa0, 0xb0, 0xc0]);
+    }
+
+    /// The id block `sample_id_all` appends: pid, tid, time, stream id, cpu.
+    fn push_sample_id(bytes: &mut Vec<u8>, pid: u32, tid: u32, time: u64, cpu: u32) {
+        push_u32(bytes, pid);
+        push_u32(bytes, tid);
+        push_u64(bytes, time);
+        push_u64(bytes, 9); // stream id
+        push_u32(bytes, cpu);
+        push_u32(bytes, 0);
+    }
+
+    /// `PERF_RECORD_SWITCH_CPU_WIDE`: header, next/prev pid and tid, id.
+    /// 48 bytes, the size the kernel writes for the scheduler rings.
+    fn cpu_wide_switch(misc: u16, pid: u32, tid: u32, time: u64, cpu: u32) -> Vec<u8> {
+        let mut bytes = header(record_type::SWITCH_CPU_WIDE, misc, 48);
+        push_u32(&mut bytes, 4242); // next_prev_pid
+        push_u32(&mut bytes, 4243); // next_prev_tid
+        push_sample_id(&mut bytes, pid, tid, time, cpu);
+        assert_eq!(bytes.len(), 48);
+        bytes
+    }
+
+    #[test]
+    fn a_cpu_wide_switch_is_read_from_its_trailing_id() {
+        let out = parse_context_switch(&cpu_wide_switch(MISC_SWITCH_OUT, 100, 101, 7_000, 5)).unwrap();
+        assert_eq!(
+            out,
+            ContextSwitch { pid: 100, tid: 101, core: 5, timestamp_ns: 7_000, is_switch_out: true }
+        );
+        // The thread it names is the one in the id, not the "next/prev" one
+        // the cpu-wide variant also carries.
+        let into = parse_context_switch(&cpu_wide_switch(0, 100, 101, 7_500, 5)).unwrap();
+        assert!(!into.is_switch_out);
+        assert_eq!((into.pid, into.tid), (100, 101));
+    }
+
+    #[test]
+    fn an_exiting_threads_switch_out_keeps_its_minus_one_tid() {
+        // The kernel can no longer resolve the tid of a thread that has
+        // been unhashed; the pid is still good.
+        let out = parse_context_switch(&cpu_wide_switch(MISC_SWITCH_OUT, 100, u32::MAX, 7_000, 0)).unwrap();
+        assert_eq!((out.pid, out.tid), (100, -1));
+    }
+
+    #[test]
+    fn a_per_task_switch_is_a_header_and_an_id_and_nothing_else() {
+        // PERF_RECORD_SWITCH: 40 bytes, the smallest record there is with
+        // sample_id_all. Both readers of the trailing id must take it.
+        let mut bytes = header(record_type::SWITCH, MISC_SWITCH_OUT, 40);
+        push_sample_id(&mut bytes, 100, 101, 7_000, 2);
+        assert_eq!(bytes.len(), 40);
+        let switch = parse_context_switch(&bytes).unwrap();
+        assert_eq!((switch.tid, switch.core, switch.is_switch_out), (101, 2, true));
+        let id = parse_sample_id_all(&bytes).expect("a record of exactly header + id has an id");
+        assert_eq!(({ id.pid }, { id.tid }, { id.time }, { id.cpu }), (100, 101, 7_000, 2));
+
+        // One byte short of holding both is not a record.
+        assert_eq!(parse_context_switch(&bytes[..39]), None);
+        assert!(parse_sample_id_all(&bytes[..39]).is_none());
+        assert!(parse_sample_id_all(&bytes[..8]).is_none());
+        assert!(parse_sample_id_all(&[]).is_none());
+    }
+
+    #[test]
+    fn a_tracepoint_sample_carries_its_raw_payload() {
+        // What the scheduler tracepoints produce: the id fields, then a
+        // u32 size and that many bytes.
+        let mut bytes = header(record_type::SAMPLE, 0, 0);
+        push_u32(&mut bytes, 100);
+        push_u32(&mut bytes, 101);
+        push_u64(&mut bytes, 7_000);
+        push_u64(&mut bytes, 9);
+        push_u32(&mut bytes, 3);
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, 12);
+        bytes.extend_from_slice(b"twelve bytes");
+        let size = bytes.len();
+        bytes[6..8].copy_from_slice(&(size as u16).to_le_bytes());
+        let flags = SampleFlags { sample_type: sample_bits::TID_TIME_STREAMID_CPU | sample_bits::RAW, regs_user_count: 0 };
+        let sample = parse_record_sample(&bytes, flags, true).unwrap();
+        assert_eq!((sample.pid, sample.tid, sample.time, sample.cpu), (100, 101, 7_000, 3));
+        assert_eq!(sample.raw_data.as_deref(), Some(&b"twelve bytes"[..]));
+        // A size that runs past the record is refused, not read.
+        let mut long = bytes.clone();
+        long[40..44].copy_from_slice(&13u32.to_le_bytes());
+        assert!(parse_record_sample(&long, flags, true).is_none());
     }
 
     #[test]

@@ -26,7 +26,7 @@ use perfr_live_event::dev::{
     NAME_POOL_TAIL_US, NAME_LISTING_INLINE, MachineId, TID_NET, TID_RENDER, TID_STATS, TID_UI, VIEWER_PID,
 };
 use perfr_live_event::{kind, InternTable, LaneKey, LiveEvent};
-use perfr_live_protocol::{decode_frame, LiveFrame};
+use perfr_live_protocol::LiveFrame;
 use perfr_live_render::{ThreadFocus, 
     apply_highlight_flags, choose_lod_hint, collect_instances_cached, collect_instances_layout_opts,
     instance_for_event,
@@ -650,7 +650,7 @@ enum ShareUi {
 /// Where the bytes in a confirm dialog came from.
 #[derive(Clone, Debug)]
 enum ShareSource {
-    /// `stream_bytes` already held by the viewer (a file or `?capture=`).
+    /// The stream already held by the viewer (a file or `?capture=`).
     Loaded,
     /// Read from the service for this confirm. Not posted yet.
     Fetched(Vec<u8>),
@@ -698,7 +698,16 @@ impl ShareDraft {
 pub struct PerfrLiveApp {
     index: TrackIndex,
     intern: InternTable,
+    /// The tail of the stream that is not a whole frame yet. See
+    /// `frames::drain_frames` for what may sit here and for how long.
     leftover: Vec<u8>,
+    /// Frames of a type this build does not know, stepped over so far.
+    frames_skipped: u64,
+    /// Set when the socket was closed because the service speaks another
+    /// protocol version: what to tell the reader, for as long as the page
+    /// lives. Only a reload brings a viewer that matches, so the socket is
+    /// not reopened.
+    ws_incompatible: Option<String>,
     net: Net,
     processes: Vec<ProcessJson>,
     selected_pid: Option<u32>,
@@ -815,14 +824,12 @@ pub struct PerfrLiveApp {
     /// service: nothing is polled, and the pills that need one are not
     /// shown. The static web site's mode.
     static_capture: Option<String>,
-    /// Bytes of a `.perfr.stream` loaded from a file or URL. Share posts
-    /// these. A live session leaves this empty and exports from the service.
-    stream_bytes: Option<Vec<u8>>,
-    /// Set while those bytes are being ingested, so a frame inside the file
-    /// does not throw them away.
-    loading_stream: bool,
-    /// The open capture is that file. Later socket frames are not mixed in.
-    local_stream: bool,
+    /// Capture story: steps, camera, overlays. Empty until a `?story=`
+    /// URL loads one or the reader opens Story from More.
+    story: crate::story::StorySession,
+    /// The `.perfr.stream` behind what is on screen, if it came from a file
+    /// or URL: what Share posts, and why socket frames are not mixed in.
+    held_stream: crate::share::HeldStream,
     share_open: bool,
     /// Bumped when a share starts and when the capture is replaced, so a
     /// reply for an older click is dropped.
@@ -985,6 +992,8 @@ pub struct PerfrLiveApp {
     /// The Benchmark window (More menu, F3): the service's fake-scope
     /// producer, with a rate knob that moves while it runs.
     bench_open: bool,
+    /// About (More menu): the same version line `perfr --version` prints.
+    about_open: bool,
     bench_threads: u32,
     bench_depth_min: u32,
     bench_depth_max: u32,
@@ -1450,6 +1459,8 @@ impl PerfrLiveApp {
     /// reading pixels. Written only when it changes.
     fn publish_selection(&mut self) {
         let focus = self.thread_focus();
+        // Same string `perfr --version` prints. A harness reads it as `build`.
+        let build = perfr_build_info::version_line();
         let text = format!(
             "{{\"thread\":{},\"scope\":{},\"focus\":{},\"measure\":{},\"ranges\":[{}],\"report_open\":{},\"tweaks\":{},\"tab\":\"{}\",\"hellos\":{},\"wire\":\"{}\",\"ws_bps\":{:.0},\"report_w\":{:.0},\"report_collapsed\":{},\"scope_menu\":{},\"scope_report\":{},\"view\":[{:.0},{:.0}],\"content\":{},\"events\":{},\"hooks\":[{}],\"capture_start\":{},\"report_filter\":{:?},\"track_filter\":{:?},\"prims\":{},\"flame_zoom\":{},\"selected_pid\":{},\"recording\":{},\"capture_elapsed\":{:.3},\"pointer\":{},\"build\":{:?},\"draw\":{},\"code\":{},\"rect\":{},\"rect_self\":{},\"theme\":{:?},\"renderer\":{:?},\"report_copied\":{},\"report_sel\":{}}}",
             match self.selected_thread {
@@ -1510,7 +1521,7 @@ impl PerfrLiveApp {
             self.recording || self.status.capturing,
             self.capture_timer.shown_s,
             self.pointer_readout.clone(),
-            VIEWER_BUILD,
+            build,
             if self.draw_readout.is_empty() { "null" } else { self.draw_readout.as_str() },
             format!(
                 "{{\"mode\":\"{}\",\"rows\":{},\"source\":{:?},\"disasm\":{:?},\"instructions\":{},\"error\":{:?},\"loading\":{},\"copied\":{}}}",
@@ -1623,7 +1634,9 @@ impl PerfrLiveApp {
         fonts::install(&cc.egui_ctx);
         // Pick the colour scheme before building visuals from it: `?theme=`
         // wins (a shared link or screenshot pins the look), else the reader's
-        // saved choice, else perfr's default.
+        // saved choice, else Nord. A stored `perfr` is kept; only a missing
+        // key gets the default. The active scheme is already Nord, so a fresh
+        // load does not paint the old palette and then correct it.
         if let Some(key) = crate::dev::query_theme_from_location().or_else(read_saved_theme) {
             perfr_live_event::theme::set_active_by_key(&key);
         }
@@ -1642,6 +1655,13 @@ impl PerfrLiveApp {
             Some(url) => Net::from_capture_url(url),
             None => Net::connect(),
         };
+        let mut story = crate::story::StorySession::from_query(
+            crate::dev::query_story_url_from_location().as_deref(),
+            crate::dev::query_chrome_compact_from_location(),
+        );
+        if let Some(url) = story.take_fetch() {
+            net.fetch_story(&url);
+        }
         let mut has_gpu = false;
         let mut gpu_backend = "none";
         if let Some(rs) = &cc.wgpu_render_state {
@@ -1661,6 +1681,8 @@ impl PerfrLiveApp {
             index: TrackIndex::default(),
             intern,
             leftover: Vec::new(),
+            frames_skipped: 0,
+            ws_incompatible: None,
             net,
             processes: Vec::new(),
             selected_pid: None,
@@ -1778,6 +1800,7 @@ impl PerfrLiveApp {
             self_profile: crate::self_pane::SelfProfile::default(),
             self_pane_open: false,
             bench_open: false,
+            about_open: false,
             bench_threads: 16,
             bench_depth_min: 8,
             bench_depth_max: 16,
@@ -1864,9 +1887,8 @@ impl PerfrLiveApp {
             user_set_view: false,
             in_self_pane: false,
             static_capture: static_capture.clone(),
-            stream_bytes: None,
-            loading_stream: false,
-            local_stream: false,
+            story,
+            held_stream: crate::share::HeldStream::default(),
             share_open: false,
             share_gen: 0,
             share_ui: ShareUi::Idle,
@@ -2004,6 +2026,7 @@ impl PerfrLiveApp {
             self.tracks.any_dragging(),
             self.selected.is_some(),
         ) || self.vscroll.is_coasting()
+            || self.story.needs_frames()
     }
 
     fn start_record(&mut self) {
@@ -2284,6 +2307,7 @@ impl PerfrLiveApp {
     }
 
     fn apply_zoom_window(&mut self, t0: f64, t1: f64) {
+        self.story.release_camera();
         let (t0, t1) = match self.content_span() {
             Some((c0, c1)) => clamp_window_contain(t0, t1, c0, c1),
             None => (t0, t1),
@@ -2295,6 +2319,7 @@ impl PerfrLiveApp {
     }
 
     fn apply_pan_window(&mut self, t0: f64, t1: f64) {
+        self.story.release_camera();
         let (t0, t1) = match self.content_span() {
             Some((c0, c1)) => clamp_window_contain(t0, t1, c0, c1),
             None => (t0.max(0.0), t0.max(0.0) + (t1 - t0).max(1.0)),
@@ -2315,10 +2340,7 @@ impl PerfrLiveApp {
         self.trace_flows.clear();
         self.thread_names.clear();
         self.trace_processes.clear();
-        if !self.loading_stream {
-            self.stream_bytes = None;
-            self.local_stream = false;
-        }
+        self.held_stream.forget();
         self.forget_share();
     }
 
@@ -2338,7 +2360,7 @@ impl PerfrLiveApp {
 
     /// Ingest a `.perfr.stream` and keep the bytes so Share can post them.
     fn accept_stream(&mut self, bytes: Vec<u8>) {
-        self.loading_stream = true;
+        self.held_stream.begin_load();
         self.clear_file_trace();
         self.index.clear();
         self.live_all.clear();
@@ -2350,10 +2372,19 @@ impl PerfrLiveApp {
         self.measure = None;
         self.sample_sels.clear();
         self.stop_record();
-        self.ingest(&bytes);
-        self.loading_stream = false;
-        self.stream_bytes = Some(bytes);
-        self.local_stream = true;
+        // A file is a stream from its first byte to its last. What an
+        // earlier stream left half-read is not the head of this one, and a
+        // frame this one ends in is not completed by the socket's next bytes.
+        self.leftover.clear();
+        let read = self
+            .ingest(&bytes)
+            .and_then(|()| crate::frames::end_of_stream(&mut self.leftover));
+        if let Err(fault) = read {
+            let message = fault.file_message();
+            log::warn!(target: "perfr_live_viewer::net", "{message}");
+            self.error = message;
+        }
+        self.held_stream.loaded(bytes);
         self.follow = false;
         self.user_set_view = false;
         if self.index.event_count() > 0 {
@@ -2361,13 +2392,15 @@ impl PerfrLiveApp {
         }
         self.needs_repaint = true;
         self.settle_frames = 6;
+        self.story.note_capture_replaced();
     }
 
     fn can_share(&self) -> bool {
-        if self.stream_bytes.as_ref().is_some_and(|b| !b.is_empty()) {
-            return true;
-        }
-        self.static_capture.is_none() && !self.local_stream && self.index.event_count() > 0
+        self.held_stream.can_share(
+            self.static_capture.is_some(),
+            self.trace_name.is_some(),
+            self.index.event_count(),
+        )
     }
 
     /// Open the confirm dialog. A file the page already holds can show its
@@ -2392,7 +2425,7 @@ impl PerfrLiveApp {
         self.share_login_waiting = false;
         self.share_login_probe = false;
         self.share_login_returned = false;
-        if self.stream_bytes.as_ref().is_some_and(|b| !b.is_empty()) {
+        if self.held_stream.has_bytes() {
             self.share_draft = Some(ShareDraft::loaded());
             self.share_ui = ShareUi::Confirm;
         } else {
@@ -2457,7 +2490,7 @@ impl PerfrLiveApp {
             Some(true)
         );
         if loaded {
-            return self.stream_bytes.clone();
+            return self.held_stream.bytes().cloned();
         }
         match &self.share_draft {
             Some(ShareDraft { source: ShareSource::Fetched(bytes), .. }) => Some(bytes.clone()),
@@ -2488,7 +2521,7 @@ impl PerfrLiveApp {
             Some(true)
         );
         let whole = if loaded {
-            self.stream_bytes.clone()
+            self.held_stream.bytes().cloned()
         } else {
             match &self.share_draft {
                 Some(ShareDraft { source: ShareSource::Fetched(bytes), .. }) => Some(bytes.clone()),
@@ -2641,6 +2674,7 @@ impl PerfrLiveApp {
         self.trace_flows.clear();
         self.thread_names.clear();
         self.trace_processes.clear();
+        self.held_stream.trace_opened();
         self.forget_share();
         self.trace_name = Some(load.name.clone());
         self.live_edge_ns = 0;
@@ -2771,6 +2805,33 @@ impl PerfrLiveApp {
         } else {
             f.name.clone()
         };
+        if perfr_story::is_story_filename(&name) {
+            if let Some(bytes) = &f.bytes {
+                match String::from_utf8(bytes.to_vec()) {
+                    Ok(text) => {
+                        if let Err(message) = self.story.load_text(&text) {
+                            self.story.error = message;
+                            self.story.open = true;
+                        }
+                    }
+                    Err(_) => self.error = format!("{name}: a story is UTF-8 JSON"),
+                }
+                return;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(path) = &f.path {
+                match std::fs::read_to_string(path) {
+                    Ok(text) => {
+                        if let Err(message) = self.story.load_text(&text) {
+                            self.story.error = message;
+                            self.story.open = true;
+                        }
+                    }
+                    Err(e) => self.error = format!("{name}: {e}"),
+                }
+                return;
+            }
+        }
         if crate::share::is_stream_file(&name) {
             if let Some(bytes) = &f.bytes {
                 self.accept_stream(bytes.to_vec());
@@ -3011,6 +3072,13 @@ impl PerfrLiveApp {
         // the start" readout count from it.
         if s.capture_start_ns > 0 {
             self.capture_start_ns = s.capture_start_ns;
+            // And the floor of its bounds, when what is held is the
+            // service's capture and not a file or the demo, whose times are
+            // on another clock altogether.
+            if !s.demo && self.static_capture.is_none() && !self.held_stream.is_local() && self.trace_name.is_none() {
+                self.index.set_extent_floor(s.capture_start_ns);
+                self.refresh_content_bounds();
+            }
         }
         let capturing = s.capturing;
         // While a capture runs the service is the truth (another viewer, or
@@ -3086,6 +3154,13 @@ impl PerfrLiveApp {
         if let Some(bytes) = inbox.loaded_stream {
             self.accept_stream(bytes);
         }
+        if let Some(text) = inbox.loaded_story {
+            if let Err(message) = self.story.load_text(&text) {
+                self.story.error = message;
+                self.story.open = true;
+            }
+        }
+        self.story_maybe_fetch_capture();
         if let Some(token) = inbox.share_token {
             self.share_token = Some(token);
         }
@@ -3274,7 +3349,7 @@ impl PerfrLiveApp {
             }
             self.error = e;
         }
-        if self.local_stream {
+        if self.held_stream.is_local() {
             // The file is the capture. Frames still arriving from a service
             // would draw on top of it.
             self.ws_queue.clear();
@@ -3289,27 +3364,62 @@ impl PerfrLiveApp {
                     break;
                 };
                 ingested = ingested.saturating_add(bytes.len());
-                self.ingest(&bytes);
+                if let Err(fault) = self.ingest(&bytes) {
+                    self.socket_fault(fault);
+                    break;
+                }
+            }
+        }
+        // Every status answer clears `error`, four times a second. This one
+        // does not stop being true, and with the socket left closed it is the
+        // only sign of why the timeline stands still.
+        if self.error.is_empty() {
+            if let Some(message) = &self.ws_incompatible {
+                self.error = message.clone();
             }
         }
     }
 
-    fn ingest(&mut self, bytes: &[u8]) {
-        self.leftover.extend_from_slice(bytes);
-        // Decode by offset and drain once. Draining after every frame moved
-        // the whole remaining buffer each time: a burst of a thousand small
-        // batches in one chunk was a thousand memmoves of the chunk.
-        let mut off = 0usize;
-        loop {
-            match decode_frame(&self.leftover[off..]) {
-                Ok((frame, n)) => {
-                    self.apply_frame(frame);
-                    off += n;
-                }
-                Err(_) => break,
+    /// Feeds stream bytes through the frame buffer. A fault is the caller's
+    /// to report: what it means depends on where the bytes came from.
+    fn ingest(&mut self, bytes: &[u8]) -> Result<(), crate::frames::StreamFault> {
+        // `apply_frame` needs all of `self`, so the buffer steps out while
+        // the frames are applied. Nothing in there reads it.
+        let mut leftover = std::mem::take(&mut self.leftover);
+        let drained = crate::frames::drain_frames(&mut leftover, bytes, |frame| self.apply_frame(frame));
+        self.leftover = leftover;
+        let skipped = drained? as u64;
+        if skipped > 0 {
+            // Said once: a newer service may send its new frame type many
+            // times a second.
+            if self.frames_skipped == 0 {
+                log::warn!(
+                    target: "perfr_live_viewer::net",
+                    "the stream has frames of a type this viewer does not know; they are skipped"
+                );
             }
+            self.frames_skipped += skipped;
         }
-        self.leftover.drain(..off);
+        Ok(())
+    }
+
+    /// The socket's stream cannot be read past this point. Nothing was
+    /// shown for that before: the bad frame stayed at the head of the
+    /// buffer, every later message queued up behind it, and the timeline
+    /// stood still while memory grew.
+    fn socket_fault(&mut self, fault: crate::frames::StreamFault) {
+        let message = fault.socket_message();
+        log::warn!(target: "perfr_live_viewer::net", "{message}");
+        // What is queued continues the stream that just failed.
+        self.ws_queue.clear();
+        if !fault.reconnect_helps() {
+            self.ws_incompatible = Some(message.clone());
+        }
+        self.error = message;
+        // Closing is how the stream is found again: the retry in `update`
+        // opens a new socket, which starts with a Hello and the whole ring,
+        // and that replaces what is held here.
+        self.net.close_ws();
     }
 
     fn apply_frame(&mut self, frame: LiveFrame) {
@@ -3319,7 +3429,12 @@ impl PerfrLiveApp {
                     return;
                 }
                 for ev in events {
-                    if !is_self_pid(ev.pid) {
+                    // An event that was already running when the capture
+                    // began comes only from a stored capture cut to a
+                    // window, and may end long after the window does: it is
+                    // drawn, and does not move the edge (nor the bounds, see
+                    // `set_extent_floor`).
+                    if !is_self_pid(ev.pid) && ev.start_ns >= self.capture_start_ns {
                         self.live_edge_ns = self.live_edge_ns.max(ev.end_ns());
                     }
                     self.live_all.push(&ev);
@@ -3355,6 +3470,7 @@ impl PerfrLiveApp {
                 // not known yet": the real CLOCK_MONOTONIC origin comes with
                 // the service's own `CaptureStarted`.
                 self.capture_start_ns = start_ns;
+                self.index.set_extent_floor(start_ns);
                 self.live_edge_ns = if start_ns > 0 { start_ns } else { DEMO_ORIGIN_NS };
                 // A new capture, a new timer: it restarts on the next frame
                 // from the capture's own clock.
@@ -3665,12 +3781,13 @@ impl PerfrLiveApp {
             ui.ctx().open_url(egui::OpenUrl::new_tab("https://perfr.dev/"));
             ui.close();
         }
+        let about = ui.button("About").on_hover_text(perfr_build_info::version_line());
+        note_ui_rect("About", about.rect);
+        if about.clicked() {
+            self.about_open = true;
+            ui.close();
+        }
         ui.separator();
-        ui.label(
-            RichText::new(format!("viewer build {VIEWER_BUILD}"))
-                .font(FontId::monospace(10.5))
-                .color(theme::MUTED()),
-        );
         if let Some(path) = &self.status.log_path {
             ui.label(
                 RichText::new(format!("service log {path}"))
@@ -3703,6 +3820,18 @@ impl PerfrLiveApp {
         note_ui_rect("Inspector", inspector.rect);
         if inspector.clicked() { self.open_right_tab(ReportTab::Inspector); ui.close(); }
         if ui.button("Rectangle selection report").clicked() { self.open_right_tab(ReportTab::Selection); ui.close(); }
+        if ui.button("Story").on_hover_text("Steps over this capture. Edit adds a step from the current view.").clicked() {
+            self.story.open = true;
+            if self.story.doc.is_none() {
+                self.story.ensure_blank();
+            }
+            self.story.begin_edit();
+            ui.close();
+        }
+        if ui.button("Demo story").on_hover_text("The story for captures/box3d.perfr.stream").clicked() {
+            self.story.load_demo();
+            ui.close();
+        }
         if ui
             .selectable_label(self.compact, "Compact tracks")
             .on_hover_text("Track density")
@@ -3861,7 +3990,13 @@ impl PerfrLiveApp {
         } else {
             detail.push_str("no status yet");
         }
-        detail.push_str(if self.ws_ok { "; event stream open" } else { "; event stream closed, retrying" });
+        detail.push_str(if self.ws_ok {
+            "; event stream open"
+        } else if self.ws_incompatible.is_some() {
+            "; event stream closed: the service speaks another protocol version, reload the page"
+        } else {
+            "; event stream closed, retrying"
+        });
         resp.on_hover_text(format!("{what} — {detail}"));
     }
 
@@ -4004,7 +4139,9 @@ impl PerfrLiveApp {
         let enabled = self.can_share();
         let tip = if enabled {
             "Upload this capture and get a link. Sign-in is required; the size is shown before anything is sent."
-        } else if self.static_capture.is_some() && self.stream_bytes.is_none() {
+        } else if self.trace_name.is_some() {
+            "An imported Chrome or Perfetto trace cannot be shared yet."
+        } else if self.static_capture.is_some() && self.held_stream.bytes().is_none() {
             "The capture is still loading."
         } else {
             "Nothing to share yet."
@@ -4176,7 +4313,7 @@ impl PerfrLiveApp {
                         ShareSource::Loaded => None,
                     };
                     let whole_len = fetched_len.unwrap_or_else(|| {
-                        self.stream_bytes.as_ref().map(|b| b.len()).unwrap_or(0)
+                        self.held_stream.bytes().map(|b| b.len()).unwrap_or(0)
                     });
                     let range = draft.range.as_ref().filter(|r| Some(r.span) == span);
                     (
@@ -5143,13 +5280,14 @@ impl PerfrLiveApp {
                 // tweak; once a second by default) the busiest tracks move
                 // to the top of their section.
                 let every = self.ui_tweaks.track_sort_every_s as f64;
-                if every > 0.0 && self.now_s - self.last_activity_sort_s >= every {
+                if !self.story.locks_layout() && every > 0.0 && self.now_s - self.last_activity_sort_s >= every {
                     self.last_activity_sort_s = self.now_s;
                     self.tracks.sort_by_activity(&self.index);
                 }
             }
             self.tracks.tick(dt, &self.index, filter);
         }
+        self.story_drive();
 
         let timebar_h = 26.0;
         let (time_rect, _) =
@@ -5313,7 +5451,13 @@ impl PerfrLiveApp {
                 // draw a rectangle over the scopes (marquee). On a thread's
                 // sample bar: select those samples -- the white ticks are the
                 // thing you drag across. Anywhere else: pan.
-                if body_resp.drag_started_by(PointerButton::Primary)
+                if self.story.captures_pointer() {
+                    let hit = ui.input(|i| i.pointer.interact_pos()).and_then(|p| self.story_hit_at(p, body));
+                    let (down, released) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released()));
+                    if let Some(crate::story::StoryCmd::AddStep) = self.story.pointer(hit, down, released) {
+                        self.story_add_step();
+                    }
+                } else if body_resp.drag_started_by(PointerButton::Primary)
                     && self.report_splitter_grab.is_none()
                 {
                     let ctrl = body_resp.ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
@@ -5366,6 +5510,7 @@ impl PerfrLiveApp {
             if empty {
                 paint_empty(ui, body, dropping);
                 paint_selection_overlay(ui, body, self.t0, self.t1, &self.sample_sels, self.measure, true, &|_| None);
+                self.paint_story_overlays(ui, body);
                 self.refresh_scope_stats(t0, t1, Some(y_cull));
                 return;
             }
@@ -5518,6 +5663,7 @@ impl PerfrLiveApp {
                     &self.trace_flows,
                     self.tracks.scale,
                 );
+                self.paint_story_overlays(ui, body);
                 if self.rect_drag.is_some() || self.rect_result.is_some() {
                     self.paint_rect_select(ui, body, self.t0, self.t1);
                 }
@@ -6964,7 +7110,7 @@ impl PerfrLiveApp {
             if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::F2)) { self.self_pane_open = !self.self_pane_open; }
             if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::F3)) { self.bench_open = !self.bench_open; }
         }
-        if ctx.input(|i| i.key_pressed(Key::Space)) {
+        if !self.story.on_key(ctx) && ctx.input(|i| i.key_pressed(Key::Space) && !i.modifiers.alt) {
             self.follow = !self.follow;
         }
         // X starts and stops a capture, as the Record button does.
@@ -6976,6 +7122,7 @@ impl PerfrLiveApp {
             }
         }
         if ctx.input(|i| i.key_pressed(Key::Home)) {
+            self.story.release_camera();
             self.fit_to_content();
             self.needs_repaint = true;
         }
@@ -10009,6 +10156,39 @@ impl PerfrLiveApp {
         self.presets.open = open;
     }
 
+    /// Version, commit, build date and, on a release build, the tag.
+    /// The monospace line is exactly what `perfr --version` prints.
+    fn about_window(&mut self, ctx: &Context) {
+        if !self.about_open {
+            return;
+        }
+        let mut open = self.about_open;
+        egui::Window::new("About perfr")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .frame(Frame::window(&ctx.style()).fill(theme::RAIL()))
+            .show(ctx, |ui| {
+                ui.set_min_width(440.0);
+                about_row(ui, "Version", &perfr_build_info::version_label_str());
+                about_commit_row(ui, perfr_build_info::git_hash());
+                about_row(ui, "Built", perfr_build_info::build_date());
+                let tag = perfr_build_info::release_tag();
+                if !tag.is_empty() {
+                    about_row(ui, "Release", tag);
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new("perfr --version").color(theme::MUTED()).size(10.5));
+                ui.label(
+                    RichText::new(perfr_build_info::version_line())
+                        .font(FontId::monospace(11.0))
+                        .color(theme::TEXT()),
+                );
+            });
+        self.about_open = open;
+    }
+
     /// The UI knobs window: what the report rows look like, live.
     /// The settings, one window behind the gear: the process and its
     /// symbols, what to collect, unwinding, hooks and what is hooked, then
@@ -10094,6 +10274,266 @@ impl PerfrLiveApp {
             self.t0 = t0;
             self.t1 = t1;
         }
+    }
+
+    fn story_name_lists(&self) -> (Vec<((u32, u32), String)>, Vec<(u32, String)>) {
+        let mut threads = Vec::new();
+        let mut pids = Vec::new();
+        for row in self.tracks.rows() {
+            match row.id {
+                RowId::Thread(t) | RowId::Async(t) => {
+                    threads.push(((t.pid, t.tid), self.thread_display_name(t.pid, t.tid)));
+                    if !pids.contains(&t.pid) {
+                        pids.push(t.pid);
+                    }
+                }
+                RowId::Process(pid) if !pids.contains(&pid) => pids.push(pid),
+                _ => {}
+            }
+        }
+        let processes = pids.into_iter().map(|pid| (pid, self.process_display_name(pid))).collect();
+        (threads, processes)
+    }
+
+    fn content_ns(&self) -> Option<(u64, u64)> {
+        self.content_span().map(|(a, b)| (a.max(0.0) as u64, b.max(0.0) as u64))
+    }
+
+    /// The story's `capture` URL, when the page did not already pass
+    /// `?capture=`, a file is not already open, and nothing is recording.
+    fn story_maybe_fetch_capture(&mut self) {
+        if self.static_capture.is_some() || self.held_stream.is_local() || self.recording || self.status.capturing {
+            let _ = self.story.take_capture_url();
+            return;
+        }
+        if let Some(url) = self.story.take_capture_url() {
+            self.net.fetch_capture(&url);
+        }
+    }
+
+    fn story_drive(&mut self) {
+        let content = self.content_ns();
+        let current = perfr_story::Camera { t0_ns: self.t0, t1_ns: self.t1, scroll_y: self.lane_scroll };
+        let (threads, processes) = self.story_name_lists();
+        let drive = self.story.drive(
+            &self.tracks,
+            content,
+            current,
+            |pid, tid| {
+                threads
+                    .iter()
+                    .find(|((p, t), _)| *p == pid && *t == tid)
+                    .map(|(_, name)| name.clone())
+                    .unwrap_or_else(|| tid.to_string())
+            },
+            |pid| {
+                processes
+                    .iter()
+                    .find(|(p, _)| *p == pid)
+                    .map(|(_, name)| name.clone())
+                    .unwrap_or_else(|| "process".into())
+            },
+        );
+        if let Some(ops) = drive.tracks {
+            for (track, collapsed) in ops {
+                if let Some(id) = crate::story::resolve_row(
+                    &self.tracks,
+                    &track,
+                    |pid, tid| {
+                        threads
+                            .iter()
+                            .find(|((p, t), _)| *p == pid && *t == tid)
+                            .map(|(_, name)| name.clone())
+                            .unwrap_or_else(|| tid.to_string())
+                    },
+                    |pid| {
+                        processes
+                            .iter()
+                            .find(|(p, _)| *p == pid)
+                            .map(|(_, name)| name.clone())
+                            .unwrap_or_else(|| "process".into())
+                    },
+                ) {
+                    self.tracks.set_collapsed(id, collapsed);
+                }
+            }
+        }
+        if let Some(cam) = drive.camera {
+            self.t0 = cam.t0_ns;
+            self.t1 = cam.t1_ns.max(cam.t0_ns + 1.0);
+            if let Some((a, b)) = self.content_span() {
+                let (t0, t1) = clamp_window_contain(self.t0, self.t1, a, b);
+                self.t0 = t0;
+                self.t1 = t1;
+            }
+            self.follow = false;
+            self.user_set_view = true;
+            self.vscroll.cancel();
+            self.pending_vscroll = Some(cam.scroll_y.max(0.0));
+            self.needs_repaint = true;
+        }
+    }
+
+    /// Load a story document. Used by the story preview example.
+    pub fn load_story(&mut self, text: &str) -> Result<(), String> {
+        self.story.load_text(text)?;
+        self.follow = false;
+        Ok(())
+    }
+
+    /// Start Play. The camera eases between steps.
+    pub fn play_story(&mut self) {
+        self.story.play();
+        self.follow = false;
+        self.needs_repaint = true;
+    }
+
+    /// Open About. The story preview uses this for the version screenshot.
+    pub fn open_about(&mut self) {
+        self.about_open = true;
+        self.needs_repaint = true;
+    }
+
+    /// Open the step list and the edit row.
+    pub fn open_story_editor(&mut self) {
+        self.story.open_editor();
+        self.needs_repaint = true;
+    }
+
+    /// A handful of scheduler lanes and one thread, so a story has tracks to
+    /// land on. This is not a recording of box3d.
+    pub fn seed_story_preview(&mut self) {
+        use perfr_live_event::{kind, LiveEvent};
+        let origin = 1_000_000_000u64;
+        let window = 1_000_000_000u64;
+        let slice = |core: u8, dur: u64| LiveEvent {
+            start_ns: origin,
+            duration_ns: dur,
+            tid: 0,
+            pid: 0,
+            kind: kind::SCHEDULING_SLICE,
+            depth: 0,
+            extra: core,
+            _pad: 0,
+            name_id: 0,
+        };
+        for core in 0..8u8 {
+            let dur = if core < 4 { window * 8 / 10 } else { window / 50 };
+            self.index.insert(slice(core, dur));
+        }
+        self.intern.insert_id(42, "Step");
+        self.index.insert(LiveEvent {
+            start_ns: origin + window / 3,
+            duration_ns: window / 5,
+            tid: 1,
+            pid: 7,
+            kind: kind::API_SCOPE,
+            depth: 0,
+            extra: 0,
+            _pad: 0,
+            name_id: 42,
+        });
+        self.thread_names.insert((7, 1), "box3d".into());
+        self.trace_processes.push(crate::net::ProcessJson {
+            pid: 7,
+            name: "box3d".into(),
+            cpu: 0.0,
+            path: String::new(),
+        });
+        self.live_edge_ns = origin + window;
+        self.refresh_content_bounds();
+        self.follow = false;
+        self.user_set_view = true;
+        self.needs_repaint = true;
+    }
+
+    fn story_add_step(&mut self) {
+        if self.story.doc.is_none() {
+            self.story.ensure_blank();
+        }
+        let id = self.story.doc.as_ref().map(crate::story::next_step_id).unwrap_or_else(|| "step-1".into());
+        let n = self.story.doc.as_ref().map(|d| d.steps.len() + 1).unwrap_or(1);
+        let view = self.story_view_now();
+        let mut step = crate::story::step_from_view(&id, view);
+        step.title = format!("Step {n}");
+        self.story.push_step(step);
+        self.story.open = true;
+    }
+
+    fn story_view_now(&self) -> perfr_story::View {
+        use perfr_story::{Fit, Scroll, TrackRef, View};
+        let mut expanded = Vec::new();
+        let mut collapsed = Vec::new();
+        for row in self.tracks.rows() {
+            let track = match row.id {
+                RowId::Scheduler => TrackRef::Scheduler,
+                RowId::Process(pid) => TrackRef::Process { pid },
+                RowId::Thread(t) => TrackRef::Thread { pid: t.pid, tid: t.tid },
+                RowId::Async(t) => TrackRef::Async { pid: t.pid, tid: t.tid },
+                RowId::Lane(_) | RowId::Machine(_) => continue,
+            };
+            if self.tracks.collapsed(row.id) {
+                collapsed.push(track);
+            } else {
+                expanded.push(track);
+            }
+        }
+        let mut focused = Vec::new();
+        if let Some((pid, tid)) = self.selected_thread {
+            focused.push(TrackRef::Thread { pid, tid });
+        }
+        View {
+            t0_ns: Some(self.t0.max(0.0) as u64),
+            t1_ns: Some((self.t1.max(self.t0 + 1.0)) as u64),
+            fit: Some(Fit::Span),
+            scroll: Some(Scroll::Y { y: self.lane_scroll }),
+            expanded,
+            collapsed,
+            focused,
+            ..View::default()
+        }
+    }
+
+    fn story_hit_at(&self, pos: Pos2, body: Rect) -> Option<crate::story::Hit> {
+        use perfr_story::TrackRef;
+        if !body.contains(pos) {
+            return None;
+        }
+        let y = pos.y - body.top();
+        let row = self.tracks.hit_at_y(y)?;
+        let track = match row {
+            RowId::Scheduler => TrackRef::Scheduler,
+            RowId::Process(pid) => TrackRef::Process { pid },
+            RowId::Thread(t) => TrackRef::Thread { pid: t.pid, tid: t.tid },
+            RowId::Async(t) => TrackRef::Async { pid: t.pid, tid: t.tid },
+            RowId::Lane(k) if k.is_scheduler() => TrackRef::Scheduler,
+            RowId::Lane(k) => TrackRef::Thread { pid: k.pid, tid: k.tid },
+            RowId::Machine(_) => return None,
+        };
+        let placed = self.tracks.rows().iter().find(|r| r.id == row);
+        let (row_y, row_h) = placed.map(|r| (r.y, r.height)).unwrap_or((y, 1.0));
+        let frac = ((y - row_y) / row_h.max(1.0)).clamp(0.0, 1.0);
+        Some(crate::story::Hit {
+            time_ns: time_at_x(pos.x, body, self.t0, self.t1),
+            track,
+            y: frac,
+        })
+    }
+
+    fn paint_story_overlays(&self, ui: &Ui, body: Rect) {
+        let content = self.content_ns();
+        self.story.paint(
+            ui,
+            body,
+            &self.tracks,
+            &self.index,
+            &self.intern,
+            content,
+            self.t0,
+            self.t1,
+            |pid, tid| self.thread_display_name(pid, tid),
+            |pid| self.process_display_name(pid),
+        );
     }
 }
 
@@ -10231,7 +10671,13 @@ impl eframe::App for PerfrLiveApp {
                 }
                 // A closed WebSocket is retried every couple of seconds, so a
                 // restarted service picks the page back up on its own.
-                if has_service && !self.ws_ok && now - self.last_ws_retry_s > 2.0 {
+                if crate::frames::ws_retry_due(
+                    has_service,
+                    self.ws_ok,
+                    self.ws_incompatible.is_some(),
+                    now,
+                    self.last_ws_retry_s,
+                ) {
                     self.last_ws_retry_s = now;
                     self.net.reconnect_ws_if_closed();
                 }
@@ -10261,6 +10707,10 @@ impl eframe::App for PerfrLiveApp {
                 }
             }
 
+            self.story.tick(dt * 1000.0);
+            if self.story.needs_frames() {
+                ctx.request_repaint();
+            }
             let sat = safe_area_insets();
             {
                 let _chrome = devf.scope(TID_UI, NAME_CHROME);
@@ -10269,26 +10719,52 @@ impl eframe::App for PerfrLiveApp {
                 } else {
                     36.0
                 };
-                egui::TopBottomPanel::top("perfr_transport")
-                    .exact_height(bar_h + sat[0])
-                    .frame(
-                        Frame::new()
-                            .fill(theme::PANEL())
-                            .inner_margin(Margin {
-                                left: 4 + sat_i8(sat[3]),
-                                right: 4 + sat_i8(sat[1]),
-                                top: 4 + sat_i8(sat[0]),
-                                bottom: 4,
-                            })
-                            .stroke(Stroke::NONE)
-                            .shadow(egui::Shadow {
-                                offset: [0, 2],
-                                blur: 10,
-                                spread: 0,
-                                color: Color32::from_black_alpha(80),
-                            }),
-                    )
-                    .show(ctx, |ui| self.transport(ui));
+                // `?chrome=compact` (an iframe) drops the transport bar; the
+                // story bar below carries Share instead.
+                if !self.story.compact {
+                    egui::TopBottomPanel::top("perfr_transport")
+                        .exact_height(bar_h + sat[0])
+                        .frame(
+                            Frame::new()
+                                .fill(theme::PANEL())
+                                .inner_margin(Margin {
+                                    left: 4 + sat_i8(sat[3]),
+                                    right: 4 + sat_i8(sat[1]),
+                                    top: 4 + sat_i8(sat[0]),
+                                    bottom: 4,
+                                })
+                                .stroke(Stroke::NONE)
+                                .shadow(egui::Shadow {
+                                    offset: [0, 2],
+                                    blur: 10,
+                                    spread: 0,
+                                    color: Color32::from_black_alpha(80),
+                                }),
+                        )
+                        .show(ctx, |ui| self.transport(ui));
+                }
+                if self.story.visible() {
+                    let story_h = self.story.bar_height() + if self.story.compact { 28.0 } else { 0.0 };
+                    egui::TopBottomPanel::top("perfr_story")
+                        .exact_height(story_h)
+                        .frame(
+                            Frame::new()
+                                .fill(theme::PANEL())
+                                .inner_margin(Margin { left: 6, right: 6, top: 4, bottom: 2 })
+                                .stroke(Stroke::NONE),
+                        )
+                        .show(ctx, |ui| {
+                            let cmds = self.story.bar(ui);
+                            if self.story.compact {
+                                ui.horizontal(|ui| self.transport_share(ui));
+                            }
+                            for cmd in cmds {
+                                match cmd {
+                                    crate::story::StoryCmd::AddStep => self.story_add_step(),
+                                }
+                            }
+                        });
+                }
             }
 
             if sat[2] > 0.5 {
@@ -10305,8 +10781,10 @@ impl eframe::App for PerfrLiveApp {
                 self.sampling_panel(ctx);
             }
             self.tweaks_window(ctx);
+            self.about_window(ctx);
             self.maybe_resume_share();
             self.share_window(ctx);
+            self.story.windows(ctx);
             self.presets_window(ctx);
             self.bench_window(ctx);
             self.paint_scope_menu(ctx);
@@ -10847,10 +11325,6 @@ thread_local! {
     static UI_RECTS: std::cell::RefCell<Vec<(String, Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// What this viewer was built from: the UTC time and the commit, set by
-/// build_wasm.sh (PERFR_VIEWER_BUILD). Shown in the More menu and on the
-/// wordmark, and published as `build` in window.__perfr_sel, so a stale
-/// page or a stale pack in a service binary is one look away.
 /// A thread-state code (`perfr_live_event::thread_state`) as a short name and
 /// a one-line description, for the hover tooltip over a thread-state bar.
 fn thread_state_label(code: u8) -> (&'static str, &'static str) {
@@ -10876,10 +11350,34 @@ const INSTRUMENTATION_TYPE_LEGEND: &str = "Instrumentation type\n\
     MS — manual scope: perfr_start / perfr_stop in the code\n\
     MA — manual async: an async span drawn on its own track";
 
-pub(crate) const VIEWER_BUILD: &str = match option_env!("PERFR_VIEWER_BUILD") {
-    Some(build) => build,
-    None => "dev",
-};
+fn about_row(ui: &mut Ui, label: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.add_sized([72.0, 18.0], egui::Label::new(RichText::new(label).color(theme::MUTED()).size(12.0)));
+        ui.label(RichText::new(value).font(FontId::monospace(12.0)).color(theme::TEXT()));
+    });
+}
+
+fn about_commit_row(ui: &mut Ui, hash: &str) {
+    ui.horizontal(|ui| {
+        ui.add_sized([72.0, 18.0], egui::Label::new(RichText::new("Commit").color(theme::MUTED()).size(12.0)));
+        if let Some(url) = perfr_build_info::commit_url(hash) {
+            let link = ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(hash).font(FontId::monospace(12.0)).color(theme::ACCENT()).underline(),
+                    )
+                    .frame(false)
+                    .min_size(Vec2::ZERO),
+                )
+                .on_hover_text("Open this commit on GitHub");
+            if link.clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            }
+        } else {
+            ui.label(RichText::new(hash).font(FontId::monospace(12.0)).color(theme::TEXT()));
+        }
+    });
+}
 
 fn note_ui_rect(label: &str, rect: Rect) {
     UI_RECTS.with(|v| v.borrow_mut().push((label.to_string(), rect)));
@@ -11747,7 +12245,8 @@ const UI_TWEAKS_KEY: &str = "perfr_ui_tweaks";
 const THEME_KEY: &str = "perfr_theme";
 
 /// The colour scheme the reader last chose, from `localStorage`. `None` on
-/// native or a fresh browser -- the caller falls back to perfr's default.
+/// native or a fresh browser -- the caller leaves Nord, the default, in
+/// place. An explicit saved key, including `perfr`, is returned as-is.
 fn read_saved_theme() -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {

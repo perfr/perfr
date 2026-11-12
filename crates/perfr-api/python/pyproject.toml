@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "perfr-api"
-version = "0.1.1"
+version = "0.1.3"
 description = "perfr manual instrumentation for Python: scopes, instants, links and values on a timeline a running perfr draws"
 readme = "README.md"
 license = "BSD-2-Clause"

@@ -250,7 +250,9 @@ fn utf8_field(bytes: &[u8], what: &'static str) -> Result<String, ProtocolError>
         return Err(ProtocolError::Truncated);
     }
     let len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-    if bytes.len() < 4 + len {
+    // Compared against what follows the prefix: `4 + len` wraps a 32-bit
+    // `usize` for a length near `u32::MAX`, and the slice below then panics.
+    if bytes.len() - 4 < len {
         return Err(ProtocolError::Truncated);
     }
     std::str::from_utf8(&bytes[4..4 + len])
@@ -338,13 +340,19 @@ pub fn pack_events(events: &[LiveEvent]) -> Vec<u8> {
 /// The inverse of [`pack_events`].
 pub fn unpack_events(payload: &[u8]) -> Result<Vec<LiveEvent>, ProtocolError> {
     let mut pos = 0usize;
-    let count = get_varint(payload, &mut pos)? as usize;
-    let nthreads = get_varint(payload, &mut pos)? as usize;
+    let count = get_varint(payload, &mut pos)?;
+    let nthreads = get_varint(payload, &mut pos)?;
     // Each event is at least 7 bytes, each thread at least 2: a count the
-    // payload cannot hold is corruption, not a large batch.
-    if count > MAX_BATCH_EVENTS || count * 7 > payload.len() || nthreads * 2 > payload.len() {
+    // payload cannot hold is corruption, not a large batch. The payload is
+    // divided rather than the count multiplied, and the counts stay `u64`
+    // until they are known to be small: `nthreads * 2` wraps to zero for
+    // 1 << 63 (1 << 31 in the viewer, where `usize` is 32 bits), passed this
+    // check, and the allocation below panicked.
+    let len = payload.len() as u64;
+    if count > MAX_BATCH_EVENTS as u64 || count > len / 7 || nthreads > len / 2 {
         return Err(ProtocolError::InvalidPayload("packed batch count exceeds payload"));
     }
+    let (count, nthreads) = (count as usize, nthreads as usize);
     let mut threads: Vec<(u32, u32)> = Vec::with_capacity(nthreads);
     for _ in 0..nthreads {
         let pid = get_varint(payload, &mut pos)?;
@@ -361,9 +369,12 @@ pub fn unpack_events(payload: &[u8]) -> Result<Vec<LiveEvent>, ProtocolError> {
         let start_ns = prev.wrapping_add(delta as u64);
         prev = start_ns;
         let duration_ns = get_varint(payload, &mut pos)?;
-        let ti = get_varint(payload, &mut pos)? as usize;
-        let (pid, tid) = *threads.get(ti).ok_or(ProtocolError::InvalidPayload("thread index out of range"))?;
-        if pos + 3 > payload.len() {
+        let ti = get_varint(payload, &mut pos)?;
+        let (pid, tid) = *usize::try_from(ti)
+            .ok()
+            .and_then(|ti| threads.get(ti))
+            .ok_or(ProtocolError::InvalidPayload("thread index out of range"))?;
+        if payload.len() - pos < 3 {
             return Err(ProtocolError::Truncated);
         }
         let (kind, depth, extra) = (payload[pos], payload[pos + 1], payload[pos + 2]);
@@ -422,10 +433,11 @@ pub fn encode_event_batch_with(events: &[LiveEvent], wire: WireFormat) -> Vec<u8
 /// Inflates a [`FRAME_EVENT_BATCH_DEFLATE`] payload back to its packed form.
 fn inflate_batch(payload: &[u8]) -> Result<Vec<u8>, ProtocolError> {
     let mut pos = 0usize;
-    let packed_len = get_varint(payload, &mut pos)? as usize;
-    if packed_len > MAX_BATCH_EVENTS * 40 {
+    let packed_len = get_varint(payload, &mut pos)?;
+    if packed_len > (MAX_BATCH_EVENTS * 40) as u64 {
         return Err(ProtocolError::InvalidPayload("deflated batch claims an absurd size"));
     }
+    let packed_len = packed_len as usize;
     let out = miniz_oxide::inflate::decompress_to_vec_with_limit(&payload[pos..], packed_len)
         .map_err(|_| ProtocolError::InvalidPayload("deflate stream is corrupt"))?;
     if out.len() != packed_len {
@@ -440,7 +452,10 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(LiveFrame, usize), ProtocolError> {
     }
     let payload_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let typ = bytes[4];
-    let total = 5 + payload_len;
+    // A length near `u32::MAX` wraps a 32-bit `usize` when the header is
+    // added; the wrapped total then passes the length check below and the
+    // slice panics. No buffer holds such a frame, so it is a short read.
+    let total = payload_len.checked_add(5).ok_or(ProtocolError::Truncated)?;
     if bytes.len() < total {
         return Err(ProtocolError::Truncated);
     }
@@ -473,8 +488,8 @@ fn decode_payload(typ: u8, payload: &[u8]) -> Result<LiveFrame, ProtocolError> {
                 return Err(ProtocolError::Truncated);
             }
             let count = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
-            let need = 4 + count * LIVE_EVENT_SIZE;
-            if payload.len() < need {
+            // `count * 32` wraps a 32-bit `usize` from 1 << 27 events up.
+            if (payload.len() - 4) / LIVE_EVENT_SIZE < count {
                 return Err(ProtocolError::Truncated);
             }
             let mut events = Vec::with_capacity(count);
@@ -492,7 +507,7 @@ fn decode_payload(typ: u8, payload: &[u8]) -> Result<LiveFrame, ProtocolError> {
             }
             let id = u32::from_le_bytes(payload[0..4].try_into().unwrap());
             let len = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as usize;
-            if payload.len() < 8 + len {
+            if payload.len() - 8 < len {
                 return Err(ProtocolError::Truncated);
             }
             let text = std::str::from_utf8(&payload[8..8 + len])
@@ -765,6 +780,120 @@ mod tests {
         bad[4] = FRAME_EVENT_BATCH_DEFLATE;
         bad.extend_from_slice(&payload);
         assert!(matches!(decode_frame(&bad), Err(ProtocolError::InvalidPayload(_))));
+    }
+
+    fn packed_frame(payload: &[u8]) -> Vec<u8> {
+        let mut frame = (payload.len() as u32).to_le_bytes().to_vec();
+        frame.push(FRAME_EVENT_BATCH_PACKED);
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    #[test]
+    fn a_packed_batch_declaring_more_threads_than_fit_is_an_error_not_a_panic() {
+        // Doubling 1 << 63 wraps to zero, which a bounds check written as
+        // `nthreads * 2 > len` lets through to the allocation.
+        for nthreads in [1u64 << 63, (1 << 63) + 1, u64::MAX, 1 << 32, 1 << 31] {
+            let mut payload = Vec::new();
+            put_varint(&mut payload, 0);
+            put_varint(&mut payload, nthreads);
+            assert!(
+                matches!(decode_frame(&packed_frame(&payload)), Err(ProtocolError::InvalidPayload(_))),
+                "nthreads {nthreads:#x}"
+            );
+            assert!(unpack_events(&payload).is_err(), "nthreads {nthreads:#x}");
+        }
+        // The same for the event count, past what the earlier cap catches.
+        for count in [1u64 << 63, u64::MAX, (1 << 32) + 1] {
+            let mut payload = Vec::new();
+            put_varint(&mut payload, count);
+            put_varint(&mut payload, 0);
+            assert!(unpack_events(&payload).is_err(), "count {count:#x}");
+        }
+    }
+
+    #[test]
+    fn frames_declaring_lengths_near_the_integer_limit_are_errors_not_panics() {
+        // Each of these lengths wraps a 32-bit `usize` (the viewer's) when
+        // the header size is added to it or it is scaled by the event size.
+        let mut frame = u32::MAX.to_le_bytes().to_vec();
+        frame.push(FRAME_EVENT_BATCH);
+        assert_eq!(decode_frame(&frame), Err(ProtocolError::Truncated));
+        for count in [u32::MAX, 0x0800_0000, 0x07FF_FFFF] {
+            assert_eq!(
+                decode_payload(FRAME_EVENT_BATCH, &count.to_le_bytes()),
+                Err(ProtocolError::Truncated),
+                "count {count:#x}"
+            );
+        }
+        for len in [u32::MAX, u32::MAX - 3, u32::MAX - 7] {
+            let mut string = 7u32.to_le_bytes().to_vec();
+            string.extend_from_slice(&len.to_le_bytes());
+            assert_eq!(decode_payload(FRAME_INTERNED_STRING, &string), Err(ProtocolError::Truncated));
+            let mut thread = [1u32.to_le_bytes(), 2u32.to_le_bytes()].concat();
+            thread.extend_from_slice(&len.to_le_bytes());
+            assert_eq!(decode_payload(FRAME_THREAD_NAME, &thread), Err(ProtocolError::Truncated));
+            let mut process = 1u32.to_le_bytes().to_vec();
+            process.extend_from_slice(&len.to_le_bytes());
+            assert_eq!(decode_payload(FRAME_PROCESS_NAME, &process), Err(ProtocolError::Truncated));
+        }
+    }
+
+    /// One valid frame of every type, in every batch encoding.
+    fn one_of_each_frame() -> Vec<Vec<u8>> {
+        let events = capture_like_batch(24);
+        vec![
+            encode_frame(&LiveFrame::Hello { version: VERSION, event_size: LIVE_EVENT_SIZE as u16 }),
+            encode_event_batch_with(&events, WireFormat::Raw),
+            encode_event_batch_with(&events, WireFormat::Packed),
+            encode_event_batch_with(&events, WireFormat::Deflate),
+            encode_frame(&LiveFrame::InternedString { id: 9, text: "Simulate".into() }),
+            encode_frame(&LiveFrame::CaptureStarted { pid: 4, start_ns: 1_000 }),
+            encode_frame(&LiveFrame::CaptureFinished),
+            encode_frame(&LiveFrame::Status {
+                capturing: true,
+                demo: false,
+                events_live: 1,
+                events_capacity: 2,
+                dropped: 3,
+                spilled: 4,
+                produced: 5,
+                oldest_start_ns: 6,
+                newest_end_ns: 7,
+                ring_bytes: 8,
+            }),
+            encode_frame(&LiveFrame::ThreadName { pid: 4, tid: 5, name: "Worker-1".into() }),
+            encode_frame(&LiveFrame::ProcessName { pid: 4, name: "game".into() }),
+        ]
+    }
+
+    #[test]
+    fn no_truncation_or_bit_flip_of_a_valid_frame_panics_the_decoder() {
+        for frame in one_of_each_frame() {
+            assert!(decode_frame(&frame).is_ok());
+            // Cut anywhere: once as the reader of a short stream sees it,
+            // once with the length prefix agreeing with the cut, so the
+            // payload decoders see the short payload too.
+            for cut in 0..frame.len() {
+                assert!(decode_frame(&frame[..cut]).is_err(), "type {} cut at {cut}", frame[4]);
+                assert!(decode_all(&frame[..cut]).is_err() || cut == 0);
+                if cut >= 5 {
+                    let mut short = frame[..cut].to_vec();
+                    short[0..4].copy_from_slice(&((cut - 5) as u32).to_le_bytes());
+                    let _ = decode_frame(&short);
+                    let _ = decode_payload(frame[4], &short[5..]);
+                }
+            }
+            // Flip every bit, one at a time. Many flips still decode (a
+            // different timestamp is a valid timestamp); none may panic.
+            for bit in 0..frame.len() * 8 {
+                let mut flipped = frame.clone();
+                flipped[bit / 8] ^= 1 << (bit % 8);
+                let _ = decode_frame(&flipped);
+                let _ = decode_all(&flipped);
+                let _ = decode_payload(flipped[4], &flipped[5..]);
+            }
+        }
     }
 
     #[test]

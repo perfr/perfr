@@ -2,17 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Packed layouts of the perf_event_open ring-buffer records perfr consumes,
-//! ported from `src/LinuxTracing/PerfEventRecords.h`.
+//! Packed layouts of the fixed-shape perf_event_open ring-buffer records
+//! perfr consumes. The kernel's perf ABI (`linux/perf_event.h`) is the spec.
 //!
-//! The kernel's perf ABI is the spec both languages answer to, so every
-//! struct here must match the C++ layout bit for bit. Two things enforce
-//! that: the `record!` macro below generates the struct, its parser, and its
-//! field-offset table from one field list, so they cannot drift from each
-//! other; and the layout parity test in
-//! `src/LinuxTracing/PerfEventRecordsLayoutParityTest.cpp` compares `sizeof`
-//! and `offsetof` of every C++ struct against the values this crate exports,
-//! so the two languages cannot drift from one another.
+//! The `record!` macro below generates each struct, its parser, and its
+//! field-offset table from one field list, so those three cannot drift from
+//! each other; the tests pin the sizes the ABI fixes. Samples are not here:
+//! their shape depends on `sample_type`, and [`reader`] walks them by flag.
 
 #![deny(unsafe_code)]
 
@@ -61,8 +57,7 @@ macro_rules! record {
         impl $name {
             pub const SIZE: usize = core::mem::size_of::<Self>();
 
-            /// Byte offset of each field, in declaration order. The layout
-            /// parity test compares these against C++ `offsetof`.
+            /// Byte offset of each field, in declaration order.
             pub const FIELD_OFFSETS: &'static [usize] = &[
                 $(core::mem::offset_of!($name, $field),)+
             ];
@@ -97,8 +92,6 @@ pub mod record_type {
     pub const MMAP: u32 = 1;
     pub const LOST: u32 = 2;
     pub const EXIT: u32 = 4;
-    pub const THROTTLE: u32 = 5;
-    pub const UNTHROTTLE: u32 = 6;
     pub const FORK: u32 = 7;
     pub const SAMPLE: u32 = 9;
     pub const SWITCH: u32 = 14;
@@ -106,7 +99,7 @@ pub mod record_type {
 }
 
 record!(
-    /// `perf_event_header`. The C++ side calls the first field `type`, a
+    /// `perf_event_header`. The kernel calls the first field `type`, a
     /// Rust keyword, so it is `kind` here; the layout is what matters.
     PerfEventHeader {
         kind: u32,
@@ -140,266 +133,6 @@ record!(
     }
 );
 
-#[cfg(target_arch = "x86_64")]
-record!(
-    /// Must stay in sync with `kSampleRegsUserAll`.
-    SampleRegsUserAll {
-        ax: u64,
-        bx: u64,
-        cx: u64,
-        dx: u64,
-        si: u64,
-        di: u64,
-        bp: u64,
-        sp: u64,
-        ip: u64,
-        flags: u64,
-        cs: u64,
-        ss: u64,
-        r8: u64,
-        r9: u64,
-        r10: u64,
-        r11: u64,
-        r12: u64,
-        r13: u64,
-        r14: u64,
-        r15: u64,
-    }
-);
-
-#[cfg(target_arch = "aarch64")]
-record!(
-    /// Must stay in sync with `kSampleRegsUserAll`. x0-x30; x30 is LR.
-    SampleRegsUserAll {
-        x: [u64; 31],
-        sp: u64,
-        pc: u64,
-    }
-);
-
-impl SampleRegsUserAll {
-    #[cfg(target_arch = "x86_64")]
-    pub fn instruction_pointer(&self) -> u64 {
-        self.ip
-    }
-    #[cfg(target_arch = "x86_64")]
-    pub fn stack_pointer(&self) -> u64 {
-        self.sp
-    }
-    #[cfg(target_arch = "x86_64")]
-    pub fn frame_pointer(&self) -> u64 {
-        self.bp
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    pub fn instruction_pointer(&self) -> u64 {
-        self.pc
-    }
-    #[cfg(target_arch = "aarch64")]
-    pub fn stack_pointer(&self) -> u64 {
-        self.sp
-    }
-    #[cfg(target_arch = "aarch64")]
-    pub fn frame_pointer(&self) -> u64 {
-        self.x[29]
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-record!(
-    /// Must stay in sync with `kSampleRegsUserAx`.
-    SampleRegsUserAx {
-        abi: u64,
-        ax: u64,
-    }
-);
-
-#[cfg(target_arch = "aarch64")]
-record!(
-    /// Must stay in sync with `kSampleRegsUserAx`; x0 holds return values.
-    SampleRegsUserAx {
-        abi: u64,
-        x0: u64,
-    }
-);
-
-impl SampleRegsUserAx {
-    #[cfg(target_arch = "x86_64")]
-    pub fn return_value(&self) -> u64 {
-        self.ax
-    }
-    #[cfg(target_arch = "aarch64")]
-    pub fn return_value(&self) -> u64 {
-        self.x0
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-record!(
-    /// Must stay in sync with `kSampleRegsUserSpIp`.
-    SampleRegsUserSpIp {
-        abi: u64,
-        sp: u64,
-        ip: u64,
-    }
-);
-
-#[cfg(target_arch = "aarch64")]
-record!(
-    /// Must stay in sync with `kSampleRegsUserSpIp`.
-    SampleRegsUserSpIp {
-        abi: u64,
-        sp: u64,
-        pc: u64,
-    }
-);
-
-impl SampleRegsUserSpIp {
-    #[cfg(target_arch = "x86_64")]
-    pub fn instruction_pointer(&self) -> u64 {
-        self.ip
-    }
-    #[cfg(target_arch = "aarch64")]
-    pub fn instruction_pointer(&self) -> u64 {
-        self.pc
-    }
-}
-
-record!(
-    /// Must stay in sync with `kSampleRegsUserSp`.
-    SampleRegsUserSp {
-        sp: u64,
-    }
-);
-
-#[cfg(target_arch = "x86_64")]
-record!(
-    /// Must stay in sync with `kSampleRegsUserSpIpArguments`.
-    SampleRegsUserSpIpArguments {
-        abi: u64,
-        cx: u64,
-        dx: u64,
-        si: u64,
-        di: u64,
-        sp: u64,
-        ip: u64,
-        r8: u64,
-        r9: u64,
-    }
-);
-
-#[cfg(target_arch = "aarch64")]
-record!(
-    /// Must stay in sync with `kSampleRegsUserSpIpArguments`; x0-x7 carry
-    /// arguments in the AArch64 AAPCS.
-    SampleRegsUserSpIpArguments {
-        abi: u64,
-        x0: u64,
-        x1: u64,
-        x2: u64,
-        x3: u64,
-        x4: u64,
-        x5: u64,
-        x6: u64,
-        x7: u64,
-        sp: u64,
-        pc: u64,
-    }
-);
-
-impl SampleRegsUserSpIpArguments {
-    #[cfg(target_arch = "x86_64")]
-    pub fn instruction_pointer(&self) -> u64 {
-        self.ip
-    }
-    /// Arguments in x86_64 SysV order: rdi, rsi, rdx, rcx, r8, r9.
-    #[cfg(target_arch = "x86_64")]
-    pub fn args(&self) -> [u64; 6] {
-        [self.di, self.si, self.dx, self.cx, self.r8, self.r9]
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    pub fn instruction_pointer(&self) -> u64 {
-        self.pc
-    }
-    #[cfg(target_arch = "aarch64")]
-    pub fn args(&self) -> [u64; 6] {
-        [self.x0, self.x1, self.x2, self.x3, self.x4, self.x5]
-    }
-}
-
-record!(
-    SampleStackUser8bytes {
-        size: u64,
-        top8bytes: u64,
-        dyn_size: u64,
-    }
-);
-
-record!(
-    /// After `regs` the record continues with `u64 size`, `char data[size]`
-    /// and `u64 dyn_size` (the last only when `size != 0`), which are read
-    /// dynamically.
-    StackSampleFixed {
-        header: PerfEventHeader,
-        sample_id: SampleIdTidTimeStreamidCpu,
-        abi: u64,
-        regs: SampleRegsUserAll,
-    }
-);
-
-record!(
-    SpIpArguments8bytesSample {
-        header: PerfEventHeader,
-        sample_id: SampleIdTidTimeStreamidCpu,
-        regs: SampleRegsUserSpIpArguments,
-        stack: SampleStackUser8bytes,
-    }
-);
-
-record!(
-    SpIp8bytesSample {
-        header: PerfEventHeader,
-        sample_id: SampleIdTidTimeStreamidCpu,
-        regs: SampleRegsUserSpIp,
-        stack: SampleStackUser8bytes,
-    }
-);
-
-record!(
-    /// Like `StackSampleFixed`, continues with a dynamically-read stack.
-    SpStackUserSampleFixed {
-        header: PerfEventHeader,
-        sample_id: SampleIdTidTimeStreamidCpu,
-        abi: u64,
-        regs: SampleRegsUserSp,
-    }
-);
-
-record!(
-    EmptySample {
-        header: PerfEventHeader,
-        sample_id: SampleIdTidTimeStreamidCpu,
-    }
-);
-
-record!(
-    AxSample {
-        header: PerfEventHeader,
-        sample_id: SampleIdTidTimeStreamidCpu,
-        regs: SampleRegsUserAx,
-    }
-);
-
-record!(
-    /// The rest of the sample is a `char[size]` read dynamically.
-    RawSampleFixed {
-        header: PerfEventHeader,
-        sample_id: SampleIdTidTimeStreamidCpu,
-        size: u32,
-    }
-);
-
 record!(
     /// The record continues with `char filename[]` and the sample id, both
     /// read dynamically because `filename` is variable-length.
@@ -422,16 +155,6 @@ record!(
     }
 );
 
-record!(
-    ThrottleUnthrottle {
-        header: PerfEventHeader,
-        time: u64,
-        id: u64,
-        lost: u64,
-        sample_id: SampleIdTidTimeStreamidCpu,
-    }
-);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,25 +164,8 @@ mod tests {
         assert_eq!(PerfEventHeader::SIZE, 8);
         assert_eq!(SampleIdTidTimeStreamidCpu::SIZE, 32);
         assert_eq!(ForkExit::SIZE, 64);
-        assert_eq!(SampleRegsUserSp::SIZE, 8);
-        assert_eq!(SampleStackUser8bytes::SIZE, 24);
-        assert_eq!(EmptySample::SIZE, 40);
-        assert_eq!(RawSampleFixed::SIZE, 44);
         assert_eq!(MmapUpToPgoff::SIZE, 40);
         assert_eq!(Lost::SIZE, 56);
-        assert_eq!(ThrottleUnthrottle::SIZE, 64);
-        #[cfg(target_arch = "x86_64")]
-        {
-            assert_eq!(SampleRegsUserAll::SIZE, 160);
-            assert_eq!(SampleRegsUserAx::SIZE, 16);
-            assert_eq!(SampleRegsUserSpIp::SIZE, 24);
-            assert_eq!(SampleRegsUserSpIpArguments::SIZE, 72);
-            assert_eq!(StackSampleFixed::SIZE, 208);
-            assert_eq!(SpIpArguments8bytesSample::SIZE, 136);
-            assert_eq!(SpIp8bytesSample::SIZE, 88);
-            assert_eq!(SpStackUserSampleFixed::SIZE, 56);
-            assert_eq!(AxSample::SIZE, 56);
-        }
     }
 
     #[test]
@@ -477,15 +183,11 @@ mod tests {
             &[8, 4, 4, 4, 4, 8, 32],
             ForkExit::SIZE,
         );
+        check(Lost::FIELD_OFFSETS, &[8, 8, 8, 32], Lost::SIZE);
         check(
-            ThrottleUnthrottle::FIELD_OFFSETS,
-            &[8, 8, 8, 8, 32],
-            ThrottleUnthrottle::SIZE,
-        );
-        check(
-            RawSampleFixed::FIELD_OFFSETS,
-            &[8, 32, 4],
-            RawSampleFixed::SIZE,
+            MmapUpToPgoff::FIELD_OFFSETS,
+            &[8, 4, 4, 8, 8, 8],
+            MmapUpToPgoff::SIZE,
         );
     }
 

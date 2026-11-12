@@ -2,12 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The per-thread state machine over sched tracepoints, replacing
-//! `src/LinuxTracing/ThreadStateManager.cpp`.
+//! The per-thread state machine over scheduler events: the Linux sched
+//! tracepoints, and on Windows the ETW context-switch records.
 //!
 //! One open state per thread; each transition may close it, yielding a
-//! `Slice` the caller turns into a `ThreadStateSlice` protobuf. The quirks
-//! are the point, and each is reproduced deliberately:
+//! `Slice` the caller turns into a state bar on the thread's row. The
+//! rules came with the C++ `ThreadStateManager` this was ported from, and
+//! each is deliberate:
 //!
 //!  - Initial states are retrieved *after* the tracepoints are enabled, so
 //!    early tracepoints can carry timestamps below the recorded begin; those
@@ -18,8 +19,10 @@
 //!  - A switch-out slice never carries a callstack status; wakeup and
 //!    switch-in slices carry the status of the state they close.
 //!
-//! Unlike the C++, nothing logs here: the manager reports what happened and
-//! the shim owns the `PERFR_ERROR` text, so the log lines stay identical.
+//!  - A new task on the tid of a thread that has exited is a new thread.
+//!
+//! Nothing logs here: the manager reports what happened ([`Warning`]) and
+//! the caller decides what is worth a line.
 
 #![deny(unsafe_code)]
 
@@ -56,8 +59,8 @@ pub struct Slice {
     pub waiting_for_callstack: bool,
 }
 
-/// The conditions the C++ reports with `PERFR_ERROR`. Returned alongside the
-/// result so the shim can emit the exact same lines.
+/// What a transition found amiss. Returned alongside the result, for the
+/// caller to log or not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Warning {
     /// `task:task_newtask` for a thread that was already known.
@@ -118,9 +121,11 @@ impl OpenState {
     }
 }
 
-/// An FxHash-style multiply-xor hasher, as in `perfr-perf-merge` and for the
-/// same reason: the keys are thread ids, this map is hit once per sched
-/// tracepoint, and SipHash's DoS resistance buys nothing here.
+/// An FxHash-style multiply-xor hasher. `std`'s default SipHash is designed
+/// for untrusted keys; these are thread ids, this map is hit once per sched
+/// tracepoint, and the DoS resistance buys nothing here. Written out rather
+/// than pulled from a crate: it is nine lines and this crate has no
+/// dependencies.
 #[derive(Default)]
 pub struct TidHasher {
     state: u64,
@@ -176,12 +181,21 @@ impl ThreadStateManager {
         was_created_by_tid: i32,
         was_created_by_pid: i32,
     ) -> Outcome {
+        let mut ended = None;
         if let Some(open_state) = self.tid_open_states.get(&tid) {
             if timestamp_ns >= open_state.begin_timestamp_ns {
-                return Outcome {
-                    slice: None,
-                    warning: Some(Warning::AlreadyKnown),
-                };
+                if open_state.state != state::DEAD && open_state.state != state::ZOMBIE {
+                    return Outcome {
+                        slice: None,
+                        warning: Some(Warning::AlreadyKnown),
+                    };
+                }
+                // The thread that had this tid has exited and the kernel has
+                // handed the number out again. Left as "already known", the
+                // new thread began life dead since the old one's exit and
+                // lost the record of who created it. The dead interval ends
+                // here instead.
+                ended = Some(open_state.close(tid, timestamp_ns, /*with_callstack_status=*/ true));
             }
         }
         self.tid_open_states.insert(
@@ -195,7 +209,7 @@ impl ThreadStateManager {
                 has_wakeup_or_switch_out_callstack: false,
             },
         );
-        Outcome::default()
+        Outcome { slice: ended, warning: None }
     }
 
     /// `OnSchedWakeup`.
@@ -435,6 +449,28 @@ mod tests {
         let outcome = manager.on_new_task(200, 42, 1, 1);
         assert_eq!(outcome.warning, Some(Warning::AlreadyKnown));
         assert_eq!(manager.on_capture_finished(300)[0].duration_ns, 200);
+    }
+
+    #[test]
+    fn a_new_task_on_the_tid_of_a_dead_thread_is_a_new_thread() {
+        const DEAD_STATES: [i32; 2] = [state::DEAD, state::ZOMBIE];
+        for dead in DEAD_STATES {
+            let mut manager = ThreadStateManager::new();
+            manager.on_initial_state(100, 42, state::RUNNING).unwrap();
+            // The thread exits at 200. Its entry stays, saying so.
+            manager.on_sched_switch_out(200, 42, dead, false);
+            // The kernel hands tid 42 to a thread created at 900.
+            let born = manager.on_new_task(900, 42, 7, 1);
+            assert_eq!(born.warning, None, "a tid being reused is not a thread already known");
+            // The dead thread's state ends where the new one begins.
+            let ended = born.slice.expect("the dead interval is closed");
+            assert_eq!((ended.thread_state, ended.duration_ns, ended.end_timestamp_ns), (dead, 700, 900));
+            // And the new thread starts as a new thread does: runnable, by
+            // creation, not dead since 200.
+            let first = manager.on_sched_switch_in(1_000, 42).slice.unwrap();
+            assert_eq!((first.thread_state, first.duration_ns), (state::RUNNABLE, 100));
+            assert_eq!((first.wakeup_reason, first.wakeup_tid, first.wakeup_pid), (wakeup_reason::CREATED, 7, 1));
+        }
     }
 
     /// TEST(ThreadStateManager, SwitchOutAndWakeupWaitForCallstacks): wakeup

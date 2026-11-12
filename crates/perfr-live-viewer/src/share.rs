@@ -283,6 +283,81 @@ pub fn is_stream_file(name: &str) -> bool {
     name.ends_with(".perfr.stream") || name.ends_with(".orbit.stream")
 }
 
+/// The `.perfr.stream` the page holds for what is on screen, which is what
+/// Share posts without asking a service, and the rule for offering Share at
+/// all. Kept apart from the app so the sequences that replace a capture can
+/// be tested: Share must never post bytes other than the capture shown.
+#[derive(Default)]
+pub struct HeldStream {
+    /// Bytes of a `.perfr.stream` loaded from a file or URL. Share posts
+    /// these. A live session leaves this empty and exports from the service.
+    bytes: Option<Vec<u8>>,
+    /// Set while those bytes are being ingested, so a frame inside the file
+    /// does not throw them away.
+    loading: bool,
+    /// The open capture is that file. Later socket frames are not mixed in.
+    local: bool,
+}
+
+impl HeldStream {
+    /// A stream file is about to be ingested.
+    pub fn begin_load(&mut self) {
+        self.loading = true;
+    }
+
+    /// The file is ingested: it is the capture on screen now.
+    pub fn loaded(&mut self, bytes: Vec<u8>) {
+        self.loading = false;
+        self.bytes = Some(bytes);
+        self.local = true;
+    }
+
+    /// The capture on screen is being replaced or cleared.
+    pub fn forget(&mut self) {
+        if !self.loading {
+            self.bytes = None;
+            self.local = false;
+        }
+    }
+
+    /// A Chrome or Perfetto trace is being imported over whatever was shown.
+    /// The file that was on screen is not any more: left held, its bytes are
+    /// what Upload would post under a timeline showing the trace.
+    pub fn trace_opened(&mut self) {
+        self.loading = false;
+        self.bytes = None;
+        self.local = false;
+    }
+
+    pub fn bytes(&self) -> Option<&Vec<u8>> {
+        self.bytes.as_ref()
+    }
+
+    pub fn has_bytes(&self) -> bool {
+        self.bytes.as_ref().is_some_and(|b| !b.is_empty())
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.local
+    }
+
+    /// Whether Share is offered. `static_page` is a page with no service
+    /// (`?capture=`), `imported_trace` a Chrome or Perfetto trace on screen,
+    /// `events` what the index holds.
+    pub fn can_share(&self, static_page: bool, imported_trace: bool, events: usize) -> bool {
+        // An imported trace exists only in the index, and nothing writes the
+        // index back out as a stream. The one other source is the service's
+        // export, which is the service's own capture, not the trace shown.
+        if imported_trace {
+            return false;
+        }
+        if self.has_bytes() {
+            return true;
+        }
+        !static_page && !self.local && events > 0
+    }
+}
+
 /// The words for the status codes the share server uses. Other failures stay
 /// a short line; an HTML body is not shown.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -971,6 +1046,57 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn a_trace_opened_on_a_service_page_is_not_shareable_as_the_services_capture() {
+        // Nothing held, a service behind the page, events on screen: a live
+        // capture, which Share reads from the service.
+        let mut held = HeldStream::default();
+        assert!(held.can_share(false, false, 100));
+        // The same page after a Chrome trace is dropped on it. The events on
+        // screen are the trace's; the service still holds its own capture,
+        // and that is what an export would post.
+        held.trace_opened();
+        assert!(!held.can_share(false, true, 100));
+    }
+
+    #[test]
+    fn a_trace_opened_over_a_stream_file_does_not_leave_the_file_to_share() {
+        let mut held = HeldStream::default();
+        held.begin_load();
+        held.forget();
+        held.loaded(vec![1, 2, 3]);
+        assert!(held.can_share(false, false, 100));
+        assert!(held.is_local());
+        held.trace_opened();
+        assert!(held.bytes().is_none(), "the previous file's bytes are still what Share would post");
+        assert!(!held.is_local());
+        assert!(!held.can_share(false, true, 100));
+        assert!(!held.can_share(true, true, 100));
+    }
+
+    #[test]
+    fn share_is_offered_for_a_held_stream_and_for_a_live_capture_only() {
+        let mut held = HeldStream::default();
+        // A static page before its capture arrives, and an empty live page.
+        assert!(!held.can_share(true, false, 0));
+        assert!(!held.can_share(false, false, 0));
+        // A frame inside the file being ingested (a `CaptureStarted`) clears
+        // the file trace; it must not drop the bytes being loaded.
+        held.begin_load();
+        held.forget();
+        held.loaded(vec![9; 16]);
+        assert!(held.can_share(true, false, 0));
+        // Clear, or a new capture: the file is gone, and with it the block
+        // on the live path.
+        held.forget();
+        assert!(held.bytes().is_none() && !held.is_local());
+        assert!(held.can_share(false, false, 1));
+        // An empty file is nothing to post, and it is still not a live page.
+        held.begin_load();
+        held.loaded(Vec::new());
+        assert!(!held.can_share(false, false, 1));
+    }
 
     #[test]
     fn share_base_is_the_website_unless_a_loopback_query_overrides_it() {

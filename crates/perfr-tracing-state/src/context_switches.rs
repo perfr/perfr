@@ -32,8 +32,9 @@ pub struct ContextSwitchManager {
     open_switches_by_core: HashMap<u16, OpenSwitchIn, FxBuildHasher>,
 }
 
-/// The switch-out result: `Died` is the timestamp-regression `PERFR_CHECK` the
-/// C++ dies on, and the shim must die the same way.
+/// The switch-out result. `Died` is a switch-out stamped before the
+/// switch-in it would close, which per-core order rules out; no caller
+/// draws a slice for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SwitchOut {
     Died,
@@ -53,15 +54,26 @@ impl ContextSwitchManager {
         core: u16,
         timestamp_ns: u64,
     ) {
-        // The C++ comment says a stale entry is overwritten, but the code uses
-        // `emplace`, which keeps the existing entry. The code is the spec.
-        self.open_switches_by_core
-            .entry(core)
-            .or_insert(OpenSwitchIn {
+        // An entry still open here means its switch-out was lost. The thread
+        // arriving now is the one on the core, so it replaces the stale
+        // entry: keeping the old one made the next switch-out mismatch as
+        // well, and one lost record cost two slices.
+        self.open_switches_by_core.insert(
+            core,
+            OpenSwitchIn {
                 pid,
                 tid,
                 timestamp_ns,
-            });
+            },
+        );
+    }
+
+    /// The kernel dropped records of `core`: whatever switch-in was open
+    /// there may have been switched out, and back in, in the gap. Pairing it
+    /// with the next switch-out of the same thread would draw one slice
+    /// across time the thread spent off the core, so the open entry goes.
+    pub fn forget_core(&mut self, core: u16) {
+        self.open_switches_by_core.remove(&core);
     }
 
     pub fn process_context_switch_out(
@@ -80,18 +92,25 @@ impl ContextSwitchManager {
             return SwitchOut::Died;
         }
 
-        // A mismatch happens when in or out switches were lost.
-        if (open.pid.is_some() && pid != -1 && open.pid != Some(pid)) || open.tid != tid {
+        // A mismatch happens when in or out switches were lost. An id of -1
+        // is not a mismatch: it is how an exiting thread's last switch-out
+        // reports an id the kernel can no longer resolve. Which one depends
+        // on the source -- the sched_switch tracepoint loses the pid, while
+        // PERF_RECORD_SWITCH_CPU_WIDE takes both from the sample id, where
+        // the tid of an already unhashed thread reads -1 and the pid stays
+        // valid for as long as the process lives. Rejecting it dropped the
+        // final run interval of every thread.
+        if (open.pid.is_some() && pid != -1 && open.pid != Some(pid)) || (tid != -1 && open.tid != tid) {
             return SwitchOut::NoSlice;
         }
 
-        // A switch-out caused by a thread exiting reports pid -1; prefer the
-        // pid recorded at switch-in, and accept -1 over dropping the slice.
+        // Prefer the ids recorded at switch-in over a -1, and accept a pid of
+        // -1 over dropping the slice.
         let pid_to_set = if pid != -1 { pid } else { open.pid.unwrap_or(-1) };
 
         SwitchOut::Slice(SchedulingSlice {
             pid: pid_to_set,
-            tid,
+            tid: open.tid,
             core,
             duration_ns: timestamp_ns - open.timestamp_ns,
             out_timestamp_ns: timestamp_ns,
@@ -102,6 +121,19 @@ impl ContextSwitchManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn records_lost_on_a_core_end_the_slice_open_on_it() {
+        let mut manager = ContextSwitchManager::new();
+        manager.process_context_switch_in(Some(10), 11, 3, 100);
+        manager.process_context_switch_in(Some(10), 12, 4, 100);
+        // Core 3's ring overflowed here: thread 11 may have left and come
+        // back any number of times before the next record that was kept.
+        manager.forget_core(3);
+        assert_eq!(manager.process_context_switch_out(10, 11, 3, 900), SwitchOut::NoSlice);
+        // The other core lost nothing.
+        assert!(matches!(manager.process_context_switch_out(10, 12, 4, 900), SwitchOut::Slice(_)));
+    }
 
     #[test]
     fn matches_in_and_out_into_a_slice() {
@@ -154,16 +186,52 @@ mod tests {
         assert_eq!(slice.pid, -1);
     }
 
-    /// The emplace quirk: a second switch-in on the same core keeps the first.
+    /// perf reports the switch-out of a thread that has already been
+    /// unhashed with tid -1 and the pid still valid.
     #[test]
-    fn second_switch_in_on_a_core_is_ignored() {
+    fn exit_switch_out_without_a_tid_takes_the_tid_from_switch_in() {
+        let mut manager = ContextSwitchManager::new();
+        manager.process_context_switch_in(Some(10), 11, 0, 100);
+        assert_eq!(
+            manager.process_context_switch_out(10, -1, 0, 250),
+            SwitchOut::Slice(SchedulingSlice {
+                pid: 10,
+                tid: 11,
+                core: 0,
+                duration_ns: 150,
+                out_timestamp_ns: 250,
+            })
+        );
+
+        // Neither id survived the exit: the open entry supplies both.
+        manager.process_context_switch_in(Some(10), 11, 0, 300);
+        let SwitchOut::Slice(slice) = manager.process_context_switch_out(-1, -1, 0, 400) else {
+            panic!()
+        };
+        assert_eq!((slice.pid, slice.tid), (10, 11));
+
+        // A pid that is present still has to match.
+        manager.process_context_switch_in(Some(10), 11, 0, 500);
+        assert_eq!(manager.process_context_switch_out(99, -1, 0, 600), SwitchOut::NoSlice);
+    }
+
+    /// A second switch-in on a core means the switch-out in between was
+    /// lost: the newer thread is the one running there now.
+    #[test]
+    fn second_switch_in_on_a_core_replaces_the_stale_one() {
         let mut manager = ContextSwitchManager::new();
         manager.process_context_switch_in(Some(10), 11, 0, 100);
         manager.process_context_switch_in(Some(20), 21, 0, 150);
-        let SwitchOut::Slice(slice) = manager.process_context_switch_out(10, 11, 0, 200) else {
-            panic!()
-        };
-        assert_eq!(slice.duration_ns, 100);
+        assert_eq!(
+            manager.process_context_switch_out(20, 21, 0, 200),
+            SwitchOut::Slice(SchedulingSlice {
+                pid: 20,
+                tid: 21,
+                core: 0,
+                duration_ns: 50,
+                out_timestamp_ns: 200,
+            })
+        );
     }
 
     #[test]

@@ -8,20 +8,21 @@
 # eframe/wgpu tree never enters a service build; `cargo test --workspace`
 # covers all of it. crates/README.md describes the crates.
 #
-# See docs/rust-port-plan.html for how the C++ service was ported, and
-# https://perfr.dev/blog/ for the running write-up of what each step cost. The C++ tree
-# itself lives on the `cpp` branch of the Orbit repository.
+# https://perfr.dev/rust-port-plan.html is how the C++ service was ported, and
+# https://perfr.dev/blog/ the running write-up of what each step cost. Where
+# the C++ tree itself went is under History in crates/README.md.
 
 [workspace]
 resolver = "2"
 members = [
     "crates/perfr-api",
+    "crates/perfr-build-info",
     "crates/perfr-capture",
-    "crates/perfr-collector",
     "crates/perfr-etw",
     "crates/perfr-lib",
     "crates/perfr-lib-windows",
     "crates/perfr-hook",
+    "crates/perfr-frida-build",
     "crates/perfr-frida-transport",
     "crates/perfr-gpu",
     "crates/perfr-live-chrome",
@@ -31,19 +32,17 @@ members = [
     "crates/perfr-live-ring",
     "crates/perfr-live-server",
     "crates/perfr-live-viewer",
+    "crates/perfr-story",
     "crates/perfr-maps",
     "crates/perfr-object",
-    "crates/perfr-perf-merge",
     "crates/perfr-perf-records",
     "crates/perfr-perf-ring",
     "crates/perfr-pod-dump",
-    "crates/perfr-ptrace",
     "crates/perfr-scope-ring",
     "crates/perfr",
     "crates/perfr-test-rust",
     "crates/perfr-thread-states",
     "crates/perfr-tracing-state",
-    "crates/perfr-trampoline",
     "crates/perfr-unwind",
     "crates/perfr-web",
     "crates/perfr-wire",

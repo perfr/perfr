@@ -377,6 +377,44 @@ fn nothing_from_before_the_capture_start_reaches_the_ring() {
 }
 
 #[test]
+fn restoring_stored_events_keeps_those_that_begin_before_the_capture_start() {
+    let span = |start_ns: u64, end_ns: u64| LiveEvent { start_ns, duration_ns: end_ns - start_ns, ..ev(0) };
+    let svc = LiveService::new(small_cfg()).unwrap();
+    let mut rx = svc.subscribe();
+    // A capture cut to [100, 200] and opened again: its start is the
+    // window's, and the events overlapping the window were stored whole.
+    svc.mark_capture_started(7, 100);
+    let stored = [span(10, 900), span(50, 150), span(120, 130), span(190, 260)];
+    let generation = svc.data_gen();
+    svc.restore_events(&stored);
+    assert_eq!(svc.ring().snapshot().1, stored);
+    assert_eq!(svc.dropped_before_start(), 0);
+    // The rest of what a push does still happens.
+    assert_eq!(svc.data_gen(), generation + 1);
+    // The capture ends where the events that begin in it do: the one that
+    // spans the window is held, and does not stretch the capture to 900.
+    assert_eq!(svc.live_end_ns(), 260);
+    assert_eq!(svc.cached_index().event_count(), 4);
+    assert_eq!(svc.cached_index().time_bounds(), Some((120, 260)));
+    let mut broadcast = Vec::new();
+    while let Ok(bytes) = rx.try_recv() {
+        for frame in decode_all(&bytes).unwrap() {
+            if let LiveFrame::EventBatch { events } = frame {
+                broadcast.extend(events);
+            }
+        }
+    }
+    assert_eq!(broadcast, stored);
+    // A live push is still held to the capture's start.
+    svc.push_events(&[span(50, 150), span(150, 160)]);
+    assert_eq!(svc.stats().events_live, 5);
+    assert_eq!(svc.dropped_before_start(), 1);
+    svc.push_event(span(50, 150));
+    assert_eq!(svc.stats().events_live, 5);
+    assert_eq!(svc.dropped_before_start(), 2);
+}
+
+#[test]
 fn a_provisional_start_after_the_real_one_is_not_broadcast() {
     let svc = LiveService::new(small_cfg()).unwrap();
     let mut rx = svc.subscribe();
@@ -419,4 +457,420 @@ fn stream_slice_keeps_events_crossing_both_edges_and_normalizes_bounds() {
     }).flatten().collect();
     assert_eq!(events, vec![crossing, ev(5)]);
     assert!(matches!(frames.last(), Some(LiveFrame::CaptureFinished)));
+}
+
+// ------------------------------------------------- the router, over TCP ---
+
+/// The real router on a loopback port, with the runtime that serves it.
+struct Served {
+    addr: std::net::SocketAddr,
+    _runtime: tokio::runtime::Runtime,
+}
+
+fn serve(svc: std::sync::Arc<LiveService>) -> Served {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = crate::http::router(svc);
+    runtime.spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    Served { addr, _runtime: runtime }
+}
+
+/// A service whose configured bind is the port it is served on, as in a
+/// real run.
+fn serve_small() -> (std::sync::Arc<LiveService>, Served) {
+    let svc = LiveService::new(small_cfg()).unwrap();
+    let served = serve(svc.clone());
+    svc.config.lock().bind = served.addr;
+    (svc, served)
+}
+
+/// One HTTP/1.1 exchange written out by hand, so that a test decides every
+/// header the server sees: `Host` and `Origin` are what the origin rules
+/// read, and an HTTP client library would choose them for us. `headers` is
+/// sent as given (no `Host` is added). Returns the status and the body.
+fn exchange(addr: std::net::SocketAddr, method: &str, path: &str, headers: &[(&str, &str)], body: Option<&[u8]>) -> (u16, String) {
+    let mut request = format!("{method} {path} HTTP/1.1\r\n");
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    if let Some(body) = body {
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    request.push_str("\r\n");
+    let mut request = request.into_bytes();
+    request.extend_from_slice(body.unwrap_or_default());
+    let (status, _head, body) = send_raw(addr, &request);
+    (status, body)
+}
+
+/// Sends `request` as it is and returns the reply's status, head and body.
+fn send_raw(addr: std::net::SocketAddr, request: &[u8]) -> (u16, String, String) {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    stream.write_all(request).unwrap();
+    // The head, then as much body as it announces: an upgraded connection
+    // stays open, so reading to the end would wait for the timeout.
+    let mut raw = Vec::new();
+    let mut byte = [0u8; 1];
+    while !raw.ends_with(b"\r\n\r\n") {
+        match stream.read(&mut byte) {
+            Ok(1) => raw.push(byte[0]),
+            _ => break,
+        }
+    }
+    let head = String::from_utf8_lossy(&raw).into_owned();
+    let status: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("no status line in the reply to {:?}: {head:?}", String::from_utf8_lossy(request)));
+    let length = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok())?
+        })
+        .unwrap_or(0);
+    let mut body = vec![0u8; length];
+    stream.read_exact(&mut body).unwrap();
+    (status, head, String::from_utf8_lossy(&body).into_owned())
+}
+
+/// The `Host` a client on this machine sends for `addr`.
+fn host_of(addr: std::net::SocketAddr) -> String {
+    addr.to_string()
+}
+
+fn get(served: &Served, path: &str) -> (u16, String) {
+    exchange(served.addr, "GET", path, &[("Host", &host_of(served.addr))], None)
+}
+
+fn send_json(served: &Served, method: &str, path: &str, body: &str) -> (u16, String) {
+    let host = host_of(served.addr);
+    exchange(
+        served.addr,
+        method,
+        path,
+        &[("Host", &host), ("Content-Type", "application/json")],
+        Some(body.as_bytes()),
+    )
+}
+
+#[test]
+fn a_ring_size_outside_the_allowed_range_is_refused_rather_than_allocated() {
+    let (svc, served) = serve_small();
+    let before = svc.config.lock().ring_buffer_bytes;
+    // Sizes whose element count overflows an allocation outright: before
+    // the range check these reached `vec![..; n]` and the handler panicked,
+    // which in a release build is the end of the service.
+    for bytes in [u64::MAX, 1u64 << 62] {
+        let (status, text) = send_json(&served, "PUT", "/api/config", &format!(r#"{{"ring_buffer_bytes":{bytes}}}"#));
+        assert_eq!(status, 400, "{bytes}: {text}");
+        assert!(text.contains("ring_buffer_bytes must be between"), "{text}");
+    }
+    // Too small to hold a capture worth looking at.
+    for bytes in [0u64, 4096, (1 << 20) - 1] {
+        let (status, text) = send_json(&served, "PUT", "/api/config", &format!(r#"{{"ring_buffer_bytes":{bytes}}}"#));
+        assert_eq!(status, 400, "{bytes}: {text}");
+        assert!(text.contains("ring_buffer_bytes must be between"), "{text}");
+    }
+    assert_eq!(svc.config.lock().ring_buffer_bytes, before, "a refused size changes nothing");
+    // The smallest size allowed is taken, and the service is still up.
+    let (status, text) = send_json(&served, "PUT", "/api/config", r#"{"ring_buffer_bytes":1048576}"#);
+    assert_eq!(status, 200, "{text}");
+    let (status, text) = get(&served, "/api/config");
+    assert_eq!(status, 200);
+    assert!(text.contains(r#""ring_buffer_bytes":1048576"#), "{text}");
+}
+
+#[test]
+fn the_largest_ring_is_half_of_memory_up_to_eight_gibibytes() {
+    use crate::http::{check_ring_bytes, max_ring_bytes, MAX_RING_BYTES, MIN_RING_BYTES};
+    const GIB: u64 = 1 << 30;
+    assert_eq!(max_ring_bytes(Some(4 * GIB)), 2 * GIB);
+    assert_eq!(max_ring_bytes(Some(64 * GIB)), MAX_RING_BYTES);
+    assert_eq!(max_ring_bytes(Some(16 * GIB)), MAX_RING_BYTES);
+    assert_eq!(max_ring_bytes(None), MAX_RING_BYTES, "unknown memory leaves the fixed cap");
+    // A machine so small that half of it is under the floor still takes
+    // the one size the floor allows.
+    assert_eq!(max_ring_bytes(Some(1 << 20)), MIN_RING_BYTES);
+    assert_eq!(max_ring_bytes(Some(0)), MIN_RING_BYTES);
+
+    let max = max_ring_bytes(Some(4 * GIB));
+    assert!(check_ring_bytes(MIN_RING_BYTES, max).is_ok());
+    assert!(check_ring_bytes(256 << 20, max).is_ok());
+    assert!(check_ring_bytes(max, max).is_ok());
+    assert!(check_ring_bytes(MIN_RING_BYTES - 1, max).is_err());
+    let error = check_ring_bytes(max + 1, max).unwrap_err();
+    assert!(error.contains("between 1048576 (1 MiB) and 2147483648 (2048 MiB"), "{error}");
+    assert!(error.ends_with(&format!("got {}", max + 1)), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn opening_a_path_that_is_not_a_regular_file_is_refused_before_anything_reads_it() {
+    let dir = std::env::temp_dir().join(format!("perfr-open-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let capture = dir.join("capture.perfr.zip");
+    std::fs::write(&capture, b"stands in for a bundle").unwrap();
+    let empty = dir.join("empty.perfr.zip");
+    std::fs::write(&empty, b"").unwrap();
+    let fifo = dir.join("fifo.perfr.zip");
+    let c_fifo = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    // SAFETY: a NUL-terminated path that outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+
+    let (svc, served) = serve_small();
+    // The hook stands in for the service's reader, which reads the whole
+    // file: on a FIFO it would wait for a writer for good, on /dev/zero it
+    // would read until the machine ran out of memory.
+    let opened = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let seen = opened.clone();
+    svc.set_capture_open(std::sync::Arc::new(move |path, _window| {
+        seen.lock().push(path.to_string());
+        Ok("{}".to_string())
+    }));
+    let open = |path: &str| send_json(&served, "POST", "/api/capture/open", &serde_json::json!({ "path": path }).to_string());
+
+    for (path, why) in [
+        (fifo.to_str().unwrap(), "not a regular file"),
+        ("/dev/zero", "not a regular file"),
+        (dir.to_str().unwrap(), "not a regular file"),
+        (empty.to_str().unwrap(), "empty"),
+        (dir.join("missing.perfr.zip").to_str().unwrap(), "missing.perfr.zip"),
+    ] {
+        let (status, text) = open(path);
+        assert_eq!(status, 400, "{path}: {text}");
+        assert!(text.contains(why), "{path}: {text}");
+    }
+    assert!(opened.lock().is_empty(), "the reader was reached: {:?}", opened.lock());
+
+    let (status, text) = open(capture.to_str().unwrap());
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(*opened.lock(), vec![capture.to_str().unwrap().to_string()]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_capture_file_over_the_import_limit_is_refused_by_its_size() {
+    let dir = std::env::temp_dir().join(format!("perfr-open-size-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("capture.perfr.zip");
+    std::fs::write(&path, vec![0u8; 4096]).unwrap();
+    let path = path.to_str().unwrap();
+    assert!(crate::http::check_capture_file(path, 4096).is_ok());
+    let error = crate::http::check_capture_file(path, 4095).unwrap_err();
+    assert!(error.contains("4096 bytes") && error.contains("4095"), "{error}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ------------------------------------------------ who may call the API ---
+
+/// The headers of a WebSocket handshake, less `Host` and `Origin`.
+const WS_UPGRADE: [(&str, &str); 4] = [
+    ("Connection", "Upgrade"),
+    ("Upgrade", "websocket"),
+    ("Sec-WebSocket-Version", "13"),
+    ("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="),
+];
+
+/// A request as a browser page on `origin` sends it to this service at
+/// `host`; `origin` is `None` for a client that is not a page (and for a
+/// page's own same-origin GETs, which carry no `Origin`).
+fn from_page(served: &Served, method: &str, path: &str, host: &str, origin: Option<&str>, body: Option<&str>) -> u16 {
+    let mut headers = vec![("Host", host)];
+    if let Some(origin) = origin {
+        headers.push(("Origin", origin));
+    }
+    if body.is_some() {
+        headers.push(("Content-Type", "application/json"));
+    }
+    if path == "/ws" || path == "/api/peer" || path == "/api/join" {
+        headers.extend(WS_UPGRADE);
+    } else if method != "GET" && body.is_none() {
+        headers.push(("Content-Length", "0"));
+    }
+    exchange(served.addr, method, path, &headers, body.map(str::as_bytes)).0
+}
+
+#[test]
+fn the_viewer_served_by_this_service_reaches_every_kind_of_route() {
+    let (svc, served) = serve_small();
+    let host = host_of(served.addr);
+    let origin = format!("http://{host}");
+    // A page's own GETs carry no Origin; its POSTs and its WebSocket do.
+    assert_eq!(from_page(&served, "GET", "/api/status", &host, None, None), 200);
+    assert_eq!(from_page(&served, "GET", "/api/status", &host, Some(&origin), None), 200);
+    assert_eq!(from_page(&served, "POST", "/api/auto_profile", &host, Some(&origin), Some(r#"{"on":false}"#)), 200);
+    svc.capturing.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(from_page(&served, "POST", "/api/capture/stop", &host, Some(&origin), None), 200);
+    assert!(!svc.is_capturing(), "the stop went through");
+    assert_eq!(from_page(&served, "GET", "/ws", &host, Some(&origin), None), 101);
+    // The same page opened as localhost: another name for this machine
+    // that needs no DNS answer.
+    let port = served.addr.port();
+    let localhost = format!("localhost:{port}");
+    assert_eq!(from_page(&served, "GET", "/ws", &localhost, Some(&format!("http://{localhost}")), None), 101);
+    assert_eq!(from_page(&served, "POST", "/api/auto_profile", &localhost, Some(&format!("http://{localhost}")), Some(r#"{"on":false}"#)), 200);
+}
+
+#[test]
+fn a_page_on_another_origin_is_refused_on_every_kind_of_route() {
+    let (svc, served) = serve_small();
+    let host = host_of(served.addr);
+    for origin in ["https://unrelated.example", "http://127.0.0.1:1", "null"] {
+        // A read, a JSON write (which a browser preflights), a write with
+        // no body (which it does not), and the three WebSocket routes, to
+        // which the browser applies no cross-origin rule at all.
+        assert_eq!(from_page(&served, "GET", "/api/status", &host, Some(origin), None), 403, "{origin}");
+        assert_eq!(from_page(&served, "GET", "/api/capture/export?format=stream", &host, Some(origin), None), 403, "{origin}");
+        assert_eq!(from_page(&served, "POST", "/api/capture/start", &host, Some(origin), Some(r#"{"pid":1}"#)), 403, "{origin}");
+        assert_eq!(from_page(&served, "PUT", "/api/config", &host, Some(origin), Some(r#"{"ring_buffer_bytes":2097152}"#)), 403, "{origin}");
+        assert_eq!(from_page(&served, "POST", "/api/demo/start", &host, Some(origin), Some("{}")), 403, "{origin}");
+        svc.capturing.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(from_page(&served, "POST", "/api/capture/stop", &host, Some(origin), None), 403, "{origin}");
+        assert!(svc.is_capturing(), "{origin}: a refused stop stops nothing");
+        svc.capturing.store(false, std::sync::atomic::Ordering::Relaxed);
+        for ws in ["/ws", "/api/peer", "/api/join"] {
+            assert_eq!(from_page(&served, "GET", ws, &host, Some(origin), None), 403, "{origin} {ws}");
+        }
+        assert_eq!(from_page(&served, "GET", "/", &host, Some(origin), None), 403, "{origin}");
+    }
+    assert!(!svc.demo.load(std::sync::atomic::Ordering::Relaxed), "no refused request started the demo");
+    assert_eq!(svc.config.lock().ring_buffer_bytes, small_cfg().ring_buffer_bytes);
+    assert!(svc.peers.list().is_empty(), "no refused handshake became a peer link");
+}
+
+#[test]
+fn a_preflight_from_another_origin_gets_no_permission() {
+    let (_svc, served) = serve_small();
+    let host = host_of(served.addr);
+    let request = format!(
+        "OPTIONS /api/capture/start HTTP/1.1\r\nHost: {host}\r\nOrigin: https://unrelated.example\r\n\
+         Access-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: content-type\r\n\r\n"
+    );
+    let (status, head, _) = send_raw(served.addr, request.as_bytes());
+    assert_eq!(status, 403, "{head}");
+    assert!(!head.to_ascii_lowercase().contains("access-control-allow"), "{head}");
+    // Nor does a reply to anyone say that other origins may read it.
+    let (status, head, _) = send_raw(served.addr, format!("GET /api/status HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes());
+    assert_eq!(status, 200);
+    assert!(!head.to_ascii_lowercase().contains("access-control-allow"), "{head}");
+}
+
+#[test]
+fn a_name_that_dns_could_have_rebound_is_refused_with_or_without_an_origin() {
+    let (svc, served) = serve_small();
+    let port = served.addr.port();
+    // The page was loaded from evil.example, whose DNS answer then changed
+    // to this machine: its requests are same-origin as far as the browser
+    // can tell, and its GETs carry no Origin at all.
+    let rebound = format!("evil.example:{port}");
+    let origin = format!("http://{rebound}");
+    assert_eq!(from_page(&served, "GET", "/api/status", &rebound, None, None), 403);
+    assert_eq!(from_page(&served, "GET", "/api/capture/export?format=stream", &rebound, None, None), 403);
+    assert_eq!(from_page(&served, "GET", "/", &rebound, None, None), 403);
+    assert_eq!(from_page(&served, "GET", "/api/status", &rebound, Some(&origin), None), 403);
+    assert_eq!(from_page(&served, "POST", "/api/capture/start", &rebound, Some(&origin), Some(r#"{"pid":1}"#)), 403);
+    svc.capturing.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(from_page(&served, "POST", "/api/capture/stop", &rebound, Some(&origin), None), 403);
+    assert_eq!(from_page(&served, "POST", "/api/capture/stop", &rebound, None, None), 403);
+    assert!(svc.is_capturing());
+    assert_eq!(from_page(&served, "GET", "/ws", &rebound, Some(&origin), None), 403);
+    assert_eq!(from_page(&served, "GET", "/ws", &rebound, None, None), 403);
+    assert_eq!(from_page(&served, "GET", "/api/status", "evil.example", None, None), 403);
+    assert_eq!(from_page(&served, "GET", "/api/status", "", None, None), 403);
+}
+
+#[test]
+fn clients_that_are_not_pages_keep_working_without_an_origin() {
+    let (svc, served) = serve_small();
+    svc.set_machine_name("render-01");
+    let port = served.addr.port();
+    // curl, the MCP client, the e2e suite: loopback by address or by name.
+    for host in [format!("127.0.0.1:{port}"), format!("localhost:{port}"), "127.0.0.1".to_string()] {
+        assert_eq!(from_page(&served, "GET", "/api/status", &host, None, None), 200, "{host}");
+        assert_eq!(from_page(&served, "POST", "/api/auto_profile", &host, None, Some(r#"{"on":false}"#)), 200, "{host}");
+        assert_eq!(from_page(&served, "POST", "/api/capture/stop", &host, None, None), 200, "{host}");
+    }
+    // A peer that was told `--connect render-01` or `--join render-01`
+    // dials this machine by its own name, and by address otherwise.
+    for host in [format!("render-01:{port}"), format!("RENDER-01:{port}"), format!("192.168.1.20:{port}")] {
+        assert_eq!(from_page(&served, "GET", "/api/peer", &host, None, None), 101, "{host}");
+        assert_eq!(from_page(&served, "GET", "/api/join", &host, None, None), 101, "{host}");
+        assert_eq!(from_page(&served, "GET", "/api/status", &host, None, None), 200, "{host}");
+    }
+    // The viewer opened from another machine as http://render-01:PORT/ (or
+    // by the name mDNS gives it) is this service's own page as well.
+    for named in [format!("render-01:{port}"), format!("render-01.local:{port}")] {
+        let origin = format!("http://{named}");
+        assert_eq!(from_page(&served, "GET", "/ws", &named, Some(&origin), None), 101, "{named}");
+        assert_eq!(from_page(&served, "POST", "/api/auto_profile", &named, Some(&origin), Some(r#"{"on":false}"#)), 200, "{named}");
+        // Not for an upload, though: that leaves the machine, and is asked
+        // for by address or as localhost only.
+        assert_eq!(from_page(&served, "POST", "/api/capture/share", &named, Some(&origin), None), 403, "{named}");
+    }
+    // Another page saying it is addressed to that name is still another page.
+    let named = format!("render-01:{port}");
+    assert_eq!(from_page(&served, "GET", "/ws", &named, Some("https://unrelated.example"), None), 403);
+    // HTTP/1.0 has no Host header, and no browser speaks it.
+    let (status, _, _) = send_raw(served.addr, b"GET /api/status HTTP/1.0\r\n\r\n");
+    assert_eq!(status, 200);
+    let (status, _, _) = send_raw(served.addr, b"GET /api/status HTTP/1.0\r\nOrigin: https://unrelated.example\r\n\r\n");
+    assert_eq!(status, 403);
+}
+
+#[test]
+fn the_host_and_origin_rules_by_case() {
+    let bind: std::net::SocketAddr = "192.168.1.20:44766".parse().unwrap();
+    let ok = |origin: Option<&str>, host: Option<&str>| crate::http::request_allowed(origin, host, bind, "render-01");
+    // No Origin: any address, localhost, the bound address, this machine's name.
+    assert!(ok(None, Some("127.0.0.1:44766")));
+    assert!(ok(None, Some("localhost")));
+    assert!(ok(None, Some("LOCALHOST:8080")));
+    assert!(ok(None, Some("[::1]:44766")));
+    assert!(ok(None, Some("10.1.2.3:9")));
+    assert!(ok(None, Some("render-01:44766")));
+    assert!(ok(None, Some("Render-01")));
+    assert!(ok(None, Some("render-01.local:44766")));
+    assert!(!ok(None, Some("render-01.locale")));
+    // The MCP client writes an IPv6 host without its brackets.
+    assert!(ok(None, Some("::1:44766")));
+    assert!(ok(None, None));
+    assert!(!ok(None, Some("evil.example:44766")));
+    assert!(!ok(None, Some("render-01.evil.example:44766")));
+    assert!(!ok(None, Some("render-01x")));
+    assert!(!ok(None, Some("")));
+    assert!(!ok(None, Some(":44766")));
+    // With an Origin: that origin must be this very host, reached without DNS.
+    assert!(ok(Some("http://127.0.0.1:44766"), Some("127.0.0.1:44766")));
+    assert!(ok(Some("https://localhost:8443"), Some("localhost:8443")));
+    assert!(ok(Some("http://192.168.1.20:44766"), Some("192.168.1.20:44766")));
+    assert!(!ok(Some("http://127.0.0.1:3000"), Some("127.0.0.1:44766")));
+    assert!(!ok(Some("https://unrelated.example"), Some("127.0.0.1:44766")));
+    assert!(!ok(Some("http://evil.example:44766"), Some("evil.example:44766")));
+    assert!(ok(Some("http://render-01:44766"), Some("render-01:44766")));
+    assert!(ok(Some("http://Render-01.local:44766"), Some("Render-01.local:44766")));
+    assert!(!ok(Some("http://render-01:3000"), Some("render-01:44766")));
+    assert!(!ok(Some("http://render-01.evil.example:44766"), Some("render-01.evil.example:44766")));
+    assert!(!ok(Some("http://render-01.local.evil.example:44766"), Some("render-01.local.evil.example:44766")));
+    assert!(!ok(Some("http://.local:44766"), Some(".local:44766")));
+    assert!(!ok(Some("null"), Some("127.0.0.1:44766")));
+    assert!(!ok(Some(""), Some("127.0.0.1:44766")));
+    assert!(!ok(Some("http://127.0.0.1:44766"), None));
+    // An unnamed machine does not make the empty name acceptable.
+    assert!(!crate::http::request_allowed(None, Some(":44766"), bind, ""));
+    assert!(!crate::http::request_allowed(None, Some(""), bind, ""));
 }

@@ -21,7 +21,8 @@
 //! arming sits at the end of a step whose unhooks can take longer than the
 //! step itself, and crediting that time calls a live function silent. A
 //! function that was entered and never returned is not tried again; one that
-//! simply went quiet is, less often each time, and then left alone.
+//! simply went quiet is, less often each time, and then left alone, and so
+//! is one that pushes the set over budget each time it comes back.
 //!
 //! Pure: the capture loop feeds it the report and the counts and carries out
 //! what it returns, so the rules are tested without a kernel.
@@ -80,7 +81,8 @@ pub enum Why {
     Sampled { inclusive_percent: f32 },
     /// It fired this often on its own.
     TooHot { per_s: f64 },
-    /// It never completed a call in the time it was armed.
+    /// It completed no call for as long as a hook is given: since it was
+    /// armed, or since its last call if it has run.
     Silent,
     /// It was entered and did not return: a main loop, not a quiet path.
     NeverReturns,
@@ -124,16 +126,36 @@ struct Hooked {
     watched_s: f64,
     /// `calls / watched_s`.
     per_s: f64,
+    /// Seconds armed since the last step in which it completed a call. Kept
+    /// apart from `calls`: that one is halved, never reaches zero again once
+    /// the function has run, and so cannot say that it stopped running.
+    quiet_s: f64,
 }
 
 /// Seconds of history a hook's rate remembers, roughly.
 const MEMORY_S: f64 = 10.0;
 /// A hook watched this long with no call is silent.
 const SILENT_AFTER_S: f64 = 1.5;
+/// A hook that has completed calls is silent after this long without one.
+/// Longer than for one that never ran: a function called every few seconds is
+/// still part of what the program does now. Start-up code that ran once and
+/// is over would otherwise keep its slot for the rest of the capture.
+const QUIET_AFTER_S: f64 = 10.0;
 /// Calls before a rate is trusted enough to call a hook too hot.
 const HOT_MIN_CALLS: f64 = 10.0;
 /// Times a function may be unhooked as silent before it is left alone.
 const MAX_SILENT_TRIES: u32 = 3;
+/// A hook that was entered and has completed no call is given this long
+/// before it is called a loop that never returns. That verdict is for the
+/// whole capture, and a single long call (a level load, a frame held in a
+/// debugger) outlasts the 1.5 s a hook that was never entered gets.
+const STUCK_AFTER_S: f64 = 10.0;
+/// Times a function may be unhooked for pushing the set over budget before
+/// it is left alone. Without a cap it came back every thirty steps for as
+/// long as it was sampled, was measured, and pushed something out again: a
+/// probe armed and disarmed on the target about once a minute for the rest
+/// of the capture, and a set that never stayed converged.
+const MAX_OVER_BUDGET_TRIES: u32 = 3;
 
 /// Where the controller stands, for the status line and `/api/status`.
 #[derive(Clone, Debug, PartialEq)]
@@ -157,10 +179,16 @@ pub struct AutoProfiler {
     rejected: HashMap<u64, u32>,
     /// How many times a function has been unhooked as silent.
     silent_tries: HashMap<u64, u32>,
+    /// How many times a function has been unhooked for the budget.
+    over_budget_tries: HashMap<u64, u32>,
     /// Steps in a row that changed nothing.
     quiet_steps: u32,
     total_per_s: f64,
     unhooked: u32,
+    /// The session's running count of dropped records at the last report,
+    /// and how many of them fell in the window the next step judges.
+    lost_total: u64,
+    lost_in_window: u64,
 }
 
 impl AutoProfiler {
@@ -171,15 +199,25 @@ impl AutoProfiler {
             hooked: BTreeMap::new(),
             rejected: HashMap::new(),
             silent_tries: HashMap::new(),
+            over_budget_tries: HashMap::new(),
             quiet_steps: 0,
             total_per_s: 0.0,
             unhooked: 0,
+            lost_total: 0,
+            lost_in_window: 0,
         }
     }
 
     /// The budget changed (the setting was edited mid-capture).
     pub fn set_budget(&mut self, budget_per_s: u64) {
-        self.config.budget_per_s = budget_per_s.max(1) as f64;
+        let budget = budget_per_s.max(1) as f64;
+        if budget > self.config.budget_per_s {
+            // What did not fit the old budget may fit this one.
+            for (id, _) in self.over_budget_tries.drain() {
+                self.rejected.remove(&id);
+            }
+        }
+        self.config.budget_per_s = budget;
     }
 
     /// Calls past which one hook is too hot, a second.
@@ -205,6 +243,17 @@ impl AutoProfiler {
         self.rejected.insert(function_id, u32::MAX);
     }
 
+    /// The kernel's running count of hook records it dropped for this
+    /// capture (`PERF_RECORD_LOST`, summed over the rings), told before each
+    /// step. A window that lost records cannot show that a hook was silent:
+    /// one hot function fills a ring and the hits of every other hook on
+    /// that CPU go with it. A count below the last one is a new session's.
+    pub fn records_lost(&mut self, total: u64) {
+        let new = if total >= self.lost_total { total - self.lost_total } else { total };
+        self.lost_total = total;
+        self.lost_in_window = self.lost_in_window.saturating_add(new);
+    }
+
     /// One step. `counts` is completed calls per hooked function since the
     /// last step, `entries` entry hits in that same span. `window_s` is how
     /// long the step was; `watched` is how long each hook was actually armed
@@ -227,6 +276,7 @@ impl AutoProfiler {
         let hot = self.config.hot_per_s();
         let window_s = window_s.max(1e-3);
         let retry = self.config.retry_after_steps;
+        let lossy = std::mem::take(&mut self.lost_in_window) > 0;
 
         // What each hook has cost since it went in. A hook armed partway
         // through the window is credited only with `watched`, so a slow
@@ -234,9 +284,21 @@ impl AutoProfiler {
         for (id, h) in self.hooked.iter_mut() {
             if h.since_step < step {
                 let dt = watched.get(id).copied().unwrap_or(window_s).max(0.0);
-                h.calls += counts.get(id).copied().unwrap_or(0) as f64;
+                let completed = counts.get(id).copied().unwrap_or(0);
+                h.calls += completed as f64;
                 h.entries += entries.get(id).copied().unwrap_or(0) as f64;
                 h.watched_s += dt;
+                h.quiet_s = if completed > 0 { 0.0 } else { h.quiet_s + dt };
+                if lossy {
+                    // The calls that did arrive still count towards the rate:
+                    // they are a floor, and the hook that caused the loss is
+                    // found by it. Silence is another matter. A return that
+                    // was dropped looks like a call that never ended, and a
+                    // dropped call like none at all, so the quiet clock and
+                    // the entries it is read with start over.
+                    h.quiet_s = 0.0;
+                    h.entries = 0.0;
+                }
                 if h.watched_s > MEMORY_S {
                     h.calls /= 2.0;
                     h.entries /= 2.0;
@@ -263,13 +325,22 @@ impl AutoProfiler {
             .hooked
             .iter()
             .filter(|(_, h)| h.since_step < step)
-            .map(|(id, h)| (*id, h.per_s, h.calls, h.watched_s, h.entries))
+            .map(|(id, h)| (*id, h.per_s, h.calls, h.quiet_s, h.entries))
             .collect();
-        for (id, per_s, calls, watched_s, entries_seen) in &judged {
+        for (id, per_s, calls, quiet_s, entries_seen) in &judged {
+            let never_called = *calls == 0.0;
+            let entered = never_called && *entries_seen > 0.0;
+            let silent_after = if entered {
+                STUCK_AFTER_S
+            } else if never_called {
+                SILENT_AFTER_S
+            } else {
+                QUIET_AFTER_S
+            };
             if *per_s > hot && *calls >= HOT_MIN_CALLS {
                 unhook(self, *id, Why::TooHot { per_s: *per_s }, None);
-            } else if *calls == 0.0 && *watched_s >= SILENT_AFTER_S {
-                if *entries_seen > 0.0 {
+            } else if *quiet_s >= silent_after {
+                if entered {
                     // Entered and still inside: retrying arms the same probe
                     // on a function that will not return.
                     unhook(self, *id, Why::NeverReturns, None);
@@ -303,7 +374,14 @@ impl AutoProfiler {
             else {
                 break;
             };
-            unhook(self, id, Why::OverBudget { per_s }, Some(retry * 2));
+            let n = {
+                let n = self.over_budget_tries.entry(id).or_insert(0);
+                *n += 1;
+                *n
+            };
+            let wait = (n < MAX_OVER_BUDGET_TRIES)
+                .then(|| retry.saturating_mul(2).saturating_mul(1u32 << (n - 1).min(4)));
+            unhook(self, id, Why::OverBudget { per_s }, wait);
         }
         self.total_per_s = self.hooked.values().map(|h| h.per_s).sum();
         if !(self.total_per_s > 0.0) {
@@ -336,6 +414,7 @@ impl AutoProfiler {
                         entries: 0.0,
                         watched_s: 0.0,
                         per_s: 0.0,
+                        quiet_s: 0.0,
                     },
                 );
                 actions.push(Action::Hook {
@@ -819,37 +898,69 @@ mod tests {
     fn a_function_that_was_entered_and_never_returned_is_not_retried() {
         let mut p = profiler();
         let c = [cand(1, 60.0)];
-        p.step(
-            &c,
-            &HashMap::new(),
-            2.0,
-            &HashMap::new(),
-            &HashMap::new(),
-            &[],
-        );
-        let a = p.step(
-            &c,
-            &HashMap::new(),
-            2.0,
-            &HashMap::new(),
-            &HashMap::from([(1, 1)]),
-            &[],
-        );
+        let none = HashMap::new();
+        p.step(&c, &none, 2.0, &HashMap::new(), &none, &[]);
+        // Entered in the first window, and then nothing: ten seconds armed
+        // without a return is a loop, not a long call.
+        let mut all = p.step(&c, &none, 2.0, &HashMap::new(), &HashMap::from([(1, 1)]), &[]);
+        for _ in 0..3 {
+            assert!(all.is_empty(), "not yet: {all:?}");
+            all = p.step(&c, &none, 2.0, &HashMap::new(), &none, &[]);
+        }
+        assert!(all.is_empty(), "eight seconds: {all:?}");
+        let a = p.step(&c, &none, 2.0, &HashMap::new(), &none, &[]);
         assert_eq!(unhooks(&a), vec![(1, Why::NeverReturns)]);
         for _ in 0..40 {
-            let a = p.step(
-                &c,
-                &HashMap::new(),
-                2.0,
-                &HashMap::new(),
-                &HashMap::new(),
-                &[],
-            );
-            assert!(
-                hooks(&a).is_empty(),
-                "a function that never returns stays off"
-            );
+            let a = p.step(&c, &none, 2.0, &HashMap::new(), &none, &[]);
+            assert!(hooks(&a).is_empty(), "a function that never returns stays off");
         }
+    }
+
+    #[test]
+    fn a_call_that_outlasts_a_step_is_not_called_never_returning() {
+        let mut p = profiler();
+        let c = [cand(1, 60.0)];
+        let none = HashMap::new();
+        p.step(&c, &none, 2.0, &HashMap::new(), &none, &[]);
+        // A level load: entered, and back six seconds later. It used to be
+        // banned for the capture at the first step that saw the entry alone.
+        let a = p.step(&c, &none, 2.0, &HashMap::new(), &HashMap::from([(1, 1)]), &[]);
+        assert!(a.is_empty(), "{a:?}");
+        let a = p.step(&c, &none, 2.0, &HashMap::new(), &none, &[]);
+        assert!(a.is_empty(), "{a:?}");
+        let a = p.step(&c, &HashMap::from([(1, 1)]), 2.0, &HashMap::new(), &none, &[]);
+        assert!(a.is_empty(), "{a:?}");
+        assert!(p.is_hooked(1));
+    }
+
+    #[test]
+    fn an_over_budget_function_backs_off_and_then_stays_off() {
+        let mut p = AutoProfiler::new(Config { retry_after_steps: 1, ..Config::with_budget(1000, 16) });
+        let c = [cand(1, 60.0), cand(2, 40.0), cand(3, 30.0)];
+        let none = HashMap::new();
+        // Each under the hot limit of 500/s, together 1030/s against a
+        // budget of 1000. The hottest, 2, goes each time it is tried; what is
+        // left is under three quarters of the budget, and 2 is still in the
+        // samples, so it is offered again as soon as its wait is over.
+        let counts = HashMap::from([(1, 300), (2, 480), (3, 250)]);
+        assert_eq!(hooks(&p.step(&c, &none, 1.0, &HashMap::new(), &none, &[])), vec![1, 2, 3]);
+        let mut removed_at = Vec::new();
+        for step in 2..80u32 {
+            let a = p.step(&c, &counts, 1.0, &HashMap::new(), &none, &[]);
+            if unhooks(&a).iter().any(|(id, why)| *id == 2 && matches!(why, Why::OverBudget { .. })) {
+                removed_at.push(step);
+            }
+        }
+        assert_eq!(removed_at.len(), 3, "tried three times, then left alone: {removed_at:?}");
+        let gaps: Vec<u32> = removed_at.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps[1] > gaps[0], "each wait is longer than the last: {removed_at:?}");
+        assert!(!p.is_hooked(2));
+        assert!(p.status().converged, "and the set stops changing");
+
+        // A larger budget is a new question: what was over the old one may fit.
+        p.set_budget(2000);
+        let a = p.step(&c, &counts, 1.0, &HashMap::new(), &none, &[]);
+        assert_eq!(hooks(&a), vec![2]);
     }
 
     #[test]
@@ -887,6 +998,88 @@ mod tests {
                 "three silent tries is the cap"
             );
         }
+    }
+
+    #[test]
+    fn a_function_that_was_called_and_then_went_quiet_gives_its_slot_to_one_that_runs_now() {
+        // One slot. The start-up function takes it, runs for a while, and the
+        // program moves on to another phase.
+        let mut p = AutoProfiler::new(Config::with_budget(1000, 1));
+        let c = [cand(1, 60.0), cand(2, 40.0)];
+        let none = HashMap::new();
+        assert_eq!(hooks(&p.step(&c, &none, 2.0, &HashMap::new(), &none, &[])), vec![1]);
+        for _ in 0..3 {
+            let a = p.step(&c, &HashMap::from([(1, 50)]), 2.0, &HashMap::new(), &none, &[]);
+            assert!(a.is_empty(), "{a:?}");
+        }
+        // Thirty seconds in which only the other function runs.
+        let mut all = Vec::new();
+        for _ in 0..15 {
+            all.extend(p.step(&c, &HashMap::from([(2, 50)]), 2.0, &HashMap::new(), &none, &[]));
+        }
+        assert_eq!(unhooks(&all), vec![(1, Why::Silent)], "{all:?}");
+        assert_eq!(hooks(&all), vec![2], "the freed slot goes to the next candidate");
+        assert!(p.is_hooked(2) && !p.is_hooked(1));
+    }
+
+    #[test]
+    fn a_function_called_now_and_then_is_not_called_quiet_between_calls() {
+        let mut p = profiler();
+        let c = [cand(1, 60.0)];
+        let none = HashMap::new();
+        p.step(&c, &none, 2.0, &HashMap::new(), &none, &[]);
+        // One call every eight seconds: quiet for longer than a never-called
+        // hook is given, shorter than the bar for one that has run.
+        for round in 0..20 {
+            let counts = if round % 4 == 0 { HashMap::from([(1, 1)]) } else { HashMap::new() };
+            let a = p.step(&c, &counts, 2.0, &HashMap::new(), &none, &[]);
+            assert!(unhooks(&a).is_empty(), "round {round}: {a:?}");
+        }
+    }
+
+    #[test]
+    fn a_window_that_lost_records_does_not_call_the_other_hooks_silent_or_stuck() {
+        let mut p = profiler();
+        let c = [cand(1, 50.0), cand(2, 30.0), cand(3, 20.0)];
+        let none = HashMap::new();
+        assert_eq!(hooks(&p.step(&c, &none, 2.0, &HashMap::new(), &none, &[])), vec![1, 2, 3]);
+        // 3 floods the ring. 1's entry got through and its return did not;
+        // nothing of 2 got through at all.
+        p.records_lost(4096);
+        let a = p.step(
+            &c,
+            &HashMap::from([(3, 3000)]),
+            2.0,
+            &HashMap::new(),
+            &HashMap::from([(1, 1), (3, 3000)]),
+            &[],
+        );
+        assert_eq!(unhooks(&a), vec![(3, Why::TooHot { per_s: 1500.0 })], "the cause still goes");
+        assert!(p.is_hooked(1) && p.is_hooked(2));
+        // The same total again is no new loss. A second of clean quiet is
+        // not yet silence, and the lossy window's entry is not held against 1.
+        p.records_lost(4096);
+        let a = p.step(&c, &none, 1.0, &HashMap::new(), &none, &[]);
+        assert!(unhooks(&a).is_empty(), "{a:?}");
+        // Clean windows are judged as ever: 1 runs, 2 stays quiet.
+        let a = p.step(&c, &HashMap::from([(1, 20)]), 1.0, &HashMap::new(), &none, &[]);
+        assert_eq!(unhooks(&a), vec![(2, Why::Silent)]);
+        assert!(p.is_hooked(1));
+    }
+
+    #[test]
+    fn a_dropped_record_count_that_starts_over_is_a_new_session() {
+        let mut p = profiler();
+        let c = [cand(1, 50.0)];
+        let none = HashMap::new();
+        p.step(&c, &none, 2.0, &HashMap::new(), &none, &[]);
+        p.records_lost(100);
+        assert!(unhooks(&p.step(&c, &none, 2.0, &HashMap::new(), &none, &[])).is_empty());
+        // Lower than before: the session was made again and lost 7 since.
+        p.records_lost(7);
+        assert!(unhooks(&p.step(&c, &none, 2.0, &HashMap::new(), &none, &[])).is_empty());
+        p.records_lost(7);
+        assert_eq!(unhooks(&p.step(&c, &none, 2.0, &HashMap::new(), &none, &[])), vec![(1, Why::Silent)]);
     }
 
     #[test]

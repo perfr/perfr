@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! NVIDIA GPU telemetry via NVML (Phase 7).
+//! NVIDIA GPU telemetry via NVML.
 //!
 //! NVML (`libnvidia-ml`) is the management library behind `nvidia-smi`. It is
 //! a *polling* API, not a tracing one: it reports device gauges -- utilization,
@@ -15,7 +15,8 @@
 //! device reading into a pod `GpuMetrics` event, attributing GPU memory to the
 //! profiled process, handling metrics a device does not support, and
 //! integrating instantaneous power into energy. The live `libnvidia-ml`
-//! binding is deliberately not here -- see the note at the bottom.
+//! binding is not here: it is in `perfr-gpu`, the helper process, because
+//! the service is a static binary and cannot `dlopen`.
 
 use std::time::Duration;
 
@@ -127,6 +128,13 @@ impl NvmlSampler {
     /// while telemetry stays on its own slower cadence.
     pub fn is_due(&self, now_ns: u64) -> bool {
         now_ns >= self.next_sample_ns
+    }
+
+    /// How long from `now_ns` until the next sample is due; zero when one
+    /// is. For a caller with nothing else to do in between: it sleeps this
+    /// long instead of waking every millisecond to ask.
+    pub fn until_due(&self, now_ns: u64) -> Duration {
+        Duration::from_nanos(self.next_sample_ns.saturating_sub(now_ns))
     }
 
     /// Records that a sample was taken at `now_ns`, scheduling the next one.
@@ -260,6 +268,20 @@ mod tests {
         // 1ms of poll latency does not push the schedule out.
         assert!(!sampler.is_due(9_000_000));
         assert!(sampler.is_due(10_000_001));
+    }
+
+    #[test]
+    fn the_wait_for_the_next_sample_ends_when_it_is_due() {
+        let mut sampler = NvmlSampler::new(Duration::from_millis(10), 1);
+        assert_eq!(sampler.until_due(0), Duration::ZERO, "the first sample is due at once");
+        sampler.mark_sampled(1_000_000);
+        let wait = sampler.until_due(4_000_000);
+        assert!(wait > Duration::ZERO);
+        // Slept exactly that long, the sampler is due: no early wakeup to
+        // ask again, no sample taken late.
+        assert!(!sampler.is_due(4_000_000 + wait.as_nanos() as u64 - 1));
+        assert!(sampler.is_due(4_000_000 + wait.as_nanos() as u64));
+        assert_eq!(sampler.until_due(1_000_000_000), Duration::ZERO, "overdue is due");
     }
 
     #[test]

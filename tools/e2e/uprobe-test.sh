@@ -5,7 +5,7 @@
 
 # Runs the "a probe actually fires" test with the capability it needs:
 # cargo builds the test binary as you, and hands it to sudo to run.
-set -e
+set -euo pipefail
 cd "$(dirname "$0")/../.."
 export PATH="$HOME/.cargo/bin:$PATH"
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sudo \

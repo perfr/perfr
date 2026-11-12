@@ -393,8 +393,14 @@ fn lex_asm(text: &str) -> Vec<Span> {
             spans.push(Span { start, end: i, kind });
             continue;
         }
+        // Anything else is one character, not one byte: the view slices the
+        // line by these spans, and a `©` in a file header split in two is a
+        // slice off a character boundary.
         let start = i;
         i += 1;
+        while i < n && !text.is_char_boundary(i) {
+            i += 1;
+        }
         spans.push(Span { start, end: i, kind: TokenKind::Punct });
     }
     spans
@@ -637,6 +643,46 @@ mod tests {
     fn kinds(lang: Language, text: &str) -> Vec<(String, TokenKind)> {
         let (spans, _) = lex_line(lang, text, LineState::default());
         spans.iter().filter(|s| !text[s.start..s.end].trim().is_empty()).map(|s| (text[s.start..s.end].to_string(), s.kind)).collect()
+    }
+
+    /// What the code view does with a line: slice it by every span.
+    fn assert_spans_slice(lang: Language, text: &str, state: LineState) {
+        let (spans, _) = lex_line(lang, text, state);
+        let mut rebuilt = String::new();
+        for s in &spans {
+            let piece = text
+                .get(s.start..s.end)
+                .unwrap_or_else(|| panic!("{lang:?} {text:?}: span {}..{} splits a character", s.start, s.end));
+            rebuilt.push_str(piece);
+        }
+        assert_eq!(rebuilt, text, "{lang:?}: the spans do not cover the line");
+    }
+
+    const MIXED_SCRIPT_LINES: &[&str] = &[
+        "é",
+        "a😀b",
+        "# Copyright © 2024 José Ünïcode — naïve façade",
+        "mov rax, [rbx+8] ; ça va",
+        "/* © */ movq %rax, %rbx // é",
+        "\tcall\tmemcpy€0x401000",
+        "let s = \"日本語\"; // 日本語",
+        "x = \"é\\é\" + 'é' + '\\é' + 'é",
+        "'€' '😀' 'a €",
+        "#include <日本.h>",
+        "#[doc = \"é\"] fn f() -> Ü {}",
+        "x = é + ü; y /= 2",
+        "\"unterminated é\\",
+        "still in a comment é */ int x; /* открыт",
+    ];
+
+    #[test]
+    fn spans_never_split_a_character_in_any_language() {
+        for lang in [Language::Asm, Language::Rust, Language::C, Language::Cpp, Language::Plain] {
+            for text in MIXED_SCRIPT_LINES {
+                assert_spans_slice(lang, text, LineState::default());
+                assert_spans_slice(lang, text, LineState { in_block_comment: true });
+            }
+        }
     }
 
     #[test]

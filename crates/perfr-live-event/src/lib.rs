@@ -581,6 +581,9 @@ mod tests {
     #[test]
     fn cpu_scope_uses_tid_mod_6_and_even_depth_darkens() {
         let _guard = crate::theme::switch_lock();
+        // The six-colour wrap is the perfr scheme. The process default is
+        // Nord (eight colours); select perfr so these hex values stay pinned.
+        crate::theme::set_active(&crate::theme::PERFR);
         let odd = thread_scope_color(0, 1);
         let even = thread_scope_color(0, 0);
         assert_eq!(odd, 0xFFE7_4435);
@@ -600,6 +603,7 @@ mod tests {
             pid: 1,
         };
         assert_eq!(ev.color_rgba(), thread_scope_color(7, 1));
+        crate::theme::restore_default();
     }
 
     #[test]
@@ -652,6 +656,7 @@ mod tests {
     #[test]
     fn async_name_hash_indexes_the_same_six_colors() {
         let _guard = crate::theme::switch_lock();
+        crate::theme::set_active(&crate::theme::PERFR);
         let h = name_hash(b"GpuSubmit");
         assert_eq!(async_scope_color(h), THREAD_PALETTE[(h as usize) % 6]);
         let mut intern = InternTable::default();
@@ -675,6 +680,7 @@ mod tests {
             ev.color_for(Some(&intern)),
             THREAD_PALETTE[(h as usize) % 6]
         );
+        crate::theme::restore_default();
     }
 
     #[test]
@@ -720,6 +726,7 @@ mod tests {
     #[test]
     fn thread_state_colors_match_thread_state_bar() {
         let _guard = crate::theme::switch_lock();
+        crate::theme::set_active(&crate::theme::PERFR);
         assert_eq!(thread_state_color(thread_state::RUNNING), 0xFF4C_AF50);
         assert_eq!(thread_state_color(thread_state::RUNNABLE), 0xFF21_96F3);
         assert_eq!(
@@ -736,6 +743,12 @@ mod tests {
         assert_eq!(thread_state_color(thread_state::ZOMBIE), 0xFF00_0000);
         assert_eq!(thread_state_color(thread_state::PARKED), 0xFF79_5548);
         assert_eq!(thread_state_color(thread_state::IDLE), 0xFF79_5548);
+        crate::theme::restore_default();
+        assert_eq!(
+            thread_state_color(thread_state::RUNNING),
+            crate::theme::default_theme().thread_states.running
+        );
+        assert_eq!(thread_state_color(thread_state::RUNNING), 0xFFA3_BE8C);
     }
 
     #[test]

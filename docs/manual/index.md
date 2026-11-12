@@ -18,7 +18,7 @@ The [home page](../index.html) opens a saved capture in the viewer. Attach, the 
 curl -fsSL https://perfr.dev/install.sh | sh
 ```
 
-The script downloads a GitHub Release tagged `perfr-vX.Y.Z` and puts `perfr` in `~/.local/bin` (`PERFR_INSTALL_DIR` to choose another directory), with `libperfr` (the library profiled programs load, and the agent for function hooks) and `perfr-hook` beside it. `perfr.h` goes in `~/.local/include`, or in the sibling `include` directory when `PERFR_INSTALL_DIR` is set. Compile with `-I~/.local/include`. The header still finds `libperfr` beside `perfr` on `PATH`. Until a stable `perfr-v*` release exists, the script stops and says how to build from source. `PERFR_INSTALL_BASE` overrides the download prefix; `DEFAULT_BASE` in the script is the one line to point at a custom domain later.
+The script downloads the latest release (tagged `perfr-vX.Y.Z`) from perfr.dev and puts `perfr` in `~/.local/bin` (`PERFR_INSTALL_DIR` to choose another directory), with `libperfr` (the library profiled programs load, and the agent for function hooks) and `perfr-hook` beside it. `perfr.h` goes in `~/.local/include`, or in the sibling `include` directory when `PERFR_INSTALL_DIR` is set. Compile with `-I~/.local/include`. The header still finds `libperfr` beside `perfr` on `PATH`. Until a stable `perfr-v*` release exists, the script stops and says how to build from source. `PERFR_INSTALL_BASE` overrides the download prefix; `DEFAULT_BASE` in the script is the one line to point at a custom domain later.
 
 The published binaries are a static Linux x86-64 build, one universal macOS binary (Intel and Apple silicon), and a Windows x86-64 zip. Linux arm64 compiles and is not in the release or in CI. If the install directory is not on `PATH`, the script prints the `export` line to add.
 
@@ -36,7 +36,7 @@ irm https://perfr.dev/install.ps1 | iex
 perfr --serve 44766
 ```
 
-Open `http://127.0.0.1:44766/`. The process prints that URL and every LAN address, so another machine on the network can open the page. `--host` picks the bind address (default `0.0.0.0`; `--host 127.0.0.1` keeps it on this machine). `--wire raw|packed|deflate` picks the WebSocket encoding (default `packed`).
+Open `http://127.0.0.1:44766/`. The service listens on this machine only. `--host` picks the bind address (default `127.0.0.1`): with `--host 0.0.0.0` the process prints every LAN address too and another machine on the network can open the page, with no authentication in front of it. `--wire raw|packed|deflate` picks the WebSocket encoding (default `packed`).
 
 ## Attach and record
 

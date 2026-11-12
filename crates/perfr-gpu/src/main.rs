@@ -19,7 +19,7 @@ mod nvml_sys;
 
 use nvml_sys::Nvml;
 use perfr_tracing_state::nvml::NvmlSampler;
-use perfr_wire::{Event, Writer};
+use perfr_wire::{Event, Writer, METRIC_UNKNOWN_U64};
 use std::io::Write;
 use std::time::Duration;
 
@@ -37,9 +37,20 @@ fn now_ns() -> u64 {
     timespec.tv_sec as u64 * 1_000_000_000 + timespec.tv_nsec as u64
 }
 
+/// The memory attributed to the target process, or "unknown" when the
+/// helper was not told which process that is. Attributing to no pid finds
+/// nothing, and the resulting 0 was plotted as a real reading: a flat lane
+/// at zero under a process that held gigabytes.
+fn process_memory_or_unknown(attributed_bytes: u64, target_pid: Option<i32>) -> u64 {
+    match target_pid {
+        Some(_) => attributed_bytes,
+        None => METRIC_UNKNOWN_U64,
+    }
+}
+
 fn main() {
     let mut interval = Duration::from_millis(100);
-    let mut target_pid = 0i32;
+    let mut target_pid: Option<i32> = None;
     let mut max_devices = u32::MAX;
     let mut iter = std::env::args().skip(1);
     while let Some(flag) = iter.next() {
@@ -49,7 +60,7 @@ fn main() {
                     interval = Duration::from_millis(ms);
                 }
             }
-            "--pid" => target_pid = iter.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            "--pid" => target_pid = iter.next().and_then(|v| v.parse().ok()).filter(|pid| *pid > 0),
             "--devices" => {
                 max_devices = iter.next().and_then(|v| v.parse().ok()).unwrap_or(u32::MAX);
             }
@@ -95,12 +106,15 @@ fn main() {
         }
     }
 
-    let mut sampler = NvmlSampler::new(interval, target_pid);
+    let mut sampler = NvmlSampler::new(interval, target_pid.unwrap_or(0));
     let stdout = stdout_handle();
     loop {
         let now = now_ns();
         if !sampler.is_due(now) {
-            std::thread::sleep(Duration::from_millis(1));
+            // To the next sample, not a millisecond at a time: this runs
+            // inside the machine being profiled, and a thousand wakeups a
+            // second to take ten samples showed on its scheduler track.
+            std::thread::sleep(sampler.until_due(now));
             continue;
         }
         let mut writer = Writer::new();
@@ -114,7 +128,7 @@ fn main() {
                 memory_utilization_percent: metrics.memory_utilization_percent,
                 memory_used_bytes: metrics.memory_used_bytes,
                 memory_total_bytes: metrics.memory_total_bytes,
-                process_memory_used_bytes: metrics.process_memory_used_bytes,
+                process_memory_used_bytes: process_memory_or_unknown(metrics.process_memory_used_bytes, target_pid),
                 temperature_celsius: metrics.temperature_celsius,
                 power_milliwatts: metrics.power_milliwatts,
                 sm_clock_mhz: metrics.sm_clock_mhz,
@@ -127,5 +141,19 @@ fn main() {
         if lock.write_all(writer.as_bytes()).is_err() || lock.flush().is_err() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_memory_without_a_target_is_unknown_not_zero() {
+        assert_eq!(process_memory_or_unknown(0, None), METRIC_UNKNOWN_U64);
+        // With a target, what was attributed stands -- zero included: a
+        // process that holds no GPU memory is a real answer.
+        assert_eq!(process_memory_or_unknown(0, Some(4321)), 0);
+        assert_eq!(process_memory_or_unknown(1 << 30, Some(4321)), 1 << 30);
     }
 }

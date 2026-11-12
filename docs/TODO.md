@@ -7,8 +7,11 @@ found in the LICENSE file.
 # PERFR — TODO
 
 The project owner's list, kept verbatim under each heading. The `Status`
-lines are the port's read of each item as of 2026-09-04 and are updated as
-work lands; the numbers they cite are in `perfr-web/blog/metrics/`.
+lines are the port's read of each item, first written 2026-09-04 and
+updated as work lands (several were brought up to date on 2026-11-11); the
+numbers they cite are in `perfr-web/blog/metrics/`. Most items are done:
+what is still open is 14, 15, 16, 18, 19, 20, the rest of 21, 33, the
+follow-up in 34, and 44.
 
 ## 1. Self-instrumentation pane for the viewer
 
@@ -104,18 +107,17 @@ theme follows the reader's colour scheme.
 - Static capture binary, backend-swappable via env var, on all three
   platforms. Differential test suite fails the build on any mismatch.
 
-**Status: macOS manual capture implemented; native runtime validation pending.
-Windows done (2026-10-17).** The Mac service serves the viewer, discovers
-processes/threads and records manual instrumentation on Intel and Apple
-Silicon. See [building_macos.md](building_macos.md). Native CI covers both
-architectures. PDB parsing is done. The Windows service records the scheduler,
+**Status: macOS manual capture and Frida hooks done, natively tested on both
+architectures; Windows done (2026-10-17).** The Mac service serves the viewer,
+discovers processes/threads, records manual instrumentation and hooks
+functions on Intel and Apple Silicon. See [building_macos.md](building_macos.md). PDB parsing is done. The Windows service records the scheduler,
 thread states and samples from the NT Kernel Logger (`crates/perfr-etw`,
 raw advapi32 bindings rather than ferrisetw; the MOF layouts are decoded from
 bytes), Frida hooks over a named pipe, and manual scopes; see
 [building_windows.md](building_windows.md) and
 `perfr-web/blog/metrics/phase-17-windows.txt`. macOS sampling and scheduling remain
-deferred. Multi-service live aggregation needs host identity and clock
-synchronization before merging Linux/Mac/Windows timelines.
+deferred. Several machines on one timeline shipped 2026-10-20 (`--join`,
+`--connect`; [manual/machines.md](manual/machines.md)).
 
 ## 8. Shared-memory ring buffer — Windows + macOS
 
@@ -228,8 +230,12 @@ the key for automatic dedup. Separate symbol store keyed by build ID
 — captures reference build IDs, symbols fetched on demand, never
 embedded. One symbol upload serves every capture from that build.
 
-**Status: not started.** The bundle is the unit to upload; the service
-can already open one from bytes, so "open by URL" is a fetch away.
+**Status: sharing done; the symbol store is not.** `POST /api/capture/share`
+(the viewer's Share and Share slice) uploads the capture from the service to
+the bucket named by `PERFR_SHARE_BUCKET` and returns one link, which the
+hosted viewer opens with no service behind it. Setup is in
+`tools/sharing/README.md`, the check is `tools/e2e/share_capture.py`.
+Captures do not reference a symbol store keyed by build ID.
 
 ## 14. GitHub integration
 
@@ -410,7 +416,7 @@ the Flat report, the trees, the flame graph and the scope-scoped report
 
 Capture sharing by pushing capture data to s3.
 
-**Status: not started; same as item 13.**
+**Status: done; same as item 13.**
 
 ## 27. Service CPU and memory track
 
@@ -606,7 +612,13 @@ unavailable" rather than misparsing.
 a logging feature, that we can correlate with the viewer from time and
 thread id
 
-**Status: not started.** A log line carries a timestamp and a thread id,
+**Status: done, through the instrumentation API.** `perfr_log` (and its
+bindings) writes a log line as a record on the scope ring, on the capture
+clock; the service serves them at `GET /api/logs` and the viewer shows them
+against the timeline. The design is in [design/logging.md](design/logging.md).
+The paragraph below is the original note, kept for the options it lists (a
+`tracing`/`spdlog` sink and reading an existing stream were not built).
+A log line carries a timestamp and a thread id,
 which is exactly what a track row is keyed by, so the viewer can put a
 log next to the scope that emitted it: a per-thread log lane or marker
 row, a log pane filtered by the current selection, and a click that
@@ -639,7 +651,7 @@ with a scope's lifetime.
 Frida Core now handles attachment and Gum native callbacks feed a Rust agent.
 Frida is the default, with Linux uprobes retained explicitly. See
 [the integration guide](frida-instrumentation.md) and the
-[implementation review](design/dynamic-instrumentation-review.md).
+[implementation review](design/archive/dynamic-instrumentation-review.md).
 
 - Evaluate replacing the Python/Frida Core control helper with a direct native
   Core integration if packaging or startup measurements justify it. Recording
@@ -689,7 +701,7 @@ command, like the llm cli do these days, but let's wait until we have a
 proper website. you can start implementing the feature now even though we
 don't have a site actually.
 
-**Status: done (2026-09-07), pending a public URL.** `tools/install/install.sh` is a POSIX installer (OS/arch detect, optional SHA-256, ~/.local/bin, PATH hint), served at the site root by `build_site.py` and linked from the landing page. Default base URL is a placeholder until the site is live (item 25); overridable with PERFR_INSTALL_BASE. Smoke-tested.
+**Status: done (2026-09-07).** `tools/install/install.sh` is a POSIX installer (OS/arch detect, a mandatory SHA-256 check, ~/.local/bin, PATH hint), served at the site root by `build_site.py` and linked from the landing page; `tools/install/install.ps1` is its Windows twin. Both download from `https://perfr.dev/download`, overridable with PERFR_INSTALL_BASE. `tools/install/test_install.sh` runs it against a local release.
 
 ### 39. Hooked functions highlighted in the sampling report
 
@@ -731,8 +743,7 @@ track washes, the scope-box palette, the thread-state bar, the selection
 highlights -- lives in one `Theme` table in `perfr_live_event::theme`, read
 through one process-wide active theme (the service never switches, so it draws
 exactly as before; it was a thread-local until 2026-11-07, which left the
-viewer's worker-thread lanes on the default palette). Five schemes: **perfr** (the original, byte-for-byte the
-default) plus **Dracula**, **Nord**, **Gruvbox** and **Solarized**, whose
+viewer's worker-thread lanes on the default palette). Five schemes: **perfr** (the original palette, byte-for-byte; **Nord** is the default as of 2026-11-11 — a missing `perfr_theme` opens on Nord, and a saved choice including `perfr` still wins) plus **Dracula**, **Nord**, **Gruvbox** and **Solarized**, whose
 scope palettes are each scheme's own harmonious accent set. Pick it in the
 More menu; `?theme=<key>` pins it for a link or screenshot; the choice is
 saved to `localStorage`. Switching rebuilds egui's visuals and drops the

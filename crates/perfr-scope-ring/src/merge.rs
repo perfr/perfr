@@ -29,7 +29,7 @@
 //! never stalls a thread.
 
 use crate::event::ScopeEvent;
-use crate::ring::Rings;
+use crate::ring::{Claimed, Rings};
 
 /// What one ring gave up in a drain pass, in the order its threads wrote it.
 #[derive(Clone, Debug, Default)]
@@ -120,6 +120,31 @@ impl Cursors {
     }
 }
 
+/// How far past the oldest resident claim a reader resumes, once it has
+/// found the producer lapping it as it reads.
+///
+/// The oldest resident claim is the one the very next `push` overwrites.
+/// Resuming there is a race the reader loses again at once, and each loss
+/// costs a look at the cursor the producers are bumping. Stepping a little
+/// further gives it a slot that will still be there when it has been copied.
+/// The records stepped over are counted as dropped like the ones that were
+/// overwritten, since nothing else would ever read them.
+///
+/// An eighth of the ring, and at most 256 slots: at a million records a
+/// second that is a quarter of a millisecond of head start for a copy that
+/// takes nanoseconds, out of a default ring of 32768.
+fn lap_margin(capacity: u64) -> u64 {
+    (capacity / 8).min(256)
+}
+
+/// Where a reader that found `read` overwritten carries on, with the write
+/// cursor now at `write`: [`lap_margin`] past the oldest claim still
+/// resident, and never past the cursor.
+fn resume_after_lap(read: u64, write: u64, capacity: u64) -> u64 {
+    let oldest = write.saturating_sub(capacity);
+    (oldest + lap_margin(capacity)).min(write).max(read + 1)
+}
+
 /// Copies the committed prefix out of every ring.
 ///
 /// `now_ns` is read once by the caller before scanning, and becomes the
@@ -152,13 +177,29 @@ pub fn drain_from(
 
         let mut events = Vec::new();
         while read < write {
-            match rings.committed(ring, read) {
-                Some(event) => {
+            match rings.read_claim(ring, read) {
+                Claimed::Committed(event) => {
                     events.push(event);
                     read += 1;
                     cursors.stalled_at[ring] = u64::MAX;
                 }
-                None => {
+                Claimed::Overwritten => {
+                    // The producer has come round to this claim since the
+                    // pass loaded `write`. That is not a claim to wait for:
+                    // taken for one, it ended the pass here with nothing,
+                    // and so did the next pass, for as long as the producer
+                    // kept lapping. Count what is gone and carry on from
+                    // what is still resident. The skip above lands on the
+                    // oldest resident claim without a margin, so that a
+                    // ring which lapped and then went quiet still gives up
+                    // everything it holds; the margin is for a producer
+                    // seen here to be writing.
+                    let resume = resume_after_lap(read, rings.write_cursor(ring), capacity);
+                    out.dropped += resume - read;
+                    read = resume;
+                    cursors.stalled_at[ring] = u64::MAX;
+                }
+                Claimed::Pending => {
                     // Nothing here waits forever. A slot claimed by a
                     // producer that died before publishing would otherwise
                     // hold the whole stream: the claim never commits, so this
@@ -203,3 +244,41 @@ pub fn drain_from(
     out
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lapped_reader_resumes_clear_of_the_slot_about_to_be_overwritten() {
+        // The default ring: claims 67232.. are resident, 67232 is the next
+        // to go, and the reader resumes 256 past it.
+        assert_eq!(resume_after_lap(40_000, 100_000, 32_768), 67_232 + 256);
+        // A small ring keeps most of itself: an eighth, not 256 slots.
+        assert_eq!(resume_after_lap(0, 100, 64), 36 + 8);
+        assert_eq!(resume_after_lap(0, 100, 8), 92 + 1);
+        // Too small for a margin at all, and still strictly forward.
+        assert_eq!(resume_after_lap(0, 100, 4), 96);
+        assert_eq!(resume_after_lap(0, 100, 1), 99);
+    }
+
+    #[test]
+    fn a_lapped_reader_never_resumes_behind_itself_or_past_the_cursor() {
+        for capacity in [1u64, 2, 8, 1024, 32_768] {
+            for write in [0u64, 1, capacity, capacity + 1, 3 * capacity + 5, 1 << 40] {
+                // Overwritten means the cursor is past `read + capacity`.
+                for read in [0u64, write.saturating_sub(capacity + 1), write.saturating_sub(2 * capacity + 3)] {
+                    if write <= read + capacity {
+                        continue;
+                    }
+                    let resume = resume_after_lap(read, write, capacity);
+                    assert!(resume > read, "{read} {write} {capacity}: stuck at {resume}");
+                    assert!(resume <= write, "{read} {write} {capacity}: {resume} was never claimed");
+                    assert!(
+                        resume + capacity >= write,
+                        "{read} {write} {capacity}: {resume} is already overwritten"
+                    );
+                }
+            }
+        }
+    }
+}

@@ -9,7 +9,7 @@
 //! Parsing of ELF/DWARF and protobuf stays on the service.
 
 use perfr_live_event::InternTable;
-use perfr_live_protocol::{decode_frame, LiveFrame};
+use perfr_live_protocol::LiveFrame;
 use perfr_live_render::{choose_lod, TimelineLod, TrackIndex, INSTANCE_MIN_PX};
 use wasm_bindgen::prelude::*;
 
@@ -28,6 +28,7 @@ mod local_report;
 mod logging;
 #[cfg(feature = "egui")]
 mod fonts;
+mod frames;
 #[cfg(feature = "egui")]
 mod net;
 #[cfg(feature = "egui")]
@@ -39,6 +40,8 @@ mod rect_select;
 mod report_copy;
 #[cfg(feature = "egui")]
 mod share;
+#[cfg(feature = "egui")]
+mod story;
 mod self_pane;
 #[cfg(feature = "egui")]
 mod theme;
@@ -74,18 +77,16 @@ impl LiveViewer {
 
     /// Decode one or more length-prefixed live frames and insert events.
     pub fn ingest(&mut self, bytes: &[u8]) -> u32 {
-        self.leftover.extend_from_slice(bytes);
+        let mut leftover = std::mem::take(&mut self.leftover);
         let mut consumed_frames = 0u32;
-        loop {
-            match decode_frame(&self.leftover) {
-                Ok((frame, n)) => {
-                    self.apply_frame(frame);
-                    self.leftover.drain(..n);
-                    consumed_frames += 1;
-                }
-                Err(_) => break,
-            }
-        }
+        // This client has nowhere to show a fault. What matters is that the
+        // buffer is emptied on one, so a frame it cannot read no longer
+        // holds back, and piles up, everything sent after it.
+        let _ = frames::drain_frames(&mut leftover, bytes, |frame| {
+            self.apply_frame(frame);
+            consumed_frames += 1;
+        });
+        self.leftover = leftover;
         consumed_frames
     }
 
@@ -251,8 +252,8 @@ pub async fn start_eframe(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsVa
     logging::install();
     install_wasm_clock();
     log::info!(
-        "viewer build {} starting; {}",
-        crate::app::VIEWER_BUILD,
+        "{} starting; {}",
+        perfr_build_info::version_line(),
         web_sys::window()
             .and_then(|w| w.navigator().user_agent().ok())
             .unwrap_or_else(|| "unknown user agent".into())
@@ -330,6 +331,32 @@ mod tests {
         let pix = v.rasterize(0.0, 100.0, 8);
         assert_eq!(pix.len(), 8 * 4);
         assert!(pix.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn a_frame_of_an_unknown_type_does_not_hold_back_what_follows() {
+        let mut v = LiveViewer::new();
+        let ev = LiveEvent {
+            start_ns: 0,
+            duration_ns: 100,
+            tid: 1,
+            pid: 1,
+            kind: kind::API_SCOPE,
+            depth: 0,
+            extra: 0,
+            _pad: 0,
+            name_id: 1,
+        };
+        // Type 200, three bytes of payload: well formed, from some later build.
+        let mut bytes = vec![3, 0, 0, 0, 200, 1, 2, 3];
+        bytes.extend_from_slice(&encode_frame(&LiveFrame::EventBatch { events: vec![ev] }));
+        assert_eq!(v.ingest(&bytes), 1);
+        assert_eq!(v.event_count(), 1);
+        // And bytes that are no frame at all are dropped, not kept in front
+        // of everything that arrives later.
+        assert_eq!(v.ingest(&[0xFF; 32]), 0);
+        assert_eq!(v.ingest(&encode_frame(&LiveFrame::EventBatch { events: vec![ev] })), 1);
+        assert_eq!(v.event_count(), 2);
     }
 
     #[test]

@@ -4,7 +4,7 @@ The same capture, in another colour scheme, on a phone, or loaded from a trace f
 
 ## Colour schemes
 
-More → **Color scheme**. The hover text is “Recolour the whole viewer — chrome, scopes and thread states”. The list, in order, is perfr, Dracula, Nord, Gruvbox, Solarized, Solarized Light and Gruvbox Light. The choice is stored in the browser as `perfr_theme` and restored on the next load.
+More → **Color scheme**. The hover text is “Recolour the whole viewer — chrome, scopes and thread states”. The list, in order, is perfr, Dracula, Nord, Gruvbox, Solarized, Solarized Light and Gruvbox Light. A fresh page, and a fresh install of the native viewer, opens on **Nord**. The choice is stored in the browser as `perfr_theme` and restored on the next load. A saved choice wins over the default, including a saved `perfr`.
 
 `?theme=` pins one when the page opens. The keys are `perfr`, `dracula`, `nord`, `gruvbox`, `solarized`, `solarized-light` and `gruvbox-light`.
 

@@ -80,7 +80,8 @@ than a beat is a drag.
 ## The report
 
 Every run writes `docs/e2e/report.md` (`--report` to move it): the verdict
-and note of each scenario, the numbers the scenarios measured (bundle and
+and note of each scenario (`pass`, `FAIL`, or `skip` for one that could not
+run here; `--strict` makes a skip fail the run), the numbers the scenarios measured (bundle and
 slice sizes, socket rate, the viewer's phase totals under headless
 SwiftShader), and an index of the screenshots. `docs/manual/features.md`
 lists every feature with its screenshot. The user guide is
@@ -113,8 +114,9 @@ scenario reports `skipped` with that hint.
 ## Known skip
 
 `instrumentation` reports `skipped` rather than failing when uprobes cannot be
-armed. The kernel requires CAP_PERFMON in `perf_uprobe_event_init` before
-`perf_event_paranoid` is consulted, so an unprivileged run cannot arm a probe.
+armed. The kernel requires CAP_SYS_ADMIN in `perf_uprobe_event_init` before
+`perf_event_paranoid` is consulted (CAP_PERFMON is not enough), so an
+unprivileged run cannot arm a probe.
 The scenario still asserts that the refusal names the capability, because
 silence there is the actual failure mode.
 

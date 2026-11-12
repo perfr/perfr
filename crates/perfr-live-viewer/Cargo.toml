@@ -26,7 +26,9 @@ egui = ["dep:eframe", "dep:egui", "dep:egui-wgpu"]
 wasm-threads = ["perfr-live-render/parallel", "dep:wasm-bindgen-rayon"]
 
 [dependencies]
+perfr-build-info = { path = "../perfr-build-info" }
 perfr-live-event = { path = "../perfr-live-event" }
+perfr-story = { path = "../perfr-story" }
 perfr-live-chrome = { path = "../perfr-live-chrome" }
 perfr-live-protocol = { path = "../perfr-live-protocol" }
 perfr-live-render = { path = "../perfr-live-render" }

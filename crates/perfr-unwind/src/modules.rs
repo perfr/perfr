@@ -6,18 +6,19 @@
 
 use framehop::{Module, ModuleSectionInfo};
 use object::ObjectSegment as _;
-use object::{Object, ObjectSection};
+use object::{Object, ObjectSection, ReadCache, ReadRef};
+use perfr_maps::{load_bias, MemoryMapping};
 use std::ops::Range;
 
-/// Feeds framehop the sections it asks for (`.eh_frame`, `.eh_frame_hdr`,
-/// `.debug_frame`, `.text`, `.got`) out of an ELF file. Section data is
+/// Feeds framehop the sections it asks for out of an ELF file: for ELF that
+/// is `.eh_frame` and `.eh_frame_hdr`, or `.debug_frame`. Section data is
 /// copied out (`uncompressed_data`), which also transparently handles
 /// SHF_COMPRESSED debug sections.
-struct ObjectSectionInfo<'data, 'file> {
-    file: &'file object::File<'data>,
+struct ObjectSectionInfo<'data, 'file, R: ReadRef<'data>> {
+    file: &'file object::File<'data, R>,
 }
 
-impl ModuleSectionInfo<Vec<u8>> for ObjectSectionInfo<'_, '_> {
+impl<'data, R: ReadRef<'data>> ModuleSectionInfo<Vec<u8>> for ObjectSectionInfo<'data, '_, R> {
     fn base_svma(&self) -> u64 {
         // For ELF objects the stated base is zero (framehop's convention);
         // relocation is expressed entirely through base_avma.
@@ -35,58 +36,73 @@ impl ModuleSectionInfo<Vec<u8>> for ObjectSectionInfo<'_, '_> {
     }
 }
 
-/// Loads one mapped file as a framehop module. `lowest_bias` is the lowest
-/// `start - offset` over the file's mappings, `avma_range` the span of its
-/// mappings. Returns None for files that don't parse as objects (deleted
-/// files, special mappings).
+/// Where an image with `segments` (the virtual address and size in memory of
+/// each loadable segment) lies once loaded at `base_avma`: from its lowest
+/// segment to the end of its highest. `None` for a file with no segments.
 ///
-/// framehop's `base_avma` is where the file's virtual address 0 landed, and
-/// `start - offset` only equals that when the first PT_LOAD puts file offset
-/// 0 at virtual address 0 -- which the usual linker layout does. Unreal's
-/// binaries (and anything linked with an image base) put it at 0x200000,
-/// so every `.eh_frame` lookup was off by that much and the unwinder walked
-/// no frame of the game itself; the difference is read from the program
-/// headers instead.
-pub fn load_module(path: &str, avma_range: Range<u64>, lowest_bias: u64) -> Option<Module<Vec<u8>>> {
-    let contents = std::fs::read(path).ok()?;
-    let file = object::File::parse(&contents[..]).ok()?;
-    let segments: Vec<(u64, u64)> =
-        file.segments().map(|segment| (segment.file_range().0, segment.address())).collect();
-    let base_avma = lowest_bias.wrapping_sub(first_segment_vaddr_offset(&segments));
-    Some(Module::new(
-        path.to_string(),
-        avma_range,
-        base_avma,
-        ObjectSectionInfo { file: &file },
-    ))
+/// This, not the span of the file's mappings, is the module's range. A file
+/// can be mapped again far from its image -- libffi maps a page of its own
+/// text once more per table of trampolines -- and a module stretched over
+/// both covers every library the process maps in between. The unwinder
+/// finds a module by the nearest start at or below an address, so each of
+/// those libraries then hid the image's text from its own unwind tables.
+pub fn image_range(base_avma: u64, segments: &[(u64, u64)]) -> Option<Range<u64>> {
+    let start = segments.iter().map(|(address, _)| *address).min()?;
+    let end = segments.iter().map(|(address, size)| address.saturating_add(*size)).max()?;
+    Some(base_avma.wrapping_add(start)..base_avma.wrapping_add(end))
 }
 
-/// `vaddr - file offset` of the PT_LOAD with the lowest file offset: what
-/// separates "start - offset" of the first mapping from the address of the
-/// file's virtual address 0. Zero for the usual layout.
-pub fn first_segment_vaddr_offset(segments: &[(u64, u64)]) -> u64 {
-    segments
-        .iter()
-        .min_by_key(|(offset, _)| *offset)
-        .map(|(offset, vaddr)| vaddr.wrapping_sub(*offset))
-        .unwrap_or(0)
+/// Loads one mapped file as a framehop module, with the address range it
+/// occupies. `text` is a mapping of the file that is of the image to unwind
+/// through, and `mappings` the whole process. Returns None for files that
+/// don't parse as objects (deleted files, special mappings).
+///
+/// framehop's `base_avma` is where the file's virtual address 0 landed: the
+/// image's load bias, which no single mapping's `start - offset` gives.
+/// Unreal's binaries (and anything linked with an image base) have their
+/// first PT_LOAD at 0x200000, so every `.eh_frame` lookup was off by that
+/// much and the unwinder walked no frame of the game itself. The rule is
+/// [`load_bias`], the one the symbolizer names these frames by.
+///
+/// The file is read through a cache that fetches what is asked for: the
+/// headers, the section table, and the unwind sections. Reading the file
+/// whole to get at those put a gigabyte binary on the heap, one module
+/// after another, on the capture thread, before the first pass.
+pub fn load_module(
+    path: &str,
+    mappings: &[MemoryMapping],
+    text: &MemoryMapping,
+) -> Option<(Module<Vec<u8>>, Range<u64>)> {
+    let handle = std::fs::File::open(path).ok()?;
+    // A path in the maps need not be a regular file, and a device mapped
+    // executable has no end to read up to.
+    if !handle.metadata().ok()?.is_file() {
+        return None;
+    }
+    let contents = ReadCache::new(handle);
+    let file = object::File::parse(&contents).ok()?;
+    let segments: Vec<(u64, u64)> =
+        file.segments().map(|segment| (segment.file_range().0, segment.address())).collect();
+    let base_avma = load_bias(mappings, text, &segments);
+    let extents: Vec<(u64, u64)> = file.segments().map(|segment| (segment.address(), segment.size())).collect();
+    let avma_range = image_range(base_avma, &extents)?;
+    let module = Module::new(path.to_string(), avma_range.clone(), base_avma, ObjectSectionInfo { file: &file });
+    Some((module, avma_range))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::first_segment_vaddr_offset;
+    use super::*;
 
     #[test]
-    fn image_base_is_read_from_the_first_load_segment() {
-        // The usual layout: file offset 0 at virtual address 0.
-        assert_eq!(first_segment_vaddr_offset(&[(0, 0), (0x1000, 0x1000), (0x5000, 0x6000)]), 0);
-        // Unreal's Shipping binary: first PT_LOAD at 0x200000, text at
-        // offset 0x3081000 / vaddr 0x3282000. The correction is the first
-        // segment's, not the text segment's (alignment padding differs).
-        assert_eq!(
-            first_segment_vaddr_offset(&[(0, 0x200000), (0x3081000, 0x3282000), (0xb029ec0, 0xb22bec0)]),
-            0x200000
-        );
-        assert_eq!(first_segment_vaddr_offset(&[]), 0);
+    fn an_image_runs_from_its_lowest_segment_to_the_end_of_its_highest() {
+        // A position-independent library: segments from 0.
+        let pie = [(0, 0x2000), (0x2000, 0xb000), (0xd000, 0x2000), (0xfc70, 0x1400)];
+        assert_eq!(image_range(0x7481baaa5000, &pie), Some(0x7481baaa5000..0x7481baab6070));
+        // Linked at an image base, loaded with no bias: the range starts at
+        // the base, not at zero.
+        let based = [(0x200000, 0x1000), (0x201000, 0x5000)];
+        assert_eq!(image_range(0, &based), Some(0x200000..0x206000));
+        assert_eq!(image_range(0x1000, &[]), None, "nothing loadable, nothing to unwind through");
     }
 }

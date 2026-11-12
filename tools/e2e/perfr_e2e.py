@@ -2234,7 +2234,10 @@ def code_views(run):
     # The service's own function, disassembled live, its source interleaved.
     asm = example("code:example:asm")
     check(asm["mode"] == "Both" and asm["instructions"] > 100, f"example disassembly: {asm}")
-    check(asm["rows"] > asm["instructions"], f"Both has no source rows: {asm}")
+    # The source is a second request, made once the disassembly has named its
+    # files: its rows join the listing a moment after the instructions do.
+    asm = run.wait_for(lambda: code().get("rows", 0) > asm["instructions"] and code() or None,
+                       f"source rows between the instructions: {asm}", timeout=15)
     check(asm["source"].endswith("uprobes.rs"), f"the example's source is not uprobes.rs: {asm}")
     run.shot("26-code-both", settle=0.5)
     run.click("Disassembly")
@@ -2276,6 +2279,8 @@ def main():
                         help="where the results, perf numbers and screenshot index go")
     parser.add_argument("--sudo", action="store_true",
                         help="run the service as root (sudo -n): dynamic instrumentation arms")
+    parser.add_argument("--strict", action="store_true",
+                        help="exit 1 when a scenario was skipped, not only when one failed")
     args = parser.parse_args()
     global SUDO
     SUDO = args.sudo
@@ -2305,8 +2310,12 @@ def main():
             started = time.time()
             try:
                 note = fn(run)
-                results.append((name, "pass", note, time.time() - started))
-                print(f"  PASS  {name}  ({time.time()-started:.1f}s) {note or ''}")
+                # A scenario that could not run returns "skipped: <why>". It
+                # asserted nothing, so it is not a pass: with --no-shots that
+                # was twenty-odd scenarios in the "N/N passed" line.
+                verdict = "skip" if isinstance(note, str) and note.startswith("skipped") else "pass"
+                results.append((name, verdict, note, time.time() - started))
+                print(f"  {verdict.upper()}  {name}  ({time.time()-started:.1f}s) {note or ''}")
             except Exception as error:  # noqa: BLE001 - reported per scenario
                 results.append((name, "FAIL", str(error), time.time() - started))
                 print(f"  FAIL  {name}  {error}")
@@ -2321,15 +2330,17 @@ def main():
 
     print()
     passed = sum(1 for r in results if r[1] == "pass")
+    skipped = sum(1 for r in results if r[1] == "skip")
+    failed = len(results) - passed - skipped
     for name, verdict, note, seconds in results:
         print(f"{verdict:>4}  {name:<22} {seconds:5.1f}s  {note or ''}")
-    print(f"\n{passed}/{len(results)} scenarios passed")
+    print(f"\n{passed}/{len(results)} scenarios passed" + (f", {skipped} skipped" if skipped else ""))
     if not args.no_shots:
         shots = sorted(os.listdir(args.shots))
         print(f"{len(shots)} screenshots in {args.shots}")
     write_report(args.report, results, run.perf if 'run' in locals() else {}, args.shots)
     print(f"report in {args.report}")
-    return 0 if passed == len(results) else 1
+    return 1 if failed or (args.strict and skipped) else 0
 
 
 def write_report(path, results, perf, shots_dir):

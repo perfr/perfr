@@ -405,6 +405,11 @@ impl ScopeRingWriter {
             return Err(error);
         }
         let base = mapping.base;
+        // The whole layout is zeroed here, unlike on POSIX, where a file
+        // grown by ftruncate is zero by contract. CreateFileMappingW grew
+        // this one, and what the new bytes hold is left to the file system:
+        // NTFS returns zeroes, but the directory can sit on a volume that
+        // makes no such promise.
         // SAFETY: base is a fresh writable mapping of exactly `len` bytes.
         unsafe { ring::init_region(base, ring_count, slots_per_ring, pid) };
         // SAFETY: the region was just initialised at these dimensions.

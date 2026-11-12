@@ -299,8 +299,20 @@ Needs `wasm32-unknown-unknown` and `wasm-bindgen-cli` matching `wasm-bindgen 0.2
 ```
 
 This writes `viewer-dist/perfr_live_viewer.js` and `.wasm`, which are checked
-in. `perfr-live-server`’s build script embeds whatever is in `viewer-dist/`, so
-rebuild `perfr` afterwards to pick up a new pack.
+in, and `viewer-dist/VERSION`: the commit, the date, the release tag and an id
+of the sources the pack was built from (`source_id.py`). `perfr-live-server`’s
+build script embeds whatever is in `viewer-dist/`, so rebuild `perfr`
+afterwards to pick up a new pack.
+
+A pack built on a branch is built from that branch. Once another viewer
+change has merged, the pack at the top of `main` no longer matches `main`'s
+sources, and whoever embeds or serves it ships the older viewer. Rebuild
+with `build_wasm.sh` in the change that edits those sources, and again on
+`main` if another viewer change merged behind the branch. perfr.dev checks
+the id in `VERSION` against the checkout it deploys and refuses a pack that
+does not match (the release workflow builds its own pack from the tag).
+Pull requests run `.github/scripts/check-viewer-pack.py`, which fails on
+that mismatch and when those sources changed without a new wasm.
 
 Without a WASM pack, `/` shows a link to `fallback.html` (HTML/JS last-ditch).
 

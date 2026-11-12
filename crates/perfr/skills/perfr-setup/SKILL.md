@@ -51,7 +51,7 @@ Non-interactive, still only after a yes:
 perfr setup --yes
 ```
 
-That applies the runtime sysctls and, when uprobes were requested by the plan, the setcap. It does not write a file under `/etc` unless `--persist` is also set:
+That applies the runtime sysctls and, when tracefs is not readable, `setcap cap_perfmon,cap_sys_ptrace+ep` on the binary. It never grants `CAP_SYS_ADMIN`. It does not write a file under `/etc` unless `--persist` is also set:
 
 ```
 perfr setup --yes --persist
@@ -59,11 +59,19 @@ perfr setup --yes --persist
 
 `--persist` writes `/etc/sysctl.d/99-perfr-perf.conf`.
 
+Kernel uprobes are a separate decision:
+
+```
+perfr setup --uprobes
+```
+
+That puts `cap_sys_admin,cap_perfmon,cap_dac_read_search+ep` on the binary, and every later run of that binary holds them. Run it only when the user asked for the kernel hook engine by name, and say first that `CAP_SYS_ADMIN` is root in all but name. A yes to `perfr setup` is not a yes to `--uprobes`. A degraded `uprobes` row is not a reason on its own: Frida is the default hook engine and needs no capability.
+
 What the rows mean:
 
 - `kernel.perf_event_paranoid` above 2 blocks sampling. Above 0 blocks the scheduler. `sudo sysctl -w kernel.perf_event_paranoid=0` allows both. Root, `CAP_PERFMON`, or `CAP_SYS_ADMIN` bypass the sysctl.
 - `kernel.kptr_restrict` above 0 hides kernel addresses from an unprivileged process. Userspace samples still have their own symbols.
-- tracefs (`/sys/kernel/tracing` or `/sys/kernel/debug/tracing`) has to be readable for scheduler tracepoints. `CAP_PERFMON` or root is the usual grant.
+- tracefs (`/sys/kernel/tracing` or `/sys/kernel/debug/tracing`) has to be readable for scheduler tracepoints and thread states. It is a root-only filesystem: root reads it, and so does `CAP_DAC_READ_SEARCH`, which reads any file. `CAP_PERFMON` does not, and no sysctl does. `perfr setup` leaves it as it is unless run with `--uprobes`.
 - Uprobes need `CAP_SYS_ADMIN`. Frida is the default hook engine and does not. A kernel built without `CONFIG_UPROBE_EVENTS` has no uprobe PMU; switch hooks to Frida. There is no sysctl that adds the PMU.
 - `kernel.yama.ptrace_scope` above 0 blocks Frida from attaching to a process that is not a child. `sudo sysctl -w kernel.yama.ptrace_scope=0`, or `CAP_SYS_PTRACE`.
 - On Windows, sampling and the scheduler come from the kernel logger and need a token from **Run as administrator**. Manual scopes and Frida hooks do not. A normal prompt of an administrator account is not elevated.

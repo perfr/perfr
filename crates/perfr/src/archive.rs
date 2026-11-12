@@ -237,11 +237,17 @@ fn find_eocd(bytes: &[u8]) -> Result<usize, String> {
     Err("zip end of central directory not found".into())
 }
 
-/// Drop the leading `perfr/` directory the release archives use.
+/// Drop the leading `perfr/` directory the release archives use. `None`
+/// for an entry that is not a plain relative file path.
 pub fn install_relative(path: &str) -> Option<String> {
     let path = path.trim_start_matches("./").replace('\\', "/");
     let rest = path.strip_prefix("perfr/").unwrap_or(path.as_str());
-    if rest.is_empty() || rest.ends_with('/') || rest.split('/').any(|part| part == "..") {
+    // The caller joins this onto the install directory, and `Path::join`
+    // drops the base when its argument is absolute. An empty component is a
+    // leading `/` (`/etc/x`, `perfr//etc/x`), a UNC `//server/share`, or a
+    // directory entry; a colon is a drive (`C:/x`, or `C:x` relative to that
+    // drive's directory) or an NTFS stream. No release file has either.
+    if rest.contains(':') || rest.split('/').any(|part| part.is_empty() || part == "..") {
         return None;
     }
     Some(rest.to_string())
@@ -396,5 +402,48 @@ mod tests {
             Some("include/perfr.h")
         );
         assert_eq!(install_relative("perfr/../../etc/passwd"), None);
+    }
+
+    #[test]
+    fn an_entry_that_is_absolute_on_any_platform_is_not_installed() {
+        for path in [
+            // Unix absolute, bare and behind the archive's top directory.
+            "/etc/cron.d/x",
+            "perfr//etc/cron.d/x",
+            ".//etc/cron.d/x",
+            // A drive letter, with a root and drive-relative.
+            "C:/Users/x/evil.exe",
+            "C:\\Users\\x\\evil.exe",
+            "perfr/C:/Users/x/evil.exe",
+            "perfr\\C:evil.exe",
+            // UNC and verbatim.
+            "\\\\server\\share\\evil.exe",
+            "//server/share/evil.exe",
+            "perfr\\\\\\server\\share\\evil.exe",
+            "\\\\?\\C:\\evil.exe",
+            // Mixed separators.
+            "perfr\\/etc/x",
+            "perfr/\\etc\\x",
+            "perfr/lib\\..\\..\\x",
+        ] {
+            assert_eq!(install_relative(path), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn every_accepted_entry_stays_under_the_install_directory() {
+        let base = std::path::Path::new("/opt/perfr/bin");
+        for (path, relative) in [
+            ("perfr/perfr", "perfr"),
+            ("./perfr/libperfr.so", "libperfr.so"),
+            ("perfr\\perfr.exe", "perfr.exe"),
+            ("perfr/include/perfr.h", "include/perfr.h"),
+            ("perfr\\include\\perfr.h", "include/perfr.h"),
+            // The older layout, which the installer still redirects.
+            ("perfr/perfr.h", "perfr.h"),
+        ] {
+            assert_eq!(install_relative(path).as_deref(), Some(relative), "{path}");
+            assert!(base.join(relative).starts_with(base), "{path}");
+        }
     }
 }

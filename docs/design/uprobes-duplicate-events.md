@@ -1,5 +1,9 @@
 # The uprobes duplicate-event workaround, and what is underneath it
 
+> The C++ files named below are in the Orbit C++ tree, not in this
+> repository. The same workaround in the Rust service is in
+> `crates/perfr/src/uprobes.rs`.
+
 Investigated 2026-08-31. Two questions: what is the workaround in perfr's C++,
 and is there a Linux kernel bug behind it. The first is answered definitively;
 the second is answered partially, and the honest limits are marked.
@@ -97,7 +101,8 @@ unmatched event.
 
 `perfr-tracing-state`'s `function_calls` and `return_addresses` modules were
 ported quirk-for-quirk, including the tolerant unmatched-exit behaviour, so the
-port inherits the same resilience. The `(sp, ip, cpu)` duplicate detection lives
+port inherits the same resilience. (`return_addresses` has since been removed:
+the uprobe engine in `crates/perfr/src/uprobes.rs` keeps its own `LiveReturns`.) The `(sp, ip, cpu)` duplicate detection lives
 in `UprobesUnwindingVisitor`, which is **not yet ported** — when it is, this
 logic must come with it, and this document is the reason it exists.
 

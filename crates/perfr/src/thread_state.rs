@@ -28,8 +28,8 @@ use perfr_perf_records::tracepoints::{
     thread_state_from_bits, SchedSwitch, SchedSwitchLayout, SchedWakeup, SchedWakeupLayout,
     TaskNewtask, TaskNewtaskLayout,
 };
-use perfr_perf_records::reader::{parse_record_sample, sample_bits, SampleFlags};
-use perfr_perf_records::{record_type, PerfEventHeader};
+use perfr_perf_records::reader::parse_tracepoint_sample;
+use perfr_perf_records::record_type;
 use perfr_perf_ring::RingBuffer;
 use perfr_thread_states::{Slice, ThreadStateManager};
 
@@ -87,6 +87,13 @@ pub struct Focus {
     /// tid -> pid of every focused thread.
     tids: HashMap<i32, u32>,
     pids: HashSet<u32>,
+    /// Threads the last rebuild no longer found in `/proc`: tid -> (pid, when
+    /// that was noticed, on the capture clock). They have exited, but their
+    /// last transitions are still on their way -- unread in a ring, or
+    /// waiting out the reorder window -- and the slices those close name
+    /// only a tid. Forgotten at once, a thread's final run (all of its
+    /// slices, for one shorter-lived than the window) had no row to go to.
+    departed: HashMap<i32, (u32, u64)>,
 }
 
 impl Focus {
@@ -115,7 +122,7 @@ impl Focus {
     }
 
     pub fn contains_tid(&self, tid: i32) -> bool {
-        self.all || self.tids.contains_key(&tid)
+        self.all || self.tids.contains_key(&tid) || self.departed.contains_key(&tid)
     }
 
     pub fn contains_pid(&self, pid: u32) -> bool {
@@ -125,7 +132,7 @@ impl Focus {
     /// The process a focused thread belongs to. `None` outside the focus, or
     /// when everything is tracked and the caller must resolve it itself.
     pub fn pid_of(&self, tid: i32) -> Option<u32> {
-        self.tids.get(&tid).copied()
+        self.tids.get(&tid).copied().or_else(|| self.departed.get(&tid).map(|(pid, _)| *pid))
     }
 
     pub fn thread_count(&self) -> usize {
@@ -138,6 +145,12 @@ pub struct ThreadStateTracer {
     manager: ThreadStateManager,
     pending: Vec<Transition>,
     newest_seen_ns: u64,
+    /// Drains that ended in a read error, the first of which is logged.
+    failed_drains: u64,
+    /// Records the kernel dropped because a tracepoint ring was full. The
+    /// states drawn across such a gap are whatever the last record before it
+    /// said, so the count is what tells a reader not to trust them.
+    records_lost: u64,
     focus: Focus,
     /// Field offsets read from each tracepoint's tracefs `format` at open,
     /// so a kernel that moved a field is parsed by its own layout rather
@@ -148,13 +161,15 @@ pub struct ThreadStateTracer {
 }
 
 impl ThreadStateTracer {
-    /// Opens the scheduling tracepoints on every CPU.
+    /// Opens the scheduling tracepoints on every CPU in `cpus`, the online
+    /// ones by number.
     ///
     /// Per CPU rather than per task, and system-wide rather than scoped to the
     /// target: a thread's state changes are emitted by whichever core makes
     /// the change, and a wakeup is emitted by the *waking* thread, which
     /// routinely belongs to another process.
-    pub fn open(cpu_count: usize) -> (Option<ThreadStateTracer>, TracepointReport) {
+    pub fn open(cpus: &[i32]) -> (Option<ThreadStateTracer>, TracepointReport) {
+        let cpu_count = cpus.len();
         let mut report = TracepointReport::default();
         let mut rings = Vec::new();
         // Field offsets from each tracepoint's `format`, falling back to the
@@ -194,7 +209,7 @@ impl ThreadStateTracer {
             };
             let mut opened = 0usize;
             let mut reason = String::new();
-            for cpu in 0..cpu_count as i32 {
+            for cpu in cpus.iter().copied() {
                 match perfr_perf_ring::ring::open_tracepoint(id, -1, cpu, 512) {
                     Ok(ring) => match ring.enable() {
                         Ok(()) => {
@@ -216,6 +231,12 @@ impl ThreadStateTracer {
             }
             if opened == 0 {
                 report.failures.push(format!("{category}:{name}: {reason}"));
+            } else if opened < cpu_count {
+                // States on the CPUs without a ring are whatever the last
+                // record from another CPU said.
+                report.failures.push(format!(
+                    "{category}:{name}: opened on {opened} of {cpu_count} CPUs only: {reason}"
+                ));
             }
         }
         report.rings = rings.len();
@@ -228,6 +249,8 @@ impl ThreadStateTracer {
                 manager: ThreadStateManager::new(),
                 pending: Vec::new(),
                 newest_seen_ns: 0,
+                failed_drains: 0,
+                records_lost: 0,
                 focus: Focus::all(),
                 switch_layout,
                 wakeup_layout,
@@ -262,28 +285,59 @@ impl ThreadStateTracer {
 
     /// Narrows tracking to `focus`. Threads created afterwards inside a
     /// focused process are picked up from `task_newtask` as they appear.
+    ///
+    /// Threads of the previous focus that `focus` no longer has are kept on
+    /// as departed (see [`Focus`]) until their last slices have come out.
     pub fn set_focus(&mut self, focus: Focus) {
+        self.set_focus_at(focus, crate::now_monotonic_ns());
+    }
+
+    fn set_focus_at(&mut self, mut focus: Focus, now_ns: u64) {
+        let previous = std::mem::take(&mut self.focus);
+        for (tid, departed) in previous.departed {
+            if !focus.tids.contains_key(&tid) {
+                focus.departed.insert(tid, departed);
+            }
+        }
+        for (tid, pid) in previous.tids {
+            if !focus.tids.contains_key(&tid) {
+                focus.departed.entry(tid).or_insert((pid, now_ns));
+            }
+        }
         self.focus = focus;
+    }
+
+    /// Forgets the departed threads whose transitions have all been fed: a
+    /// record of a thread gone at `noticed` is older than that, and the
+    /// reorder window has moved a full delay beyond it once the newest
+    /// record seen is two delays past. Run before a poll reads anything, so
+    /// the slices the previous poll returned could still be resolved.
+    fn forget_departed(&mut self) {
+        let newest_seen_ns = self.newest_seen_ns;
+        self.focus
+            .departed
+            .retain(|_, (_, noticed_ns)| newest_seen_ns < noticed_ns.saturating_add(2 * REORDER_DELAY_NS));
     }
 
     pub fn focus(&self) -> &Focus {
         &self.focus
     }
 
+    /// How many records the kernel has dropped from the tracepoint rings.
+    pub fn records_lost(&self) -> u64 {
+        self.records_lost
+    }
+
     /// Drains the rings and returns the state slices that can now be closed.
     pub fn poll(&mut self) -> Vec<Slice> {
-        let flags = SampleFlags {
-            sample_type: sample_bits::TID_TIME_STREAMID_CPU | sample_bits::RAW,
-            regs_user_count: 0,
-        };
+        self.forget_departed();
         for (ring, kind) in self.rings.iter_mut() {
-            while let Ok(Some(record)) = ring.read_record() {
-                let Some(header) = PerfEventHeader::parse(&record) else { continue };
-                if { header.kind } != record_type::SAMPLE {
-                    continue;
+            let read = ring.drain(|record_kind, record| {
+                if record_kind != record_type::SAMPLE {
+                    return;
                 }
-                let Some(sample) = parse_record_sample(&record, flags, true) else { continue };
-                let Some(raw) = sample.raw_data.as_deref() else { continue };
+                let Some(sample) = parse_tracepoint_sample(record) else { return };
+                let raw = sample.raw;
                 let payload = match kind {
                     Kind::SchedSwitch => SchedSwitch::parse_with(raw, &self.switch_layout).and_then(|s| {
                         let prev_in = self.focus.contains_tid(s.prev_tid);
@@ -308,6 +362,9 @@ impl ThreadStateTracer {
                             return None;
                         }
                         if !self.focus.all {
+                            // A tid the kernel hands out again is the new
+                            // thread's from here on.
+                            self.focus.departed.remove(&t.tid);
                             if t.clone_flags & perfr_perf_records::tracepoints::CLONE_THREAD != 0 {
                                 self.focus.tids.insert(t.tid, parent);
                             } else {
@@ -318,7 +375,7 @@ impl ThreadStateTracer {
                         Some(Payload::NewTask { tid: t.tid })
                     }),
                 };
-                let Some(payload) = payload else { continue };
+                let Some(payload) = payload else { return };
                 self.newest_seen_ns = self.newest_seen_ns.max(sample.time);
                 self.pending.push(Transition {
                     timestamp_ns: sample.time,
@@ -326,6 +383,25 @@ impl ThreadStateTracer {
                     emitting_pid: sample.pid as i32,
                     payload,
                 });
+            });
+            match read {
+                Ok(drained) => {
+                    if drained.lost > 0 && self.records_lost == 0 {
+                        log::warn!(
+                            "the kernel dropped {} scheduler tracepoint record(s): a tracepoint ring was full",
+                            drained.lost
+                        );
+                    }
+                    self.records_lost += drained.lost;
+                }
+                Err(error) => {
+                    // The ring has skipped what it could not walk and reads
+                    // on; one line is enough to say it happened.
+                    if self.failed_drains == 0 {
+                        log::warn!("reading a scheduling tracepoint ring failed: {error}");
+                    }
+                    self.failed_drains += 1;
+                }
             }
         }
         let horizon = self.newest_seen_ns.saturating_sub(REORDER_DELAY_NS);
@@ -430,6 +506,8 @@ mod tests {
             manager: ThreadStateManager::new(),
             pending: Vec::new(),
             newest_seen_ns: 0,
+            failed_drains: 0,
+            records_lost: 0,
             focus: Focus::all(),
             switch_layout: SchedSwitchLayout::DEFAULT,
             wakeup_layout: SchedWakeupLayout::DEFAULT,
@@ -444,6 +522,23 @@ mod tests {
             emitting_pid: 0,
             payload: Payload::Switch { prev_tid, prev_state, next_tid, prev_in: true, next_in: true },
         }
+    }
+
+    #[test]
+    fn records_the_kernel_dropped_from_a_tracepoint_ring_are_counted() {
+        let mut tracer = tracer();
+        let ring = perfr_perf_ring::ring::synthetic(4096).unwrap();
+        let mut lost = Vec::new();
+        lost.extend_from_slice(&record_type::LOST.to_le_bytes());
+        lost.extend_from_slice(&0u16.to_le_bytes());
+        lost.extend_from_slice(&(perfr_perf_records::Lost::SIZE as u16).to_le_bytes());
+        lost.extend_from_slice(&1u64.to_le_bytes());
+        lost.extend_from_slice(&250u64.to_le_bytes());
+        lost.resize(perfr_perf_records::Lost::SIZE, 0);
+        assert!(ring.publish(&lost));
+        tracer.rings.push((ring, Kind::SchedSwitch));
+        assert!(tracer.poll().is_empty());
+        assert_eq!(tracer.records_lost(), 250);
     }
 
     #[test]
@@ -472,6 +567,77 @@ mod tests {
         assert!(slices.iter().all(|s| s.tid == 70), "{slices:?}");
         assert_eq!(t.focus().pid_of(70), Some(7));
         assert_eq!(t.focus().pid_of(99), None);
+    }
+
+    #[test]
+    fn a_thread_that_exited_stays_resolvable_until_its_last_slices_are_out() {
+        let mut t = tracer();
+        let mut focus = Focus::default();
+        focus.pids.insert(7);
+        focus.tids.insert(70, 7);
+        focus.tids.insert(71, 7);
+        t.set_focus(focus);
+        t.manager.on_initial_state(0, 71, thread_state::RUNNING).unwrap();
+        // Thread 71 runs its last and exits at 1000. The record is read and
+        // waits out the reorder window.
+        t.pending.push(switch(1_000, 71, thread_state::DEAD, 70));
+        // The once-a-second rebuild of the focus from /proc comes first, and
+        // /proc no longer lists the thread.
+        let mut rebuilt = Focus::default();
+        rebuilt.pids.insert(7);
+        rebuilt.tids.insert(70, 7);
+        t.set_focus(rebuilt);
+
+        let slices = t.drain_up_to(u64::MAX);
+        let last_run = slices.iter().find(|s| s.tid == 71 && s.thread_state == thread_state::RUNNING);
+        assert_eq!(last_run.map(|s| s.duration_ns), Some(1_000));
+        // The slice names only a tid; its row is found through the focus.
+        assert_eq!(t.focus().pid_of(71), Some(7), "the last slice of an exited thread has no row to go to");
+        // And a record of it still to be read is still one to keep.
+        assert!(t.focus().contains_tid(71));
+    }
+
+    #[test]
+    fn an_exited_thread_is_forgotten_once_the_reorder_window_has_passed_it() {
+        let mut t = tracer();
+        let mut focus = Focus::default();
+        focus.pids.insert(7);
+        focus.tids.insert(71, 7);
+        t.set_focus(focus);
+        let mut rebuilt = Focus::default();
+        rebuilt.pids.insert(7);
+        t.set_focus_at(rebuilt.clone(), 10_000);
+        assert_eq!(t.focus().pid_of(71), Some(7));
+
+        // Later rebuilds carry it along; they do not restart its clock.
+        t.set_focus_at(rebuilt.clone(), 10_000 + REORDER_DELAY_NS);
+        t.newest_seen_ns = 10_000 + 2 * REORDER_DELAY_NS - 1;
+        t.forget_departed();
+        assert_eq!(t.focus().pid_of(71), Some(7), "its last record may still be inside the window");
+
+        t.newest_seen_ns = 10_000 + 2 * REORDER_DELAY_NS;
+        t.forget_departed();
+        assert_eq!(t.focus().pid_of(71), None);
+        assert!(!t.focus().contains_tid(71), "a tid is reused; it must not stay another thread's forever");
+    }
+
+    #[test]
+    fn a_thread_back_in_the_focus_is_not_departed() {
+        let mut t = tracer();
+        let mut with = Focus::default();
+        with.pids.insert(7);
+        with.tids.insert(71, 7);
+        let mut without = Focus::default();
+        without.pids.insert(7);
+        t.set_focus(with.clone());
+        t.set_focus_at(without, 10_000);
+        // The same tid, in another process now.
+        let mut reused = Focus::default();
+        reused.pids.insert(9);
+        reused.tids.insert(71, 9);
+        t.set_focus_at(reused, 20_000);
+        assert_eq!(t.focus().pid_of(71), Some(9));
+        assert!(t.focus().departed.is_empty());
     }
 
     #[test]

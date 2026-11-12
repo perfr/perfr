@@ -38,9 +38,21 @@ export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+atomics,+bulk-memory,+mutabl
   -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size \
   -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base"
 export CARGO_PROFILE_RELEASE_PANIC=abort
-# The build the viewer reports about itself (More menu, the wordmark's
-# tooltip, window.__perfr_sel.build): what a running page was built from.
-export PERFR_VIEWER_BUILD="$(date -u +%Y-%m-%dT%H:%MZ) $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)"
+# Same stamp as `perfr --version` (crates/perfr-build-info). A release sets
+# PERFR_RELEASE_TAG=perfr-vX.Y.Z (the release workflow does). With no tag the
+# About window and `perfr --version` say `dev` plus the short hash.
+# SOURCE_DATE_EPOCH, when set, pins the UTC build date.
+if [[ -z "${PERFR_GIT_HASH:-}" ]]; then
+  PERFR_GIT_HASH="$(git -C "$WORKSPACE" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+fi
+export PERFR_GIT_HASH
+if [[ -z "${PERFR_RELEASE_TAG:-}" && "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+  PERFR_RELEASE_TAG="${GITHUB_REF_NAME}"
+fi
+if [[ -n "${PERFR_RELEASE_TAG:-}" ]]; then
+  export PERFR_RELEASE_TAG
+fi
+echo "viewer stamp: hash=${PERFR_GIT_HASH} tag=${PERFR_RELEASE_TAG:-dev} date=${SOURCE_DATE_EPOCH:-clock}"
 
 echo "Building wasm pack with ${NIGHTLY} -Z build-std + --features wasm-threads (profile wasm)"
 rustup run "$NIGHTLY" cargo build \
@@ -92,3 +104,17 @@ if [[ -d "$ROOT/viewer-dist/snippets" ]]; then
   echo "Worker snippets: $ROOT/viewer-dist/snippets"
 fi
 echo "Rebuild perfr so perfr-live-server's build script embeds the pack."
+
+# What this pack was built from, for anything that serves it. `source` is
+# source_id.py over the viewer's sources as they are now: perfr-web's
+# build_site.py recomputes it over the checkout it deploys and refuses a
+# pack that does not match, so a pack built on a branch cannot go live after
+# a viewer change merged behind it. Rebuild on main after merging.
+SOURCE_ID="$(python3 "$ROOT/source_id.py" "$WORKSPACE")"
+{
+  echo "hash=${PERFR_GIT_HASH}"
+  echo "tag=${PERFR_RELEASE_TAG:-dev}"
+  echo "date=$(date -u -d "@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y-%m-%d)"
+  echo "source=${SOURCE_ID}"
+} > "$ROOT/viewer-dist/VERSION"
+echo "viewer-dist/VERSION: $(tr '\n' ' ' < "$ROOT/viewer-dist/VERSION")"

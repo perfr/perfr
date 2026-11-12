@@ -8,6 +8,7 @@ pub mod bench;
 pub mod demo;
 mod sharing;
 pub mod http;
+mod targets;
 pub mod ingest;
 pub mod peers;
 pub mod settings;
@@ -711,11 +712,31 @@ impl LiveService {
         } else {
             events
         };
+        self.admit_events(events);
+    }
+
+    /// Loads events read back from a stored capture. Nothing is refused for
+    /// starting before the capture did: that guard keeps a previous
+    /// session's backlog out of a live capture, while a stored one already
+    /// holds exactly what belongs to it. A capture cut to a window keeps the
+    /// events that overlap the window whole, and its start is the window's,
+    /// so through `push_events` every scope already running at the left edge
+    /// was dropped on reopening.
+    pub fn restore_events(&self, events: &[LiveEvent]) {
+        if !events.is_empty() {
+            self.admit_events(events);
+        }
+    }
+
+    fn admit_events(&self, events: &[LiveEvent]) {
         self.ring().push_many(events);
         self.data_gen.fetch_add(1, Ordering::Relaxed);
         let mut end = 0u64;
         for e in events {
-            if !perfr_live_event::dev::is_self_pid(e.pid) {
+            // An event that was already running when the capture began (a
+            // restored one: a push has none) does not say where it ends. One
+            // that spans a capture cut to a window ends well after it.
+            if !perfr_live_event::dev::is_self_pid(e.pid) && !self.before_capture_start(e) {
                 end = end.max(e.end_ns());
             }
         }
@@ -916,6 +937,7 @@ impl LiveService {
         }
         let (_, events) = self.ring().snapshot();
         let mut index = TrackIndex::default();
+        index.set_extent_floor(self.capture_start_ns());
         index.extend(events);
         let index = Arc::new(index);
         *cache = Some(CachedIndex {

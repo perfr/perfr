@@ -27,7 +27,9 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::hook_safety::{HookSafety, SafetyLevel};
+use crate::hook_safety::HookSafety;
+#[cfg(any(test, target_os = "linux"))]
+use crate::hook_safety::SafetyLevel;
 use crate::hooks::HookSpec;
 
 /// One armed hook with the evidence gathered before arming.
@@ -41,6 +43,7 @@ pub struct ArmedHook {
 /// The armed set matches the live hooks: one entry per function, gone when
 /// it is unhooked. Retries used to append another copy and leave the old one,
 /// so the journal grew a function every time it was tried again.
+#[cfg(any(test, target_os = "linux"))]
 pub fn set_hook(hooks: &mut Vec<ArmedHook>, function_id: u64, hook: Option<ArmedHook>) {
     hooks.retain(|h| h.spec.function_id != function_id);
     if let Some(hook) = hook {
@@ -78,10 +81,12 @@ const CRASH_PREFIX: &str = "perfr-hook-crash-";
 /// later capture removes it; the log files' week.
 const KEEP_FOR: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
 
+#[cfg(target_os = "linux")]
 pub fn journal_path(target_pid: i32) -> PathBuf {
     journal_path_in(&state_dir(), target_pid)
 }
 
+#[cfg(any(test, target_os = "linux"))]
 pub fn crash_path(target_pid: i32) -> PathBuf {
     crash_path_in(&state_dir(), target_pid)
 }
@@ -220,6 +225,7 @@ fn write_journal_in(dir: &Path, target_pid: i32, engine: &str, hooks: &[ArmedHoo
 }
 
 /// A crash line the kernel logged for the target.
+#[cfg(any(test, target_os = "linux"))]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KernelCrash {
     /// `segfault`, `trap invalid opcode`, `general protection fault`, ...
@@ -241,6 +247,7 @@ pub struct KernelCrash {
 }
 
 /// Parse a hex or decimal integer that may carry a `0x` prefix.
+#[cfg(any(test, target_os = "linux"))]
 fn parse_int(token: &str) -> Option<u64> {
     let t = token.trim_end_matches([':', ',']);
     if let Some(hex) = t.strip_prefix("0x") {
@@ -255,6 +262,7 @@ fn parse_int(token: &str) -> Option<u64> {
 /// a `traps:` line, `comm[tid] trap ...`; a comm may itself hold spaces and
 /// brackets, and the module clause ends in a bracket too, so only a number
 /// followed the way the kernel follows the thread id counts.
+#[cfg(any(test, target_os = "linux"))]
 fn names_a_thread(line: &str, tids: &[i32]) -> bool {
     line.match_indices('[').any(|(open, _)| {
         let rest = &line[open + 1..];
@@ -274,6 +282,7 @@ fn names_a_thread(line: &str, tids: &[i32]) -> bool {
 ///   `traps: comm[tid] trap invalid opcode ip:IP sp:SP error:N in MOD[...]`
 ///   `comm[tid]: segfault ... ` / `general protection fault ...`
 /// The `in` clause is absent when the ip was not in a file mapping.
+#[cfg(any(test, target_os = "linux"))]
 pub fn parse_kernel_line(tids: &[i32], line: &str) -> Option<KernelCrash> {
     if !names_a_thread(line, tids) {
         return None;
@@ -330,6 +339,7 @@ pub fn parse_kernel_line(tids: &[i32], line: &str) -> Option<KernelCrash> {
 /// The file offset of `ip`, given the mapping it was in starts at
 /// `mapping_start`: the offset into that mapping plus the mapping's own
 /// offset in the file, from a `/proc/<pid>/maps` snapshot.
+#[cfg(any(test, target_os = "linux"))]
 fn file_offset_from_maps(maps: &str, mapping_start: u64, ip: u64) -> Option<u64> {
     maps.lines().find_map(|line| {
         // `start-end perms offset dev inode path`
@@ -345,6 +355,7 @@ fn file_offset_from_maps(maps: &str, mapping_start: u64, ip: u64) -> Option<u64>
 
 /// The last crash line among `lines` about one of `tids`, with the ip's
 /// file offset filled in from `maps` when the kernel did not print it.
+#[cfg(any(test, target_os = "linux"))]
 fn last_crash_in<'a>(lines: impl Iterator<Item = &'a str>, tids: &[i32], maps: &str) -> Option<KernelCrash> {
     let mut crash = lines.filter_map(|line| parse_kernel_line(tids, line)).last()?;
     if crash.file_offset.is_none() && crash.ip != 0 && !crash.module.is_empty() {
@@ -357,6 +368,7 @@ fn last_crash_in<'a>(lines: impl Iterator<Item = &'a str>, tids: &[i32], maps: &
 /// the journal recorded while the target was alive, plus whatever `/proc`
 /// still has. By the time a crash is noticed the process is gone or a
 /// zombie, and neither can be asked.
+#[cfg(target_os = "linux")]
 fn threads_and_maps(pid: i32) -> (Vec<i32>, String) {
     let journal: serde_json::Value = std::fs::read(journal_path(pid))
         .ok()
@@ -376,6 +388,7 @@ fn threads_and_maps(pid: i32) -> (Vec<i32>, String) {
 /// a thread of `pid`. Non-blocking: it drains the buffer and stops at the end
 /// rather than waiting for new messages. None when the device is unreadable
 /// (no privilege) or holds no matching line.
+#[cfg(target_os = "linux")]
 pub fn scan_kernel_crash(pid: i32) -> Option<KernelCrash> {
     let (tids, maps) = threads_and_maps(pid);
     match read_kmsg_crash(&tids, &maps) {
@@ -437,11 +450,6 @@ fn read_kmsg_crash(tids: &[i32], maps: &str) -> Result<Option<KernelCrash>, i32>
     Ok(found)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn read_kmsg_crash(_tids: &[i32], _maps: &str) -> Result<Option<KernelCrash>, i32> {
-    Ok(None)
-}
-
 /// Is the process still running? A gone target has no `/proc/<pid>`; a
 /// *crashed* one that its parent has not reaped is a zombie, whose
 /// `/proc/<pid>` still exists -- so a plain existence check would miss the
@@ -450,11 +458,6 @@ fn read_kmsg_crash(_tids: &[i32], _maps: &str) -> Result<Option<KernelCrash>, i3
 /// thread's, and a program whose `main` ends in `pthread_exit` runs on in
 /// its other threads behind a zombie leader. Its capture ended after a
 /// quarter of a second with "target exited".
-#[cfg(windows)]
-pub fn process_alive(pid: i32) -> bool {
-    crate::windows::process_alive(pid)
-}
-
 #[cfg(target_os = "linux")]
 pub fn process_alive(pid: i32) -> bool {
     if pid <= 0 {
@@ -468,14 +471,14 @@ pub fn process_alive(pid: i32) -> bool {
 
 /// Without a `/proc` to read the state from, the answer is the system's own:
 /// reading a file that is not there called every process dead.
-#[cfg(all(not(windows), not(target_os = "linux")))]
+#[cfg(all(test, not(windows), not(target_os = "linux")))]
 pub fn process_alive(pid: i32) -> bool {
     pid > 0 && perfr_scope_ring::platform::process_alive(pid as u32)
 }
 
 /// The verdict from the leader's `/proc/<pid>/stat` line; `has_other_threads`
 /// is only asked when the leader is a zombie.
-#[cfg(not(windows))]
+#[cfg(all(not(windows), any(test, target_os = "linux")))]
 fn alive_from_stat(stat: &str, has_other_threads: impl FnOnce() -> bool) -> bool {
     // `pid (comm) state ...`; comm may hold spaces and parens, so the state
     // is the first token after the final ')'.
@@ -490,9 +493,13 @@ fn alive_from_stat(stat: &str, has_other_threads: impl FnOnce() -> bool) -> bool
 }
 
 /// The crash report: a named suspect and every fact gathered.
+#[cfg(any(test, target_os = "linux"))]
 pub struct CrashReport {
     pub summary: String,
     pub json: serde_json::Value,
+    // Only the Linux capture loop says where the report went; the tests that
+    // build one elsewhere look at what it says.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub path: Option<PathBuf>,
 }
 
@@ -504,6 +511,7 @@ pub struct CrashReport {
 /// The prime suspect is, in order of confidence: the armed hook the kernel's
 /// faulting ip lands in (module + offset match); else the most dangerous
 /// armed hook by verdict (unsafe before risky); else the last hook armed.
+#[cfg(any(test, target_os = "linux"))]
 pub fn build_and_write(target_pid: i32, engine: &str, hooks: &[ArmedHook], kernel: Option<KernelCrash>) -> CrashReport {
     // By kernel ip: its offset in the faulting module's file, matched to a
     // hook in that module whose [offset, offset+size) covers it.

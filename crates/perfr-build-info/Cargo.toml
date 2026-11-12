@@ -10,3 +10,6 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "Version, commit, build date and release tag shared by perfr and the live viewer"
+
+[lints]
+workspace = true

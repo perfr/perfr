@@ -15,6 +15,9 @@ edition = "2021"
 license = "BSD-2-Clause"
 publish = false
 
+[lints]
+workspace = true
+
 [lib]
 name = "libperfr"
 crate-type = ["cdylib"]

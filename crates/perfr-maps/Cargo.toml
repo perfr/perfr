@@ -11,5 +11,8 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 # No dependencies. The C++ this replaces needs four Abseil targets.
 [dependencies]

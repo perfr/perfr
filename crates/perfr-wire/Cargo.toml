@@ -11,6 +11,9 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 # No dependencies: the whole point of the pod wire format is that it needs
 # no protobuf runtime, no code generator, no schema compiler.
 [dependencies]

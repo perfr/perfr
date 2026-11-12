@@ -14,6 +14,9 @@ keywords = ["profiling", "tracing", "wasm", "perfr"]
 categories = ["development-tools::profiling"]
 include = ["src/**", "include/**", "README.md"]
 
+[lints]
+workspace = true
+
 # rlib for Rust (including wasm-bindgen apps), staticlib for a C ABI,
 # cdylib for the wasm-bindgen package (`--features bindgen`).
 [lib]

@@ -11,6 +11,9 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Versioned capture stories: view targets and overlays for the perfr viewer"
 
+[lints]
+workspace = true
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

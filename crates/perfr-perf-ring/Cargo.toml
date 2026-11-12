@@ -11,6 +11,9 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 # libc only, for the syscalls the kernel interface is made of.
 [dependencies]
 libc = "0.2"

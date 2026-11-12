@@ -11,5 +11,8 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 # No dependencies; this sits on the capture hot path.
 [dependencies]

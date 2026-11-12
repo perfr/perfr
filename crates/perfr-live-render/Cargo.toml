@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Live-trace timeline index: pixel-column raster (O(width * log n) per lane) and instance listing"
 
+[lints]
+workspace = true
+
 [features]
 default = []
 # Native rayon lane split, off by default so the service does not pull rayon;

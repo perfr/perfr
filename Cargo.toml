@@ -63,6 +63,21 @@ serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.135"
 tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "net", "sync", "time", "signal"] }
 
+# Clippy decisions that hold for the whole workspace. Every crate opts in
+# with `[lints] workspace = true`, and `tools/ci.sh clippy` fails on any
+# warning that is left. Keep this short: an entry switches a lint off
+# everywhere, so it needs a reason that is true everywhere. A lint that is
+# wrong for one item gets an `#[allow]` with its reason on that item.
+[workspace.lints.clippy]
+# The capture loops, the painters and the LOD walks take what they read as
+# plain arguments. A parameter struct built for one call site would only
+# move the list somewhere less visible.
+too_many_arguments = "allow"
+# The service's hooks are `Mutex<Option<Arc<dyn Fn(..) -> Result<..> + Send +
+# Sync>>>` fields whose signature is their documentation, and the rest are
+# tuples returned to one caller. An alias for each would hide what it holds.
+type_complexity = "allow"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

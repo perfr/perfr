@@ -9,6 +9,9 @@ description = "perfr-hook: the Frida Core controller perfr spawns to attach to a
 edition = "2021"
 license = "BSD-2-Clause"
 
+[lints]
+workspace = true
+
 [dependencies]
 libc = "0.2"
 perfr-frida-transport = { path = "../perfr-frida-transport" }

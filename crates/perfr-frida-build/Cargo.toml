@@ -12,5 +12,8 @@ rust-version.workspace = true
 description = "Build-script helper that compiles and links the Frida devkit adapters of the agent and the helper"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 cc = "1"

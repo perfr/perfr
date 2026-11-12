@@ -9,6 +9,9 @@ description = "Capture lease and counters shared between the service, the helper
 edition = "2021"
 license = "BSD-2-Clause"
 
+[lints]
+workspace = true
+
 [dependencies]
 libc = "0.2"
 serde_json = "1"

@@ -11,6 +11,9 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 # Already linked: object's "compression" feature brings it in through flate2.
 crc32fast = "1"

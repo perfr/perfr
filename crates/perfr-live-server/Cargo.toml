@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "HTTP + WebSocket server that serves the live WASM viewer and streams packed events"
 
+[lints]
+workspace = true
+
 [dependencies]
 perfr-live-event = { path = "../perfr-live-event" }
 perfr-live-protocol = { path = "../perfr-live-protocol" }

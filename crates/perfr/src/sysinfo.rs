@@ -81,6 +81,7 @@ pub fn vendor_name(pci_vendor_id: u32) -> &'static [u8] {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn read_trimmed(path: &str) -> Vec<u8> {
     std::fs::read_to_string(path)
         .map(|s| s.trim().as_bytes().to_vec())
@@ -109,9 +110,9 @@ pub fn system_info(capture_start_unix_ns: u64, capture_start_monotonic_ns: u64) 
 }
 
 // The Windows file capture does not write a SystemInfo event yet; the
-// function is tested in windows.rs and kept here for the day it does.
+// function lives in windows.rs and is named here for the test below, and
+// for the day it does.
 #[cfg(target_os = "windows")]
-#[allow(unused_imports)]
 pub use crate::windows::system_info;
 
 /// Read a public sysctl value without assuming its string or integer width.
@@ -157,6 +158,7 @@ pub fn system_info(capture_start_unix_ns: u64, capture_start_monotonic_ns: u64) 
 /// with no driver library at all: every DRM card exposes its PCI ids, and
 /// amdgpu additionally exposes VRAM size. A telemetry helper, when one runs,
 /// reports richer info (model name, driver version) for its own devices.
+#[cfg(target_os = "linux")]
 pub fn gpu_info_from_sysfs() -> Vec<Event> {
     let mut events = Vec::new();
     let Ok(entries) = std::fs::read_dir("/sys/class/drm") else { return events };

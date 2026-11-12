@@ -92,6 +92,8 @@ pub enum Why {
     Limited,
 }
 
+// Worded for the capture loop's log lines, which only Linux writes.
+#[cfg(target_os = "linux")]
 impl Why {
     pub fn text(&self) -> String {
         match self {
@@ -221,6 +223,7 @@ impl AutoProfiler {
     }
 
     /// Calls past which one hook is too hot, a second.
+    #[cfg(target_os = "linux")]
     pub fn hot_per_s(&self) -> f64 {
         self.config.hot_per_s()
     }
@@ -232,6 +235,7 @@ impl AutoProfiler {
 
     /// Functions currently hooked, so the capture loop can say how long each
     /// one was actually armed.
+    #[cfg(target_os = "linux")]
     pub fn hooked_ids(&self) -> Vec<u64> {
         self.hooked.keys().copied().collect()
     }

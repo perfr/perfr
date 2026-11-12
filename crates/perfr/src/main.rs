@@ -24,6 +24,9 @@
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
+// Driven by the Linux capture loop alone. Its rules are pure, so their
+// tests run on every platform.
+#[cfg(any(test, target_os = "linux"))]
 mod auto_profile;
 mod hooks;
 mod hook_safety;
@@ -32,6 +35,7 @@ mod frida;
 mod code;
 mod demangle;
 mod functions;
+#[cfg(any(test, target_os = "linux"))]
 mod interner;
 mod lan;
 mod logging;
@@ -46,7 +50,9 @@ mod python_usdt;
 mod scopes;
 mod serve;
 mod symbolize;
+#[cfg(any(test, target_os = "linux"))]
 mod sysinfo;
+#[cfg(any(test, target_os = "linux"))]
 mod telemetry;
 #[cfg(target_os = "linux")]
 mod thread_state;

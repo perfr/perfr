@@ -20,9 +20,13 @@
 //! also makes the path testable without an NVIDIA GPU.
 
 use perfr_wire::{Event, Reader};
+#[cfg(unix)]
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
 
+// Windows builds one only in the test that a missing helper is an error, and
+// reads nothing back from it: reading needs the non-blocking pipe.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub struct TelemetryHelper {
     child: Child,
     /// Bytes read but not yet a whole event.
@@ -64,6 +68,7 @@ impl TelemetryHelper {
     /// Reads whatever the helper has produced and returns the whole events in
     /// it, keeping any partial trailing record for next time. Non-blocking:
     /// the pipe is O_NONBLOCK, so it only consumes what is already buffered.
+    #[cfg(unix)]
     pub fn drain(&mut self) -> Vec<Event> {
         let Some(stdout) = self.child.stdout.as_mut() else { return Vec::new() };
         let mut chunk = [0u8; 16 * 1024];
@@ -107,15 +112,18 @@ impl TelemetryHelper {
         events
     }
 
+    #[cfg(target_os = "linux")]
     pub fn events_received(&self) -> u64 {
         self.events
     }
 
+    #[cfg(target_os = "linux")]
     pub fn decode_errors(&self) -> u64 {
         self.decode_errors
     }
 
     /// Stops the helper and drains whatever it wrote before exiting.
+    #[cfg(unix)]
     pub fn shutdown(mut self) -> Vec<Event> {
         let _ = self.child.kill();
         let mut remaining = Vec::new();
@@ -136,6 +144,7 @@ impl TelemetryHelper {
 
 /// A record larger than this is malformed, not merely incomplete: the biggest
 /// pod event is an interned callstack, bounded by the unwinder's frame cap.
+#[cfg(unix)]
 const MAX_PENDING_BYTES: usize = 1 << 20;
 
 #[cfg(test)]
@@ -162,6 +171,7 @@ mod tests {
     /// A stand-in for the real NVML helper: writes a pod stream to stdout,
     /// exactly as the dynamically-linked helper would. This is what proves a
     /// STATIC binary can consume vendor telemetry without dlopen.
+    #[cfg(unix)]
     fn fake_helper_writing(events: &[Event]) -> (String, Vec<String>) {
         let mut writer = Writer::new();
         for event in events {

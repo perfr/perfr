@@ -1,0 +1,37 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+[package]
+name = "perfr-web"
+version = "0.1.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "In-page perfr instrumentation: a ring of live events encoded as a .perfr.stream"
+keywords = ["profiling", "tracing", "wasm", "perfr"]
+categories = ["development-tools::profiling"]
+include = ["src/**", "include/**", "README.md"]
+
+# rlib for Rust (including wasm-bindgen apps), staticlib for a C ABI,
+# cdylib for the wasm-bindgen package (`--features bindgen`).
+[lib]
+name = "perfr_web"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[features]
+default = []
+# wasm-bindgen exports used by the @perfr/web npm package.
+bindgen = []
+
+[dependencies]
+perfr-live-event = { path = "../perfr-live-event" }
+perfr-live-protocol = { path = "../perfr-live-protocol" }
+# Always linked: the wasm clock uses it, and `--features bindgen` exports
+# the npm package API. Native builds do not call into JS.
+wasm-bindgen = "=0.2.100"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "=0.3.77"
+web-sys = { version = "=0.3.77", features = ["Performance", "Window"] }

@@ -200,6 +200,14 @@ A release is a tag `perfr-vX.Y.Z` (not `v1.*`, which is the C++ line).
 Cut one with `tools/release/release.sh`. Pushing that tag runs the Rust
 release workflow. Details: [docs/releasing.md](docs/releasing.md).
 
+## In the browser
+
+A JS, TypeScript or WASM app cannot see the native perfr service. It can
+record its own scopes into the same `.perfr.stream` format and mount the
+viewer in the page. That path does not sample CPU stacks or context switches:
+the browser does not expose them. [In-page profiling](docs/manual/web.md)
+is the API, the browser tracks, and those limits.
+
 ## More
 
 - [Manual](docs/manual/index.md)

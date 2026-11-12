@@ -1,0 +1,21 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Small wasm-bindgen app that records with the perfr-web crate directly.
+# Not a workspace member: `cargo build --manifest-path examples/web-wasm/Cargo.toml --target wasm32-unknown-unknown`.
+[workspace]
+
+[package]
+name = "perfr-web-example"
+version = "0.1.1"
+edition = "2021"
+license = "BSD-2-Clause"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+perfr-web = { path = "../../crates/perfr-web" }
+wasm-bindgen = "=0.2.100"

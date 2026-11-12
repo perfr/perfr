@@ -74,6 +74,7 @@ The viewer and its server:
 | `perfr-live-render` | The pixel-column rasterizer of the timeline. |
 | `perfr-live-viewer` | The viewer: an eframe/egui application compiled to WebAssembly by `build_wasm.sh`. The built pack is committed in `viewer-dist/`. See its [README](perfr-live-viewer/README.md). |
 | `perfr-story` | The versioned story document (camera targets and overlays) shared by the viewer and the MCP server. |
+| `perfr-web` | The recorder behind `@perfr/web` (`web/perfr`): a ring of live events encoded as a `.perfr.stream`, compiled to WebAssembly for a page that profiles itself, with a C ABI for Emscripten and native callers. |
 
 The `docs` step of `tools/ci.sh` fails when a directory here is missing from
 these tables.

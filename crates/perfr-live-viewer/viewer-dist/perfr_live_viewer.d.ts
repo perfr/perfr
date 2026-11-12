@@ -71,21 +71,21 @@ export interface InitOutput {
   readonly wbg_rayon_poolbuilder_receiver: (a: number) => number;
   readonly wbg_rayon_start_worker: (a: number) => void;
   readonly initThreadPool: (a: number) => any;
-  readonly __externref_table_alloc: () => number;
-  readonly __wbindgen_export_1: WebAssembly.Table;
-  readonly memory: WebAssembly.Memory;
   readonly __wbindgen_exn_store: (a: number) => void;
+  readonly __externref_table_alloc: () => number;
+  readonly __wbindgen_export_2: WebAssembly.Table;
+  readonly memory: WebAssembly.Memory;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
   readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __wbindgen_export_7: WebAssembly.Table;
   readonly _dyn_core__ops__function__FnMut_____Output___R_as_wasm_bindgen__closure__WasmClosure___describe__invoke__h44eb5a8d5da8001f: (a: number, b: number) => void;
-  readonly closure338_externref_shim: (a: number, b: number, c: any) => void;
+  readonly closure369_externref_shim: (a: number, b: number, c: any) => void;
   readonly _dyn_core__ops__function__FnMut_____Output___R_as_wasm_bindgen__closure__WasmClosure___describe__invoke__ha1627759ae2c9a7a_multivalue_shim: (a: number, b: number) => [number, number];
   readonly __externref_table_dealloc: (a: number) => void;
-  readonly closure593_externref_shim: (a: number, b: number, c: any) => void;
-  readonly closure1307_externref_shim: (a: number, b: number, c: any) => void;
-  readonly closure3023_externref_shim: (a: number, b: number, c: any, d: any) => void;
+  readonly closure610_externref_shim: (a: number, b: number, c: any) => void;
+  readonly closure1324_externref_shim: (a: number, b: number, c: any) => void;
+  readonly closure3040_externref_shim: (a: number, b: number, c: any, d: any) => void;
   readonly __wbindgen_thread_destroy: (a?: number, b?: number, c?: number) => void;
   readonly __wbindgen_start: (a: number) => void;
 }

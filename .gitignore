@@ -13,9 +13,9 @@ __pycache__
 # Cargo build output
 target/
 
-# Slim embeddable viewer pack (crates/perfr-viewer/build_wasm.sh).
+# Slim embeddable viewer pack (crates/perfr-viewer-embed/build_wasm.sh).
 # The service embeds crates/perfr-live-viewer/viewer-dist, which stays committed.
-/crates/perfr-viewer/viewer-dist/
+/crates/perfr-viewer-embed/viewer-dist/
 
 # The in-page package's installed toolchain. dist/ and pkg/ are generated and committed.
 web/perfr/node_modules/

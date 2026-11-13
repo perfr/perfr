@@ -10,12 +10,16 @@ on:
     paths:
       - 'crates/perfr-live-*/**'
       - 'crates/perfr-viewer/**'
+      - 'crates/perfr-viewer-embed/**'
+      - '.github/scripts/check-viewer-boundary.py'
       - '.github/workflows/live-viewer.yml'
   pull_request:
     branches: ['main']
     paths:
       - 'crates/perfr-live-*/**'
       - 'crates/perfr-viewer/**'
+      - 'crates/perfr-viewer-embed/**'
+      - '.github/scripts/check-viewer-boundary.py'
       - '.github/workflows/live-viewer.yml'
 
 permissions: read-all
@@ -36,19 +40,23 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       # The viewer crates: the server side perfr links, the trace importers,
-      # the viewer core, and the eframe page (its tests run natively, no
-      # window). The service crates have their own jobs.
+      # the viewer core, and the two eframe pages built on it (their tests
+      # run natively, no window). The service crates have their own jobs.
       - name: Test the live-viewer crates
         run: >
           cargo test -p perfr-live-event -p perfr-live-ring -p perfr-live-protocol
           -p perfr-live-render -p perfr-live-server -p perfr-live-chrome
-          -p perfr-viewer -p perfr-live-viewer
+          -p perfr-viewer -p perfr-viewer-embed -p perfr-live-viewer
       - name: Compile eframe WebRunner for wasm32
         run: cargo build -p perfr-live-viewer --target wasm32-unknown-unknown
-      - name: Compile the slim viewer core for wasm32
-        run: cargo build -p perfr-viewer --target wasm32-unknown-unknown
-      - name: Viewer core does not depend on the capture pipeline
-        run: python3 crates/perfr-viewer/check_boundary.py
+      - name: Compile the slim embed for wasm32
+        run: cargo build -p perfr-viewer-embed --target wasm32-unknown-unknown
+      - name: Compile the slim embed with WebGL and the full fonts
+        run: >
+          cargo check -p perfr-viewer-embed --target wasm32-unknown-unknown
+          --features webgl,full-fonts
+      - name: Slim viewer does not depend on the capture pipeline or the full page
+        run: python3 .github/scripts/check-viewer-boundary.py
       - name: Compile benches
         run: cargo bench -p perfr-live-render -p perfr-live-ring --no-run
       # The complexity test is compiled out of debug (`cfg(not(debug_assertions))`).

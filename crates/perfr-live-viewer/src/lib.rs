@@ -154,3 +154,25 @@ pub async fn start_eframe(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsVa
         )
         .await
 }
+
+#[cfg(test)]
+mod page_tests {
+    #[test]
+    fn web_page_background_matches_the_default_canvas() {
+        // The HTML behind the canvas paints before wasm. It has to be the
+        // default canvas, or the first paint flashes another palette. The
+        // slim embed checks its own page in `perfr-viewer-embed`.
+        let html = include_str!("../viewer-dist/index.html");
+        let canvas = perfr_live_event::theme::default_theme().canvas;
+        let css = format!(
+            "#{:02X}{:02X}{:02X}",
+            (canvas >> 16) & 0xFF,
+            (canvas >> 8) & 0xFF,
+            canvas & 0xFF
+        );
+        assert!(
+            html.contains(&format!("background: {css};")),
+            "page background should be the default canvas {css}"
+        );
+    }
+}

@@ -22,28 +22,9 @@ pub fn percent_encode(s: &str) -> String {
     out
 }
 
-/// Undoes percent-encoding. The decoded bytes are read as UTF-8, so
-/// `%C3%A9` is one character; a `%` not followed by two hex digits stays as
-/// it is. Works on bytes throughout: slicing the text at `%` plus two could
-/// land inside a character and panic.
-pub fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
-            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
+// One copy, in the viewer core: the slim embed decodes its `?capture=` with
+// the same function.
+pub use perfr_viewer::url::percent_decode;
 
 /// A size in decimal units: `12.4 MB` is 12.4 million bytes. Under 1000
 /// bytes the unit is `B` with no decimal.

@@ -12,24 +12,23 @@
 //!   pixel-column raster and the instanced scope quads in `perfr-live-render`.
 //!
 //! `perfr-capture` and the service depend on the same format crates. This
-//! crate does not depend on them, and the slim wasm pack
-//! ([`build_wasm.sh`](../build_wasm.sh)) links only this crate. The full
-//! product UI lives in `perfr-live-viewer`, which depends on this crate and
-//! adds the service client, Chrome/Perfetto import, and the rest of the page.
+//! crate does not depend on them. It is a library with no wasm entry point
+//! of its own; two pages are built on it:
+//!
+//! * `perfr-live-viewer`, the full product UI: the service client,
+//!   Chrome/Perfetto import, and the rest of the page.
+//! * `perfr-viewer-embed`, the slim page that opens one `.perfr.stream` and
+//!   draws it. Its pack links this crate and none of the full page.
 
 pub mod dev;
 pub mod frames;
 pub mod open;
 pub mod tracks;
+pub mod url;
 
 #[cfg(feature = "egui")]
 pub mod theme;
 #[cfg(feature = "egui")]
 pub mod timeline;
 
-#[cfg(feature = "egui")]
-mod embed;
-#[cfg(feature = "egui")]
-pub use embed::CaptureViewer;
-#[cfg(feature = "egui")]
 pub use open::{open_capture, OpenedCapture};

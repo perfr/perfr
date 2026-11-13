@@ -3,21 +3,29 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Slim viewer-only wasm: the WebGPU timeline and the .perfr.stream parser.
-# Unlike crates/perfr-live-viewer/build_wasm.sh this does not enable wasm
-# threads (no nightly, no SharedArrayBuffer), so a blog page can embed the
-# pack without cross-origin isolation.
+# Slim viewer-only wasm: the embed page over the viewer core (the WebGPU
+# timeline and the .perfr.stream parser). Unlike
+# crates/perfr-live-viewer/build_wasm.sh this does not enable wasm threads
+# (no nightly, no SharedArrayBuffer), so a blog page can embed the pack
+# without cross-origin isolation.
 #
 # Profile `wasm-embed` (workspace Cargo.toml): opt-level z, fat LTO, one
 # codegen unit, symbol names stripped. The full page stays on profile `wasm`.
 # wasm-opt is not run: on this profile it shrinks the raw module and makes
-# gzip and brotli larger. WebGL is off (`--features webgl` puts it back).
-# The font is a Latin subset of Hack (`slim-fonts`, on by default).
+# gzip and brotli larger.
 #
-#   ./crates/perfr-viewer/build_wasm.sh
+#   ./crates/perfr-viewer-embed/build_wasm.sh [cargo build arguments]
 #
-# Writes crates/perfr-viewer/viewer-dist/ (gitignored). The service embeds
-# the full page from perfr-live-viewer/viewer-dist, not this pack.
+# The default pack draws with WebGPU only and carries a Latin subset of Hack.
+# A browser without a WebGPU adapter gets a sentence saying so. Arguments go
+# to `cargo build`, which is how the two larger variants are asked for:
+#
+#   --features webgl        link the GLES backend: the page then falls back to
+#                           WebGL without WebGPU, and `?webgl` asks for it
+#   --features full-fonts   egui's default fonts, for names outside Latin-1
+#
+# Writes crates/perfr-viewer-embed/viewer-dist/ (gitignored). The service
+# embeds the full page from perfr-live-viewer/viewer-dist, not this pack.
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -40,12 +48,13 @@ WORKSPACE="$(cd "$ROOT/../.." && pwd)"
 # Do not inherit the full viewer's atomics / shared-memory RUSTFLAGS.
 unset RUSTFLAGS || true
 
-echo "Building perfr-viewer (profile wasm-embed, no wasm-threads, no webgl)"
+echo "Building perfr-viewer-embed (profile wasm-embed, no wasm-threads) $*"
 cargo build \
   --manifest-path "$WORKSPACE/Cargo.toml" \
   --target wasm32-unknown-unknown \
   --profile wasm-embed \
-  -p perfr-viewer
+  -p perfr-viewer-embed \
+  "$@"
 
 OUT="$ROOT/viewer-dist"
 rm -rf "$OUT"
@@ -55,7 +64,7 @@ wasm-bindgen \
   --target web \
   --out-dir "$OUT" \
   --out-name perfr_viewer \
-  "$WORKSPACE/target/wasm32-unknown-unknown/wasm-embed/perfr_viewer.wasm"
+  "$WORKSPACE/target/wasm32-unknown-unknown/wasm-embed/perfr_viewer_embed.wasm"
 
 cp "$ROOT/embed.html" "$OUT/index.html"
 

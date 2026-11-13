@@ -74,7 +74,8 @@ The viewer and its server:
 | `perfr-live-chrome` | Import of Chrome Trace Event JSON and Perfetto proto traces into live events. |
 | `perfr-live-render` | The pixel-column rasterizer of the timeline. |
 | `perfr-live-viewer` | The full viewer page: service client, Chrome/Perfetto import, and the eframe shell around `perfr-viewer`. Compiled to WebAssembly by `build_wasm.sh`. The built pack is committed in `viewer-dist/` and embedded in the `perfr` binary. See its [README](perfr-live-viewer/README.md). |
-| `perfr-viewer` | Viewer core: the WebGPU timeline and the `.perfr.stream` parser. No dependency on the capture pipeline. `build_wasm.sh` produces the slim wasm pack for embedding a capture in a page. The capture crates depend on the format crates this one also uses, not the other way around. |
+| `perfr-viewer` | Viewer core, a library: the WebGPU timeline, the track rail and the `.perfr.stream` parser. No dependency on the capture pipeline. The capture crates depend on the format crates this one also uses, not the other way around. |
+| `perfr-viewer-embed` | The slim page for embedding a capture in another page: opens one `.perfr.stream` and draws it with `perfr-viewer`. `build_wasm.sh` produces its wasm pack. `perfr-live-viewer` does not depend on it, so the pack the service embeds carries none of it. |
 | `perfr-story` | The versioned story document (camera targets and overlays) shared by the viewer and the MCP server. |
 | `perfr-web` | The recorder behind `@perfr/web` (`web/perfr`): a ring of live events encoded as a `.perfr.stream`, compiled to WebAssembly for a page that profiles itself, with a C ABI for Emscripten and native callers. |
 
@@ -212,15 +213,15 @@ Two build targets:
 
 ```
 cargo build -p perfr                         # full service binary
-./crates/perfr-viewer/build_wasm.sh          # slim viewer-only wasm
+./crates/perfr-viewer-embed/build_wasm.sh    # slim viewer-only wasm
 ```
 
 The service embeds the full viewer page, which is a third artifact built
 with a nightly toolchain by `crates/perfr-live-viewer/build_wasm.sh`. A
 service build embeds whatever pack is in that crate's `viewer-dist/` at
 that moment. The slim pack is profile `wasm-embed` (opt-level `z`, fat LTO). It is only
-the viewer core (renderer and `.perfr.stream` parser) and is not embedded
-in the binary. The full page pack stays on profile `wasm`.
+the embed page and the viewer core (renderer and `.perfr.stream` parser) and
+is not embedded in the binary. The full page pack stays on profile `wasm`.
 
 ## History
 

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<!-- Copyright (c) 2026 The perfr Authors. All rights reserved.
+     Use of this source code is governed by a BSD-style license that can be
+     found in the LICENSE file. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>perfr capture</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #2E3440; overflow: hidden; }
+    canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+    #perfr-viewer-error {
+      margin: 0; padding: 16px; color: #D8DEE9;
+      font: 14px/1.5 system-ui, sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="perfr-viewer"></canvas>
+  <p id="perfr-viewer-error" role="alert" hidden></p>
+  <script type="module">
+    import init, { start_embed } from "./perfr_viewer.js";
+    const canvas = document.getElementById("perfr-viewer");
+    try {
+      await init();
+      await start_embed(canvas);
+    } catch (err) {
+      // The page could not start: no WebGPU adapter, or the pack did not
+      // load. Say so where the timeline would have been; an empty canvas
+      // reads as a capture with nothing in it.
+      console.error(err);
+      const box = document.getElementById("perfr-viewer-error");
+      box.textContent = typeof err === "string"
+        ? err
+        : `The viewer could not start: ${err?.message ?? err}`;
+      canvas.style.display = "none";
+      box.hidden = false;
+    }
+  </script>
+</body>
+</html>

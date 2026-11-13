@@ -11,11 +11,11 @@
 
 use std::collections::HashMap;
 
-use perfr_live_event::{InternTable, LiveEvent};
+use perfr_live_event::InternTable;
 use perfr_live_protocol::LiveFrame;
 use perfr_live_render::TrackIndex;
 
-use crate::frames::{drain_frames, end_of_stream, StreamFault};
+use crate::frames::{drain_frames, end_of_stream};
 
 /// What a capture file yielded. `fault` is set when the bytes stopped being
 /// a stream; events before that point are kept.
@@ -72,33 +72,25 @@ pub fn open_capture(bytes: &[u8]) -> OpenedCapture {
     opened
 }
 
-/// One scope, for tests and for anything building a stream by hand.
-pub fn scope(pid: u32, tid: u32, start_ns: u64, duration_ns: u64, name_id: u32) -> LiveEvent {
-    LiveEvent {
-        start_ns,
-        duration_ns,
-        tid,
-        pid,
-        kind: perfr_live_event::kind::API_SCOPE,
-        depth: 0,
-        extra: 0,
-        _pad: 0,
-        name_id,
-    }
-}
-
-/// The sentence a reader sees when `fault` is a [`StreamFault`]. Public so
-/// the page and the tests share it; `open_capture` already stores the file
-/// wording.
-pub fn fault_text(fault: &StreamFault) -> String {
-    fault.file_message()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perfr_live_event::LIVE_EVENT_SIZE;
+    use perfr_live_event::{LiveEvent, LIVE_EVENT_SIZE};
     use perfr_live_protocol::{encode_frame, LiveFrame, VERSION};
+
+    fn scope(pid: u32, tid: u32, start_ns: u64, duration_ns: u64, name_id: u32) -> LiveEvent {
+        LiveEvent {
+            start_ns,
+            duration_ns,
+            tid,
+            pid,
+            kind: perfr_live_event::kind::API_SCOPE,
+            depth: 0,
+            extra: 0,
+            _pad: 0,
+            name_id,
+        }
+    }
 
     fn hello() -> Vec<u8> {
         encode_frame(&LiveFrame::Hello {

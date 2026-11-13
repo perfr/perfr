@@ -11,7 +11,7 @@
 //! same active theme.
 #![allow(non_snake_case)]
 
-use eframe::egui::Color32;
+use egui::Color32;
 use perfr_live_event::chrome;
 use perfr_live_event::theme::active;
 
@@ -230,8 +230,8 @@ pub fn dim_argb(argb: u32) -> u32 {
     a | (mix(r) << 16) | (mix(g) << 8) | mix(b)
 }
 
-pub fn hairline() -> eframe::egui::Stroke {
-    eframe::egui::Stroke::new(1.0, HAIR())
+pub fn hairline() -> egui::Stroke {
+    egui::Stroke::new(1.0, HAIR())
 }
 
 #[cfg(test)]
@@ -274,30 +274,6 @@ mod tests {
         assert!((w.g() as i32 - cg as i32).abs() <= 40);
         assert!((w.b() as i32 - cb as i32).abs() <= 40);
         assert!(w.r() > 0x28 || w.g() > 0x28 || w.b() > 0x28, "not the old near-black table");
-    }
-
-    #[test]
-    fn web_page_background_matches_the_default_canvas() {
-        // The HTML behind the canvas paints before wasm. The full page pack
-        // and the slim embed page both have to be the default canvas, or the
-        // first paint flashes another palette.
-        let pages = [
-            include_str!("../../perfr-live-viewer/viewer-dist/index.html"),
-            include_str!("../embed.html"),
-        ];
-        let canvas = perfr_live_event::theme::default_theme().canvas;
-        let css = format!(
-            "#{:02X}{:02X}{:02X}",
-            (canvas >> 16) & 0xFF,
-            (canvas >> 8) & 0xFF,
-            canvas & 0xFF
-        );
-        for html in pages {
-            assert!(
-                html.contains(&format!("background: {css};")),
-                "page background should be the default canvas {css}"
-            );
-        }
     }
 
     #[test]

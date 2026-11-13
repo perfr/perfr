@@ -3222,14 +3222,26 @@ dependencies = [
 name = "perfr-viewer"
 version = "0.1.1"
 dependencies = [
+ "egui",
+ "egui-wgpu",
+ "perfr-live-event",
+ "perfr-live-protocol",
+ "perfr-live-render",
+ "web-sys",
+]
+
+[[package]]
+name = "perfr-viewer-embed"
+version = "0.1.1"
+dependencies = [
  "console_error_panic_hook",
  "eframe",
  "egui",
- "egui-wgpu",
  "js-sys",
  "perfr-live-event",
  "perfr-live-protocol",
  "perfr-live-render",
+ "perfr-viewer",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

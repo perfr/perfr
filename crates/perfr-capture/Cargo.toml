@@ -14,6 +14,9 @@ rust-version = "1.88"
 workspace = true
 
 [dependencies]
+# The viewer's event and stream format (`perfr-viewer` parses the same
+# crates). This crate must not be a dependency of those: the wasm viewer
+# does not link Arrow or Parquet, and the graph has no cycle.
 perfr-live-protocol = { path = "../perfr-live-protocol" }
 perfr-live-event = { path = "../perfr-live-event" }
 # Granular arrow crates, no compression features, so the service stays a pure

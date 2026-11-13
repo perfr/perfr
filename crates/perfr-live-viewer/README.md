@@ -266,24 +266,29 @@ CPU-prepare medians (this VM has no discrete GPU).
 
 ## Build
 
-The viewer is seven crates of the one Cargo workspace at the repository
-root:
+The viewer is eight crates of the one Cargo workspace at the repository
+root. `perfr-viewer` is the core (WebGPU timeline and `.perfr.stream`
+parser). This crate is the full page and depends on that core. The core
+does not depend on this crate, on the capture service, or on Chrome import.
 
 | Crates | Role | Built by |
 | --- | --- | --- |
 | `perfr-live-event`, `-ring`, `-protocol`, `-render`, `-server` | what the service links to serve the page | `cargo build -p perfr` |
-| `perfr-live-chrome` | Chrome JSON and Perfetto proto import | the viewer |
-| `perfr-live-viewer` | the wasm32 eframe front end | `./build_wasm.sh` |
+| `perfr-viewer` | WebGPU timeline and `.perfr.stream` parser | `../perfr-viewer/build_wasm.sh` (slim wasm) |
+| `perfr-live-chrome` | Chrome JSON and Perfetto proto import | the full page, not the slim wasm |
+| `perfr-live-viewer` | the full wasm32 eframe page | `./build_wasm.sh` |
 
-Only `perfr-live-viewer` depends on eframe / wgpu / winit (~200 crates), so a
-service build never compiles them.
+`perfr-viewer` and `perfr-live-viewer` are the crates that depend on
+eframe / wgpu / winit, so a service build never compiles them. The full
+`perfr` binary embeds the pack from `build_wasm.sh`; it does not link
+those crates.
 
 ### Native crates (tests + benches, no browser)
 
 ```
 cargo test -p perfr-live-event -p perfr-live-ring -p perfr-live-protocol \
            -p perfr-live-render -p perfr-live-server -p perfr-live-chrome \
-           -p perfr-live-viewer
+           -p perfr-viewer -p perfr-live-viewer
 cargo bench -p perfr-live-render -p perfr-live-ring
 ```
 
@@ -298,7 +303,19 @@ Needs `wasm32-unknown-unknown` and `wasm-bindgen-cli` matching `wasm-bindgen 0.2
 ./crates/perfr-live-viewer/build_wasm.sh
 ```
 
-This writes `viewer-dist/perfr_live_viewer.js` and `.wasm`, which are checked
+The slim embeddable pack (renderer and `.perfr.stream` parser, no service
+client and no Chrome/Perfetto import) is a separate target:
+
+```
+./crates/perfr-viewer/build_wasm.sh
+```
+
+That writes `crates/perfr-viewer/viewer-dist/` (gitignored). It uses the
+workspace `wasm` profile and does not enable wasm threads, so a page can
+embed it without cross-origin isolation. `?capture=<url>` fetches a
+`.perfr.stream`; `?webgl` selects WebGL instead of WebGPU.
+
+This full-page script writes `viewer-dist/perfr_live_viewer.js` and `.wasm`, which are checked
 in, and `viewer-dist/VERSION`: the commit, the date, the release tag and an id
 of the sources the pack was built from (`source_id.py`). `perfr-live-server`’s
 build script embeds whatever is in `viewer-dist/`, so rebuild `perfr`

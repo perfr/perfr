@@ -4,9 +4,11 @@
 
 # One workspace: the capture service and everything it is built from, the
 # browser viewer and its server, the instrumentation API, the test program.
-# `cargo build -p perfr` compiles only that graph, so the viewer's
-# eframe/wgpu tree never enters a service build; `cargo test --workspace`
-# covers all of it. crates/README.md describes the crates.
+# `cargo build -p perfr` compiles the full service (capture pipeline and the
+# viewer format crates it writes). The viewer's eframe/wgpu tree is
+# `perfr-viewer`, which the service does not link; `perfr-live-viewer` is
+# the full page and depends on that core. `cargo test --workspace` covers
+# all of it. crates/README.md describes the crates and the two build targets.
 #
 # https://perfr.dev/rust-port-plan.html is how the C++ service was ported, and
 # https://perfr.dev/blog/ the running write-up of what each step cost. Where
@@ -32,6 +34,7 @@ members = [
     "crates/perfr-live-ring",
     "crates/perfr-live-server",
     "crates/perfr-live-viewer",
+    "crates/perfr-viewer",
     "crates/perfr-story",
     "crates/perfr-maps",
     "crates/perfr-object",

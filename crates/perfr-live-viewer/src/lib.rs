@@ -28,7 +28,9 @@ mod logging;
 mod fonts;
 #[cfg(feature = "egui")]
 mod frame_marks;
-mod frames;
+// The stream assembler lives in the viewer core. This crate depends on that
+// core; the core does not depend on this crate.
+pub(crate) use perfr_viewer::frames;
 #[cfg(feature = "egui")]
 mod net;
 #[cfg(feature = "egui")]
@@ -48,11 +50,11 @@ mod share;
 mod story;
 mod self_pane;
 #[cfg(feature = "egui")]
-mod theme;
+pub(crate) use perfr_viewer::theme;
 #[cfg(feature = "egui")]
-mod timeline;
+pub(crate) use perfr_viewer::timeline;
 #[cfg(feature = "egui")]
-pub mod tracks;
+pub use perfr_viewer::tracks;
 #[cfg(feature = "egui")]
 mod vscroll;
 

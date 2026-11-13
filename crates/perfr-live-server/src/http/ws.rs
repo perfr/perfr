@@ -81,6 +81,33 @@ pub(super) async fn start_viewer(
     Some(rx)
 }
 
+/// About how large a message of live frames joined for a viewer that is
+/// behind is let grow. The viewer applies a message whole, so this is also
+/// the most one of its frames takes on at once.
+const BEHIND_MESSAGE_BYTES: usize = 1 << 20;
+
+/// `first` with every frame already waiting behind it, up to about
+/// [`BEHIND_MESSAGE_BYTES`], and how many frames the receiver was found to
+/// have missed, if it had.
+///
+/// A viewer that keeps up finds nothing waiting and gets `first` as it is.
+/// One that is behind gets what piled up as one message. Sent one frame to
+/// a message, the backlog did not shrink: a page whose frames run long is
+/// handed a message or a few between two of them, however many are queued,
+/// so it took the stream in at a fraction of the rate it was produced and
+/// fell further behind for as long as the capture ran.
+pub(super) fn with_backlog(first: Vec<u8>, rx: &mut broadcast::Receiver<Vec<u8>>) -> (Vec<u8>, Option<u64>) {
+    let mut message = first;
+    while message.len() < BEHIND_MESSAGE_BYTES {
+        match rx.try_recv() {
+            Ok(frame) => message.extend_from_slice(&frame),
+            Err(broadcast::error::TryRecvError::Lagged(skipped)) => return (message, Some(skipped)),
+            Err(_) => break,
+        }
+    }
+    (message, None)
+}
+
 pub(super) async fn ws_loop(socket: WebSocket, svc: Arc<LiveService>) {
     let (mut sink, mut stream) = socket.split();
     let Some(mut rx) = start_viewer(&svc, &mut sink).await else {
@@ -100,64 +127,119 @@ pub(super) async fn ws_loop(socket: WebSocket, svc: Arc<LiveService>) {
                 }
             }
             live = rx.recv() => {
-                match live {
+                let lagged = match live {
                     Ok(bytes) => {
-                        if !send_frame(&mut sink, bytes).await {
+                        let (message, lagged) = with_backlog(bytes, &mut rx);
+                        if !send_frame(&mut sink, message).await {
                             break;
                         }
+                        lagged
                     }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        if svc.is_live_capture() {
-                            // A viewer that cannot keep up with a live
-                            // capture goes on with a gap. It gets the names
-                            // and strings again, since a name it missed
-                            // would leave a track unlabelled for good; the
-                            // events it missed stay in the ring for the
-                            // report and the export. Starting it over with
-                            // the whole ring instead (below) took longer
-                            // than the slack it had, so it lagged again
-                            // before the snapshot was through and again
-                            // after that: the view reset every few seconds
-                            // to the start of the capture and never reached
-                            // the present.
-                            if !lag_reported {
-                                lag_reported = true;
-                                eprintln!(
-                                    "perfr-live-server: a viewer fell {skipped} frame(s) behind the live capture; \
-                                     it continues with a gap"
-                                );
-                            }
-                            for message in crate::join_frames(svc.names_and_status_frames()) {
-                                if !send_frame(&mut sink, message).await {
-                                    return;
-                                }
-                            }
-                            continue;
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => Some(skipped),
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                if let Some(skipped) = lagged {
+                    if svc.is_live_capture() {
+                        // A viewer that cannot keep up with a live
+                        // capture goes on with a gap. It gets the names
+                        // and strings again, since a name it missed
+                        // would leave a track unlabelled for good; the
+                        // events it missed stay in the ring for the
+                        // report and the export. Starting it over with
+                        // the whole ring instead (below) took longer
+                        // than the slack it had, so it lagged again
+                        // before the snapshot was through and again
+                        // after that: the view reset every few seconds
+                        // to the start of the capture and never reached
+                        // the present.
+                        if !lag_reported {
+                            lag_reported = true;
+                            eprintln!(
+                                "perfr-live-server: a viewer fell {skipped} frame(s) behind the live capture; \
+                                 it continues with a gap"
+                            );
                         }
-                        // Otherwise the burst is finite -- opening a
-                        // capture posts its names and batches all at once
-                        // -- and rather than leave the viewer with holes it
-                        // cannot see, start it over: a fresh Hello plus the
-                        // whole ring, which the viewer takes as a reset.
-                        // That holds while the capture is still being read
-                        // back, too: it counts as capturing, and a viewer
-                        // sent on with a gap then kept the gap, since
-                        // nothing lags once the burst is over.
-                        //
-                        // The subscription is replaced along with the
-                        // snapshot. The frames still queued in the old one
-                        // carry events the ring, and so the snapshot,
-                        // already holds: sent after it, they showed every
-                        // event of the capture's tail twice.
-                        match start_viewer(&svc, &mut sink).await {
-                            Some(fresh) => rx = fresh,
-                            None => return,
+                        for message in crate::join_frames(svc.names_and_status_frames()) {
+                            if !send_frame(&mut sink, message).await {
+                                return;
+                            }
                         }
                         continue;
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    // Otherwise the burst is finite -- opening a
+                    // capture posts its names and batches all at once
+                    // -- and rather than leave the viewer with holes it
+                    // cannot see, start it over: a fresh Hello plus the
+                    // whole ring, which the viewer takes as a reset.
+                    // That holds while the capture is still being read
+                    // back, too: it counts as capturing, and a viewer
+                    // sent on with a gap then kept the gap, since
+                    // nothing lags once the burst is over.
+                    //
+                    // The subscription is replaced along with the
+                    // snapshot. The frames still queued in the old one
+                    // carry events the ring, and so the snapshot,
+                    // already holds: sent after it, they showed every
+                    // event of the capture's tail twice.
+                    match start_viewer(&svc, &mut sink).await {
+                        Some(fresh) => rx = fresh,
+                        None => return,
+                    }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_viewer_that_keeps_up_gets_each_frame_as_it_is() {
+        let (tx, mut rx) = broadcast::channel::<Vec<u8>>(8);
+        tx.send(vec![1, 2, 3]).expect("a receiver");
+        let first = rx.try_recv().expect("the frame");
+        assert_eq!(with_backlog(first, &mut rx), (vec![1, 2, 3], None));
+    }
+
+    #[test]
+    fn a_viewer_that_is_behind_gets_what_piled_up_as_one_message() {
+        let (tx, mut rx) = broadcast::channel::<Vec<u8>>(64);
+        for i in 0..5u8 {
+            tx.send(vec![i; 4]).expect("a receiver");
+        }
+        let first = rx.try_recv().expect("the first frame");
+        let (message, lagged) = with_backlog(first, &mut rx);
+        assert_eq!(lagged, None);
+        assert_eq!(message.len(), 20, "all five, back to back");
+        assert_eq!(&message[16..], [4; 4], "in order");
+        assert!(rx.try_recv().is_err(), "nothing is left queued");
+    }
+
+    #[test]
+    fn a_joined_message_stops_growing_at_about_its_limit() {
+        let (tx, mut rx) = broadcast::channel::<Vec<u8>>(64);
+        for _ in 0..6 {
+            tx.send(vec![0u8; BEHIND_MESSAGE_BYTES / 2]).expect("a receiver");
+        }
+        let first = rx.try_recv().expect("the first frame");
+        let (message, _) = with_backlog(first, &mut rx);
+        assert_eq!(message.len(), BEHIND_MESSAGE_BYTES, "two halves reach the limit");
+        assert_eq!(rx.len(), 4, "the rest waits for the next message");
+    }
+
+    #[test]
+    fn frames_the_receiver_missed_are_reported_with_what_was_joined() {
+        let (tx, mut rx) = broadcast::channel::<Vec<u8>>(4);
+        tx.send(vec![9]).expect("a receiver");
+        let first = rx.try_recv().expect("the first frame");
+        // Six more into a channel of four: two are gone before they are read.
+        for i in 0..6u8 {
+            tx.send(vec![i]).expect("a receiver");
+        }
+        let (message, lagged) = with_backlog(first, &mut rx);
+        assert_eq!(message, [9], "nothing after the gap is joined across it");
+        assert_eq!(lagged, Some(2));
     }
 }

@@ -311,9 +311,11 @@ client and no Chrome/Perfetto import) is a separate target:
 ```
 
 That writes `crates/perfr-viewer/viewer-dist/` (gitignored). It uses the
-workspace `wasm` profile and does not enable wasm threads, so a page can
-embed it without cross-origin isolation. `?capture=<url>` fetches a
-`.perfr.stream`; `?webgl` selects WebGL instead of WebGPU.
+workspace `wasm-embed` profile (opt-level `z`, fat LTO, one codegen unit,
+symbol names stripped) and does not enable wasm threads, so a page can
+embed it without cross-origin isolation. The font is a Latin subset of
+Hack, and the GLES backend is not linked. `?capture=<url>` fetches a
+`.perfr.stream`. `--features webgl` puts the `?webgl` fallback back.
 
 This full-page script writes `viewer-dist/perfr_live_viewer.js` and `.wasm`, which are checked
 in, and `viewer-dist/VERSION`: the commit, the date, the release tag and an id

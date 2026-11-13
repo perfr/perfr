@@ -218,8 +218,9 @@ cargo build -p perfr                         # full service binary
 The service embeds the full viewer page, which is a third artifact built
 with a nightly toolchain by `crates/perfr-live-viewer/build_wasm.sh`. A
 service build embeds whatever pack is in that crate's `viewer-dist/` at
-that moment. The slim pack is only the viewer core (renderer and
-`.perfr.stream` parser) and is not embedded in the binary.
+that moment. The slim pack is profile `wasm-embed` (opt-level `z`, fat LTO). It is only
+the viewer core (renderer and `.perfr.stream` parser) and is not embedded
+in the binary. The full page pack stays on profile `wasm`.
 
 ## History
 

@@ -124,3 +124,12 @@ lto = false
 codegen-units = 16
 debug = false
 panic = "abort"
+
+# Slim embed only (`crates/perfr-viewer/build_wasm.sh`). The full page pack
+# stays on `wasm` above. Native release is untouched, including `strip = "none"`.
+[profile.wasm-embed]
+inherits = "wasm"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

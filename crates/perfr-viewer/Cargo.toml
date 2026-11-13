@@ -24,28 +24,38 @@ workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["egui"]
+default = ["egui", "slim-fonts"]
 egui = ["dep:eframe", "dep:egui", "dep:egui-wgpu"]
+# Latin subset of Hack instead of egui's four default fonts. The full page
+# leaves this off and keeps eframe `default_fonts`.
+slim-fonts = []
+# GLES backend, so `?webgl` works. Off in the slim pack; turn it on with
+# `--features webgl`. The full page enables WebGL on its own wgpu dependency.
+webgl = ["wgpu/webgl"]
 
 [dependencies]
 perfr-live-event = { path = "../perfr-live-event" }
 perfr-live-protocol = { path = "../perfr-live-protocol" }
 perfr-live-render = { path = "../perfr-live-render" }
-eframe = { version = "0.32.3", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"], optional = true }
-egui = { version = "0.32.3", optional = true }
+# default-features off so the slim wasm does not embed egui's four fonts.
+# Native builds turn them back on through eframe's `default_fonts` feature.
+# The full page depends on egui with its defaults, so its pack is unchanged.
+egui = { version = "0.32.3", default-features = false, optional = true }
 egui-wgpu = { version = "0.32.3", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 perfr-live-render = { path = "../perfr-live-render", features = ["parallel"] }
+eframe = { version = "0.32.3", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 perfr-live-render = { path = "../perfr-live-render" }
+eframe = { version = "0.32.3", default-features = false, features = ["wgpu"], optional = true }
 wasm-bindgen = "=0.2.100"
 js-sys = "=0.3.77"
 wasm-bindgen-futures = "=0.4.50"
 console_error_panic_hook = "0.1"
-# WebGPU first. `?webgl` on the page selects the GL backend instead.
-wgpu = { version = "25", default-features = false, features = ["webgpu", "webgl", "wgsl"] }
+# WebGPU, not WebGL. `webgl` above adds the GLES backend.
+wgpu = { version = "25", default-features = false, features = ["webgpu", "wgsl"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
 version = "0.3"

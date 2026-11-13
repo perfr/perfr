@@ -91,19 +91,63 @@ say "installing perfr ${VERSION} for ${os}/${arch}"
 say "from ${url}"
 
 # --- pick a downloader -------------------------------------------------------
+# fetch_once <url> <file> returns 0 when the file arrived, 1 when the server
+# says it is not there, and 2 when the transfer broke and may work if tried
+# again. curl gives up on a transfer that stays under 10 kB/s for 30 seconds
+# and wget on one that is silent for 30. Without that a stalled download
+# hangs with nothing on the screen.
 if have curl; then
-    fetch() { curl -fsSL "$1" -o "$2"; }
+    fetch_once() {
+        once_rc=0
+        once_code=$(curl -fsSL --connect-timeout 30 --speed-limit 10000 --speed-time 30 \
+            -w '%{http_code}' "$1" -o "$2") || once_rc=$?
+        if [ "$once_rc" -eq 0 ]; then return 0; fi
+        # Exit 37 is a file:// URL with no file behind it.
+        if [ "$once_code" = 404 ] || [ "$once_rc" -eq 37 ]; then return 1; fi
+        return 2
+    }
 elif have wget; then
-    fetch() { wget -qO "$2" "$1"; }
+    fetch_once() {
+        once_rc=0
+        wget -q -t 1 -T 30 -O "$2" "$1" || once_rc=$?
+        if [ "$once_rc" -eq 0 ]; then return 0; fi
+        # GNU wget exits 8 when the server answers with an error. BusyBox wget
+        # exits 1 whatever went wrong, so there a 404 is tried again as well.
+        if [ "$once_rc" -eq 8 ]; then return 1; fi
+        return 2
+    }
 else
     die "need curl or wget to download"
 fi
+
+# fetch <url> <file>: fetch_once, up to three times while the transfer breaks.
+# Returns what the last fetch_once returned.
+fetch() {
+    attempt=1
+    while :; do
+        fetch_rc=0
+        fetch_once "$1" "$2" || fetch_rc=$?
+        if [ "$fetch_rc" -ne 2 ] || [ "$attempt" -ge 3 ]; then
+            return "$fetch_rc"
+        fi
+        attempt=$((attempt + 1))
+        say "the download broke off, trying again ($attempt of 3)"
+        sleep 2
+    done
+}
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/perfr-install.XXXXXX") || die "cannot make a temp dir"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 archive="$tmp/$asset"
-if ! fetch "$url" "$archive"; then
+status=0
+fetch "$url" "$archive" || status=$?
+if [ "$status" -eq 2 ]; then
+    die "download failed: ${url}
+
+The transfer broke off three times. The last error is above. This is the
+network or the server, not a missing release. Run the installer again."
+elif [ "$status" -ne 0 ]; then
     die "download failed: ${url}
 
 No Rust release is published at that URL yet, or this platform's archive is missing.
@@ -120,7 +164,13 @@ Or set PERFR_INSTALL_BASE to a URL prefix that already serves the files."
 fi
 
 # --- checksum is required ----------------------------------------------------
-if ! fetch "${url}.sha256" "$tmp/sum"; then
+status=0
+fetch "${url}.sha256" "$tmp/sum" || status=$?
+if [ "$status" -eq 2 ]; then
+    die "could not download ${url}.sha256
+The transfer broke off three times. The last error is above.
+Refusing to install an unverified binary. Run the installer again."
+elif [ "$status" -ne 0 ]; then
     die "no checksum at ${url}.sha256
 Refusing to install an unverified binary."
 fi

@@ -82,6 +82,58 @@ output=$(HOME="$TMP/no" PERFR_INSTALL_BASE="file://$TMP/nosum" PERFR_INSTALL_DIR
 [ "$status" -ne 0 ] || fail "an unverified archive was accepted"
 [ ! -e "$TMP/no/bin" ] || fail "something was installed without a checksum"
 
+it "an archive that is not there is reported as a missing release"
+mkdir -p "$TMP/empty"
+status=0
+output=$(HOME="$TMP/none" PERFR_INSTALL_BASE="file://$TMP/empty" PERFR_INSTALL_DIR="$TMP/none/bin" \
+  sh <"$INSTALL" 2>&1) || status=$?
+[ "$status" -ne 0 ] || fail "an archive that does not exist was installed"
+case "$output" in *"No Rust release"*) ;; *) fail "no missing-release message"$'\n'"$output" ;; esac
+case "$output" in *"trying again"*) fail "a missing archive was tried again"$'\n'"$output" ;; esac
+
+# A curl that fails its first FAKE_CURL_FAILS calls the way a reset connection
+# does and is the real curl after that, and a sleep that does not wait.
+REAL_CURL=$(command -v curl)
+mkdir -p "$TMP/fakebin"
+cat >"$TMP/fakebin/curl" <<'FAKE'
+#!/bin/sh
+n=$(cat "$FAKE_CURL_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" >"$FAKE_CURL_COUNT"
+if [ "$n" -le "$FAKE_CURL_FAILS" ]; then
+  echo 'curl: (56) Recv failure: Connection reset by peer' >&2
+  exit 56
+fi
+exec "$REAL_CURL" "$@"
+FAKE
+printf '#!/bin/sh\nexit 0\n' >"$TMP/fakebin/sleep"
+chmod +x "$TMP/fakebin/curl" "$TMP/fakebin/sleep"
+
+# run_flaky <fails> <prefix>: an install where curl breaks off <fails> times.
+run_flaky() {
+  local fails=$1 prefix=$2
+  rm -f "$TMP/curl-count"
+  status=0
+  output=$(HOME="$prefix" PERFR_INSTALL_BASE="file://$SITE" PERFR_INSTALL_DIR="$prefix/bin" \
+    PATH="$TMP/fakebin:$PATH" REAL_CURL="$REAL_CURL" \
+    FAKE_CURL_COUNT="$TMP/curl-count" FAKE_CURL_FAILS="$fails" \
+    sh <"$INSTALL" 2>&1) || status=$?
+}
+
+it "a download that breaks off is tried again"
+run_flaky 2 "$TMP/flaky"
+[ "$status" -eq 0 ] || fail "install exited $status after two broken transfers"$'\n'"$output"
+case "$output" in *"trying again (3 of 3)"*) ;; *) fail "no retry message"$'\n'"$output" ;; esac
+[ -x "$TMP/flaky/bin/perfr" ] || fail "perfr was not installed after the retries"
+
+it "a download that keeps breaking off is not reported as a missing release"
+run_flaky 3 "$TMP/broken"
+[ "$status" -ne 0 ] || fail "three broken transfers were accepted"
+[ "$(cat "$TMP/curl-count")" -eq 3 ] || fail "curl ran $(cat "$TMP/curl-count") times, not 3"
+case "$output" in *"No Rust release"*) fail "a broken transfer was called a missing release"$'\n'"$output" ;; esac
+case "$output" in *"Run the installer again"*) ;; *) fail "no advice to run it again"$'\n'"$output" ;; esac
+[ ! -e "$TMP/broken/bin" ] || fail "something was installed from a broken transfer"
+
 # `curl | sh` hands the shell whatever arrived. A script the shell runs
 # line by line would, cut in the wrong place, install the service and stop
 # before the library it must match.

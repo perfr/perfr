@@ -208,6 +208,7 @@ impl TimelinePayload {
                         early_out: true,
                         inline: false,
                         per_lane_spans: dev.is_active(),
+                        ..CollectOpts::default()
                     },
                 );
                 for inst in &mut frame.instances {
@@ -1018,36 +1019,37 @@ impl TimelineGpu {
         instances: &[ScopeInstance],
         layer: TimelineLayer,
     ) {
-        let bytes = pack_instances(instances);
-        let need = bytes.len() as u64;
+        let need = instances.len() as u64 * INSTANCE_STRIDE;
         let slot = self.layer_mut(layer);
         slot.instance_count = instances.len() as u32;
-        if bytes.is_empty() {
+        let Some(size) = std::num::NonZeroU64::new(need) else {
             slot.instance_buf = None;
             slot.instance_cap = 0;
             record_instance_upload(0, 0);
             return;
+        };
+        if slot.instance_buf.is_none() || slot.instance_cap < need {
+            let cap = need.next_multiple_of(256).max(need.saturating_mul(3) / 2);
+            slot.instance_buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("perfr-instances"),
+                size: cap,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            slot.instance_cap = cap;
         }
-        if let Some(buf) = &slot.instance_buf {
-            if slot.instance_cap >= need {
-                let t0 = upload_clock_ns();
-                queue.write_buffer(buf, 0, &bytes);
-                record_instance_upload(upload_clock_ns().saturating_sub(t0), need);
-                return;
-            }
-        }
-        let cap = need.next_multiple_of(256).max(need.saturating_mul(3) / 2);
-        let buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("perfr-instances"),
-            size: cap,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let Some(buf) = &slot.instance_buf else {
+            return;
+        };
         let t0 = upload_clock_ns();
-        queue.write_buffer(&buf, 0, &bytes);
+        // Packed where the queue will send it from. Packing into a vector
+        // of its own first and handing that over was the frame's instances
+        // written twice, and a live frame writes all of them.
+        match queue.write_buffer_with(buf, 0, size) {
+            Some(mut staging) => pack_instances_into(instances, &mut staging),
+            None => queue.write_buffer(buf, 0, &pack_instances(instances)),
+        }
         record_instance_upload(upload_clock_ns().saturating_sub(t0), need);
-        slot.instance_cap = cap;
-        slot.instance_buf = Some(buf);
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'static>, layer: TimelineLayer) {
@@ -1112,27 +1114,25 @@ pub fn pack_inst_uniforms(viewport: [f32; 2], origin: [f32; 2], time: f32) -> [u
 }
 
 pub fn pack_instances(instances: &[ScopeInstance]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(instances.len() * INSTANCE_STRIDE as usize);
-    for i in instances {
-        bytes.extend_from_slice(&i.x.to_le_bytes());
-        bytes.extend_from_slice(&i.y.to_le_bytes());
-        bytes.extend_from_slice(&i.w.to_le_bytes());
-        bytes.extend_from_slice(&i.h.to_le_bytes());
-        let color = crate::theme::display_argb(i.color);
-        let r = ((color >> 16) & 0xFF) as f32 / 255.0;
-        let g = ((color >> 8) & 0xFF) as f32 / 255.0;
-        let b = (color & 0xFF) as f32 / 255.0;
-        let a = ((i.color >> 24) & 0xFF) as f32 / 255.0;
-        bytes.extend_from_slice(&r.to_le_bytes());
-        bytes.extend_from_slice(&g.to_le_bytes());
-        bytes.extend_from_slice(&b.to_le_bytes());
-        bytes.extend_from_slice(&a.to_le_bytes());
-        bytes.extend_from_slice(&i.radius.to_le_bytes());
-        bytes.extend_from_slice(&i.flags.to_le_bytes());
-        bytes.extend_from_slice(&0f32.to_le_bytes());
-        bytes.extend_from_slice(&0f32.to_le_bytes());
-    }
+    let mut bytes = vec![0u8; instances.len() * INSTANCE_STRIDE as usize];
+    pack_instances_into(instances, &mut bytes);
     bytes
+}
+
+/// Writes the instances' vertex records into `out`, [`INSTANCE_STRIDE`]
+/// bytes each: as many as fit. `out` is only written, never read: it may be
+/// the queue's staging memory.
+pub fn pack_instances_into(instances: &[ScopeInstance], out: &mut [u8]) {
+    for (i, record) in instances.iter().zip(out.chunks_exact_mut(INSTANCE_STRIDE as usize)) {
+        let color = crate::theme::display_argb(i.color);
+        let channel = |shift: u32| ((color >> shift) & 0xFF) as f32 / 255.0;
+        let alpha = ((i.color >> 24) & 0xFF) as f32 / 255.0;
+        let fields: [f32; 12] =
+            [i.x, i.y, i.w, i.h, channel(16), channel(8), channel(0), alpha, i.radius, i.flags, 0.0, 0.0];
+        for (bytes, field) in record.chunks_exact_mut(4).zip(fields) {
+            bytes.copy_from_slice(&field.to_le_bytes());
+        }
+    }
 }
 
 #[cfg(test)]

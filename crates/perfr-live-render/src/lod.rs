@@ -8,9 +8,8 @@
 use perfr_live_event::{kind, InternTable, LaneKey, LiveEvent};
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use crate::{par, Lane, TrackIndex};
+use crate::{event_span_ns, gallop, par, Lane, TrackIndex};
 
 pub const INSTANCE_MIN_PX: f32 = 4.0;
 /// Extra stack pixels above/below the clip so scroll does not pop lanes.
@@ -65,6 +64,17 @@ pub struct CollectOpts {
     /// clock reads per lane, so it is only set when the Self pane is open to
     /// show which lane was slow.
     pub per_lane_spans: bool,
+    /// One instance for a run of events that are each under a pixel wide
+    /// and start in the same pixel column, instead of one each. It carries
+    /// the identity and colour of the longest of them, which is the event
+    /// the pixel-column LOD gives that column to.
+    ///
+    /// Off, every event in the window is an instance. That is what the
+    /// listing did, and on a live capture of a busy process it was the
+    /// frame: a view goes instanced as soon as one scope in it is a few
+    /// pixels wide, and the other half a million events in the window, all
+    /// far under a pixel, were each listed, sorted and uploaded every frame.
+    pub merge_subpixel: bool,
 }
 
 impl Default for CollectOpts {
@@ -74,6 +84,7 @@ impl Default for CollectOpts {
             early_out: true,
             inline: false,
             per_lane_spans: false,
+            merge_subpixel: true,
         }
     }
 }
@@ -266,31 +277,68 @@ pub struct InstanceFrame {
     pub lanes_kept: u32,
     /// Lanes whose row came out of the [`ListingCache`] instead of a walk.
     pub lanes_reused: u32,
+    /// Lanes whose cached row was kept, where it was or moved along with
+    /// the window, and only the events that arrived since were walked.
+    pub lanes_extended: u32,
 }
 
-/// What one lane's listing depended on. Same key, same instances.
+/// What one lane's listing depended on besides the lane's own events. Same
+/// key and same events, same instances.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RowKey {
-    lane_gen: u64,
-    version: u64,
     t0: u64,
     t1: u64,
     width_bits: u32,
+    /// [`InternTable::color_epoch`]: the colours of names that were known.
+    names: (u64, u64),
+    merge: bool,
+}
+
+/// The lane as a row was listed from it.
+#[derive(Clone, Copy, Debug)]
+struct RowState {
+    lane: u64,
+    version: u64,
+    reshaped: u64,
+    /// The event the row's last instance begins at, and that instance's
+    /// place in the row. Everything before it is final while the lane only
+    /// gains events at its end; the last instance is not, since an event
+    /// that arrives next may start in the same pixel column and join it.
+    /// `None` for a row that is listed whole every time: an empty one, or
+    /// one whose instances are not in the order of the events.
+    resume: Option<(usize, usize)>,
+    /// The size of the name table, when the row holds an event whose name
+    /// the table did not have yet. Such a row is good until a name arrives,
+    /// which may be the one it is waiting for.
+    unnamed_at: Option<usize>,
+}
+
+struct CachedRow {
+    key: RowKey,
+    state: RowState,
+    /// Where the row was listed. Not part of the key: a lane appearing
+    /// above moves every row below it, which a live capture does many times
+    /// a second while threads and stack depths are still turning up, and a
+    /// row that only moved is the same row at another height.
     y_bits: u32,
-    intern_len: usize,
+    row: Vec<ScopeInstance>,
+    /// The [`ListingCache::frame`] that last listed or reused the row.
+    seen: u64,
 }
 
 /// Per-lane listing rows from the previous frame (TODO item 21). During a
-/// live capture with the window still -- Follow off, or the capture paused
-/// in view -- only the lanes that received events since the last frame
-/// change; the rest of the frame is the same rows again. The walk reuses
-/// them: a lane whose events, window, width and y are unchanged hands back
-/// the row it produced last time, and only the changed lanes are walked.
-/// A moving window (Follow) keys every row anew, so nothing is reused and
-/// nothing is lost: the cost is one hash probe per lane.
+/// live capture the listing window holds still for many frames -- Follow
+/// lists a window wider than the view and pans inside it -- and what changes
+/// from one frame to the next is the handful of events each lane received.
+/// A lane whose events, window, width and y are unchanged hands back the row
+/// it produced last time. One that only gained events at its end keeps its
+/// row and walks the new events alone. Only a lane that changed some other
+/// way, or a window that moved, is listed from the start.
 #[derive(Default)]
 pub struct ListingCache {
-    rows: HashMap<LaneKey, (RowKey, Arc<Vec<ScopeInstance>>)>,
+    rows: HashMap<LaneKey, CachedRow>,
+    /// Counts the listings, so the rows the last one did not touch can go.
+    frame: u64,
 }
 
 impl ListingCache {
@@ -308,8 +356,81 @@ impl ListingCache {
 }
 
 enum Row {
-    Reused(Arc<Vec<ScopeInstance>>),
-    Fresh(Vec<ScopeInstance>),
+    /// Culled, absent from the index, or a lane that draws no instances.
+    Skipped,
+    /// The cached row stands as it is, `len` instances.
+    Reused { len: usize },
+    /// The cached row's first `keep` instances stand; `tail` follows them.
+    Extended { keep: usize, tail: Vec<ScopeInstance>, state: RowState },
+    /// The cached row moved to a window that starts a whole number of
+    /// pixel columns later, and listed on from where it ended.
+    Slid { row: Vec<ScopeInstance>, state: RowState },
+    Fresh { row: Vec<ScopeInstance>, state: RowState },
+}
+
+impl Row {
+    fn len(&self) -> usize {
+        match self {
+            Row::Skipped => 0,
+            Row::Reused { len } => *len,
+            Row::Extended { keep, tail, .. } => keep + tail.len(),
+            Row::Slid { row, .. } | Row::Fresh { row, .. } => row.len(),
+        }
+    }
+}
+
+/// How many whole pixel columns later `to`'s window starts than `from`'s,
+/// when that is all the two differ by: the same span over the same width,
+/// begun a whole number of columns on and before the old window's end.
+///
+/// A view that follows a live capture is listed for a window somewhat wider
+/// than itself and panned inside it; when it reaches the window's end the
+/// next window is this one, the last moved along. The instances a row holds
+/// are then the same instances that many pixels to the left.
+fn window_slide(from: &RowKey, to: &RowKey) -> Option<u32> {
+    let same_scale = from.width_bits == to.width_bits
+        && from.t1.saturating_sub(from.t0) == to.t1.saturating_sub(to.t0)
+        && from.names == to.names
+        && from.merge == to.merge;
+    if !same_scale || to.t0 <= from.t0 || to.t0 >= from.t1 {
+        return None;
+    }
+    let ns_per_px = (to.t1 - to.t0) as f64 / f32::from_bits(to.width_bits) as f64;
+    let shift = (to.t0 - from.t0) as f64;
+    let columns = (shift / ns_per_px).round();
+    // To the nanosecond the window's start was rounded to.
+    (columns >= 1.0 && (columns * ns_per_px - shift).abs() <= 1.0).then_some(columns as u32)
+}
+
+/// `row` as it stands in a window that starts `columns` pixels later: what
+/// has left the window dropped, the rest moved left. `width` is the
+/// window's. `None` when an instance was cut short at the old window's end
+/// and so is not what the new window would list.
+fn slide_row(row: &[ScopeInstance], columns: u32, width: f32, y: f32) -> Option<Vec<ScopeInstance>> {
+    if row.last().is_some_and(|last| last.x + last.w >= width - 0.5) {
+        return None;
+    }
+    let dx = columns as f32;
+    // Starts are in order and so are ends, in a row listed by column.
+    let gone = row.partition_point(|i| i.x + i.w <= dx);
+    Some(
+        row[gone..]
+            .iter()
+            .map(|i| {
+                let x = (i.x - dx).max(0.0);
+                ScopeInstance { x, w: (i.x + i.w - dx - x).max(1.0), y, ..*i }
+            })
+            .collect(),
+    )
+}
+
+/// The window a listing is for, and how much time one pixel of it holds.
+struct ListWindow {
+    t0: u64,
+    t1: u64,
+    span: f64,
+    width: f32,
+    ns_per_px: f64,
 }
 
 pub fn lane_height(key: LaneKey) -> f32 {
@@ -821,60 +942,81 @@ pub fn collect_instances_cached(
             worker_spans: Vec::new(),
             lanes_kept: 0,
             lanes_reused: 0,
+            lanes_extended: 0,
         };
     }
     let span = (t1 - t0) as f64;
+    let win = ListWindow { t0, t1, span, width, ns_per_px: span / width as f64 };
+    let merge = opts.merge_subpixel;
     let now = perfr_live_event::dev::now_ns;
     let mut timing = ListingTiming { dispatch_t0_ns: now(), ..ListingTiming::default() };
-    let lane_gen = index.lane_gen();
     let intern_len = intern.map(InternTable::len).unwrap_or(0);
-    let row_key = |y: f32, lane: &Lane| RowKey {
-        lane_gen,
-        version: lane.version(),
-        t0,
-        t1,
-        width_bits: width.to_bits(),
-        y_bits: y.to_bits(),
-        intern_len,
-    };
+    let names = intern.map(InternTable::color_epoch).unwrap_or_default();
+    let row_key = RowKey { t0, t1, width_bits: width.to_bits(), names, merge };
     // The walk reads the cache; the writes wait until it is over.
     let reads: Option<&ListingCache> = cache.as_deref();
     let walk = |&(key, y): &(LaneKey, f32)| {
         if key.kind == kind::VALUE {
-            return Row::Fresh(Vec::new());
+            return Row::Skipped;
         }
         let h = lane_height(key);
         if let Some(cull) = opts.y_cull {
             if !cull.hits(y, h + lane_gap(key)) {
-                return Row::Fresh(Vec::new());
+                return Row::Skipped;
+            }
+        }
+        let Some(lane) = index.lane(key) else {
+            return Row::Skipped;
+        };
+        let state = |resume, unnamed: bool| RowState {
+            lane: lane.id(),
+            version: lane.version(),
+            reshaped: lane.reshaped(),
+            resume,
+            unnamed_at: unnamed.then_some(intern_len),
+        };
+        // A row listed column by column is in the order of the events and
+        // can be picked up again where it ended.
+        let by_column = merge && lane.ends_sorted();
+        let cached = reads
+            .and_then(|c| c.rows.get(&key))
+            .filter(|c| c.state.lane == lane.id() && c.state.unnamed_at.is_none_or(|len| len == intern_len));
+        // The window moved along by whole columns under a lane that only
+        // gained events: the row's instances move with it, all but the last,
+        // which is listed again along with what is new.
+        if let Some((cached, (event, at))) = cached
+            .filter(|c| by_column && c.state.reshaped == lane.reshaped())
+            .and_then(|c| Some((c, c.state.resume?)))
+        {
+            let slid = window_slide(&cached.key, &row_key).and_then(|columns| slide_row(&cached.row[..at], columns, width, y));
+            if let Some(mut row) = slid {
+                let mut unnamed = cached.state.unnamed_at.is_some();
+                let resume = list_lane_columns(lane, event, &win, y, h, intern, &mut row, &mut unnamed);
+                return Row::Slid { row, state: state(resume, unnamed) };
+            }
+        }
+        if let Some(cached) = cached.filter(|c| c.key == row_key) {
+            if cached.state.version == lane.version() {
+                return Row::Reused { len: cached.row.len() };
+            }
+            if let (true, Some((event, keep))) =
+                (by_column && cached.state.reshaped == lane.reshaped(), cached.state.resume)
+            {
+                let mut tail = Vec::new();
+                let mut unnamed = cached.state.unnamed_at.is_some();
+                let resume = list_lane_columns(lane, event, &win, y, h, intern, &mut tail, &mut unnamed);
+                return Row::Extended { keep, tail, state: state(resume.map(|(e, at)| (e, keep + at)), unnamed) };
             }
         }
         let mut row = Vec::new();
-        if let Some(lane) = index.lane(key) {
-            if let Some((k, cached)) = reads.and_then(|c| c.rows.get(&key)) {
-                if *k == row_key(y, lane) {
-                    return Row::Reused(Arc::clone(cached));
-                }
-            }
-            push_lane_instances(
-                lane,
-                t0,
-                t1,
-                span,
-                width,
-                y,
-                h,
-                intern,
-                &mut row,
-            );
-        }
-        // Painter's order is settled here, per lane, on whichever thread
-        // walked the lane. Instances only ever overlap within one lane row,
-        // so a global sort over every instance of the frame -- which was
-        // the listing's single largest sequential step on a big capture --
-        // bought nothing a per-lane sort does not.
-        sort_instances_longer_on_top(&mut row);
-        Row::Fresh(row)
+        let mut unnamed = false;
+        let resume = if by_column {
+            list_lane_columns(lane, lane.first_ending_after(t0), &win, y, h, intern, &mut row, &mut unnamed)
+        } else {
+            list_lane_events(lane, &win, y, h, intern, merge, &mut row, &mut unnamed);
+            None
+        };
+        Row::Fresh { row, state: state(resume, unnamed) }
     };
     let (parts, worker_spans): (Vec<Row>, Vec<par::WorkerSpan>) = if opts.inline {
         (layout.iter().map(walk).collect(), Vec::new())
@@ -886,44 +1028,65 @@ pub fn collect_instances_cached(
         par::map_collect_lanes(layout, walk)
     };
     timing.dispatch_t1_ns = now();
-    let row_len = |r: &Row| match r {
-        Row::Reused(v) => v.len(),
-        Row::Fresh(v) => v.len(),
-    };
-    let lanes_kept = parts.iter().filter(|p| row_len(p) > 0).count() as u32;
-    let lanes_reused = parts.iter().filter(|p| matches!(p, Row::Reused(_))).count() as u32;
+    let lanes_kept = parts.iter().filter(|p| p.len() > 0).count() as u32;
+    let lanes_reused = parts.iter().filter(|p| matches!(p, Row::Reused { .. })).count() as u32;
+    let lanes_extended = parts.iter().filter(|p| matches!(p, Row::Extended { .. } | Row::Slid { .. })).count() as u32;
     timing.flatten_t0_ns = now();
-    let total: usize = parts.iter().map(row_len).sum();
+    let total: usize = parts.iter().map(Row::len).sum();
     // The flatten is a copy into a fresh buffer either way: the frame's
     // instances leave for the GPU upload and are not seen again. What the
     // cache saves is the walk, which the bench times on its own.
     let mut instances: Vec<ScopeInstance> = Vec::with_capacity(total);
-    let mut fresh: Vec<(LaneKey, f32, Arc<Vec<ScopeInstance>>)> = Vec::new();
-    for ((key, y), part) in layout.iter().zip(parts) {
-        match part {
-            Row::Reused(v) => instances.extend_from_slice(&v),
-            Row::Fresh(v) => {
-                instances.extend_from_slice(&v);
-                if cache.is_some() && key.kind != kind::VALUE {
-                    fresh.push((*key, *y, Arc::new(v)));
+    match cache {
+        Some(cache) => {
+            cache.frame = cache.frame.wrapping_add(1);
+            let frame = cache.frame;
+            // A kept row that was listed at another height moves to this one.
+            let move_to = |cached: &mut CachedRow, y: f32| {
+                if cached.y_bits != y.to_bits() {
+                    cached.y_bits = y.to_bits();
+                    for inst in &mut cached.row {
+                        inst.y = y;
+                    }
+                }
+            };
+            for ((key, y), part) in layout.iter().zip(parts) {
+                match part {
+                    Row::Skipped => {}
+                    Row::Reused { .. } => {
+                        if let Some(cached) = cache.rows.get_mut(key) {
+                            move_to(cached, *y);
+                            cached.seen = frame;
+                            instances.extend_from_slice(&cached.row);
+                        }
+                    }
+                    Row::Extended { keep, tail, state } => {
+                        if let Some(cached) = cache.rows.get_mut(key) {
+                            cached.row.truncate(keep);
+                            move_to(cached, *y);
+                            cached.row.extend_from_slice(&tail);
+                            cached.state = state;
+                            cached.seen = frame;
+                            instances.extend_from_slice(&cached.row);
+                        }
+                    }
+                    Row::Slid { row, state } | Row::Fresh { row, state } => {
+                        instances.extend_from_slice(&row);
+                        let cached = CachedRow { key: row_key, state, y_bits: y.to_bits(), row, seen: frame };
+                        cache.rows.insert(*key, cached);
+                    }
                 }
             }
+            // Rows of lanes this listing did not reach go: a lane no longer
+            // laid out, and a culled one, which is not worth a slot either.
+            // Told by the stamp; asking the layout for each cached row was a
+            // walk of the layout per row.
+            cache.rows.retain(|_, cached| cached.seen == frame);
         }
-    }
-    if let Some(cache) = cache {
-        // Rows of lanes no longer laid out go; a culled lane was listed
-        // empty and is not worth a slot either.
-        cache.rows.retain(|k, _| layout.iter().any(|(lk, _)| lk == k));
-        for (key, y, row) in fresh {
-            let culled = opts
-                .y_cull
-                .map(|c| !c.hits(y, lane_height(key) + lane_gap(key)))
-                .unwrap_or(false);
-            if let Some(lane) = index.lane(key) {
-                if culled {
-                    cache.rows.remove(&key);
-                } else {
-                    cache.rows.insert(key, (row_key(y, lane), row));
+        None => {
+            for part in parts {
+                if let Row::Slid { row, .. } | Row::Fresh { row, .. } = part {
+                    instances.extend_from_slice(&row);
                 }
             }
         }
@@ -942,6 +1105,7 @@ pub fn collect_instances_cached(
         worker_spans,
         lanes_kept,
         lanes_reused,
+        lanes_extended,
     }
 }
 
@@ -992,8 +1156,10 @@ pub fn pick_instance_at(instances: &[ScopeInstance], x: f32, y: f32) -> Option<u
 }
 
 /// Painter's algorithm: shorter first so longer scopes cover 1 px ticks.
-/// Applied per lane (see the collect walk); picking does not depend on
-/// order, it takes the longest instance under the cursor.
+/// Applied per lane, on whichever thread walked the lane: instances only
+/// ever overlap within one lane row, so a global sort over every instance
+/// of the frame bought nothing a per-lane sort does not. Picking does not
+/// depend on order, it takes the longest instance under the cursor.
 fn sort_instances_longer_on_top(instances: &mut [ScopeInstance]) {
     instances.sort_unstable_by_key(|i| i.duration_ns);
 }
@@ -1081,30 +1247,161 @@ pub fn apply_highlight_flags(
     }
 }
 
-fn push_lane_instances(
+/// Lists a lane whose events do not overlap, from event `from` on: one
+/// instance for each event at least a pixel wide, and one for each run of
+/// narrower events that start in the same pixel column.
+///
+/// The instances are pushed in the order of the events. That is also
+/// painter's order here: only an instance drawn wider than its event (the
+/// one-pixel minimum) reaches into the next, and the next is drawn over it.
+///
+/// A run is found, not walked: one gallop to the first event that starts
+/// past the column and a block search for the longest event before it. A
+/// lane that holds a thousand events to the pixel costs what one that holds
+/// two does.
+///
+/// Returns the event the last instance begins at and that instance's index
+/// in `out`, for [`RowState::resume`].
+fn list_lane_columns(
     lane: &Lane,
-    t0: u64,
-    t1: u64,
-    span: f64,
-    width: f32,
+    from: usize,
+    win: &ListWindow,
     y: f32,
     h: f32,
     intern: Option<&InternTable>,
     out: &mut Vec<ScopeInstance>,
-) {
-    let mut i = lane.first_ending_after(t0);
+    unnamed: &mut bool,
+) -> Option<(usize, usize)> {
+    let events = lane.events();
     let radius = (h * 0.14).clamp(2.0, 3.0);
-    while let Some(e) = lane.events().get(i) {
-        if e.start_ns >= t1 {
+    let narrow = |e: &LiveEvent| (event_span_ns(e) as f64) < win.ns_per_px;
+    let mut instance = |e: &LiveEvent| {
+        let (inst, named) = instance_named(e, win.t0, win.t1, win.span, win.width, y, h, radius, intern);
+        *unnamed |= !named;
+        inst
+    };
+    let px = |ns: u64| (ns as f64 / win.span) * win.width as f64;
+    let mut last = None;
+    let mut i = from;
+    while let Some(e) = events.get(i) {
+        if e.start_ns >= win.t1 {
             break;
         }
-        if e.end_ns() <= t0 {
+        if e.end_ns() <= win.t0 {
             i += 1;
             continue;
         }
-        out.push(instance_for_event(e, t0, t1, span, width, y, h, radius, intern));
-        i += 1;
+        last = Some((i, out.len()));
+        if !narrow(e) {
+            out.push(instance(e));
+            i += 1;
+            continue;
+        }
+        // The column `e` starts in ends at `col_end`; `events[i..j]` start
+        // in it.
+        let start = e.start_ns.max(win.t0);
+        let col = ((start - win.t0) as f64 / win.ns_per_px) as u64;
+        let col_end = win
+            .t0
+            .saturating_add(((col + 1) as f64 * win.ns_per_px).ceil() as u64)
+            .max(start.saturating_add(1))
+            .min(win.t1);
+        let j = gallop(events, i + 1, |x| x.start_ns < col_end);
+        // All of them but the last end inside the column, since nothing
+        // overlaps, and so are narrow. The last may run on past it; then it
+        // is listed on its own, next. The walk is for a lane whose ends are
+        // in order though its events overlap.
+        let all_narrow = |a: usize, b: usize| lane.longest_in(a, b).is_none_or(|k| narrow(&events[k]));
+        let run_end = if all_narrow(i, j) {
+            j
+        } else if all_narrow(i, j - 1) {
+            j - 1
+        } else {
+            (i + 1..j).find(|&k| !narrow(&events[k])).unwrap_or(j)
+        };
+        if run_end - i == 1 {
+            out.push(instance(e));
+        } else {
+            // The run draws as its longest event, over what its events
+            // would cover drawn one by one: each is a pixel wide from where
+            // it starts, so from the first start to a pixel past the last.
+            // Stopping where the last one ends drew a busy lane in slivers,
+            // with the gaps between them that the pixel each used to fill.
+            let longest = lane.longest_in(i, run_end).unwrap_or(i);
+            let mut inst = instance(&events[longest]);
+            let x0 = px(start - win.t0);
+            let x1 = px(events[run_end - 1].start_ns.max(start) - win.t0) + 1.0;
+            inst.x = x0 as f32;
+            inst.w = (x1 - x0) as f32;
+            out.push(inst);
+        }
+        i = run_end;
     }
+    last
+}
+
+/// Lists a lane event by event, for one whose events overlap (an instant
+/// inside a scope, an imported trace's marks): there a pixel column's events
+/// are not a run of neighbours, and a column cannot be skipped to its end.
+/// With `merge`, the narrow events that start in one column still share an
+/// instance, the longest of them.
+fn list_lane_events(
+    lane: &Lane,
+    win: &ListWindow,
+    y: f32,
+    h: f32,
+    intern: Option<&InternTable>,
+    merge: bool,
+    out: &mut Vec<ScopeInstance>,
+    unnamed: &mut bool,
+) {
+    let listed = out.len();
+    let radius = (h * 0.14).clamp(2.0, 3.0);
+    let mut instance = |e: &LiveEvent| {
+        let (inst, named) = instance_named(e, win.t0, win.t1, win.span, win.width, y, h, radius, intern);
+        *unnamed |= !named;
+        inst
+    };
+    // The column of the narrow events being gathered, their instance's
+    // place in `out` and the span of the longest so far.
+    let mut run: Option<(u64, usize, u64)> = None;
+    let mut i = lane.first_ending_after(win.t0);
+    while let Some(e) = lane.events().get(i) {
+        if e.start_ns >= win.t1 {
+            break;
+        }
+        i += 1;
+        if e.end_ns() <= win.t0 {
+            continue;
+        }
+        let span = event_span_ns(e);
+        if !merge || span as f64 >= win.ns_per_px {
+            out.push(instance(e));
+            continue;
+        }
+        let col = ((e.start_ns.max(win.t0) - win.t0) as f64 / win.ns_per_px) as u64;
+        match run {
+            Some((c, at, longest)) if c == col => {
+                // From where the first of them starts to where the one
+                // that reaches furthest ends, as the longest of them.
+                let joining = instance(e);
+                let mut inst = out[at];
+                let (x, right) = (inst.x, (inst.x + inst.w).max(joining.x + joining.w));
+                if span >= longest {
+                    inst = joining;
+                    run = Some((c, at, span));
+                }
+                inst.x = x;
+                inst.w = (right - x).max(1.0);
+                out[at] = inst;
+            }
+            _ => {
+                run = Some((col, out.len(), span));
+                out.push(instance(e));
+            }
+        }
+    }
+    sort_instances_longer_on_top(&mut out[listed..]);
 }
 
 pub fn instance_for_event(
@@ -1118,6 +1415,22 @@ pub fn instance_for_event(
     radius: f32,
     intern: Option<&InternTable>,
 ) -> ScopeInstance {
+    instance_named(e, t0, t1, span, width, y, h, radius, intern).0
+}
+
+/// [`instance_for_event`], and whether the table had the event's name
+/// ([`LiveEvent::color_and_named`]).
+fn instance_named(
+    e: &LiveEvent,
+    t0: u64,
+    t1: u64,
+    span: f64,
+    width: f32,
+    y: f32,
+    h: f32,
+    radius: f32,
+    intern: Option<&InternTable>,
+) -> (ScopeInstance, bool) {
     let px = |ns: u64| (ns as f64 / span) * width as f64;
     let (x0, x1) = if e.end_ns() <= t0 {
         // Ended before the window. The listing never asks for such an
@@ -1131,12 +1444,13 @@ pub fn instance_for_event(
     } else {
         (px(e.start_ns.max(t0) - t0), px(e.end_ns().min(t1) - t0))
     };
-    ScopeInstance {
+    let (color, named) = e.color_and_named(intern);
+    let instance = ScopeInstance {
         x: x0 as f32,
         y,
         w: (x1 - x0).max(1.0) as f32,
         h,
-        color: e.color_for(intern),
+        color,
         radius,
         name_id: e.name_id,
         start_ns: e.start_ns,
@@ -1148,7 +1462,8 @@ pub fn instance_for_event(
         extra: e.extra,
         event_flags: e._pad,
         flags: FLAG_NONE,
-    }
+    };
+    (instance, named)
 }
 
 #[cfg(test)]
@@ -1521,6 +1836,253 @@ mod listing_cache_tests {
             }
         }
         assert!(reused > 0, "the sequence never exercised a reused row");
+    }
+
+    fn one_lane(events: impl IntoIterator<Item = LiveEvent>) -> (TrackIndex, Vec<(LaneKey, f32)>) {
+        let mut idx = TrackIndex::default();
+        idx.extend(events);
+        let layout = layout_of(&idx);
+        (idx, layout)
+    }
+
+    const INLINE: CollectOpts =
+        CollectOpts { y_cull: None, early_out: true, inline: true, per_lane_spans: false, merge_subpixel: true };
+
+    /// 1000 ns to the pixel: 400 px over 400 us.
+    const PX: u64 = 1_000;
+
+    #[test]
+    fn events_under_a_pixel_that_start_in_one_column_are_one_instance() {
+        // Column 3 holds forty 20 ns scopes and one of 300 ns, the longest;
+        // a 5 px scope starts in the same column after them and runs on.
+        let mut events: Vec<LiveEvent> = (0..40).map(|i| scope(3 * PX + i * 15, 10, 1, 100 + i as u32)).collect();
+        events.push(scope(3 * PX + 610, 300, 1, 7));
+        events.push(scope(3 * PX + 950, 5 * PX, 1, 8));
+        // Alone in its column: itself, a pixel wide.
+        events.push(scope(20 * PX + 100, 10, 1, 9));
+        let (idx, layout) = one_lane(events);
+        let frame = collect_instances_layout_opts(&idx, 0, 400 * PX, 400.0, &layout, None, INLINE);
+        let names: Vec<u32> = frame.instances.iter().map(|i| i.name_id).collect();
+        assert_eq!(names, [7, 8, 9], "the run as its longest event, then the wide scope, then the lone one");
+        let run = frame.instances[0];
+        assert_eq!((run.start_ns, run.duration_ns), (3 * PX + 610, 300), "the run is picked as its longest event");
+        assert!(
+            (run.x - 3.0).abs() < 1e-3 && (run.w - 1.61).abs() < 1e-3,
+            "from the first start to a pixel past the last, as the events drawn one by one cover: {run:?}"
+        );
+        assert!((frame.instances[1].w - 5.0).abs() < 1e-3, "a scope a pixel wide or more is never merged");
+        assert!((frame.instances[2].x - 20.1).abs() < 1e-3 && frame.instances[2].w == 1.0);
+
+        let each = collect_instances_layout_opts(
+            &idx,
+            0,
+            400 * PX,
+            400.0,
+            &layout,
+            None,
+            CollectOpts { merge_subpixel: false, ..INLINE },
+        );
+        assert_eq!(each.instances.len(), 43, "with merging off every event is an instance");
+    }
+
+    #[test]
+    fn a_dense_lane_lists_no_more_than_a_few_instances_per_column() {
+        // A hundred events to the pixel, across the whole window.
+        let (idx, layout) = one_lane((0..40_000u64).map(|i| scope(i * 10, 6, 1, 1 + (i % 5) as u32)));
+        let frame = collect_instances_layout_opts(&idx, 0, 400 * PX, 400.0, &layout, None, INLINE);
+        assert_eq!(frame.instances.len(), 400, "one per column, where it was a hundred");
+        for (column, inst) in frame.instances.iter().enumerate() {
+            assert!((inst.x - column as f32).abs() < 0.02 && (inst.w - 1.99).abs() < 0.02, "{inst:?}");
+        }
+    }
+
+    #[test]
+    fn narrow_events_of_a_lane_with_overlap_share_their_columns_instance_too() {
+        // A long scope with marks inside it: the ends are out of order.
+        let mut events = vec![scope(0, 100 * PX, 1, 1)];
+        events.extend((0..30).map(|i| scope(50 * PX + i * 20, 5, 1, 2)));
+        events.push(scope(50 * PX + 700, 90, 1, 3));
+        let (idx, layout) = one_lane(events);
+        assert!(!idx.lanes().next().expect("the lane").1.ends_sorted());
+        let frame = collect_instances_layout_opts(&idx, 0, 400 * PX, 400.0, &layout, None, INLINE);
+        let names: Vec<u32> = frame.instances.iter().map(|i| i.name_id).collect();
+        assert_eq!(names, [3, 1], "the marks as the longest of them, under the scope they are inside");
+    }
+
+    /// What a live capture does to a lane: events arrive at its end, a few
+    /// a frame, most of them far under a pixel.
+    fn arrivals(rng: &mut crate::test_rng::Rng, tid: u32, from: u64, until: u64) -> Vec<LiveEvent> {
+        let mut out = Vec::new();
+        let mut t = from;
+        while t < until {
+            let dur = [3, 3, 3, 40, 40, 700, 2_500, 9_000][rng.below(8) as usize];
+            out.push(scope(t, dur, tid, 1 + rng.below(9) as u32));
+            t += dur + rng.below(60);
+        }
+        out
+    }
+
+    fn assert_same_listing(got: &[ScopeInstance], want: &[ScopeInstance], from_x: f32, what: &str) {
+        let (got, want): (Vec<_>, Vec<_>) =
+            (got.iter().filter(|i| i.x >= from_x).collect(), want.iter().filter(|i| i.x >= from_x).collect());
+        assert_eq!(got.len(), want.len(), "{what}: count");
+        for (g, w) in got.iter().zip(&want) {
+            assert_eq!(ScopePick::from_instance(g), ScopePick::from_instance(w), "{what}");
+            assert!((g.x - w.x).abs() < 0.01 && (g.w - w.w).abs() < 0.01 && g.y == w.y && g.color == w.color, "{what}: {g:?} / {w:?}");
+        }
+    }
+
+    #[test]
+    fn a_lane_that_only_gained_events_keeps_its_row_and_walks_what_is_new() {
+        use crate::test_rng::Rng;
+        let mut rng = Rng(0x0A77_E7D5);
+        let mut idx = TrackIndex::default();
+        let mut cache = ListingCache::default();
+        let mut ends = [0u64; 3];
+        let mut extended = 0;
+        for frame in 0..120u64 {
+            for (lane, end) in ends.iter_mut().enumerate() {
+                // The third lane goes quiet now and then: reused whole.
+                if lane == 2 && frame % 4 != 0 {
+                    continue;
+                }
+                let until = *end + 1 + rng.below(4 * PX);
+                let batch = arrivals(&mut rng, 1 + lane as u32, *end, until);
+                *end = batch.last().map(|e| e.end_ns()).unwrap_or(*end);
+                idx.extend(batch);
+            }
+            let layout = layout_of(&idx);
+            let plain = collect_instances_layout_opts(&idx, 0, 400 * PX, 400.0, &layout, None, INLINE);
+            let cached = collect_instances_cached(&idx, 0, 400 * PX, 400.0, &layout, None, INLINE, Some(&mut cache));
+            assert_eq!(cached.instances, plain.instances, "frame {frame}");
+            if frame > 0 {
+                assert_eq!(cached.lanes_extended + cached.lanes_reused, 3, "frame {frame}: no lane is listed from its start");
+            }
+            extended += cached.lanes_extended;
+        }
+        assert!(extended > 200, "the lanes that gained events were extended: {extended}");
+    }
+
+    #[test]
+    fn a_window_moved_on_by_whole_columns_moves_its_rows_with_it() {
+        use crate::test_rng::Rng;
+        let mut rng = Rng(0x51DE_51DE);
+        let mut idx = TrackIndex::default();
+        let mut cache = ListingCache::default();
+        let mut ends = [0u64; 4];
+        let (mut t0, span) = (0u64, 400 * PX);
+        let mut slid = 0;
+        for frame in 0..400u64 {
+            // The live edge moves on about three columns a frame.
+            let edge = (frame + 1) * 3 * PX;
+            for (lane, end) in ends.iter_mut().enumerate() {
+                let batch = arrivals(&mut rng, 1 + lane as u32, *end, edge);
+                *end = batch.last().map(|e| e.end_ns()).unwrap_or(*end);
+                idx.extend(batch);
+            }
+            // And the window after it, a whole number of columns at a time,
+            // once the edge has gone three quarters of the way across.
+            let moved = edge > t0 + span * 3 / 4;
+            if moved {
+                t0 += (1 + rng.below(90)) * PX;
+            }
+            let layout = layout_of(&idx);
+            let plain = collect_instances_layout_opts(&idx, t0, t0 + span, 400.0, &layout, None, INLINE);
+            let cached = collect_instances_cached(&idx, t0, t0 + span, 400.0, &layout, None, INLINE, Some(&mut cache));
+            // The window's first columns hold what was cut by its start,
+            // which a row that was moved keeps as it was listed.
+            assert_same_listing(&cached.instances, &plain.instances, 2.0, &format!("frame {frame}"));
+            if moved && frame > 0 {
+                assert_eq!(cached.lanes_extended, 4, "frame {frame}: every row moved with the window");
+                slid += 1;
+            }
+        }
+        assert!(slid > 10, "the window moved {slid} times");
+    }
+
+    #[test]
+    fn a_window_that_moved_by_part_of_a_column_or_back_is_listed_again() {
+        let (idx, layout) = one_lane((0..4_000u64).map(|i| scope(i * 100, 60, 1, 1)));
+        let mut cache = ListingCache::default();
+        let mut list = |t0: u64| collect_instances_cached(&idx, t0, t0 + 400 * PX, 400.0, &layout, None, INLINE, Some(&mut cache));
+        list(10 * PX);
+        assert_eq!(list(20 * PX).lanes_extended, 1, "ten columns on");
+        assert_eq!(list(20 * PX + PX / 2).lanes_extended, 0, "half a column on: the columns are other columns");
+        assert_eq!(list(15 * PX).lanes_extended, 0, "back: what is before the row was never listed");
+    }
+
+    #[test]
+    fn a_row_that_only_moved_up_or_down_is_the_same_row_at_its_new_height() {
+        let mut idx = TrackIndex::default();
+        idx.extend((0..500u64).map(|i| scope(i * 700, 400, 5, 1)));
+        let mut cache = ListingCache::default();
+        let layout = layout_of(&idx);
+        collect_instances_cached(&idx, 0, 400 * PX, 400.0, &layout, None, INLINE, Some(&mut cache));
+        // A lane appears above it: a thread seen for the first time.
+        idx.insert(scope(0, 50 * PX, 2, 9));
+        let layout = layout_of(&idx);
+        let moved = collect_instances_cached(&idx, 0, 400 * PX, 400.0, &layout, None, INLINE, Some(&mut cache));
+        let plain = collect_instances_layout_opts(&idx, 0, 400 * PX, 400.0, &layout, None, INLINE);
+        assert_eq!(moved.lanes_reused, 1, "the lane below was not walked again");
+        assert_eq!(moved.instances, plain.instances);
+    }
+
+    #[test]
+    fn a_name_that_arrives_relists_only_the_rows_that_were_waiting_for_one() {
+        // Two lanes. Lane 1's scopes are named 5, which the table has; lane
+        // 2's are named 6, which it does not have yet.
+        let mut idx = TrackIndex::default();
+        idx.extend((0..50u64).map(|i| scope(i * 5 * PX, 2 * PX, 1, 5)));
+        idx.extend((0..50u64).map(|i| scope(i * 5 * PX, 2 * PX, 2, 6)));
+        let layout = layout_of(&idx);
+        let mut intern = InternTable::default();
+        intern.insert_id(5, "update");
+        let mut cache = ListingCache::default();
+        let mut list = |intern: &InternTable| {
+            collect_instances_cached(&idx, 0, 400 * PX, 400.0, &layout, Some(intern), INLINE, Some(&mut cache))
+        };
+        let first = list(&intern);
+        // A name nothing listed uses: new threads' and functions' names
+        // arrive all through a capture. Lane 1 has nothing to wait for.
+        intern.insert_id(77, "elsewhere");
+        let other = list(&intern);
+        assert_eq!(other.lanes_reused, 1, "the row whose names were known stands");
+        assert_eq!(other.instances, first.instances);
+        // The name lane 2 was drawn without: its colour changes.
+        intern.insert_id(6, "render");
+        let named = list(&intern);
+        assert_eq!(named.lanes_reused, 1, "lane 1 again");
+        let colour_of = |f: &InstanceFrame, name: u32| f.instances.iter().find(|i| i.name_id == name).map(|i| i.color);
+        assert_eq!(colour_of(&named, 5), colour_of(&first, 5));
+        assert_ne!(colour_of(&named, 6), colour_of(&first, 6), "lane 2 was listed again, in its name's colour");
+        // Nothing is waiting any more: another new name moves no row.
+        intern.insert_id(78, "elsewhere too");
+        assert_eq!(list(&intern).lanes_reused, 2);
+        // A known id renamed changes its colour under every row.
+        intern.insert_id(5, "update_all");
+        let renamed = list(&intern);
+        assert_eq!(renamed.lanes_reused, 0);
+        assert_ne!(colour_of(&renamed, 5), colour_of(&first, 5));
+        // And another table is another table, whatever it holds.
+        let mut again = InternTable::default();
+        again.insert_id(5, "update_all");
+        again.insert_id(6, "render");
+        assert_eq!(list(&again).lanes_reused, 0);
+    }
+
+    #[test]
+    fn a_lane_made_again_under_its_key_is_not_the_lane_a_row_was_listed_from() {
+        let mut idx = TrackIndex::default();
+        idx.extend((0..10u64).map(|i| scope(i * 5 * PX, 2 * PX, 1, 1)));
+        let mut cache = ListingCache::default();
+        let layout = layout_of(&idx);
+        collect_instances_cached(&idx, 0, 400 * PX, 400.0, &layout, None, INLINE, Some(&mut cache));
+        // Gone and back with as many events, so the same version, elsewhere.
+        idx.retain(|_| false);
+        idx.extend((0..10u64).map(|i| scope(PX + i * 7 * PX, 3 * PX, 1, 2)));
+        let again = collect_instances_cached(&idx, 0, 400 * PX, 400.0, &layout, None, INLINE, Some(&mut cache));
+        assert_eq!((again.lanes_reused, again.lanes_extended), (0, 0));
+        assert!(again.instances.iter().all(|i| i.name_id == 2), "the new lane's events, not the cached row");
     }
 
     /// `cargo test --release -p perfr-live-render listing_cache_bench -- --ignored --nocapture`

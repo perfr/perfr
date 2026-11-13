@@ -28,11 +28,21 @@ use perfr_live_event::{kind, LiveEvent};
 pub const HIST_BUCKETS: usize = 40;
 
 /// Scope statistics must not mix processes or instrumentation origins.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LiveKey {
     pub pid: u32,
     pub name_id: u32,
     pub kind: u8,
+}
+
+impl std::hash::Hash for LiveKey {
+    /// One word and one byte, for [`perfr_live_event::IdHasher`]: it keeps
+    /// the last word it is given, so the pid is folded into the name id
+    /// rather than written before it.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u32(self.name_id ^ self.pid.rotate_left(16));
+        state.write_u8(self.kind);
+    }
 }
 
 /// One scope name's running statistics.
@@ -128,7 +138,10 @@ pub fn hist_bucket_floor_ns(bucket: usize) -> u64 {
 /// The table: scope rows plus what the samples are doing.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LiveTable {
-    rows: HashMap<LiveKey, LiveRow>,
+    /// Hashed with the id hasher: a row is looked up for every scope that
+    /// arrives, and on a busy capture SipHash here was a twelfth of the
+    /// page's main thread.
+    rows: HashMap<LiveKey, LiveRow, std::hash::BuildHasherDefault<perfr_live_event::IdHasher>>,
     pub samples: u64,
     sample_threads: HashMap<u32, u64>,
     first_ns: u64,

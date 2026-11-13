@@ -85,6 +85,7 @@ fn time_nav(strip: &mut TrackStrip, idx: &TrackIndex, bounds: (u64, u64), label:
                 early_out: true,
                 inline: false,
                 per_lane_spans: false,
+                ..CollectOpts::default()
             },
         );
     }

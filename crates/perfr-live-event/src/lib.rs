@@ -170,10 +170,18 @@ impl LiveEvent {
     }
 
     pub fn color_for(self, intern: Option<&InternTable>) -> u32 {
+        self.color_and_named(intern).0
+    }
+
+    /// The colour, and whether `intern` had the name it is drawn from. A
+    /// name that arrives later changes the colour; one that was there does
+    /// not, short of a rename ([`InternTable::color_epoch`]). An event with
+    /// no name (id 0) and a lookup with no table have nothing to wait for.
+    pub fn color_and_named(self, intern: Option<&InternTable>) -> (u32, bool) {
         // The name's hash, not its bytes: the table has it precomputed, and
         // hashing the string here again was a third of the listing.
         let hash = intern.and_then(|t| t.name_hash(self.name_id));
-        crate::color::event_color_hashed(
+        let color = crate::color::event_color_hashed(
             self.kind,
             self.tid,
             self.depth,
@@ -181,7 +189,8 @@ impl LiveEvent {
             self._pad & event_flags::COLOR_MASK,
             self.name_id,
             hash,
-        )
+        );
+        (color, hash.is_some() || self.name_id == 0 || intern.is_none())
     }
 
     pub fn lane_key(self) -> LaneKey {
@@ -341,11 +350,28 @@ struct Interned {
     hash: u32,
 }
 
-#[derive(Default)]
 pub struct InternTable {
     by_text: HashMap<String, u32>,
     by_id: IdMap<Interned>,
     next_id: u32,
+    /// Unlike any other table's. See [`Self::color_epoch`].
+    table: u64,
+    /// How many times an id that had a name was given one that hashes
+    /// differently.
+    renamed: u64,
+}
+
+impl Default for InternTable {
+    fn default() -> Self {
+        static NEXT_TABLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            by_text: HashMap::new(),
+            by_id: IdMap::default(),
+            next_id: 0,
+            table: NEXT_TABLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            renamed: 0,
+        }
+    }
 }
 
 impl InternTable {
@@ -362,10 +388,24 @@ impl InternTable {
 
     pub fn insert_id(&mut self, id: u32, text: &str) {
         self.by_text.insert(text.to_string(), id);
-        self.by_id.insert(id, Interned { text: text.to_string(), hash: crate::color::name_hash(text.as_bytes()) });
+        let hash = crate::color::name_hash(text.as_bytes());
+        if self.by_id.insert(id, Interned { text: text.to_string(), hash }).is_some_and(|was| was.hash != hash) {
+            self.renamed = self.renamed.wrapping_add(1);
+        }
         if id >= self.next_id {
             self.next_id = id.wrapping_add(1);
         }
+    }
+
+    /// Stands still for as long as every colour drawn from a name this
+    /// table knew is still that colour: it changes when a known id is given
+    /// another name, and it differs from one table to the next. A name that
+    /// is new leaves it alone. During a capture names arrive many times a
+    /// second, nearly all of them new, for events that have not been seen
+    /// yet; keyed on the table's size instead, everything listed so far was
+    /// thrown away and listed again each time.
+    pub fn color_epoch(&self) -> (u64, u64) {
+        (self.table, self.renamed)
     }
 
     pub fn get(&self, id: u32) -> Option<&str> {

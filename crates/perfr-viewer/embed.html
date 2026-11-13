@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<!-- Copyright (c) 2026 The perfr Authors. All rights reserved.
+     Use of this source code is governed by a BSD-style license that can be
+     found in the LICENSE file. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>perfr capture</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #2E3440; overflow: hidden; }
+    canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+  </style>
+</head>
+<body>
+  <canvas id="perfr-viewer"></canvas>
+  <script type="module">
+    import init, { start_embed } from "./perfr_viewer.js";
+    await init();
+    await start_embed(document.getElementById("perfr-viewer"));
+  </script>
+</body>
+</html>

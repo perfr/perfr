@@ -9,11 +9,13 @@ on:
     branches: ['main']
     paths:
       - 'crates/perfr-live-*/**'
+      - 'crates/perfr-viewer/**'
       - '.github/workflows/live-viewer.yml'
   pull_request:
     branches: ['main']
     paths:
       - 'crates/perfr-live-*/**'
+      - 'crates/perfr-viewer/**'
       - '.github/workflows/live-viewer.yml'
 
 permissions: read-all
@@ -33,15 +35,20 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      # The seven viewer crates: the server side perfr links, the
-      # trace importers, and the eframe viewer itself (its tests run natively,
-      # no window). The service crates have their own jobs.
+      # The viewer crates: the server side perfr links, the trace importers,
+      # the viewer core, and the eframe page (its tests run natively, no
+      # window). The service crates have their own jobs.
       - name: Test the live-viewer crates
         run: >
           cargo test -p perfr-live-event -p perfr-live-ring -p perfr-live-protocol
-          -p perfr-live-render -p perfr-live-server -p perfr-live-chrome -p perfr-live-viewer
+          -p perfr-live-render -p perfr-live-server -p perfr-live-chrome
+          -p perfr-viewer -p perfr-live-viewer
       - name: Compile eframe WebRunner for wasm32
         run: cargo build -p perfr-live-viewer --target wasm32-unknown-unknown
+      - name: Compile the slim viewer core for wasm32
+        run: cargo build -p perfr-viewer --target wasm32-unknown-unknown
+      - name: Viewer core does not depend on the capture pipeline
+        run: python3 crates/perfr-viewer/check_boundary.py
       - name: Compile benches
         run: cargo bench -p perfr-live-render -p perfr-live-ring --no-run
       # The complexity test is compiled out of debug (`cfg(not(debug_assertions))`).

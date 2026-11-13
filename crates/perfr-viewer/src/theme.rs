@@ -278,9 +278,13 @@ mod tests {
 
     #[test]
     fn web_page_background_matches_the_default_canvas() {
-        // The HTML behind the canvas paints before wasm. It has to be the
-        // default scheme's canvas or the first paint flashes another palette.
-        let html = include_str!("../viewer-dist/index.html");
+        // The HTML behind the canvas paints before wasm. The full page pack
+        // and the slim embed page both have to be the default canvas, or the
+        // first paint flashes another palette.
+        let pages = [
+            include_str!("../../perfr-live-viewer/viewer-dist/index.html"),
+            include_str!("../embed.html"),
+        ];
         let canvas = perfr_live_event::theme::default_theme().canvas;
         let css = format!(
             "#{:02X}{:02X}{:02X}",
@@ -288,10 +292,12 @@ mod tests {
             (canvas >> 8) & 0xFF,
             canvas & 0xFF
         );
-        assert!(
-            html.contains(&format!("background: {css};")),
-            "index.html background should be the default canvas {css}"
-        );
+        for html in pages {
+            assert!(
+                html.contains(&format!("background: {css};")),
+                "page background should be the default canvas {css}"
+            );
+        }
     }
 
     #[test]

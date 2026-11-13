@@ -3119,6 +3119,7 @@ dependencies = [
  "perfr-live-protocol",
  "perfr-live-render",
  "perfr-story",
+ "perfr-viewer",
  "rfd",
  "serde",
  "serde_json",
@@ -3215,6 +3216,24 @@ dependencies = [
  "perfr-maps",
  "perfr-perf-records",
  "perfr-perf-ring",
+]
+
+[[package]]
+name = "perfr-viewer"
+version = "0.1.1"
+dependencies = [
+ "console_error_panic_hook",
+ "eframe",
+ "egui",
+ "egui-wgpu",
+ "js-sys",
+ "perfr-live-event",
+ "perfr-live-protocol",
+ "perfr-live-render",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "wgpu",
 ]
 
 [[package]]

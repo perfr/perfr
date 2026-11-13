@@ -22,7 +22,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["egui"]
-egui = ["dep:eframe", "dep:egui", "dep:egui-wgpu"]
+egui = ["dep:eframe", "dep:egui", "dep:egui-wgpu", "perfr-viewer/egui"]
 # Nightly + atomics + build-std. `build_wasm.sh` enables this. Plain
 # `cargo build --target wasm32-unknown-unknown` stays sequential so CI
 # does not need a rebuilt std.
@@ -35,6 +35,9 @@ perfr-story = { path = "../perfr-story" }
 perfr-live-chrome = { path = "../perfr-live-chrome" }
 perfr-live-protocol = { path = "../perfr-live-protocol" }
 perfr-live-render = { path = "../perfr-live-render" }
+# Renderer, track rail, and `.perfr.stream` parser. default-features off so
+# a build of this crate without `egui` does not pull eframe through the core.
+perfr-viewer = { path = "../perfr-viewer", default-features = false }
 wasm-bindgen = "=0.2.100"
 js-sys = "=0.3.77"
 console_error_panic_hook = "0.1"

@@ -6,8 +6,13 @@
 # Slim viewer-only wasm: the WebGPU timeline and the .perfr.stream parser.
 # Unlike crates/perfr-live-viewer/build_wasm.sh this does not enable wasm
 # threads (no nightly, no SharedArrayBuffer), so a blog page can embed the
-# pack without cross-origin isolation. Profile `wasm` is the workspace
-# release profile with debug info and thin LTO turned off.
+# pack without cross-origin isolation.
+#
+# Profile `wasm-embed` (workspace Cargo.toml): opt-level z, fat LTO, one
+# codegen unit, symbol names stripped. The full page stays on profile `wasm`.
+# wasm-opt is not run: on this profile it shrinks the raw module and makes
+# gzip and brotli larger. WebGL is off (`--features webgl` puts it back).
+# The font is a Latin subset of Hack (`slim-fonts`, on by default).
 #
 #   ./crates/perfr-viewer/build_wasm.sh
 #
@@ -35,11 +40,11 @@ WORKSPACE="$(cd "$ROOT/../.." && pwd)"
 # Do not inherit the full viewer's atomics / shared-memory RUSTFLAGS.
 unset RUSTFLAGS || true
 
-echo "Building perfr-viewer (profile wasm, no wasm-threads)"
+echo "Building perfr-viewer (profile wasm-embed, no wasm-threads, no webgl)"
 cargo build \
   --manifest-path "$WORKSPACE/Cargo.toml" \
   --target wasm32-unknown-unknown \
-  --profile wasm \
+  --profile wasm-embed \
   -p perfr-viewer
 
 OUT="$ROOT/viewer-dist"
@@ -50,7 +55,7 @@ wasm-bindgen \
   --target web \
   --out-dir "$OUT" \
   --out-name perfr_viewer \
-  "$WORKSPACE/target/wasm32-unknown-unknown/wasm/perfr_viewer.wasm"
+  "$WORKSPACE/target/wasm32-unknown-unknown/wasm-embed/perfr_viewer.wasm"
 
 cp "$ROOT/embed.html" "$OUT/index.html"
 

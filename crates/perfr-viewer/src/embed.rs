@@ -36,8 +36,32 @@ pub struct CaptureViewer {
     waiting: bool,
 }
 
+/// Latin subset of Hack (U+0020–U+007E and U+00A0–U+00FF). The four egui
+/// default fonts are about 1.4 MB of TTF; this page only draws track labels
+/// and a status line. License: `fonts/LICENSE-Hack.txt`.
+#[cfg(feature = "slim-fonts")]
+fn install_embed_font(ctx: &egui::Context) {
+    use std::sync::Arc;
+    let mut fonts = egui::FontDefinitions::empty();
+    fonts.font_data.insert(
+        "HackLatin".to_owned(),
+        Arc::new(egui::FontData::from_static(include_bytes!(
+            "../fonts/HackLatin.ttf"
+        ))),
+    );
+    fonts
+        .families
+        .insert(egui::FontFamily::Proportional, vec!["HackLatin".to_owned()]);
+    fonts
+        .families
+        .insert(egui::FontFamily::Monospace, vec!["HackLatin".to_owned()]);
+    ctx.set_fonts(fonts);
+}
+
 impl CaptureViewer {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        #[cfg(feature = "slim-fonts")]
+        install_embed_font(&cc.egui_ctx);
         let mut has_gpu = false;
         let mut backend = "no wgpu device";
         if let Some(rs) = &cc.wgpu_render_state {
@@ -398,8 +422,9 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// `?webgl` forces the WebGL backend. Otherwise the page asks for WebGPU.
-#[cfg(target_arch = "wasm32")]
+/// `?webgl` forces the WebGL backend. Compiled only with `--features webgl`;
+/// the slim pack does not include the GLES backend.
+#[cfg(all(target_arch = "wasm32", feature = "webgl"))]
 fn query_prefers_webgl() -> bool {
     web_sys::window()
         .and_then(|w| w.location().search().ok())
@@ -418,10 +443,19 @@ pub async fn start_embed(canvas: web_sys::HtmlCanvasElement) -> Result<(), wasm_
     let mut web_options = eframe::WebOptions::default();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut web_options.wgpu_options.wgpu_setup
     {
-        setup.instance_descriptor.backends = if query_prefers_webgl() {
-            eframe::wgpu::Backends::GL
-        } else {
-            eframe::wgpu::Backends::BROWSER_WEBGPU
+        setup.instance_descriptor.backends = {
+            #[cfg(feature = "webgl")]
+            {
+                if query_prefers_webgl() {
+                    eframe::wgpu::Backends::GL
+                } else {
+                    eframe::wgpu::Backends::BROWSER_WEBGPU
+                }
+            }
+            #[cfg(not(feature = "webgl"))]
+            {
+                eframe::wgpu::Backends::BROWSER_WEBGPU
+            }
         };
     }
     eframe::WebRunner::new()

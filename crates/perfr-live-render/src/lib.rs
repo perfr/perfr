@@ -96,8 +96,13 @@ fn gallop<T>(s: &[T], from: usize, pred: impl Fn(&T) -> bool) -> usize {
 /// Chrome ingest also places 1 ns instants / marks on the same tid as B/E/X
 /// slices; those break the end order. `ends_sorted` tracks that, and a lane
 /// that lost it searches `latest_end` instead.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Lane {
+    /// Unlike any other lane's, a clone's included: with `version` and
+    /// `reshaped` it tells a listing cache that this is the lane it listed
+    /// and what has happened to it since. A lane dropped and created again
+    /// under the same key counts its versions from zero like the first.
+    id: u64,
     events: Vec<LiveEvent>,
     ends_sorted: bool,
     /// For a lane whose ends are out of order: the latest end among
@@ -111,6 +116,13 @@ pub struct Lane {
     /// Bumped by every insert and every retain that removed something: the
     /// listing cache's way to know a lane is exactly what it listed before.
     version: u64,
+    /// Bumped by every change that is not an event added at the end with
+    /// the end order intact: an insert in the middle, a retain that removed
+    /// something, an event that broke the end order. While it stands still
+    /// the events a listing has already walked are where they were, and all
+    /// that is new comes after them, so a listed row is extended rather
+    /// than listed again (see `lod::ListingCache`).
+    reshaped: u64,
     /// The longest span among each [`SPAN_BLOCK`] consecutive events.
     ///
     /// "The longest event in this range" is asked once per pixel column by
@@ -126,13 +138,39 @@ pub struct Lane {
     longest_span: u64,
 }
 
+/// Source of [`Lane::id`].
+static NEXT_LANE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_lane_id() -> u64 {
+    NEXT_LANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+impl Clone for Lane {
+    /// The same events under a new [`Lane::id`]: the two go their own ways
+    /// from here, and their versions would not tell them apart.
+    fn clone(&self) -> Self {
+        Self {
+            id: next_lane_id(),
+            events: self.events.clone(),
+            ends_sorted: self.ends_sorted,
+            latest_end: self.latest_end.clone(),
+            version: self.version,
+            reshaped: self.reshaped,
+            block_span: self.block_span.clone(),
+            longest_span: self.longest_span,
+        }
+    }
+}
+
 impl Default for Lane {
     fn default() -> Self {
         Self {
+            id: next_lane_id(),
             events: Vec::new(),
             ends_sorted: true,
             latest_end: Vec::new(),
             version: 0,
+            reshaped: 0,
             block_span: Vec::new(),
             longest_span: 0,
         }
@@ -157,8 +195,42 @@ impl Lane {
         self.version
     }
 
+    /// See the field.
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Changes whenever the lane changed other than by gaining an event at
+    /// its end; see the field.
+    pub(crate) fn reshaped(&self) -> u64 {
+        self.reshaped
+    }
+
+    /// Whether `end_ns` is non-decreasing along the lane, as kept up to date
+    /// by every insert and retain ([`Self::ends_are_sorted`] walks to find out).
+    pub(crate) fn ends_sorted(&self) -> bool {
+        self.ends_sorted
+    }
+
     pub fn insert(&mut self, event: LiveEvent) {
         self.version = self.version.wrapping_add(1);
+        // A live stream's events arrive in order, each after the one before
+        // it and ending no earlier: nearly every insert is this one, and it
+        // needs none of what an insert anywhere else does.
+        if self.ends_sorted {
+            if let Some(last) = self.events.last() {
+                if last.start_ns <= event.start_ns && last.end_ns() <= event.end_ns() {
+                    let span = event_span_ns(&event);
+                    self.longest_span = self.longest_span.max(span);
+                    match self.block_span.last_mut() {
+                        Some(longest) if self.events.len() % SPAN_BLOCK != 0 => *longest = (*longest).max(span),
+                        _ => self.block_span.push(span),
+                    }
+                    self.events.push(event);
+                    return;
+                }
+            }
+        }
         let i = if self
             .events
             .last()
@@ -173,6 +245,7 @@ impl Lane {
                 .events
                 .partition_point(|e| e.start_ns <= event.start_ns);
             self.events.insert(i, event);
+            self.reshaped = self.reshaped.wrapping_add(1);
             i
         };
         let end = self.events[i].end_ns();
@@ -181,6 +254,7 @@ impl Lane {
             let next_ok = i + 1 >= self.events.len() || end <= self.events[i + 1].end_ns();
             self.ends_sorted = prev_ok && next_ok;
             if !self.ends_sorted {
+                self.reshaped = self.reshaped.wrapping_add(1);
                 self.rebuild_latest_end();
             }
         } else {
@@ -244,6 +318,7 @@ impl Lane {
         self.events.retain(|e| f(e));
         if self.events.len() != before {
             self.version = self.version.wrapping_add(1);
+            self.reshaped = self.reshaped.wrapping_add(1);
             // Removing events can only restore end order, never break it, but
             // a lane that was already unsorted may now be sorted -- recheck so
             // it does not stay on the linear fallback forever.
@@ -646,9 +721,29 @@ impl TrackIndex {
         self.lane_gen
     }
 
+    /// Inserts a batch. Consecutive events of one lane, which is how a
+    /// capture's sources hand them over (a thread's states, then a core's
+    /// slices), share one lookup of the lane.
     pub fn extend<I: IntoIterator<Item = LiveEvent>>(&mut self, events: I) {
-        for e in events {
-            self.insert(e);
+        use std::collections::btree_map::Entry;
+        let mut events = events.into_iter().peekable();
+        while let Some(first) = events.next() {
+            let key = first.lane_key();
+            let lane = match self.lanes.entry(key) {
+                Entry::Occupied(e) => e.into_mut(),
+                Entry::Vacant(e) => {
+                    self.lane_gen = self.lane_gen.wrapping_add(1);
+                    e.insert(Lane::default())
+                }
+            };
+            let mut next = Some(first);
+            while let Some(event) = next {
+                lane.insert(event);
+                self.events += 1;
+                self.revision = self.revision.wrapping_add(1);
+                self.bounds.add(&event, self.extent_floor);
+                next = events.next_if(|e| e.lane_key() == key);
+            }
         }
     }
 
@@ -1184,6 +1279,57 @@ mod tests {
         assert!(lane.ends_are_sorted());
         assert_eq!(lane.first_ending_after(10), 0);
         assert_eq!(lane.overlapping(10, 11).map(|e| e.start_ns), Some(0));
+    }
+
+    #[test]
+    fn a_batch_is_indexed_as_its_events_one_by_one_would_be() {
+        use crate::test_rng::Rng;
+        let mut rng = Rng(0x0BA7_C4ED);
+        let events: Vec<LiveEvent> = (0..5_000)
+            .map(|_| LiveEvent {
+                // Runs of one lane, as a capture's sources hand events over,
+                // and now and then one out of order or overlapping.
+                tid: 1 + (rng.below(40) / 10) as u32,
+                depth: (rng.below(30) / 10) as u8,
+                ..scope(rng.below(1_000_000), [5, 5, 800, 40_000][rng.below(4) as usize], 0, 1 + rng.below(6) as u32)
+            })
+            .collect();
+        let mut one_by_one = TrackIndex::default();
+        for e in &events {
+            one_by_one.insert(*e);
+        }
+        let mut batch = TrackIndex::default();
+        batch.extend(events.iter().copied());
+        assert_eq!(batch.event_count(), one_by_one.event_count());
+        assert_eq!(batch.time_bounds(), one_by_one.time_bounds());
+        assert_eq!(batch.revision(), one_by_one.revision());
+        assert_eq!(batch.lane_gen(), one_by_one.lane_gen());
+        for ((ka, a), (kb, b)) in batch.lanes().zip(one_by_one.lanes()) {
+            assert_eq!(ka, kb);
+            assert_eq!(a.events(), b.events());
+            assert_eq!((a.ends_sorted, &a.latest_end, &a.block_span, a.longest_span, a.version), (b.ends_sorted, &b.latest_end, &b.block_span, b.longest_span, b.version));
+        }
+    }
+
+    #[test]
+    fn an_event_added_at_the_end_in_order_does_not_reshape_the_lane() {
+        let mut lane = Lane::default();
+        for i in 0..200u64 {
+            lane.insert(scope(i * 10, 6, 0, 1));
+        }
+        assert_eq!(lane.reshaped(), 0, "in order, each ending after the last");
+        assert_eq!(lane.version(), 200);
+        lane.insert(scope(1_005, 2, 0, 1));
+        assert_eq!(lane.reshaped(), 1, "an insert in the middle");
+        lane.insert(scope(1_990, 4, 0, 1));
+        assert_eq!(lane.reshaped(), 2, "at the end, but ending before the one before it: the ends lost their order");
+        assert!(!lane.ends_sorted());
+        let before = lane.reshaped();
+        lane.retain(|e| e.start_ns != 1_990);
+        assert!(lane.reshaped() > before, "a retain that removed something");
+        let copy = lane.clone();
+        assert_ne!(copy.id(), lane.id(), "a clone is another lane to a cache");
+        assert_eq!(copy.events(), lane.events());
     }
 
     #[test]

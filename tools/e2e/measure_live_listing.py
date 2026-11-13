@@ -5,7 +5,8 @@
 
 """Measures the viewer's primitive listing during a live capture, with the
 window still (Follow off: the per-lane cache reuses rows) and with the
-window moving (Follow on: every lane is re-listed every frame). TODO item 21.
+window moving (Follow on: the rows are extended, and slid along when the
+window moves on). TODO item 21.
 
 Runs the same harness the e2e suite uses -- headless Chrome, a fresh service
 on its own port, the Box3D target -- opens the Self pane and reads

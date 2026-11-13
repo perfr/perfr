@@ -2210,3 +2210,43 @@ fn what_the_address_names_is_shown_without_touching_a_capture() {
     reader.begin_trace_load(TraceLoad::from_bytes("t.json".into(), b"[]".to_vec()));
     assert_eq!(reader.stop_requests, 2);
 }
+
+/// A view goes instanced for one wide scope, and the scopes far under a
+/// pixel then share an instance per pixel column, drawn as the longest of
+/// them. One of the others, selected, still has to show as selected.
+#[test]
+fn a_selected_scope_that_shares_its_columns_instance_is_drawn_selected_on_its_own() {
+    let scope = |start_ns: u64, duration_ns: u64, depth: u8| LiveEvent {
+        start_ns,
+        duration_ns,
+        tid: 101,
+        pid: 100,
+        kind: perfr_live_event::kind::API_SCOPE,
+        depth,
+        extra: 0,
+        _pad: 0,
+        name_id: 7,
+    };
+    // A second-long scope, and under it 20,000 of 10 us, 50 us apart.
+    let mut events = vec![scope(1_000, 1_000_000_000, 0)];
+    events.extend((0..20_000u64).map(|i| scope(1_000 + i * 50_000, 10_000, 1)));
+    let hidden = events[4_321];
+    let mut page = Page::new();
+    page.app.has_gpu = true;
+    page.app.ingest(&capture_stream(status_frame(false, false), events)).expect("the stream decodes");
+    page.frame(vec![]);
+    page.frame(vec![]);
+    let listed = page.app.last_instances.len();
+    assert!(listed > 100 && listed < 5_000, "one instance a column, not one a scope: {listed}");
+    let pick = ScopePick::from_event(hidden);
+    assert!(!page.app.last_instances.iter().any(|i| pick.matches_instance(i)), "the scope has no instance of its own");
+
+    page.app.selected = Some(pick);
+    page.frame(vec![]);
+    let own: Vec<&ScopeInstance> = page.app.last_instances.iter().filter(|i| pick.matches_instance(i)).collect();
+    assert_eq!(own.len(), 1, "the selected scope got an instance");
+    assert_eq!(own[0].flags, FLAG_SELECTED);
+    // And it stays the one: a frame later it is not added again.
+    page.frame(vec![]);
+    assert_eq!(page.app.last_instances.iter().filter(|i| pick.matches_instance(i)).count(), 1);
+}

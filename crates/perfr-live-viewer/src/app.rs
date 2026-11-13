@@ -810,6 +810,9 @@ pub struct PerfrLiveApp {
     last_status_seen_s: f64,
     last_ws_retry_s: f64,
     ws_queue: std::collections::VecDeque<Vec<u8>>,
+    /// When the stream's queue was last drained, on `dev::now_ns`; 0 before
+    /// the first time. See [`ingest_budget_ns`].
+    last_ingest_ns: u64,
     lod_label: &'static str,
     has_gpu: bool,
     /// The graphics backend wgpu actually chose: "WebGPU", "WebGL", or "none".
@@ -1817,6 +1820,7 @@ impl PerfrLiveApp {
             last_status_seen_s: -1.0,
             last_ws_retry_s: -1.0,
             ws_queue: std::collections::VecDeque::new(),
+            last_ingest_ns: 0,
             lod_label: "",
             has_gpu,
             gpu_backend,
@@ -3647,19 +3651,32 @@ impl PerfrLiveApp {
             // would draw on top of it.
             self.ws_queue.clear();
         } else {
-            self.ws_queue.extend(inbox.frames);
-            let mut ingested = 0usize;
-            while let Some(next_len) = self.ws_queue.front().map(Vec::len) {
-                if ingested > 0 && ingested + next_len > 1024 * 1024 {
-                    break;
+            // The queue steps out while its messages are applied: `ingest`
+            // needs all of `self`.
+            let mut queue = std::mem::take(&mut self.ws_queue);
+            queue.extend(inbox.frames);
+            let now = perfr_live_event::dev::now_ns;
+            let since_last = match self.last_ingest_ns {
+                0 => 0,
+                last => now().saturating_sub(last),
+            };
+            let mut fault = None;
+            drain_for(&mut queue, ingest_budget_ns(since_last), now, |bytes| match self.ingest(bytes) {
+                Ok(()) => true,
+                Err(f) => {
+                    fault = Some(f);
+                    false
                 }
-                let Some(bytes) = self.ws_queue.pop_front() else {
-                    break;
-                };
-                ingested = ingested.saturating_add(bytes.len());
-                if let Err(fault) = self.ingest(&bytes) {
-                    self.socket_fault(fault);
-                    break;
+            });
+            self.last_ingest_ns = now();
+            match fault {
+                // What is queued continues the stream that just failed.
+                Some(fault) => self.socket_fault(fault),
+                None => {
+                    // What is left is taken next frame, and there has to be
+                    // one: nothing else may be asking for it.
+                    self.needs_repaint |= !queue.is_empty();
+                    self.ws_queue = queue;
                 }
             }
         }
@@ -3786,7 +3803,7 @@ impl PerfrLiveApp {
                 if self.file_trace_active() {
                     return;
                 }
-                for ev in events {
+                for ev in &events {
                     // An event that was already running when the capture
                     // began comes only from a stored capture cut to a
                     // window, and may end long after the window does: it is
@@ -3795,9 +3812,10 @@ impl PerfrLiveApp {
                     if !is_self_pid(ev.pid) && ev.start_ns >= self.capture_start_ns {
                         self.live_edge_ns = self.live_edge_ns.max(ev.end_ns());
                     }
-                    self.live_all.push(&ev);
-                    self.index.insert(ev);
+                    self.live_all.push(ev);
                 }
+                // As a batch: neighbours of one lane share its lookup.
+                self.index.extend(events);
                 self.refresh_content_bounds();
             }
             LiveFrame::InternedString { id, text } => {
@@ -6821,10 +6839,33 @@ impl PerfrLiveApp {
                 {
                     (a, b, w)
                 }
-                _ => {
-                    let a = t0.saturating_sub(view_span / 2);
-                    let b = t1.saturating_add(view_span / 2);
-                    let w = width * ((b - a) as f64 / view_span as f64) as f32;
+                previous => {
+                    // How far past the view the window reaches. A view that
+                    // follows a live capture only ever moves on: nearly all
+                    // of its margin is ahead of it, and what is behind is
+                    // not listed, where half a view each way listed, and
+                    // uploaded every frame, most of a view nobody saw.
+                    let following = self.follow && (self.recording || self.status.capturing);
+                    let (before, after) =
+                        if following { (view_span / 16, view_span / 4) } else { (view_span / 2, view_span / 2) };
+                    let mut a = t0.saturating_sub(before);
+                    let mut len = view_span + before + after;
+                    let mut w = width * (len as f64 / view_span as f64) as f32;
+                    // The view left a window of this size by its far end:
+                    // the next one is that window moved along by a whole
+                    // number of its pixel columns, so the rows listed for
+                    // it are moved, not listed again (`window_slide`).
+                    if let Some((pa, pb, pw, span)) = previous {
+                        let same = span.abs_diff(view_span) <= 4 && (pb - pa).abs_diff(len) <= 64 && (pw - w).abs() < 0.5;
+                        if same && a > pa && a < pb && pw > 0.0 {
+                            let ns_per_px = (pb - pa) as f64 / pw as f64;
+                            let columns = ((a - pa) as f64 / ns_per_px).floor();
+                            a = pa + (columns * ns_per_px).round() as u64;
+                            len = pb - pa;
+                            w = pw;
+                        }
+                    }
+                    let b = a.saturating_add(len);
                     self.overscan_window = Some((a, b, w, view_span));
                     (a, b, w)
                 }
@@ -6897,6 +6938,9 @@ impl PerfrLiveApp {
             && lod == perfr_live_render::TimelineLod::Instanced
             && !self.last_instances.is_empty()
             && dragged.is_none()
+            // A selection that has no instance of its own yet gets one in
+            // the listing below; flags alone would light nothing.
+            && self.selected.is_none_or(|s| self.last_instances.iter().any(|i| s.matches_instance(i)))
         {
             let _up = dev.scope(TID_RENDER, NAME_UPLOAD);
             let mut instances = self.last_instances.clone();
@@ -6968,6 +7012,7 @@ impl PerfrLiveApp {
                             early_out: true,
                             inline: self.listing_inline,
                             per_lane_spans: dev.is_active(),
+                            ..CollectOpts::default()
                         },
                         Some(&mut self.listing_cache),
                     );
@@ -6995,17 +7040,32 @@ impl PerfrLiveApp {
                         self.needs_repaint = true;
                     }
                     self.last_n_lanes_kept = frame.lanes_kept;
-                    self.last_n_lanes_reused = frame.lanes_reused;
+                    // Rows the cache kept: whole, or all but their end.
+                    self.last_n_lanes_reused = frame.lanes_reused + frame.lanes_extended;
                     for inst in &mut frame.instances {
                         inst.h *= d;
                     }
                     instances = frame.instances;
                 }
-                snap_instances_to_layout(&mut instances, &rest_layout);
+                if shifted {
+                    // Moved rows are pinned to where the layout has them. A
+                    // fresh listing was made at the layout's heights; asking
+                    // it again, a lookup for every instance, was a fifth of
+                    // a live frame.
+                    snap_instances_to_layout(&mut instances, &rest_layout);
+                }
                 let search = self.search_active().then_some(&self.search_ids);
                 {
                     let _hl = dev.scope(TID_RENDER, NAME_APPLY_HL);
                     apply_highlight_flags(&mut instances, self.selected, self.hover, search, self.thread_focus());
+                    // The selected scope may be one of several that share a
+                    // pixel column and its one instance, drawn as the
+                    // longest of them. Then it has none to light up, and
+                    // gets its own, on top.
+                    if let Some(selected) = self.selected.filter(|s| !instances.iter().any(|i| s.matches_instance(i))) {
+                        let own = overlay_instance(&self.index, &rest_layout, lt0, lt1, lwidth, selected, d, Some(&self.intern));
+                        instances.extend(own.map(|inst| ScopeInstance { flags: FLAG_SELECTED, ..inst }));
+                    }
                 }
                 let (mut bg, mut fg) = if dragged.is_some() {
                     let _split = dev.scope(TID_RENDER, NAME_SPLIT_DRAG);
@@ -7027,6 +7087,7 @@ impl PerfrLiveApp {
                             early_out: true,
                             inline: false,
                             per_lane_spans: false,
+                            ..CollectOpts::default()
                         },
                     );
                     for inst in &mut frame.instances {
@@ -7095,6 +7156,7 @@ impl PerfrLiveApp {
                         early_out: true,
                         inline: false,
                         per_lane_spans: false,
+                        ..CollectOpts::default()
                     },
                 );
                 let d = self.tracks.scale;
@@ -13612,12 +13674,15 @@ fn overlay_instance(
     let key = pick.lane_key();
     let y = layout.iter().find(|(k, _)| *k == key)?.1;
     let h = lane_height(key) * scale.max(0.01);
-    let e = index
-        .lane(key)?
-        .events()
+    // The lane is in order of start: found, not looked for from its first
+    // event, which a selection in a long lane paid on every listed frame.
+    let events = index.lane(key)?.events();
+    let from = events.partition_point(|ev| ev.start_ns < pick.start_ns);
+    let e = events[from..]
         .iter()
-        .copied()
-        .find(|ev| ev.start_ns == pick.start_ns && ev.name_id == pick.name_id)?;
+        .take_while(|ev| ev.start_ns == pick.start_ns)
+        .find(|ev| ev.name_id == pick.name_id)
+        .copied()?;
     let span = (t1 - t0) as f64;
     let radius = (h * 0.14).clamp(2.0, 3.0);
     Some(instance_for_event(
@@ -13633,6 +13698,44 @@ fn scale_instances_ppp(instances: &mut [ScopeInstance], ppp: f32) {
         inst.w *= s;
         inst.h *= s;
         inst.radius *= s;
+    }
+}
+
+/// The least of a frame the stream's backlog gets, and the most.
+const INGEST_MIN_NS: u64 = 4_000_000;
+const INGEST_MAX_NS: u64 = 100_000_000;
+/// The share of the time between two frames that ingest may take.
+const INGEST_FRAME_SHARE: f64 = 0.4;
+
+/// How long one frame may spend applying queued stream messages, given the
+/// time since the frame before.
+///
+/// The limit is there for a burst: the whole ring on connect, a capture
+/// read back. Applied in one go that is the page frozen for as long as it
+/// takes. It is a share of the frame period, not a fixed amount, because
+/// what arrives between two frames grows with the time between them: a
+/// fixed megabyte a frame, which this replaces, was a third of what a busy
+/// capture sent at four frames a second, so a viewer that was already slow
+/// also fell further behind the stream with every frame, without end.
+fn ingest_budget_ns(since_last_frame_ns: u64) -> u64 {
+    ((since_last_frame_ns as f64 * INGEST_FRAME_SHARE) as u64).clamp(INGEST_MIN_NS, INGEST_MAX_NS)
+}
+
+/// Hands the queued messages to `ingest`, oldest first, until none is left,
+/// `ingest` refuses one, or `budget_ns` has passed on `now`. At least one is
+/// taken, whatever the budget. A clock that stands still (the wasm clock
+/// before its hook is installed) drains the queue.
+fn drain_for(
+    queue: &mut std::collections::VecDeque<Vec<u8>>,
+    budget_ns: u64,
+    now: impl Fn() -> u64,
+    mut ingest: impl FnMut(&[u8]) -> bool,
+) {
+    let started = now();
+    while let Some(bytes) = queue.pop_front() {
+        if !ingest(&bytes) || now().saturating_sub(started) >= budget_ns {
+            break;
+        }
     }
 }
 
@@ -14271,6 +14374,62 @@ mod state_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ingest_budget_is_a_share_of_the_frame_period_within_bounds() {
+        // No frame before this one, and a fast frame: the floor.
+        assert_eq!(ingest_budget_ns(0), INGEST_MIN_NS);
+        assert_eq!(ingest_budget_ns(1_000_000), INGEST_MIN_NS);
+        // 60 fps and 4 fps: the share of the period.
+        assert_eq!(ingest_budget_ns(16_600_000), 6_640_000);
+        assert_eq!(ingest_budget_ns(250_000_000), INGEST_MAX_NS);
+        assert!(ingest_budget_ns(50_000_000) > ingest_budget_ns(20_000_000));
+    }
+
+    #[test]
+    fn the_queue_is_drained_until_the_budget_is_spent_and_always_by_one() {
+        use std::cell::Cell;
+        let queue = |n: usize| -> std::collections::VecDeque<Vec<u8>> { (0..n).map(|i| vec![i as u8]).collect() };
+        // Each message costs 1 ms on this clock.
+        let clock = Cell::new(0u64);
+        let mut taken = Vec::new();
+        let mut q = queue(10);
+        drain_for(&mut q, 3_000_000, || clock.get(), |b| {
+            taken.push(b[0]);
+            clock.set(clock.get() + 1_000_000);
+            true
+        });
+        assert_eq!(taken, [0, 1, 2], "oldest first, until the budget has passed");
+        assert_eq!(q.len(), 7, "the rest waits for the next frame");
+
+        // No budget at all still takes one: a message larger than the
+        // budget must not stall the stream.
+        let mut q = queue(3);
+        let mut n = 0;
+        drain_for(&mut q, 0, || 0, |_| {
+            n += 1;
+            true
+        });
+        assert_eq!((n, q.len()), (1, 2));
+
+        // A megabyte was the old limit. Ten of them inside the budget all go.
+        let mut q: std::collections::VecDeque<Vec<u8>> = (0..10).map(|_| vec![0u8; 1 << 20]).collect();
+        let mut n = 0;
+        drain_for(&mut q, 5_000_000, || 0, |_| {
+            n += 1;
+            true
+        });
+        assert_eq!((n, q.len()), (10, 0), "bytes are not what is counted");
+
+        // A refused message ends the frame's ingest and is not put back.
+        let mut q = queue(4);
+        let mut n = 0;
+        drain_for(&mut q, u64::MAX, || 0, |_| {
+            n += 1;
+            n < 2
+        });
+        assert_eq!((n, q.len()), (2, 2));
+    }
     use crate::tracks::TrackStrip;
     use perfr_live_event::{chrome, kind, LiveEvent};
 

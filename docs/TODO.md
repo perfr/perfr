@@ -348,9 +348,26 @@ window, width, y) and only the lanes that received events are walked
 stat counts them. Measured in `phase-11-live-listing-cache.txt`: the walk
 drops 0.69 → 0.51 ms (110k instances) and 3.0 → 1.15 ms (1M instances) in
 the bench, and the viewer's listing phase halves (0.80 → 0.39 ms/frame,
-headless) once Follow is off. The flatten and the GPU upload still copy
-every instance each frame; per-lane GPU buffers, compute-shader
-rasterization, the pyramid and the per-bucket palette are not started.
+headless) once Follow is off.
+
+Since 2026-11-12 it holds with Follow on as well, and for a view that is
+instanced over events that are mostly under a pixel wide, which is what a
+live capture of a busy process is. Such events that start in one pixel
+column are listed as one instance, the longest of them
+(`CollectOpts::merge_subpixel`), found with a gallop per column rather
+than a walk of the events. A cached row is tied to its lane rather than
+to the set of lanes, extended with the events that arrived since
+(`RowState::resume`), moved in place when a lane appears above it, and
+slid along with the window when Follow moves the window on by whole
+columns (`window_slide`). Measured by replaying a capture of a Bevy scene
+(460k events/s over 100 threads) as a live stream into headless Chrome on
+a GPU: 44 fps falling to 11 and ten seconds behind the stream before,
+60 fps and a tenth of a second behind after; about 500k instances a frame
+before, about 50k after.
+
+The flatten and the GPU upload still copy every instance each frame;
+per-lane GPU buffers, compute-shader rasterization, the pyramid and the
+per-bucket palette are not started.
 
 ## 22. Commercialization
 

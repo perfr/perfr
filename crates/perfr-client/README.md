@@ -325,8 +325,13 @@ is built the same way by its own script:
 ```
 
 Both scripts run one recipe (`crates/perfr-viewer/wasm_pack.sh`): the
-pinned nightly, a rebuilt std, `--features wasm-threads`, profile `wasm`.
-The viewer's goes to `crates/perfr-viewer/viewer-dist/` (gitignored) with
+pinned nightly, a rebuilt std, `--features wasm-threads`. This crate's pack
+is profile `wasm`, built for speed. The viewer's is profile `wasm-viewer`,
+built for size except in the crates that draw every frame, without the
+`service` feature (so recording, the process picker, hooks, the code views,
+Share and egui's built-in fonts are not compiled in) and without the table
+of function names: a little over half the size of this one, at the same
+frame rate. It goes to `crates/perfr-viewer/viewer-dist/` (gitignored) with
 its own page, and is the one to host: `?capture=<url>` fetches a
 `.perfr.stream`, `&story=<url>` plays a story over it, `&chrome=compact`
 drops the toolbar for an iframe. It has no Record, no process picker, no

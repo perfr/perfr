@@ -14,7 +14,7 @@ use perfr_live_protocol::encode_frame;
 
 /// The app as a page with a service builds it: `perfr-client`'s.
 pub(super) fn app() -> PerfrLiveApp {
-    PerfrLiveApp::new(&eframe::CreationContext::_new_kittest(egui::Context::default()), Host::with_service())
+    PerfrLiveApp::new(&eframe::CreationContext::_new_kittest(egui::Context::default()), Host::test_service())
 }
 
 /// The app as the viewer's own page builds it: no service, no sharing.
@@ -49,7 +49,7 @@ impl Page {
 
     /// `setup` runs before the first frame.
     pub fn with(setup: impl FnOnce(&mut PerfrLiveApp)) -> Self {
-        Self::on(Host::with_service(), setup)
+        Self::on(Host::test_service(), setup)
     }
 
     /// The viewer's own page: no service behind it.

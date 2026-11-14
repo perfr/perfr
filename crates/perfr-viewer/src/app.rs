@@ -1807,7 +1807,7 @@ impl PerfrLiveApp {
         cc.egui_ctx.options_mut(|o| o.input_options.max_double_click_delay = 0.5);
         let intern = InternTable::default();
         let static_capture = crate::dev::query_capture_url_from_location();
-        let share_cross_origin = crate::share::share_is_cross_origin(
+        let share_cross_origin = host.share() && crate::share::share_is_cross_origin(
             &crate::dev::location_href(),
             &crate::share::resolve_share_base(&crate::dev::location_search()),
         );
@@ -1938,7 +1938,7 @@ impl PerfrLiveApp {
             column_rasters: 0,
             report_tab: crate::dev::query_report_tab_from_location()
                 .and_then(|v| ReportTab::from_query(&v))
-                .filter(|tab| host.service || *tab != ReportTab::Functions)
+                .filter(|tab| host.service() || !matches!(tab, ReportTab::Functions | ReportTab::Code))
                 .unwrap_or(ReportTab::Flat),
             tree: None,
             tree_expanded: std::collections::HashSet::new(),
@@ -2226,8 +2226,9 @@ impl PerfrLiveApp {
     /// Whether there is a service to ask. The viewer's own page never has
     /// one, and a page opened on a capture file (`?capture=`) has none
     /// either: a request it sends goes nowhere.
+    #[inline(always)]
     fn has_service(&self) -> bool {
-        self.host.service && self.static_capture.is_none()
+        self.host.service() && self.static_capture.is_none()
     }
 
     /// Reports a failure of something the reader asked for. See `notice`.
@@ -2738,7 +2739,7 @@ impl PerfrLiveApp {
     }
 
     fn can_share(&self) -> bool {
-        self.host.share
+        self.host.share()
             && self.held_stream.can_share(
             self.static_capture.is_some(),
             self.trace_name.is_some(),
@@ -3540,23 +3541,25 @@ impl PerfrLiveApp {
             }
         }
         self.story_maybe_fetch_capture();
-        if let Some(token) = inbox.share_token {
-            self.share_token = Some(token);
-        }
-        let login_signalled = inbox.share_login_signalled;
-        for note in inbox.share_notes {
-            if note.gen != self.share_gen {
-                continue;
+        if self.host.share() {
+            if let Some(token) = inbox.share_token {
+                self.share_token = Some(token);
             }
-            self.apply_share_note(note.kind);
-        }
-        if login_signalled
-            && self.share_open
-            && !matches!(self.share_ui, ShareUi::Uploading { .. } | ShareUi::Authorizing)
-        {
-            self.share_login_waiting = false;
-            self.share_login_probe = true;
-            self.request_share_session(true);
+            let login_signalled = inbox.share_login_signalled;
+            for note in inbox.share_notes {
+                if note.gen != self.share_gen {
+                    continue;
+                }
+                self.apply_share_note(note.kind);
+            }
+            if login_signalled
+                && self.share_open
+                && !matches!(self.share_ui, ShareUi::Uploading { .. } | ShareUi::Authorizing)
+            {
+                self.share_login_waiting = false;
+                self.share_login_probe = true;
+                self.request_share_session(true);
+            }
         }
         self.http_ok = inbox.http_ok;
         self.ws_ok = inbox.ws_ok;
@@ -3574,140 +3577,146 @@ impl PerfrLiveApp {
             self.ws_window_bytes = 0;
             self.ws_window_start_s = self.now_s;
         }
-        if let Some(s) = inbox.status {
-            self.apply_status(s);
-        }
-        if let Some(s) = inbox.settings {
-            let text = s.get("track_order").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            self.track_order.adopt_settings(&text);
-            self.track_order_applied_s = -1.0;
-            self.server_settings = Some(s);
-        }
-        if let Some(b) = inbox.bench {
-            self.bench_status = b;
-            self.needs_repaint = true;
-        }
-        if let Some(p) = inbox.processes {
-            self.apply_process_list(p);
-        }
-        self.apply_service_reports(inbox.sampling, inbox.tree);
-        if let Some(m) = inbox.modules {
-            self.modules = Some(m);
-        }
-        if let Some(result) = inbox.disassembly {
-            self.code_loading = false;
-            match result {
-                Ok(d) => {
-                    // The function's own file, when the line table names one
-                    // and it is not what is open already, for the two to be
-                    // read together.
-                    let want = if !d.function.file.is_empty() { d.function.file.clone() } else { d.files.first().cloned().unwrap_or_default() };
-                    let have = self.code_doc.as_ref().map(|doc| doc.path.clone()).unwrap_or_default();
-                    if !want.is_empty() && want != have {
-                        self.net.get_source(&want);
-                    }
-                    let has_lines = d.lines.iter().any(|l| l.line > 0);
-                    self.code_mode = if has_lines { crate::code::CodeMode::Both } else { crate::code::CodeMode::Disassembly };
-                    self.code_disasm = Some(d);
-                    self.code_error.clear();
-                    self.code_scroll_to = Some(0);
-                    self.report_tab = ReportTab::Code;
-                    self.report_open = true;
-                    if self.report_collapsed {
-                        self.report_collapsed = false;
-                        self.report_w_override = Some(SAMPLING_PANEL_DEFAULT_W);
-                    }
-                }
-                Err(e) => self.code_error = e,
+        // What only a capture service sends: its status and settings, the
+        // process list, reports, symbols, code.
+        if self.host.service() {
+            if let Some(s) = inbox.status {
+                self.apply_status(s);
             }
-            self.needs_repaint = true;
-        }
-        if let Some(result) = inbox.source {
-            match result {
-                Ok(f) => {
-                    self.code_doc = Some(crate::code::CodeDoc::new(&f.path, &f.text));
-                    self.code_error.clear();
-                }
-                Err(e) => self.code_error = e,
+            if let Some(s) = inbox.settings {
+                let text = s.get("track_order").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                self.track_order.adopt_settings(&text);
+                self.track_order_applied_s = -1.0;
+                self.server_settings = Some(s);
             }
-            self.needs_repaint = true;
-        }
-        if let Some(mut s) = inbox.symbols {
-            if self.selected_pid == Some(s.pid) {
-                if s.status == "ready" && s.elapsed_ms.is_none() {
-                    s.elapsed_ms = Some(((self.now_s - self.symbols_started_s).max(0.0) * 1000.0) as u64);
-                }
-                self.symbols = s;
+            if let Some(b) = inbox.bench {
+                self.bench_status = b;
+                self.needs_repaint = true;
             }
-        }
-        if let Some(list) = inbox.function_list {
-            if self.selected_pid == Some(list.pid) {
-                self.functions_pid = Some(list.pid);
-                let total = list.total.max(list.functions.len());
-                self.set_functions(list.functions, total);
-                self.functions_requested = false;
-                self.functions_server_query.clear();
+            if let Some(p) = inbox.processes {
+                self.apply_process_list(p);
             }
-        }
-        // Hits from the service's search over the whole index: the ones the
-        // capped list does not have join it, so they can be hooked like any
-        // other row.
-        if let Some(hits) = inbox.function_hits {
-            if Some(hits.pid) == self.functions_pid {
-                self.add_functions(hits.functions);
+            self.apply_service_reports(inbox.sampling, inbox.tree);
+            if let Some(m) = inbox.modules {
+                self.modules = Some(m);
             }
-        }
-        for (generation, result) in inbox.preset_functions {
-            if generation == self.presets.generation {
-                self.presets.resolving = false;
-                self.presets.pending = false;
+            if let Some(result) = inbox.disassembly {
+                self.code_loading = false;
                 match result {
-                    Ok(list) if self.selected_pid == Some(list.pid) && list.status == "ready" => {
-                        self.presets.reports = crate::presets::apply(&self.presets.loaded, &list.functions, &mut self.selected_hooks);
-                        self.presets.message.clear();
+                    Ok(d) => {
+                        // The function's own file, when the line table names one
+                        // and it is not what is open already, for the two to be
+                        // read together.
+                        let want = if !d.function.file.is_empty() { d.function.file.clone() } else { d.files.first().cloned().unwrap_or_default() };
+                        let have = self.code_doc.as_ref().map(|doc| doc.path.clone()).unwrap_or_default();
+                        if !want.is_empty() && want != have {
+                            self.net.get_source(&want);
+                        }
+                        let has_lines = d.lines.iter().any(|l| l.line > 0);
+                        self.code_mode = if has_lines { crate::code::CodeMode::Both } else { crate::code::CodeMode::Disassembly };
+                        self.code_disasm = Some(d);
+                        self.code_error.clear();
+                        self.code_scroll_to = Some(0);
+                        self.report_tab = ReportTab::Code;
+                        self.report_open = true;
+                        if self.report_collapsed {
+                            self.report_collapsed = false;
+                            self.report_w_override = Some(SAMPLING_PANEL_DEFAULT_W);
+                        }
                     }
-                    Ok(_) => self.presets.message = "Process changed while resolving presets. Apply again when symbols are ready.".into(),
-                    Err(error) => self.presets.message = error,
+                    Err(e) => self.code_error = e,
+                }
+                self.needs_repaint = true;
+            }
+            if let Some(result) = inbox.source {
+                match result {
+                    Ok(f) => {
+                        self.code_doc = Some(crate::code::CodeDoc::new(&f.path, &f.text));
+                        self.code_error.clear();
+                    }
+                    Err(e) => self.code_error = e,
+                }
+                self.needs_repaint = true;
+            }
+            if let Some(mut s) = inbox.symbols {
+                if self.selected_pid == Some(s.pid) {
+                    if s.status == "ready" && s.elapsed_ms.is_none() {
+                        s.elapsed_ms = Some(((self.now_s - self.symbols_started_s).max(0.0) * 1000.0) as u64);
+                    }
+                    self.symbols = s;
                 }
             }
-        }
-        if self.status.demo && self.processes.iter().all(|p| p.pid != 1) {
-            let seeded_into_empty = self.processes.is_empty();
-            for (pid, name) in [
-                (1u32, "perfr-demo"),
-                (10, "perfr-render"),
-                (11, "perfr-audio"),
-            ] {
-                if !self.processes.iter().any(|p| p.pid == pid) {
-                    self.processes.push(ProcessJson {
-                        pid,
-                        name: name.into(),
-                        cpu: 0.0,
-                        path: String::new(),
-                    });
+            if let Some(list) = inbox.function_list {
+                if self.selected_pid == Some(list.pid) {
+                    self.functions_pid = Some(list.pid);
+                    let total = list.total.max(list.functions.len());
+                    self.set_functions(list.functions, total);
+                    self.functions_requested = false;
+                    self.functions_server_query.clear();
                 }
             }
-            if seeded_into_empty && self.selected_pid.is_none() {
-                match default_pid_for_first_list(
-                    self.got_status,
-                    self.status.hooks,
-                    self.status.capturing,
-                    self.status.target_pid,
-                    true,
-                ) {
-                    Some(pid) => self.selected_pid = Some(pid),
-                    None if !self.got_status => self.defer_default_pid = true,
-                    None => {}
+            // Hits from the service's search over the whole index: the ones the
+            // capped list does not have join it, so they can be hooked like any
+            // other row.
+            if let Some(hits) = inbox.function_hits {
+                if Some(hits.pid) == self.functions_pid {
+                    self.add_functions(hits.functions);
+                }
+            }
+            for (generation, result) in inbox.preset_functions {
+                if generation == self.presets.generation {
+                    self.presets.resolving = false;
+                    self.presets.pending = false;
+                    match result {
+                        Ok(list) if self.selected_pid == Some(list.pid) && list.status == "ready" => {
+                            self.presets.reports = crate::presets::apply(&self.presets.loaded, &list.functions, &mut self.selected_hooks);
+                            self.presets.message.clear();
+                        }
+                        Ok(_) => self.presets.message = "Process changed while resolving presets. Apply again when symbols are ready.".into(),
+                        Err(error) => self.presets.message = error,
+                    }
+                }
+            }
+            if self.status.demo && self.processes.iter().all(|p| p.pid != 1) {
+                let seeded_into_empty = self.processes.is_empty();
+                for (pid, name) in [
+                    (1u32, "perfr-demo"),
+                    (10, "perfr-render"),
+                    (11, "perfr-audio"),
+                ] {
+                    if !self.processes.iter().any(|p| p.pid == pid) {
+                        self.processes.push(ProcessJson {
+                            pid,
+                            name: name.into(),
+                            cpu: 0.0,
+                            path: String::new(),
+                        });
+                    }
+                }
+                if seeded_into_empty && self.selected_pid.is_none() {
+                    match default_pid_for_first_list(
+                        self.got_status,
+                        self.status.hooks,
+                        self.status.capturing,
+                        self.status.target_pid,
+                        true,
+                    ) {
+                        Some(pid) => self.selected_pid = Some(pid),
+                        None if !self.got_status => self.defer_default_pid = true,
+                        None => {}
+                    }
                 }
             }
         }
         self.merge_trace_processes();
-        if let Some(tl) = inbox.timeline {
-            self.service_timeline = Some(tl);
-            self.service_frame = None;
-        }
-        if let Some(fr) = inbox.frame {
-            self.service_frame = Some(fr);
+        if self.host.service() {
+            if let Some(tl) = inbox.timeline {
+                self.service_timeline = Some(tl);
+                self.service_frame = None;
+            }
+            if let Some(fr) = inbox.frame {
+                self.service_frame = Some(fr);
+            }
         }
         if let Some(e) = inbox.error {
             self.apply_net_error(e);
@@ -4160,7 +4169,7 @@ impl PerfrLiveApp {
             self.transport_share(ui);
         }
         // Hooks are set up for a capture the service will take.
-        if self.host.service {
+        if self.host.service() {
             let presets = ui.button("Instrumentation presets…");
             note_ui_rect("Presets", presets.rect);
             if presets.clicked() { self.presets.open = true; ui.close(); }
@@ -4414,7 +4423,7 @@ impl PerfrLiveApp {
     }
 
     fn paint_link_dot(&self, ui: &mut Ui) {
-        if !self.host.service && self.static_capture.is_none() {
+        if !self.host.service() && self.static_capture.is_none() {
             // The viewer with no capture named in its address: there is no
             // service to be connected to and no file to name.
             return;
@@ -4605,7 +4614,7 @@ impl PerfrLiveApp {
     fn share_state(&self) -> Option<(bool, &'static str)> {
         // No Share on a page that cannot share (the viewer's own), which is
         // every place the button is drawn: this is where they all ask.
-        if !cfg!(target_arch = "wasm32") || !self.host.share {
+        if !cfg!(target_arch = "wasm32") || !self.host.share() {
             return None;
         }
         let enabled = self.can_share();
@@ -4975,7 +4984,7 @@ impl PerfrLiveApp {
     fn symbol_status_line(&self) -> String {
         if let Some(load) = &self.trace_load { return load.progress_line(); }
         if self.static_capture.is_some() { return "Saved capture".into(); }
-        if !self.host.service {
+        if !self.host.service() {
             // No service, so no process and no symbols to load: the line
             // names what the reader opened, or says nothing.
             return match &self.trace_name {
@@ -5530,7 +5539,7 @@ impl PerfrLiveApp {
                 note_ui_rect(&format!("danger:{}", f.name), name_rect);
             }
             if let Some(action) = hook_menu(
-                self.host.service,
+                self.host.service(),
                 &label, f.function_id,
                 if selected { all_selected_hooked } else { hooked },
                 if selected { self.report_selection.len() } else { 1 },
@@ -5630,7 +5639,7 @@ impl PerfrLiveApp {
     fn chrome(&mut self, ui: &mut Ui) {
         // The viewer's own page has no process to pick, no ring to size and
         // no service to wait for: those parts are the client's.
-        let service = self.host.service;
+        let service = self.host.service();
         if service {
             section(ui, "PROCESS");
             self.paint_process_picker(ui, "perfr_processes_side");
@@ -6052,7 +6061,7 @@ impl PerfrLiveApp {
                 && self.service_frame.is_none()
                 && self.trace_load.is_none();
             if empty {
-                paint_empty(ui, body, dropping, self.host.service);
+                paint_empty(ui, body, dropping, self.host.service());
                 paint_selection_overlay(ui, body, self.t0, self.t1, &self.sample_sels, self.measure, true, &|_| None);
                 self.paint_story_overlays(ui, body);
                 self.refresh_scope_stats(t0, t1, Some(y_cull));
@@ -8732,11 +8741,12 @@ impl PerfrLiveApp {
                         ReportTab::Inspector,
                         ReportTab::Selection,
                     ];
-                    // Functions lists what the service indexed, to hook from.
+                    // Functions lists what the service indexed, to hook from,
+                    // and Code shows the source and disassembly it serves.
                     let tabs: Vec<ReportTab> = TABS
                         .iter()
                         .copied()
-                        .filter(|t| self.host.service || *t != ReportTab::Functions)
+                        .filter(|t| self.host.service() || !matches!(t, ReportTab::Functions | ReportTab::Code))
                         .collect();
                     let labels: Vec<&str> = tabs.iter().map(|t| t.label()).collect();
                     let current = tabs.iter().position(|t| *t == self.report_tab).unwrap_or(0);
@@ -8871,7 +8881,7 @@ impl PerfrLiveApp {
                     });
                     return;
                 }
-                if self.report_tab == ReportTab::Code {
+                if self.report_tab == ReportTab::Code && self.host.service() {
                     self.code_toolbar(ui);
                 }
                 // The Live tab owns its own layout: the histogram is pinned to
@@ -8893,6 +8903,7 @@ impl PerfrLiveApp {
                                 ReportTab::Modules => self.module_rows(ui),
                                 ReportTab::Live | ReportTab::Inspector | ReportTab::Selection => {}
                                 ReportTab::Flame => self.flame_rows(ui),
+                                ReportTab::Functions | ReportTab::Code if !self.host.service() => {}
                                 ReportTab::Functions => self.function_rows(ui),
                                 ReportTab::Code => self.code_rows(ui),
                             }
@@ -9138,7 +9149,7 @@ impl PerfrLiveApp {
             // Match the manually positioned row columns: add_space supplies the gap.
             ui.spacing_mut().item_spacing.x = 0.0;
             for (i, (h, w)) in [
-                (if self.host.service { "hooked" } else { "" }, widths[0]),
+                (if self.host.service() { "hooked" } else { "" }, widths[0]),
                 ("self", widths[1]),
                 ("incl", widths[2]),
                 ("function", name_w),
@@ -9195,7 +9206,7 @@ impl PerfrLiveApp {
             // hooked: a painted box, like the Functions view; rows with no
             // function id (no file offset) show none.
             let check_rect = Rect::from_min_size(Pos2::new(x, row_rect.top()), Vec2::new(widths[0], row_h));
-            if self.host.service && row.function_id != 0 {
+            if self.host.service() && row.function_id != 0 {
                 let check = ui.interact(check_rect, ui.id().with(("rephook", first + n)), Sense::click());
                 paint_hook_box(ui, check_rect, hooked);
                 if check.clicked() {
@@ -9230,7 +9241,7 @@ impl PerfrLiveApp {
             );
             note_ui_rect(&format!("report:{}", row.name), name_rect);
             if let Some(action) = hook_menu(
-                self.host.service,
+                self.host.service(),
                 &label, row.function_id,
                 if selected { all_selected_hooked } else { hooked },
                 if selected { self.report_selection.len() } else { 1 },
@@ -9492,6 +9503,9 @@ impl PerfrLiveApp {
     /// Record arms it, the way C++ perfr's "Hook" in the sampling report
     /// works.
     fn apply_hook_action(&mut self, action: HookAction, function_id: u64, name: &str, module: &str) {
+        if !self.host.service() {
+            return;
+        }
         match action {
             HookAction::Hook => {
                 if !self.is_hooked(function_id) {
@@ -9527,6 +9541,9 @@ impl PerfrLiveApp {
     /// Row hook actions operate on the selection when the clicked row is
     /// selected. Disassembly always belongs to the clicked function alone.
     fn apply_row_hook_action(&mut self, action: HookAction, id: u64, name: &str, module: &str) {
+        if !self.host.service() {
+            return;
+        }
         for target in row_hook_targets(action, id, &self.report_selection) {
             let (target_name, target_module) = if target == id {
                 (name.to_string(), module.to_string())
@@ -9633,7 +9650,7 @@ impl PerfrLiveApp {
     /// The batch-hook controls a report shows once a drag has selected rows.
     fn selection_hook_controls(&mut self, ui: &mut Ui) {
         let n = self.report_selection.len();
-        if n == 0 || !self.host.service {
+        if n == 0 || !self.host.service() {
             return;
         }
         let label = if self.selection_all_hooked() { format!("Unhook {n}") } else { format!("Hook {n}") };
@@ -9724,6 +9741,11 @@ impl PerfrLiveApp {
     /// when the service first sees it, comm can change), so this is redone
     /// about as often as the names refresh, and at once after an edit.
     fn apply_track_order(&mut self) {
+        // The order is a setting the service keeps, edited in its part of
+        // the settings window: a page without one has no rules to apply.
+        if !self.host.service() {
+            return;
+        }
         self.track_order.receive();
         if self.track_order.rules.is_empty() {
             if !self.tracks.process_priority.is_empty() {
@@ -9838,7 +9860,7 @@ impl PerfrLiveApp {
     /// The line above a report that says what is hooked and what to do
     /// about it: hooks arm on the next Record, not on the capture in view.
     fn hooked_hint(&self, ui: &mut Ui) {
-        if !self.host.service {
+        if !self.host.service() {
             return;
         }
         // Always one line, so hooking a row does not shift the rows under
@@ -9942,7 +9964,7 @@ impl PerfrLiveApp {
             .spacing([self.ui_tweaks.report_col_gap, self.ui_tweaks.report_row_gap])
             .striped(true)
             .show(ui, |ui| {
-                let hook = if self.host.service { "hook" } else { "" };
+                let hook = if self.host.service() { "hook" } else { "" };
                 for (col, h) in [hook, "inclusive", "self", "of parent", "function", "module"].iter().enumerate() {
                     sort_header(ui, h, col as u8, &mut self.tree_sort, col < 4, self.ui_tweaks.report_font);
                 }
@@ -9975,7 +9997,7 @@ impl PerfrLiveApp {
                         Vec2::new(16.0, self.ui_tweaks.report_font + 4.0),
                         egui::Sense::click(),
                     );
-                    if self.host.service && !is_thread && node.function_id != 0 {
+                    if self.host.service() && !is_thread && node.function_id != 0 {
                         note_ui_rect(&format!("hook:{}", node.name), crect);
                         paint_hook_box(ui, crect, hooked);
                         if cresp.clicked() {
@@ -10041,7 +10063,7 @@ impl PerfrLiveApp {
                         }
                         if !is_thread {
                             note_ui_rect(&format!("tree:{}", node.name), label.rect);
-                            if let Some(action) = hook_menu(self.host.service, &label, node.function_id, if selected { all_selected_hooked } else { hooked }, if selected { self.report_selection.len() } else { 1 }) {
+                            if let Some(action) = hook_menu(self.host.service(), &label, node.function_id, if selected { all_selected_hooked } else { hooked }, if selected { self.report_selection.len() } else { 1 }) {
                                 tree_actions.push((action, node.function_id, node.name.clone(), node.module.clone()));
                             }
                         }
@@ -10330,7 +10352,7 @@ impl PerfrLiveApp {
                     .spacing([self.ui_tweaks.report_col_gap, self.ui_tweaks.report_row_gap])
                     .striped(true)
                     .show(ui, |ui| {
-                        sort_header(ui, if self.host.service { "hook" } else { "" }, 9, &mut self.live_sort, true, font);
+                        sort_header(ui, if self.host.service() { "hook" } else { "" }, 9, &mut self.live_sort, true, font);
                         for (col, h) in ["type", "function", "count", "total", "avg", "min", "max", "std dev", "module"].iter().enumerate() {
                             sort_header(ui, h, col as u8, &mut self.live_sort, (2..=7).contains(&col), font);
                         }
@@ -10437,7 +10459,7 @@ impl PerfrLiveApp {
                             let selected = fid != 0 && self.report_selection.contains(&fid);
                             let (rect, response) = ui.allocate_exact_size(Vec2::new(16.0, font + 4.0), Sense::click());
                             selection_rows.push((fid, rect));
-                            if let Some(f) = function.filter(|_| self.host.service) {
+                            if let Some(f) = function.filter(|_| self.host.service()) {
                                 paint_hook_box(ui, rect, hooked);
                                 note_ui_rect(&format!("hook:{name}"), rect);
                                 if response.clicked() {
@@ -10464,7 +10486,7 @@ impl PerfrLiveApp {
                             note_ui_rect(&format!("live:{name}"), label.rect);
                             note_ui_rect(&format!("live-type:{}:{name}", r.type_label()), label.rect);
                             if let Some(f) = function {
-                                if let Some(action) = hook_menu(self.host.service, &label, fid,
+                                if let Some(action) = hook_menu(self.host.service(), &label, fid,
                                     if selected { all_selected_hooked } else { hooked },
                                     if selected { self.report_selection.len() } else { 1 }) {
                                     actions.push((action, f.clone()));
@@ -10685,7 +10707,7 @@ impl PerfrLiveApp {
         }
         if let Some((function_id, name, module)) = self.flame_menu.clone() {
             let hooked = self.is_hooked(function_id);
-            if let Some(action) = hook_menu(self.host.service, &resp, function_id, hooked, 1) {
+            if let Some(action) = hook_menu(self.host.service(), &resp, function_id, hooked, 1) {
                 self.apply_hook_action(action, function_id, &name, &module);
                 self.flame_menu = None;
             }
@@ -10745,7 +10767,10 @@ impl PerfrLiveApp {
                             .size(10.5),
                     );
                     ui.add_space(4.0);
-                    if let Some(function) = self.scope_function(pick.pid, &name) {
+                    // Hooking is for the next capture, which only a page with
+                    // a service takes.
+                    if !self.host.service() {
+                    } else if let Some(function) = self.scope_function(pick.pid, &name) {
                         let hooked = self.is_hooked(function.function_id);
                         let item = ui.button(if hooked { "Unhook function" } else { "Hook function" });
                         note_ui_rect("menu:hook", item.rect);
@@ -11564,12 +11589,16 @@ impl eframe::App for PerfrLiveApp {
             }
             self.tweaks_window(ctx);
             self.about_window(ctx);
-            self.maybe_resume_share();
-            self.share_window(ctx);
+            if self.host.share() {
+                self.maybe_resume_share();
+                self.share_window(ctx);
+            }
             self.notice_window(ctx);
             self.story.windows(ctx);
-            self.presets_window(ctx);
-            self.bench_window(ctx);
+            if self.host.service() {
+                self.presets_window(ctx);
+                self.bench_window(ctx);
+            }
             self.paint_scope_menu(ctx);
             {
                 let _pane = devf.scope(TID_UI, NAME_SELF_PANE);

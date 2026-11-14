@@ -8,21 +8,25 @@
 # (crates/perfr-client/build_wasm.sh), which is the same interface with the
 # capture service behind it. One recipe, so the two packs are built alike.
 #
-#   wasm_pack.sh <crate directory> <module name> <output directory>
+#   wasm_pack.sh <crate directory> <module name> <output directory> [profile [wasm-bindgen arguments]]
 #
 # Compiles the crate for wasm32 with the pinned nightly, a rebuilt std and
-# `--features wasm-threads` (profile `wasm`), runs wasm-bindgen into the
-# output directory as <module name>.js and <module name>_bg.wasm, and stamps
-# the generated JavaScript. The caller adds its page and its VERSION.
+# `--features wasm-threads`, runs wasm-bindgen into the output directory as
+# <module name>.js and <module name>_bg.wasm, and stamps the generated
+# JavaScript. The caller adds its page and its VERSION. The profile is
+# `wasm` unless one is named: the viewer's pack names `wasm-viewer`, and
+# passes wasm-bindgen the flag that leaves the function names out.
 
 set -euo pipefail
-if [[ $# -ne 3 ]]; then
-  echo "usage: $0 <crate directory> <module name> <output directory>" >&2
+if [[ $# -lt 3 ]]; then
+  echo "usage: $0 <crate directory> <module name> <output directory> [profile [wasm-bindgen arguments]]" >&2
   exit 2
 fi
 CRATE="$(cd "$1" && pwd)"
 MODULE="$2"
 OUT="$3"
+PROFILE="${4:-wasm}"
+BINDGEN_ARGS=("${@:5}")
 WORKSPACE="$(cd "$(dirname "$0")/../.." && pwd)"
 
 if ! command -v rustup >/dev/null; then
@@ -68,11 +72,11 @@ if [[ -n "${PERFR_RELEASE_TAG:-}" ]]; then
 fi
 echo "pack stamp: hash=${PERFR_GIT_HASH} tag=${PERFR_RELEASE_TAG:-dev} date=${SOURCE_DATE_EPOCH:-clock}"
 
-echo "Building $MODULE with ${NIGHTLY} -Z build-std + --features wasm-threads (profile wasm)"
+echo "Building $MODULE with ${NIGHTLY} -Z build-std + --features wasm-threads (profile $PROFILE)"
 rustup run "$NIGHTLY" cargo build \
   --manifest-path "$CRATE/Cargo.toml" \
   --target wasm32-unknown-unknown \
-  --profile wasm \
+  --profile "$PROFILE" \
   --features wasm-threads \
   -Z build-std=panic_abort,std
 
@@ -86,7 +90,8 @@ wasm-bindgen \
   --target web \
   --out-dir "$OUT" \
   --out-name "$MODULE" \
-  "$WORKSPACE/target/wasm32-unknown-unknown/wasm/$MODULE.wasm"
+  "${BINDGEN_ARGS[@]}" \
+  "$WORKSPACE/target/wasm32-unknown-unknown/$PROFILE/$MODULE.wasm"
 
 # wasm-bindgen overwrites the glue. CI requires the perfr header on *.js.
 stamp_perfr_js_header() {

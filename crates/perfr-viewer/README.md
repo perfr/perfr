@@ -20,7 +20,10 @@ Host that folder anywhere and open it on a capture:
 
 There is no Record, no process picker, no hooks and no Share: those need
 the capture service, and belong to `perfr-client`, the layer on top of this
-crate and the page the service itself serves. A `.perfr.zip` is opened by
+crate and the page the service itself serves. They are not switched off in
+this pack; they are not in it. The code for them is the `service` feature,
+which only `perfr-client` turns on, and the pack is built for size besides:
+about 5.4 MB of wasm (2 MB gzipped) against the client's 9.9 MB. A `.perfr.zip` is opened by
 the service too; the viewer says so when it is given one.
 
 ## How the two fit
@@ -31,10 +34,12 @@ This crate holds the whole interface. What is behind the page is a
 - The viewer's own entry point (`start_viewer`, the `page` feature) runs the
   interface over `Host::viewer()`: a backend that reads capture files and
   stories, no service, no sharing.
-- `perfr-client` runs the same interface over a host that has a service.
-  Its backend (`perfr-client/src/service.rs`) is the event socket and the
-  requests under `/api`, and the interface then shows recording, the process
-  picker, hooks, the service's settings and Share.
+- `perfr-client` runs the same interface over a host that has a service,
+  with the `service` feature on. Its backend (`perfr-client/src/service.rs`)
+  is the event socket and the requests under `/api`, and the interface then
+  shows recording, the process picker, hooks, the service's settings, the
+  code views and Share. The source of those controls is in this crate,
+  behind that feature; a build without it has none of them.
 
 `perfr-client` depends on this crate; this crate depends on neither it nor
 the capture service (`.github/scripts/check-viewer-boundary.py`). The

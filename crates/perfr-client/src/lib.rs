@@ -20,11 +20,7 @@ use wasm_bindgen::prelude::*;
 
 /// What this page is built on: a capture service, and sharing.
 pub fn host() -> Host {
-    Host {
-        service: true,
-        share: true,
-        connect,
-    }
+    Host::with_service(connect)
 }
 
 /// The service that served the page, or, when the page's address names a
@@ -58,8 +54,8 @@ mod host_tests {
     #[test]
     fn the_client_has_a_service_and_shares() {
         let host = super::host();
-        assert!(host.service);
-        assert!(host.share);
+        assert!(host.service());
+        assert!(host.share());
     }
 }
 

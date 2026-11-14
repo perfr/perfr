@@ -218,8 +218,9 @@ cargo build -p perfr                   # the service binary
 The service embeds the client, which is a third artifact built by
 `crates/perfr-client/build_wasm.sh`. A service build embeds whatever pack
 is in that crate's `viewer-dist/` at that moment. The viewer's pack is the
-same interface with no service behind it, built by the same recipe (a
-nightly toolchain, profile `wasm`); it is not embedded in the binary.
+same interface with no service behind it and none of the service's
+controls compiled in. It is built for size (profile `wasm-viewer`), a
+little over half the client's, and is not embedded in the binary.
 
 ## History
 

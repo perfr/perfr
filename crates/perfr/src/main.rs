@@ -35,6 +35,8 @@ mod frida;
 mod code;
 mod demangle;
 mod functions;
+#[cfg(target_os = "linux")]
+mod health;
 #[cfg(any(test, target_os = "linux"))]
 mod interner;
 mod lan;

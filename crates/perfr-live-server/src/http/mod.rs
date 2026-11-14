@@ -1045,6 +1045,10 @@ pub struct StartBody {
     /// samples point at, and prunes it to a scopes-a-second budget.
     #[serde(default)]
     pub auto_profile: bool,
+    /// Sample the machine itself twice a second (CPU, memory, pressure,
+    /// disks, network, GPU) into the machine health track. On by default.
+    #[serde(default = "default_true")]
+    pub machine_health: bool,
 }
 
 fn default_true() -> bool {

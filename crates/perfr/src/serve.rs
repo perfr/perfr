@@ -8,8 +8,9 @@
 //! (`perfr-live-server`), prints its URL, and waits. The viewer's Capture
 //! strip lists real processes from `/proc`, and its Record button starts and
 //! stops a real capture through this service: stack sampling, system-wide
-//! scheduling, thread states, manual scopes, hooks and GPU telemetry, read
-//! by one loop on a thread of its own (`capture_loop`). The macOS and
+//! scheduling, thread states, manual scopes, hooks, GPU telemetry and the
+//! machine's own health (`health.rs`), read by one loop on a thread of its
+//! own (`capture_loop`). The macOS and
 //! Windows file-writing modes run that same loop headless; the Linux one is
 //! a separate, older pipeline (`main.rs`).
 //!
@@ -109,6 +110,21 @@ fn intern_gpu_lane_names(service: &LiveService) {
     service.intern_id(gpu_lane::SM_CLOCK_MHZ, "GPU SM clock MHz");
     service.intern_id(gpu_lane::PROCESS_MEMORY_MIB, "GPU memory (process) MiB");
     service.intern_id(gpu_lane::JOB, "GPU job");
+}
+
+/// Names the machine health track for the viewer: its process, one thread
+/// per group, and the lanes. At every capture start, since a capture's
+/// names are forgotten when the next one begins.
+#[cfg(target_os = "linux")]
+fn name_health_track(service: &LiveService) {
+    use perfr_live_event::health;
+    service.set_process_name(health::PID, health::PROCESS_NAME);
+    for (tid, name) in health::GROUPS {
+        service.set_thread_name(health::PID, *tid, name);
+    }
+    for lane in health::LANES {
+        service.intern_id(lane.id, lane.name);
+    }
 }
 
 /// Turns one pod telemetry/job event into viewer events.
@@ -648,6 +664,10 @@ struct StartRequest {
     /// This capture's own auto-unhook limit, when the request carries one;
     /// see [`StartRequest::max_hook_calls_per_s`].
     max_hook_calls_per_s: Option<u64>,
+    /// The machine health track. Absent means on: it costs a few file
+    /// reads twice a second, and it can only explain a stall if it was on
+    /// when the stall happened.
+    machine_health: bool,
 }
 
 impl StartRequest {
@@ -675,6 +695,7 @@ impl StartRequest {
             auto_profile: flag("auto_profile").unwrap_or(false),
             uprobe_duplicate_filter: flag("uprobe_duplicate_filter").unwrap_or(true),
             max_hook_calls_per_s: value.get("max_hook_calls_per_s").and_then(|v| v.as_u64()),
+            machine_health: flag("machine_health").unwrap_or(true),
         }
     }
 
@@ -1744,6 +1765,7 @@ fn capture_loop(
     mut scopes: ScopeSource,
     capture_start_ns: u64,
     symbols: Arc<Mutex<SymbolState>>,
+    machine_health: bool,
 ) {
     // The hook specs the engines arm; the armed set also carries each hook's
     // size and safety verdict, kept for the crash journal.
@@ -1777,6 +1799,12 @@ fn capture_loop(
     let has_target = target_pid > 0;
     // The scope reader and epoch were established before Frida attachment.
     service.mark_capture_started(target_pid.max(0) as u32, capture_start_ns);
+    // The machine's own state, twice a second, as the value lanes of a
+    // process of their own (`health.rs`).
+    let mut health = machine_health.then(|| {
+        name_health_track(&service);
+        crate::health::HealthSampler::new()
+    });
     // A Frida target has been writing since its hooks armed; empty its rings
     // once now, before the setup below takes its half second.
     {
@@ -2696,7 +2724,19 @@ fn capture_loop(
         if let Some(helper) = telemetry.as_mut() {
             let _gpu = perfr_api::scope("read gpu telemetry");
             for event in helper.drain() {
+                // NVIDIA's figures are not in sysfs; the health track takes
+                // them from here.
+                if let Some(health) = health.as_mut() {
+                    health.note_gpu(&event);
+                }
                 batch.extend(gpu_events(&event));
+            }
+        }
+        if let Some(health) = health.as_mut() {
+            let now_ns = crate::now_monotonic_ns();
+            if health.due(now_ns) {
+                let _health = perfr_api::scope("read machine health");
+                health.sample(now_ns, &mut batch);
             }
         }
 
@@ -3472,6 +3512,7 @@ pub fn run_on(
             let ids = &request.function_ids;
             let show_all_processes = request.show_all_processes;
             let uprobe_duplicate_filter = request.uprobe_duplicate_filter;
+            let machine_health = request.machine_health;
             let max_hook_calls_per_s = request.max_hook_calls_per_s(&start_service);
             let mut hooks = Vec::new();
             // Per-hook size and safety verdict, in the same order as `hooks`,
@@ -3608,6 +3649,7 @@ pub fn run_on(
                         scopes,
                         capture_start_ns,
                         symbols,
+                        machine_health,
                     );
                     // However the capture ended: its hook journal has done
                     // its job unless a crash report now points at it.
@@ -4526,6 +4568,7 @@ mod tests {
             auto_profile: false,
             uprobe_duplicate_filter: true,
             max_hook_calls_per_s: None,
+            machine_health: true,
         };
         // What the server sends: its typed body, as JSON.
         let full = perfr_live_server::http::StartBody {
@@ -4542,6 +4585,7 @@ mod tests {
             uprobe_duplicate_filter: false,
             max_hook_calls_per_s: Some(5),
             auto_profile: true,
+            machine_health: false,
         };
         assert_eq!(
             StartRequest::parse(&full.to_json()),
@@ -4551,6 +4595,7 @@ mod tests {
                 auto_profile: true,
                 uprobe_duplicate_filter: false,
                 max_hook_calls_per_s: Some(5),
+                machine_health: false,
                 ..request(4242)
             }
         );
@@ -4562,7 +4607,7 @@ mod tests {
         // A field of the wrong type is an absent field.
         assert_eq!(
             StartRequest::parse(
-                r#"{"pid":-3,"show_all_processes":"yes","auto_profile":1,"uprobe_duplicate_filter":null,
+                r#"{"pid":-3,"show_all_processes":"yes","auto_profile":1,"uprobe_duplicate_filter":null,"machine_health":0,
                     "max_hook_calls_per_s":-1,"dynamic_instrumentation_method":7,"instrumented_functions":{"function_id":1}}"#
             ),
             request(-3)

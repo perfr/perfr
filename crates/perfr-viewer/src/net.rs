@@ -276,6 +276,7 @@ pub struct CaptureStart {
     pub show_all_processes: bool,
     pub uprobe_duplicate_filter: bool,
     pub auto_profile: bool,
+    pub machine_health: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -538,7 +539,7 @@ pub fn capture_start_body(req: &CaptureStart) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        r#"{{"pid":{},"enable_api":{},"context_switches":{},"thread_states":{},"sampling":{},"samples_per_second":{},"unwinding":"{}","dynamic_instrumentation_method":"{}","instrumented_functions":[{fns}],"show_all_processes":{},"uprobe_duplicate_filter":{},"auto_profile":{}}}"#,
+        r#"{{"pid":{},"enable_api":{},"context_switches":{},"thread_states":{},"sampling":{},"samples_per_second":{},"unwinding":"{}","dynamic_instrumentation_method":"{}","instrumented_functions":[{fns}],"show_all_processes":{},"uprobe_duplicate_filter":{},"auto_profile":{},"machine_health":{}}}"#,
         req.pid,
         req.enable_api,
         req.context_switches,
@@ -550,6 +551,7 @@ pub fn capture_start_body(req: &CaptureStart) -> String {
         req.show_all_processes,
         req.uprobe_duplicate_filter,
         req.auto_profile,
+        req.machine_health,
     )
 }
 
@@ -1381,6 +1383,7 @@ mod tests {
             show_all_processes: false,
             uprobe_duplicate_filter: true,
             auto_profile: false,
+            machine_health: true,
         }
     }
 
@@ -1391,7 +1394,7 @@ mod tests {
         // other spellings, but the body is also what the log line shows.
         assert_eq!(
             body,
-            r#"{"pid":4242,"enable_api":true,"context_switches":true,"thread_states":false,"sampling":true,"samples_per_second":1000,"unwinding":"dwarf","dynamic_instrumentation_method":"uprobes","instrumented_functions":[{"function_id":7},{"function_id":281474976710655}],"show_all_processes":false,"uprobe_duplicate_filter":true,"auto_profile":false}"#
+            r#"{"pid":4242,"enable_api":true,"context_switches":true,"thread_states":false,"sampling":true,"samples_per_second":1000,"unwinding":"dwarf","dynamic_instrumentation_method":"uprobes","instrumented_functions":[{"function_id":7},{"function_id":281474976710655}],"show_all_processes":false,"uprobe_duplicate_filter":true,"auto_profile":false,"machine_health":true}"#
         );
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["instrumented_functions"][1]["function_id"], 281474976710655u64);

@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 mod color;
 pub mod logs;
 pub mod dev;
+pub mod health;
 pub mod theme;
 pub use color::{
     argb_to_css, async_scope_color, encode_manual_color, event_color, inactive, log_level_color,

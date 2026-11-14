@@ -3,6 +3,17 @@
 // found in the LICENSE file.
 
 //! IBM Plex (OFL) for chrome and tabular status / time.
+//!
+//! Plex here is a Latin subset. Behind it come the fallbacks, for what a
+//! capture brings that Plex has no glyph for:
+//!
+//! * With the `service` feature (`perfr-client`), egui's four built-in
+//!   fonts: Ubuntu Light, Hack, Noto Emoji and an icon font. The controls
+//!   that need a service use their symbols.
+//! * Without it (the viewer's own pack), Ubuntu Light alone: Greek,
+//!   Cyrillic and accented Latin in thread, process and scope names. The
+//!   other three are 1 MB that the viewer's own text never draws from. An
+//!   emoji in a name is the one thing that shows as a missing glyph.
 
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily, FontId, TextStyle};
 
@@ -14,8 +25,32 @@ pub fn medium() -> FontFamily {
     FontFamily::Name("ibm_medium".into())
 }
 
+/// The fallback of a build without egui's built-in fonts.
+#[cfg(not(feature = "service"))]
+const FALLBACK: &[u8] = epaint_default_fonts::UBUNTU_LIGHT;
+
+/// Font definitions with the fallbacks in and nothing in front of them.
+fn fallbacks() -> FontDefinitions {
+    #[cfg(feature = "service")]
+    {
+        FontDefinitions::default()
+    }
+    #[cfg(not(feature = "service"))]
+    {
+        let mut fonts = FontDefinitions::empty();
+        fonts.font_data.insert(
+            "ubuntu_light".into(),
+            std::sync::Arc::new(FontData::from_static(FALLBACK)),
+        );
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            fonts.families.insert(family, vec!["ubuntu_light".into()]);
+        }
+        fonts
+    }
+}
+
 pub fn install(ctx: &egui::Context) {
-    let mut fonts = FontDefinitions::default();
+    let mut fonts = fallbacks();
     fonts.font_data.insert(
         "ibm_plex_sans".into(),
         std::sync::Arc::new(FontData::from_static(SANS)),
@@ -79,6 +114,26 @@ pub fn install(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whatever the fallbacks are, Plex is asked first, and both families
+    /// end in a font that has Greek and Cyrillic.
+    #[test]
+    fn plex_leads_and_a_fallback_follows() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let _ = ctx.run(Default::default(), |ctx| {
+            for (family, lead) in [(FontFamily::Proportional, "ibm_plex_sans"), (FontFamily::Monospace, "ibm_plex_mono")] {
+                let id = FontId::new(12.0, family.clone());
+                ctx.fonts(|f| {
+                    assert!(f.has_glyphs(&id, "Record 12.5 ms µ — …"), "{lead}");
+                    assert!(f.has_glyphs(&id, "поток Ελληνικά žluťoučký"), "no fallback behind {lead}");
+                });
+            }
+        });
+        let defs = fallbacks();
+        assert!(!defs.families[&FontFamily::Proportional].is_empty());
+        assert!(!defs.families[&FontFamily::Monospace].is_empty());
+    }
 
     #[test]
     fn plex_fonts_are_ttf() {

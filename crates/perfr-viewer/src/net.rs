@@ -821,18 +821,23 @@ pub type Net = Box<dyn Backend>;
 /// `perfr-client` passes the one with the capture service in it.
 #[derive(Clone, Copy)]
 pub struct Host {
-    /// A capture service serves this page. With one, a page opened without
-    /// `?capture=` connects to it and shows what goes with it: recording,
-    /// the process picker, hooks, the service's settings. Without one the
-    /// page shows the captures it is given and none of that.
-    pub service: bool,
-    /// Captures can be sent to the website from this page (Share).
-    pub share: bool,
+    service: bool,
+    share: bool,
     /// Opens what is behind the page. Given an address (the page's
     /// `?capture=`), that capture file is fetched and nothing else is
     /// contacted.
     pub connect: fn(Option<&str>) -> Net,
 }
+
+/// Whether the parts of the interface that need a capture service are in
+/// this build at all: recording, the process picker, hooks, the service's
+/// settings, the code views, Share. They are the `service` feature, which
+/// `perfr-client` turns on and the viewer's own pack does not have. Every
+/// one of them is reached through [`Host::service`] or [`Host::share`], so
+/// in a build without the feature those are constant, the compiler drops
+/// the branches behind them, and nothing of capture control or sharing is
+/// left in the pack. The tests build both kinds of page, so they have it.
+pub(crate) const SERVICE_BUILT: bool = cfg!(any(test, feature = "service"));
 
 impl Host {
     /// The viewer's own page: capture files, no service, no sharing.
@@ -843,18 +848,40 @@ impl Host {
             connect: open_files,
         }
     }
+
+    /// A page served by a capture service, which can share. `connect`
+    /// opens the connection to it.
+    #[cfg(any(test, feature = "service"))]
+    pub fn with_service(connect: fn(Option<&str>) -> Net) -> Self {
+        Self {
+            service: true,
+            share: true,
+            connect,
+        }
+    }
+
+    /// A capture service serves this page. With one, a page opened without
+    /// `?capture=` connects to it and shows what goes with it: recording,
+    /// the process picker, hooks, the service's settings. Without one the
+    /// page shows the captures it is given and none of that.
+    #[inline(always)]
+    pub fn service(&self) -> bool {
+        SERVICE_BUILT && self.service
+    }
+
+    /// Captures can be sent to the website from this page (Share).
+    #[inline(always)]
+    pub fn share(&self) -> bool {
+        SERVICE_BUILT && self.share
+    }
 }
 
 #[cfg(test)]
 impl Host {
     /// A page with a service and sharing, as `perfr-client` builds it, over
     /// the empty backend: the tests hand the page its frames and answers.
-    pub(crate) fn with_service() -> Self {
-        Self {
-            service: true,
-            share: true,
-            connect: |_| Box::new(NoBackend),
-        }
+    pub(crate) fn test_service() -> Self {
+        Self::with_service(|_| Box::new(NoBackend))
     }
 }
 

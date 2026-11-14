@@ -34,9 +34,10 @@ wasm-threads = ["perfr-viewer/wasm-threads"]
 
 [dependencies]
 perfr-live-event = { path = "../perfr-live-event" }
-# The interface. Its defaults stay off: `page`, the viewer's own entry point,
-# is not for this pack (.github/scripts/check-viewer-boundary.py holds that).
-perfr-viewer = { path = "../perfr-viewer", default-features = false }
+# The interface, with the parts that need a service compiled in (`service`).
+# Its defaults stay off: `page`, the viewer's own entry point, is not for
+# this pack (.github/scripts/check-viewer-boundary.py holds that).
+perfr-viewer = { path = "../perfr-viewer", default-features = false, features = ["service"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "=0.2.100"

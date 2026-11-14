@@ -126,3 +126,23 @@ lto = false
 codegen-units = 16
 debug = false
 panic = "abort"
+
+# The viewer's pack (crates/perfr-viewer/build_wasm.sh), which is downloaded
+# by whoever opens a page it is hosted on: built for size. Most of the
+# module is code that runs once or rarely (the shader compiler, the graphics
+# backend's setup, formatting, parsing), and that is compiled small. What
+# runs every frame is compiled for speed, below: sized like the rest, a pan
+# or a zoom over a busy capture lost a third of its frame rate.
+[profile.wasm-viewer]
+inherits = "wasm"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+[profile.wasm-viewer.package.perfr-viewer]
+opt-level = 3
+[profile.wasm-viewer.package.perfr-live-render]
+opt-level = 3
+[profile.wasm-viewer.package.perfr-live-event]
+opt-level = 3

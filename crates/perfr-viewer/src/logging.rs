@@ -157,7 +157,9 @@ mod wasm {
     }
 
     fn flush_inner(force: bool) {
-        if !RELAY.load(Ordering::Relaxed) {
+        // The relay is to a service's log file: a build with no service in
+        // it (the viewer's own pack) has nothing to send and no code to.
+        if !crate::net::SERVICE_BUILT || !RELAY.load(Ordering::Relaxed) {
             return;
         }
         let Ok(mut queue) = QUEUE.try_lock() else { return };

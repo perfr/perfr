@@ -3213,6 +3213,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui-wgpu",
+ "epaint_default_fonts",
  "js-sys",
  "log",
  "perfr-build-info",

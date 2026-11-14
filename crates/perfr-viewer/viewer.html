@@ -20,11 +20,11 @@
   <canvas id="perfr-viewer"></canvas>
   <p id="perfr-viewer-error" role="alert" hidden></p>
   <script type="module">
-    import init, { start_embed } from "./perfr_viewer.js";
+    import init, { start_viewer } from "./perfr_viewer.js";
     const canvas = document.getElementById("perfr-viewer");
     try {
       await init();
-      await start_embed(canvas);
+      await start_viewer(canvas);
     } catch (err) {
       // The page could not start: no WebGPU adapter, or the pack did not
       // load. Say so where the timeline would have been; an empty canvas

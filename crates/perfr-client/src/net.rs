@@ -1575,11 +1575,11 @@ mod wasm_impl {
         fn send(&self, method: &'static str, path: &'static str, body: String) {
             // Every command the page gives the service, in the log: these
             // are clicks (Record, Stop, Demo, config), not per-frame pulls.
-            log::info!(target: "perfr_live_viewer::net", "{method} {path} {}", body.chars().take(200).collect::<String>());
+            log::info!(target: "perfr_client::net", "{method} {path} {}", body.chars().take(200).collect::<String>());
             let inbox = self.inbox.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 if let Err(e) = send_text(method, path, &body).await {
-                    log::warn!(target: "perfr_live_viewer::net", "{method} {e}");
+                    log::warn!(target: "perfr_client::net", "{method} {e}");
                     inbox.lock().unwrap_or_else(|p| p.into_inner()).error = Some(e);
                 }
             });
@@ -1824,7 +1824,7 @@ mod wasm_impl {
     /// returns.
     fn abort_upload(handle: Option<web_sys::XmlHttpRequest>) {
         if let Some(xhr) = handle {
-            log::info!(target: "perfr_live_viewer::net", "share upload aborted");
+            log::info!(target: "perfr_client::net", "share upload aborted");
             let _ = xhr.abort();
         }
     }
@@ -1985,7 +1985,7 @@ mod wasm_impl {
 
         let inbox_open = inbox.clone();
         let onopen = Closure::wrap(Box::new(move |_ev: JsValue| {
-            log::info!(target: "perfr_live_viewer::net", "WebSocket open");
+            log::info!(target: "perfr_client::net", "WebSocket open");
             if let Ok(mut g) = inbox_open.lock() {
                 g.ws_ok = true;
             }
@@ -2007,7 +2007,7 @@ mod wasm_impl {
                 };
                 if queued == Queued::Overflow {
                     log::warn!(
-                        target: "perfr_live_viewer::net",
+                        target: "perfr_client::net",
                         "the page is hidden and {} MiB of the event stream were waiting: closing the socket; the capture is read again from the service when the page is shown",
                         HIDDEN_BACKLOG_MAX >> 20
                     );
@@ -2031,7 +2031,7 @@ mod wasm_impl {
         let inbox_close = inbox;
         let slot_close = slot.clone();
         let onclose = Closure::wrap(Box::new(move |_ev: JsValue| {
-            log::warn!(target: "perfr_live_viewer::net", "WebSocket closed");
+            log::warn!(target: "perfr_client::net", "WebSocket closed");
             if let Ok(mut g) = inbox_close.lock() {
                 g.ws_ok = false;
                 g.error = Some("WebSocket closed".into());
@@ -2072,7 +2072,7 @@ mod wasm_impl {
         if let Ok(mut g) = inbox.lock() {
             g.error = Some(msg.to_string());
         }
-        log::error!(target: "perfr_live_viewer::net", "{msg}");
+        log::error!(target: "perfr_client::net", "{msg}");
     }
 
     fn js_err(v: JsValue) -> String {

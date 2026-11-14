@@ -5,13 +5,13 @@
 """Fail a pull request whose committed viewer pack does not match its sources.
 
 perfr.dev runs this comparison in build_site.py: it recomputes
-crates/perfr-live-viewer/source_id.py over the checkout it deploys and
+crates/perfr-client/source_id.py over the checkout it deploys and
 refuses a pack whose id differs. A mismatch there fails the deploy. This
 script is that comparison on the pull request, so the mismatch is caught
 before it reaches main.
 
 It also fails when a file that counts toward the id changed since the base
-and viewer-dist/perfr_live_viewer_bg.wasm did not. Writing a new source id
+and viewer-dist/perfr_client_bg.wasm did not. Writing a new source id
 into VERSION by hand is not a rebuild; build_wasm.sh rewrites the wasm.
 
     python3 .github/scripts/check-viewer-pack.py [--base origin/main]
@@ -22,13 +22,13 @@ import subprocess
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-sys.path.insert(0, os.path.join(ROOT, "crates", "perfr-live-viewer"))
+sys.path.insert(0, os.path.join(ROOT, "crates", "perfr-client"))
 
 import source_id  # noqa: E402
 
-PACK = "crates/perfr-live-viewer/viewer-dist"
+PACK = "crates/perfr-client/viewer-dist"
 VERSION = os.path.join(PACK, "VERSION")
-WASM = os.path.join(PACK, "perfr_live_viewer_bg.wasm")
+WASM = os.path.join(PACK, "perfr_client_bg.wasm")
 
 
 def git(args):
@@ -88,7 +88,7 @@ def main():
     fields = version_fields()
     if not fields or "source" not in fields:
         print(
-            f"{VERSION} has no source id. Run crates/perfr-live-viewer/build_wasm.sh "
+            f"{VERSION} has no source id. Run crates/perfr-client/build_wasm.sh "
             "and commit viewer-dist.",
             file=sys.stderr,
         )
@@ -103,7 +103,7 @@ def main():
         print(
             f"the viewer pack in {PACK} was built from other viewer sources than "
             f"this checkout has (pack {pack} at commit {commit}, checkout {checkout}). "
-            "Rebuild it with crates/perfr-live-viewer/build_wasm.sh and commit "
+            "Rebuild it with crates/perfr-client/build_wasm.sh and commit "
             "viewer-dist. perfr.dev runs this same check and will refuse to deploy.",
             file=sys.stderr,
         )
@@ -128,7 +128,7 @@ def main():
             "viewer sources changed but "
             f"{WASM} did not. Updating {VERSION} by hand is not a rebuild.\n"
             f"{shown}{extra}\n"
-            "Run crates/perfr-live-viewer/build_wasm.sh and commit viewer-dist.",
+            "Run crates/perfr-client/build_wasm.sh and commit viewer-dist.",
             file=sys.stderr,
         )
 

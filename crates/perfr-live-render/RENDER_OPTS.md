@@ -88,7 +88,7 @@ egui idle-chrome widget skip; on-screen FPS / `fps_sweep`.
    Rebuild the checked-in pack (needs rustup nightly + rust-src):
 
    ```
-   ./crates/perfr-live-viewer/build_wasm.sh
+   ./crates/perfr-client/build_wasm.sh
    ```
 
    That runs `nightly-2025-11-15` with `-Z build-std=panic_abort,std`,

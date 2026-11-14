@@ -17,7 +17,7 @@ case ${1:-} in
   --universal) targets=(aarch64-apple-darwin x86_64-apple-darwin); output=dist/macos-universal ;;
   *) echo "Usage: $0 [--universal]" >&2; exit 2 ;;
 esac
-[[ -f crates/perfr-live-viewer/viewer-dist/index.html ]]
+[[ -f crates/perfr-client/viewer-dist/index.html ]]
 mkdir -p "$output/include"
 service_bins=(); static_libs=(); dynamic_libs=(); frida_helpers=()
 for target in "${targets[@]}"; do

@@ -266,24 +266,23 @@ CPU-prepare medians (this VM has no discrete GPU).
 
 ## Build
 
-The viewer is nine crates of the one Cargo workspace at the repository
-root. `perfr-viewer` is the core (WebGPU timeline and `.perfr.stream`
-parser). This crate is the full page and depends on that core. The core
-does not depend on this crate, on the capture service, or on Chrome import.
-`perfr-viewer-embed` is the slim page on the same core; this crate does not
-depend on it.
+The client is eight crates of the one Cargo workspace at the repository
+root. `perfr-viewer` opens a `.perfr.stream` and draws it (the WebGPU
+timeline, the track rail and the stream parser), and has a page of its own.
+This crate is the page the service serves: it builds on `perfr-viewer` and
+adds the service client, live capture, Chrome/Perfetto import and stories.
+`perfr-viewer` does not depend on this crate, on the capture service, or on
+Chrome import.
 
 | Crates | Role | Built by |
 | --- | --- | --- |
 | `perfr-live-event`, `-ring`, `-protocol`, `-render`, `-server` | what the service links to serve the page | `cargo build -p perfr` |
-| `perfr-viewer` | WebGPU timeline and `.perfr.stream` parser | both pages |
-| `perfr-viewer-embed` | the slim page: one `.perfr.stream`, drawn | `../perfr-viewer-embed/build_wasm.sh` (slim wasm) |
-| `perfr-live-chrome` | Chrome JSON and Perfetto proto import | the full page, not the slim wasm |
-| `perfr-live-viewer` | the full wasm32 eframe page | `./build_wasm.sh` |
+| `perfr-viewer` | WebGPU timeline, `.perfr.stream` parser, and the viewer's own page | this crate (the library), and `../perfr-viewer/build_wasm.sh` (its page) |
+| `perfr-live-chrome` | Chrome JSON and Perfetto proto import | this crate, not the viewer |
+| `perfr-client` | the wasm32 eframe page the service serves | `./build_wasm.sh` |
 
-`perfr-viewer`, `perfr-viewer-embed` and `perfr-live-viewer` are the crates
-that depend on egui / eframe / wgpu / winit, so a service build never
-compiles them. The full
+`perfr-viewer` and `perfr-client` are the crates that depend on egui /
+eframe / wgpu / winit, so a service build never compiles them. The
 `perfr` binary embeds the pack from `build_wasm.sh`; it does not link
 those crates.
 
@@ -292,11 +291,11 @@ those crates.
 ```
 cargo test -p perfr-live-event -p perfr-live-ring -p perfr-live-protocol \
            -p perfr-live-render -p perfr-live-server -p perfr-live-chrome \
-           -p perfr-viewer -p perfr-viewer-embed -p perfr-live-viewer
+           -p perfr-viewer -p perfr-client
 cargo bench -p perfr-live-render -p perfr-live-ring
 ```
 
-`cargo test -p perfr-live-viewer` compiles the eframe app + callback on
+`cargo test -p perfr-client` compiles the eframe app + callback on
 native (no window).
 
 ### WASM pack (eframe WebRunner)
@@ -304,18 +303,18 @@ native (no window).
 Needs `wasm32-unknown-unknown` and `wasm-bindgen-cli` matching `wasm-bindgen 0.2.100`:
 
 ```
-./crates/perfr-live-viewer/build_wasm.sh
+./crates/perfr-client/build_wasm.sh
 ```
 
-The slim embeddable pack (renderer and `.perfr.stream` parser, no service
-client and no Chrome/Perfetto import) is a separate target:
+The viewer's pack (its page, the renderer and the `.perfr.stream` parser:
+no service client and no Chrome/Perfetto import) is a separate target:
 
 ```
-./crates/perfr-viewer-embed/build_wasm.sh
+./crates/perfr-viewer/build_wasm.sh
 ```
 
-That writes `crates/perfr-viewer-embed/viewer-dist/` (gitignored). It uses
-the workspace `wasm-embed` profile (opt-level `z`, fat LTO, one codegen unit,
+That writes `crates/perfr-viewer/viewer-dist/` (gitignored). It uses
+the workspace `wasm-viewer` profile (opt-level `z`, fat LTO, one codegen unit,
 symbol names stripped) and does not enable wasm threads, so a page can
 embed it without cross-origin isolation. `?capture=<url>` fetches a
 `.perfr.stream`.
@@ -324,7 +323,7 @@ The default pack is the small one, and two things are left out of it:
 
 - It draws with WebGPU only; the GLES backend is not linked. In a browser
   with no WebGPU adapter the page says so in place of the timeline.
-  `./crates/perfr-viewer-embed/build_wasm.sh --features webgl` links the
+  `./crates/perfr-viewer/build_wasm.sh --features webgl` links the
   backend: that pack falls back to WebGL when there is no WebGPU adapter,
   and `?webgl` asks for it.
 - The font is a Latin subset of Hack (U+0020–U+007E and U+00A0–U+00FF). A
@@ -332,11 +331,13 @@ The default pack is the small one, and two things are left out of it:
   symbols) is drawn with `?` in their place. `--features full-fonts` links
   egui's default fonts, which cover Cyrillic and Greek but not CJK.
 
-Nothing in `crates/perfr-viewer-embed` counts toward the full page's source
-id, so a change there does not ask for `viewer-dist/` here to be rebuilt. A
-change in `crates/perfr-viewer` does.
+The viewer's page (`src/page.rs`, `viewer.html`, its font and build script
+in `crates/perfr-viewer`) does not count toward this pack's source id: this
+crate turns the viewer's `page` feature off, so none of it is in the pack,
+and a change to it does not ask for `viewer-dist/` here to be rebuilt. A
+change to the rest of `crates/perfr-viewer` does.
 
-This full-page script writes `viewer-dist/perfr_live_viewer.js` and `.wasm`, which are checked
+This crate's script writes `viewer-dist/perfr_client.js` and `.wasm`, which are checked
 in, and `viewer-dist/VERSION`: the commit, the date, the release tag and an id
 of the sources the pack was built from (`source_id.py`). `perfr-live-server`’s
 build script embeds whatever is in `viewer-dist/`, so rebuild `perfr`
@@ -436,7 +437,7 @@ wasm runs (the pack did not load, a JS error) is relayed by `index.html` the
 same way, as page `js`.
 
 `POST /api/log` takes `{"page":"7c1e","lines":[{"t_ms":<Date.now()>,
-"level":"warn","target":"perfr_live_viewer::net","message":"..."}]}`, at
+"level":"warn","target":"perfr_client::net","message":"..."}]}`, at
 most 512 lines of 4 KB each per call, and answers 204. Anything that can
 reach the service may use it; a line's origin in the file is `viewer <page>
 <target>`.

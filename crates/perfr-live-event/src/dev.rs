@@ -6,7 +6,7 @@
 //! on the Self pane's timeline, the thread ids of its UI, render, net and
 //! worker threads, and the names of every phase it times.
 //!
-//! [`VIEWER_PID`] is reserved (`perfr-live-viewer`); `demo` already uses
+//! [`VIEWER_PID`] is reserved (`perfr-client`); `demo` already uses
 //! `pid = 1`. The Self pane keeps these scopes on a timeline of its own;
 //! they never enter a capture's ring.
 
@@ -17,7 +17,7 @@ use crate::InternTable;
 /// The viewer's own self-profile pid. High, like the agent's pid, so it
 /// can never be a real process: it was 2, and on a machine capturing every
 /// process that is kthreadd, which the timeline then labelled
-/// perfr-live-viewer.
+/// perfr-client.
 pub const VIEWER_PID: u32 = 0x5E1F_0002;
 
 /// Spoofed remote-demo pids. LiveEvent has no machine field — the rail maps
@@ -82,7 +82,7 @@ impl MachineId {
     }
 }
 
-pub const VIEWER_NAME: &str = "perfr-live-viewer";
+pub const VIEWER_NAME: &str = "perfr-client";
 
 pub const TID_UI: u32 = 1;
 pub const TID_RENDER: u32 = 2;

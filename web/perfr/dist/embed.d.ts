@@ -13,7 +13,7 @@ export interface AttachViewerOptions {
     hotkey?: string | null;
     /**
      * URL of the perfr viewer's `index.html` (the files in
-     * `crates/perfr-live-viewer/viewer-dist`). The page is opened with
+     * `crates/perfr-client/viewer-dist`). The page is opened with
      * `embed=1`. `?capture=` on that URL is left alone and embed mode stays off.
      */
     viewerUrl: string;

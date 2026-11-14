@@ -2,20 +2,24 @@
 # Copyright (c) 2026 The perfr Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
-"""Fail if the slim viewer reaches the capture pipeline or the full page.
+"""Fail if the viewer reaches the capture pipeline or the client.
 
-Two checks, over the viewer core (perfr-viewer) and the slim embed built on
-it (perfr-viewer-embed):
+Three checks:
 
-1. The workspace crates either of them links, by any chain of dependencies,
-   are the event format, the stream framing, the rasterizer and the core.
-   Read from `cargo metadata`, so it is the graph cargo builds: a dependency
-   inherited from the workspace, renamed, or declared for one target counts
-   like any other. Dev-dependencies are left out; they are not in the pack.
+1. The workspace crates perfr-viewer links, by any chain of dependencies,
+   are the event format, the stream framing and the rasterizer. Read from
+   `cargo metadata`, so it is the graph cargo builds: a dependency inherited
+   from the workspace, renamed, or declared for one target counts like any
+   other. Dev-dependencies are left out; they are not in the pack.
 
-2. Neither crate's sources `include_str!` or `include_bytes!` a file outside
-   its own directory. That is a dependency cargo does not know about: a test
-   in the core once read the full page's index.html this way.
+2. Its sources do not `include_str!` or `include_bytes!` a file outside the
+   crate's directory. That is a dependency cargo does not know about: a test
+   here once read the client's index.html this way.
+
+3. perfr-client builds on perfr-viewer with the `page` feature off. The
+   viewer's page is then not in the client's pack, which is why the page's
+   files are left out of that pack's source id
+   (crates/perfr-client/source_id.py).
 
     python3 .github/scripts/check-viewer-boundary.py
 """
@@ -26,10 +30,11 @@ import subprocess
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-STARTS = ["perfr-viewer", "perfr-viewer-embed"]
+STARTS = ["perfr-viewer"]
+CLIENT = "perfr-client"
+PAGE_FEATURE = "page"
 ALLOWED = {
     "perfr-viewer",
-    "perfr-viewer-embed",
     "perfr-live-event",
     "perfr-live-protocol",
     "perfr-live-render",
@@ -84,6 +89,26 @@ def escaping_includes():
     return found
 
 
+def client_page_feature(metadata):
+    """Why the client's pack would carry the viewer's page, or an empty list."""
+    client = next((p for p in metadata["packages"] if p["name"] == CLIENT), None)
+    if client is None:
+        return [f"not a workspace crate: {CLIENT}"]
+    wanted = f"{STARTS[0]}/{PAGE_FEATURE}"
+    reasons = []
+    for dep in client["dependencies"]:
+        if dep["name"] != STARTS[0] or dep["kind"] == "dev":
+            continue
+        if dep["uses_default_features"]:
+            reasons.append(f"{CLIENT} depends on {STARTS[0]} with its default features")
+        if PAGE_FEATURE in dep["features"]:
+            reasons.append(f"{CLIENT} asks for {wanted}")
+    for feature, enables in client["features"].items():
+        if any(e.replace("?", "") == wanted for e in enables):
+            reasons.append(f"the {feature} feature of {CLIENT} turns on {wanted}")
+    return reasons
+
+
 def main():
     run = subprocess.run(
         ["cargo", "metadata", "--format-version", "1", "--locked"],
@@ -92,22 +117,26 @@ def main():
     if run.returncode != 0:
         print(run.stderr, file=sys.stderr)
         return 1
-    chains = linked_workspace_crates(json.loads(run.stdout))
+    metadata = json.loads(run.stdout)
+    chains = linked_workspace_crates(metadata)
 
     failed = False
     for name in sorted(set(chains) - ALLOWED):
         failed = True
         print(
-            f"the slim viewer must not link {name} "
+            f"the viewer must not link {name} "
             f"(reached through {' -> '.join(chains[name])})",
             file=sys.stderr,
         )
     for path, target in escaping_includes():
         failed = True
         print(f"{path} includes {target}, a file outside its crate", file=sys.stderr)
+    for reason in client_page_feature(metadata):
+        failed = True
+        print(f"{reason}: the client's pack must not carry the viewer's page", file=sys.stderr)
     if failed:
         return 1
-    print("slim viewer workspace crates: " + ", ".join(sorted(chains)))
+    print("viewer workspace crates: " + ", ".join(sorted(chains)))
     return 0
 
 

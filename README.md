@@ -169,7 +169,7 @@ It needs a Rust toolchain (`rust-toolchain.toml` pins the version) and a C
 compiler. The first run also needs `curl`, `xz` and the network: it downloads
 the pinned Frida devkits, about 100 MB, into `target/frida-devkits`. The
 viewer pack is committed, so the front end builds only when you
-change it (`crates/perfr-live-viewer/build_wasm.sh`); rebuild it in that
+change it (`crates/perfr-client/build_wasm.sh`); rebuild it in that
 change, and again on `main` if another viewer change merged behind the
 branch. CI rejects a pull request that leaves the committed pack stale.
 

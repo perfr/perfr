@@ -138,7 +138,7 @@ mod wasm {
             *page = format!("{:04x}", (js_sys::Math::random() * 65_536.0) as u32);
         }
         std::panic::set_hook(Box::new(|info| {
-            log::error!(target: "perfr_live_viewer", "panic: {info}");
+            log::error!(target: "perfr_client", "panic: {info}");
             flush_inner(true);
             console_error_panic_hook::hook(info);
         }));
@@ -170,7 +170,7 @@ mod wasm {
         if queue.dropped > 0 {
             let note = format!("{} viewer log line(s) dropped before this batch", queue.dropped);
             queue.dropped = 0;
-            queue.lines.push(Line { t_ms: now as u64, level: "warn", target: "perfr_live_viewer".into(), message: note });
+            queue.lines.push(Line { t_ms: now as u64, level: "warn", target: "perfr_client".into(), message: note });
         }
         let page = PAGE.try_lock().map(|p| p.clone()).unwrap_or_default();
         let Ok(body) = serde_json::to_string(&Batch { page: &page, lines: &queue.lines }) else {

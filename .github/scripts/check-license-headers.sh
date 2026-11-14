@@ -16,7 +16,7 @@ LICENSE_HEADER_MISSED=""
 # crates, one of which (wasm-bindgen-rayon's worker helper) is Google's, under
 # Apache-2.0. Requiring our header on these made the pack build write
 # "Copyright The perfr Authors" above another holder's notice.
-GENERATED='^crates/perfr-live-viewer/viewer-dist/(perfr_live_viewer|snippets/)'
+GENERATED='^crates/perfr-client/viewer-dist/(perfr_client|snippets/)'
 
 echo -e "The following files are missing a license/copyright header:\n"
 while read file; do

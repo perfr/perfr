@@ -2705,7 +2705,7 @@ impl PerfrLiveApp {
             .and_then(|()| crate::frames::end_of_stream(&mut self.leftover));
         if let Err(fault) = read {
             let message = fault.file_message();
-            log::warn!(target: "perfr_live_viewer::net", "{message}");
+            log::warn!(target: "perfr_client::net", "{message}");
             self.fail(message);
         }
         // A stream saved while its capture ran carries the status of that
@@ -3797,7 +3797,7 @@ impl PerfrLiveApp {
         // while the service is down would otherwise fill the log with
         // the same line.
         if e != self.error {
-            log::warn!(target: "perfr_live_viewer::net", "{e}");
+            log::warn!(target: "perfr_client::net", "{e}");
         }
         if self.recording && !self.recording_confirmed {
             if let Some(reason) = refused_start(&e) {
@@ -3826,7 +3826,7 @@ impl PerfrLiveApp {
             // times a second.
             if self.frames_skipped == 0 {
                 log::warn!(
-                    target: "perfr_live_viewer::net",
+                    target: "perfr_client::net",
                     "the stream has frames of a type this viewer does not know; they are skipped"
                 );
             }
@@ -3841,7 +3841,7 @@ impl PerfrLiveApp {
     /// stood still while memory grew.
     fn socket_fault(&mut self, fault: crate::frames::StreamFault) {
         let message = fault.socket_message();
-        log::warn!(target: "perfr_live_viewer::net", "{message}");
+        log::warn!(target: "perfr_client::net", "{message}");
         // What is queued continues the stream that just failed.
         self.ws_queue.clear();
         if !fault.reconnect_helps() {

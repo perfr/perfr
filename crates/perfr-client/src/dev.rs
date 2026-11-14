@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Self-profile frames live in the viewer core. URL parameters stay here,
+//! Self-profile frames live in `perfr-viewer`. URL parameters stay here,
 //! because they name this page (the service client, Share, Chrome import).
 //! `app.rs` still reaches both through `crate::dev`.
 

@@ -21,8 +21,8 @@ param([string]$Output = 'dist\windows')
 $ErrorActionPreference = 'Stop'
 Push-Location (Join-Path $PSScriptRoot '..\..')
 try {
-    if (-not (Test-Path 'crates\perfr-live-viewer\viewer-dist\index.html')) {
-        throw 'crates\perfr-live-viewer\viewer-dist\index.html is missing: the service embeds the viewer at build time'
+    if (-not (Test-Path 'crates\perfr-client\viewer-dist\index.html')) {
+        throw 'crates\perfr-client\viewer-dist\index.html is missing: the service embeds the viewer at build time'
     }
     . .\tools\windows\msvc-env.ps1
     # rustup-init puts the toolchain in %USERPROFILE%\.cargo\bin; the PATH

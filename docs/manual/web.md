@@ -71,7 +71,7 @@ built-in tracks off: `perfr.start({ browser: { gc: false, loaf: false } })`.
 
 ## Embedding the viewer
 
-Host the existing viewer (`crates/perfr-live-viewer/viewer-dist`) and point
+Host the existing viewer (`crates/perfr-client/viewer-dist`) and point
 at its `index.html`:
 
 ```ts

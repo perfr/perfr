@@ -112,7 +112,7 @@ test("demo records and the embedded viewer starts", async () => {
     const captureErrors = [];
     capture.on("pageerror", (err) => captureErrors.push(String(err)));
     await capture.goto(
-      `http://127.0.0.1:${port}/crates/perfr-live-viewer/viewer-dist/index.html?capture=${encodeURIComponent("/web/demo/sample.perfr.stream")}`,
+      `http://127.0.0.1:${port}/crates/perfr-client/viewer-dist/index.html?capture=${encodeURIComponent("/web/demo/sample.perfr.stream")}`,
       { waitUntil: "domcontentloaded" },
     );
     await capture.waitForFunction(() => document.querySelector("canvas"));

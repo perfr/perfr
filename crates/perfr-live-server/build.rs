@@ -58,7 +58,7 @@ fn collect_files(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) {
 }
 
 /// The pack is `viewer-dist/` in the viewer crate beside this one
-/// (`crates/perfr-live-viewer/viewer-dist`, written by its `build_wasm.sh`).
+/// (`crates/perfr-client/viewer-dist`, written by its `build_wasm.sh`).
 /// `PERFR_VIEWER_DIST` overrides it; failing both, walk up from the manifest
 /// dir so a vendored or relocated crate with the pack above it still finds it.
 fn find_viewer_dist() -> Option<PathBuf> {
@@ -67,7 +67,7 @@ fn find_viewer_dist() -> Option<PathBuf> {
         return path.is_dir().then_some(path);
     }
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").ok()?);
-    let sibling = manifest.join("../perfr-live-viewer/viewer-dist");
+    let sibling = manifest.join("../perfr-client/viewer-dist");
     if sibling.is_dir() {
         return Some(sibling);
     }
@@ -113,7 +113,7 @@ fn checkout_source_id(viewer: &Path) -> Option<(String, Vec<String>)> {
 /// build of the service produced a binary serving the previous viewer, and
 /// the only sign was the change not showing up.
 fn warn_if_pack_is_stale(dist: &Path) {
-    // Resolved first: the pack is found as `<this crate>/../perfr-live-viewer/
+    // Resolved first: the pack is found as `<this crate>/../perfr-client/
     // viewer-dist`, and the parent of a path ending in `..` is not the
     // directory above it.
     let Ok(dist) = dist.canonicalize() else {
@@ -139,7 +139,7 @@ fn warn_if_pack_is_stale(dist: &Path) {
     if built != now {
         println!(
             "cargo:warning=the viewer pack in {} is stale: it was built from viewer sources {built}, this checkout's are {now}. \
-             The service will serve the old viewer; run crates/perfr-live-viewer/build_wasm.sh and build again.",
+             The service will serve the old viewer; run crates/perfr-client/build_wasm.sh and build again.",
             dist.display()
         );
     }

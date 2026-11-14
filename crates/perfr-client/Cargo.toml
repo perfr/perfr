@@ -6,7 +6,7 @@
 # which nothing else in the workspace depends on, so a service build never
 # compiles them. build_wasm.sh produces the pack.
 [package]
-name = "perfr-live-viewer"
+name = "perfr-client"
 version = "0.1.1"
 edition = "2021"
 license = "BSD-2-Clause"
@@ -36,7 +36,9 @@ perfr-live-chrome = { path = "../perfr-live-chrome" }
 perfr-live-protocol = { path = "../perfr-live-protocol" }
 perfr-live-render = { path = "../perfr-live-render" }
 # Renderer, track rail, and `.perfr.stream` parser. default-features off so
-# a build of this crate without `egui` does not pull eframe through the core.
+# a build of this crate without `egui` does not pull egui through the viewer.
+# Its defaults stay off either way: `page`, the viewer's own page, is not for
+# this pack (.github/scripts/check-viewer-boundary.py holds that).
 perfr-viewer = { path = "../perfr-viewer", default-features = false }
 wasm-bindgen = "=0.2.100"
 js-sys = "=0.3.77"

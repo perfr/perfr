@@ -14,7 +14,7 @@
 # tag to build that tag's commit and attach a release to it, whichever
 # branch the run is started from. This workflow never creates a tag.
 #
-# The viewer job packs crates/perfr-live-viewer/viewer-dist, built for
+# The viewer job packs crates/perfr-client/viewer-dist, built for
 # this tag, as perfr-viewer.tar.gz plus perfr-viewer.tar.gz.sha256.
 # publish attaches both. The platform jobs embed that same pack.
 
@@ -71,13 +71,13 @@ jobs:
       - name: Build the viewer and pack it
         run: |
           set -euo pipefail
-          ./crates/perfr-live-viewer/build_wasm.sh
+          ./crates/perfr-client/build_wasm.sh
           # Paths inside the archive are relative to viewer-dist/, so a
           # static host extracts it and serves index.html at the top.
-          tar -C crates/perfr-live-viewer/viewer-dist -czf perfr-viewer.tar.gz .
+          tar -C crates/perfr-client/viewer-dist -czf perfr-viewer.tar.gz .
           sha256sum perfr-viewer.tar.gz | tee perfr-viewer.tar.gz.sha256
           tar -tzf perfr-viewer.tar.gz | grep -qE '(^|/)index.html$'
-          tar -tzf perfr-viewer.tar.gz | grep -qE '(^|/)perfr_live_viewer_bg.wasm$'
+          tar -tzf perfr-viewer.tar.gz | grep -qE '(^|/)perfr_client_bg.wasm$'
 
       - uses: actions/upload-artifact@v4
         with:
@@ -114,11 +114,11 @@ jobs:
           cd dist/viewer-pack
           sha256sum -c perfr-viewer.tar.gz.sha256
           cd ../..
-          rm -rf crates/perfr-live-viewer/viewer-dist
-          mkdir -p crates/perfr-live-viewer/viewer-dist
-          tar -C crates/perfr-live-viewer/viewer-dist -xzf dist/viewer-pack/perfr-viewer.tar.gz
-          test -f crates/perfr-live-viewer/viewer-dist/index.html
-          test -f crates/perfr-live-viewer/viewer-dist/perfr_live_viewer_bg.wasm
+          rm -rf crates/perfr-client/viewer-dist
+          mkdir -p crates/perfr-client/viewer-dist
+          tar -C crates/perfr-client/viewer-dist -xzf dist/viewer-pack/perfr-viewer.tar.gz
+          test -f crates/perfr-client/viewer-dist/index.html
+          test -f crates/perfr-client/viewer-dist/perfr_client_bg.wasm
 
       - name: Rust toolchain
         run: |
@@ -136,8 +136,8 @@ jobs:
       - name: Build static perfr
         run: |
           set -euo pipefail
-          test -f crates/perfr-live-viewer/viewer-dist/index.html
-          test -f crates/perfr-live-viewer/viewer-dist/perfr_live_viewer_bg.wasm
+          test -f crates/perfr-client/viewer-dist/index.html
+          test -f crates/perfr-client/viewer-dist/perfr_client_bg.wasm
           # perfr-live-server's build script embeds viewer-dist into the binary.
           cargo +1.88.0 build --locked --release --target x86_64-unknown-linux-musl \
             -p perfr
@@ -253,11 +253,11 @@ jobs:
           cd dist/viewer-pack
           shasum -a 256 -c perfr-viewer.tar.gz.sha256
           cd ../..
-          rm -rf crates/perfr-live-viewer/viewer-dist
-          mkdir -p crates/perfr-live-viewer/viewer-dist
-          tar -C crates/perfr-live-viewer/viewer-dist -xzf dist/viewer-pack/perfr-viewer.tar.gz
-          test -f crates/perfr-live-viewer/viewer-dist/index.html
-          test -f crates/perfr-live-viewer/viewer-dist/perfr_live_viewer_bg.wasm
+          rm -rf crates/perfr-client/viewer-dist
+          mkdir -p crates/perfr-client/viewer-dist
+          tar -C crates/perfr-client/viewer-dist -xzf dist/viewer-pack/perfr-viewer.tar.gz
+          test -f crates/perfr-client/viewer-dist/index.html
+          test -f crates/perfr-client/viewer-dist/perfr_client_bg.wasm
 
       - name: Rust toolchain
         run: rustup toolchain install 1.88.0 --profile minimal
@@ -371,13 +371,13 @@ jobs:
           $expected = ($sidecar -split '\s+')[0].Trim().ToLowerInvariant()
           $actual = (Get-FileHash -Algorithm SHA256 dist\viewer-pack\perfr-viewer.tar.gz).Hash.ToLowerInvariant()
           if ($actual -ne $expected) { throw "viewer pack checksum mismatch: $actual" }
-          if (Test-Path crates\perfr-live-viewer\viewer-dist) {
-            Remove-Item -Recurse -Force crates\perfr-live-viewer\viewer-dist
+          if (Test-Path crates\perfr-client\viewer-dist) {
+            Remove-Item -Recurse -Force crates\perfr-client\viewer-dist
           }
-          New-Item -ItemType Directory -Force crates\perfr-live-viewer\viewer-dist | Out-Null
-          tar -C crates\perfr-live-viewer\viewer-dist -xzf dist\viewer-pack\perfr-viewer.tar.gz
-          foreach ($required in 'index.html', 'perfr_live_viewer_bg.wasm') {
-            if (-not (Test-Path (Join-Path crates\perfr-live-viewer\viewer-dist $required))) {
+          New-Item -ItemType Directory -Force crates\perfr-client\viewer-dist | Out-Null
+          tar -C crates\perfr-client\viewer-dist -xzf dist\viewer-pack\perfr-viewer.tar.gz
+          foreach ($required in 'index.html', 'perfr_client_bg.wasm') {
+            if (-not (Test-Path (Join-Path crates\perfr-client\viewer-dist $required))) {
               throw "missing $required in the viewer pack"
             }
           }
@@ -560,7 +560,7 @@ jobs:
               "logger (ETW) and need an elevated prompt; manual scopes and Frida hooks do not. No auto-profiling, no "
               "kernel hook engine, no GPU helper.\n\n"
               "**Viewer** (`perfr-viewer.tar.gz`): the live viewer built for this tag, "
-              "a gzip tar of `crates/perfr-live-viewer/viewer-dist` with paths relative to that "
+              "a gzip tar of `crates/perfr-client/viewer-dist` with paths relative to that "
               "directory (`index.html` at the top, plus the wasm glue, `.wasm`, `snippets/` and "
               "`stories/`). `perfr-viewer.tar.gz.sha256` is the `sha256sum` sidecar. perfr.dev "
               "embeds this asset instead of the viewer at the top of `main`.\n\n"

@@ -361,7 +361,7 @@ async fn viewer_log_lines_reach_the_sink_capped_and_whatever_the_content_type() 
         String::from_utf8_lossy(&out.stdout).to_string()
     };
     // sendBeacon sends text/plain; a JSON content type must work too.
-    assert!(post("text/plain;charset=UTF-8", r#"{"page":"7c1e","lines":[{"t_ms":1700000000123,"level":"warn","target":"perfr_live_viewer::net","message":"WebSocket closed"}]}"#).contains("204"));
+    assert!(post("text/plain;charset=UTF-8", r#"{"page":"7c1e","lines":[{"t_ms":1700000000123,"level":"warn","target":"perfr_client::net","message":"WebSocket closed"}]}"#).contains("204"));
     let long = "x".repeat(10_000);
     assert!(post("application/json", &format!(r#"{{"page":"a/b<c>d","lines":[{{"level":"info","message":"{long}"}}]}}"#)).contains("204"));
     assert!(post("application/json", "not json").contains("400"));
@@ -370,7 +370,7 @@ async fn viewer_log_lines_reach_the_sink_capped_and_whatever_the_content_type() 
     assert_eq!(seen[0].page, "7c1e");
     assert_eq!(seen[0].lines[0].t_ms, 1_700_000_000_123);
     assert_eq!(seen[0].lines[0].level, "warn");
-    assert_eq!(seen[0].lines[0].target, "perfr_live_viewer::net");
+    assert_eq!(seen[0].lines[0].target, "perfr_client::net");
     assert_eq!(seen[0].lines[0].message, "WebSocket closed");
     assert_eq!(seen[1].page, "abcd", "the page id is sanitised");
     assert!(seen[1].lines[0].message.len() < 4200, "long messages are cut");
@@ -467,7 +467,7 @@ async fn capture_export_is_501_without_a_hook() {
 
 #[test]
 fn parse_ranges_round_trips_the_viewer_query() {
-    // Mirrors perfr-live-viewer's ranges_query output.
+    // Mirrors perfr-client's ranges_query output.
     let got = super::parse_ranges("100-200:7,500-800");
     assert_eq!(got, vec![(100, 200, Some(7)), (500, 800, None)]);
 }

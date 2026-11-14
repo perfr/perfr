@@ -4,7 +4,7 @@
 
 //! RAII self-profile scopes. No timers or allocations when disabled.
 //!
-//! URL parameters stay in `perfr-live-viewer`. That crate re-exports this
+//! URL parameters stay in `perfr-client`. That crate re-exports this
 //! module together with them, which is how `app.rs` still names both through
 //! `crate::dev`.
 

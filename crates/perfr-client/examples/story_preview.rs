@@ -26,7 +26,7 @@ fn main() -> eframe::Result {
         "perfr story",
         native,
         Box::new(move |cc| {
-            let mut app = perfr_live_viewer::PerfrLiveApp::new(cc);
+            let mut app = perfr_client::PerfrLiveApp::new(cc);
             app.seed_story_preview();
             if mode == "about" {
                 app.open_about();
@@ -51,7 +51,7 @@ fn main() -> eframe::Result {
 
 /// Grabs one frame after About has laid out, for `docs/images/`.
 struct AboutShot {
-    inner: perfr_live_viewer::PerfrLiveApp,
+    inner: perfr_client::PerfrLiveApp,
     frames: u32,
     path: Option<String>,
     saved: bool,

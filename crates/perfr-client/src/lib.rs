@@ -28,8 +28,8 @@ mod logging;
 mod fonts;
 #[cfg(feature = "egui")]
 mod frame_marks;
-// The stream assembler lives in the viewer core. This crate depends on that
-// core; the core does not depend on this crate.
+// The stream assembler lives in `perfr-viewer`. This crate depends on that
+// one; it does not depend on this crate.
 pub(crate) use perfr_viewer::frames;
 #[cfg(feature = "egui")]
 mod net;
@@ -161,7 +161,7 @@ mod page_tests {
     fn web_page_background_matches_the_default_canvas() {
         // The HTML behind the canvas paints before wasm. It has to be the
         // default canvas, or the first paint flashes another palette. The
-        // slim embed checks its own page in `perfr-viewer-embed`.
+        // viewer checks its own page in `perfr-viewer`.
         let html = include_str!("../viewer-dist/index.html");
         let canvas = perfr_live_event::theme::default_theme().canvas;
         let css = format!(

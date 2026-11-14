@@ -18,7 +18,7 @@ perfr.scope("frame", () => {
 });
 
 perfr.attachViewer({
-  viewerUrl: "/viewer/index.html", // crates/perfr-live-viewer/viewer-dist
+  viewerUrl: "/viewer/index.html", // crates/perfr-client/viewer-dist
   overlay: true,
   hotkey: "F8",
 });

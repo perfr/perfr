@@ -1996,7 +1996,7 @@ def website(run):
         capture_output=True, text=True, timeout=120,
     )
     check(build.returncode == 0, f"build_site.py failed: {build.stderr[-400:]}")
-    for needed in ("index.html", "features.html", "viewer/perfr_live_viewer_bg.wasm", "captures/e2e.perfr.stream",
+    for needed in ("index.html", "features.html", "viewer/perfr_client_bg.wasm", "captures/e2e.perfr.stream",
                    "manual/index.html", "blog/index.html", "e2e/report.html", "site.css"):
         check(os.path.exists(os.path.join(site, needed)), f"the site is missing {needed}")
     port = run.service.port + 7

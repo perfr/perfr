@@ -34,6 +34,7 @@ More also lists “Pan time: A / D”, “Zoom: W / S” and “Scroll tracks: �
 |---|---|---|
 | Wheel | Ruler | Zoom time |
 | Wheel | Tracks | Scroll tracks |
+| Wheel or pinch | Frame strip | Grow or shrink the timeline's window |
 | Ctrl+wheel, ⌘+wheel, or pinch | Tracks | Zoom around the cursor |
 | Left-drag | Anywhere but a sample bar | Pan |
 | Left-drag | A thread’s sample bar | Select that thread’s samples |

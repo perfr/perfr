@@ -267,7 +267,8 @@ opens on first load with a service and closes with its ×. Its rows:
   in sight from anywhere. The time the timeline is showing is a window on
   it, lit while the rest steps back: dragging the window pans the timeline,
   and the handle on each edge moves that edge, to grow or shrink what the
-  timeline shows.
+  timeline shows. The wheel over the strip, or a pinch, grows and shrinks
+  the window too.
   A bar is drawn against the median frame: the accent colour up to 1.5
   medians, amber up to 2.5, red past that, and the strip is three medians
   tall, so one hitch does not flatten the rest. Where several frames share

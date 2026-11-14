@@ -53,6 +53,7 @@ A program that marks its frames (`perfr_frame_mark`, see [Instrument your code](
 | Drag the window | Pan the timeline. The window keeps its length and stops at the capture's ends |
 | Drag a handle | Move that edge of the timeline's window; the other edge stays. Out to grow it, in to shrink it |
 | Drag from outside the window | The window comes to the pointer, by its middle, and follows it |
+| Wheel, or pinch | Grow or shrink the timeline's window, a tenth a notch: wheel down to grow it, up to shrink it. The time under the pointer stays put while the pointer is on the window; off it, the window's nearer edge does |
 | Click the label beside the strip | The next series of frames, when the capture has more than one |
 | Right-drag | Measure, as on the ruler and the tracks, in the timeline's scale and not the strip's. The selection is one column from the ruler down, across the strip |
 

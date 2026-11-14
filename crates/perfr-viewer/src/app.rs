@@ -1211,6 +1211,9 @@ pub struct PerfrLiveApp {
     opt_csw: bool,
     opt_thread_states: bool,
     opt_sampling: bool,
+    /// The machine health track: the machine's CPU, memory, pressure, disks,
+    /// network and GPU, sampled by the service twice a second.
+    opt_health: bool,
     sample_period_ms: String,
     unwind_dwarf: bool,
     user_space_hooks: bool,
@@ -2011,6 +2014,7 @@ impl PerfrLiveApp {
             opt_csw: true,
             opt_thread_states: true,
             opt_sampling: true,
+            opt_health: true,
             sample_period_ms: "1.0".into(),
             unwind_dwarf: true,
             user_space_hooks: true,
@@ -2522,7 +2526,11 @@ impl PerfrLiveApp {
                     .map(|p| p.name.as_str())
                     .filter(|s| !s.is_empty())
             })
-            .unwrap_or("process")
+            .unwrap_or(if perfr_live_event::health::is_health_pid(pid) {
+                perfr_live_event::health::PROCESS_NAME
+            } else {
+                "process"
+            })
             .to_string()
     }
 
@@ -3278,6 +3286,7 @@ impl PerfrLiveApp {
             show_all_processes: self.show_all_processes,
             uprobe_duplicate_filter: self.uprobe_duplicate_filter,
             auto_profile: self.auto_profile,
+            machine_health: self.opt_health,
         }
     }
 
@@ -5150,6 +5159,15 @@ impl PerfrLiveApp {
             {
                 self.opt_sampling = !self.opt_sampling;
             }
+            if pill(ui, "Health", self.opt_health)
+                .on_hover_text(
+                    "Machine health: the whole machine's CPU, memory, pressure, disks, network and GPU, \
+                     sampled twice a second into a track under the target (Linux services)",
+                )
+                .clicked()
+            {
+                self.opt_health = !self.opt_health;
+            }
             ui.add(
                 egui::TextEdit::singleline(&mut self.sample_period_ms)
                     .id_salt("perfr_sample_ms")
@@ -6597,7 +6615,11 @@ impl PerfrLiveApp {
                     self.tracks.end_header_drag();
                 }
                 let name = self.process_display_name(pid);
-                let proc_label = if tight {
+                let proc_label = if perfr_live_event::health::is_health_pid(pid) {
+                    // Not a process: its pid is a reserved number that
+                    // would only read as noise.
+                    name
+                } else if tight {
                     format!("{pid}  {name}")
                 } else {
                     format!("process  {pid}  {name}")
@@ -6707,7 +6729,14 @@ impl PerfrLiveApp {
                 ui.painter()
                     .rect_filled(chip_r, theme::TRACK_RADIUS, c32(chip));
                 let tname = self.thread_display_name(th.pid, th.tid);
-                let thread_label = if tight {
+                // A group of the machine health track is not a thread:
+                // its name alone, without a number that means nothing.
+                let health_group = perfr_live_event::health::is_health_pid(th.pid)
+                    .then(|| perfr_live_event::health::group_name(th.tid))
+                    .flatten();
+                let thread_label = if let Some(group) = health_group {
+                    group.to_string()
+                } else if tight {
                     if tname.is_empty() {
                         format!("{}", th.tid)
                     } else {
@@ -12844,6 +12873,23 @@ fn value_extent(samples: &[(f32, f32)]) -> (f32, f32) {
     (min_v, max_v)
 }
 
+/// The values at the bottom and the top of a graph. A graph spans what is
+/// in view, so a small change fills the lane. A machine health lane is the
+/// exception: its axis starts at zero and has a least top of its own
+/// (`perfr_live_event::health`), so a CPU at 3 percent draws near the
+/// floor and the lanes of the track compare at a glance.
+fn value_axis(key: LaneKey, name: Option<&str>, samples: &[(f32, f32)]) -> (f32, f32) {
+    let (min_v, max_v) = value_extent(samples);
+    if !perfr_live_event::health::is_health_pid(key.pid) {
+        return (min_v, max_v);
+    }
+    match name.and_then(perfr_live_event::health::lane_by_name) {
+        // The largest sample itself: `value_extent` lifts a flat line's top.
+        Some(lane) => perfr_live_event::health::axis(lane, samples.iter().map(|&(_, v)| v).fold(0.0, f32::max)),
+        None => (min_v, max_v),
+    }
+}
+
 /// The vertical line under the pointer, across every track, as C++ perfr
 /// draws it: what lines a scope on one thread up with the others.
 fn paint_cursor_line(ui: &Ui, body: Rect, x: f32) {
@@ -12933,7 +12979,7 @@ fn paint_value_graphs(
             let at = events.partition_point(|e| e.start_ns <= t);
             (at > 0).then(|| events[at - 1])
         });
-        let (min_v, max_v) = value_extent(&samples);
+        let (min_v, max_v) = value_axis(key, events.last().and_then(|e| intern.get(e.name_id)), &samples);
         let bucketed = bucket_last_per_device_px(&samples, ppp);
         let graph_argb = theme::display_argb(perfr_live_event::named_scope_color(
             intern
@@ -15948,6 +15994,24 @@ mod tests {
         assert_eq!(points, vec![(10.0, 2.0), (70.0, 2.0), (70.0, 5.0), (90.0, 5.0)]);
         // A real sample beyond the window already supplies its closing step.
         assert_eq!(samples(&index, 0, 50, 90), vec![(20.0, 2.0), (140.0, 5.0)]);
+    }
+
+    #[test]
+    fn a_machine_health_graph_has_a_pinned_axis_and_any_other_spans_its_values() {
+        use perfr_live_event::health;
+        let samples = [(0.0, 2.0), (10.0, 4.0)];
+        let cpu = LiveEvent::from_value(0, health::PID, health::group::CPU, health::lane::CPU, 0.0).lane_key();
+        assert_eq!(value_axis(cpu, Some("CPU %"), &samples), (0.0, 100.0), "3 percent is near the floor");
+        assert_eq!(value_axis(cpu, Some("IO pressure %"), &samples), (0.0, 10.0));
+        assert_eq!(value_axis(cpu, Some("IO pressure %"), &[(0.0, 40.0)]), (0.0, 40.0), "the axis grows, never clips");
+        // The same track on a linked machine.
+        let remote = LaneKey { pid: (2 << perfr_live_event::dev::MACHINE_SHIFT) | health::PID, ..cpu };
+        assert_eq!(value_axis(remote, Some("CPU %"), &samples), (0.0, 100.0));
+        // A lane this viewer has no entry for, and a graph of any other process.
+        assert_eq!(value_axis(cpu, Some("something newer"), &samples), (2.0, 4.0));
+        assert_eq!(value_axis(cpu, None, &samples), (2.0, 4.0));
+        let other = LaneKey { pid: 1234, ..cpu };
+        assert_eq!(value_axis(other, Some("CPU %"), &samples), (2.0, 4.0));
     }
 
     #[test]

@@ -148,7 +148,10 @@ opens on first load with a service and closes with its ×. Its rows:
   when a capture starts with hooks and none are loaded yet.
 - **COLLECT** toggles: **CSW** context switches (the scheduler track),
   **States** thread state slices, **API** manual `perfr.h` scopes,
-  **Sample** callstack sampling with the period in ms next to it. Every
+  **Sample** callstack sampling with the period in ms next to it,
+  **Health** the machine health track (the machine's CPU, memory,
+  pressure, disks, network and GPU every 500 ms, under the target; see
+  [Capture](capture.html#machine-health)). Every
   thread of the target is sampled, including threads born during the
   capture: each sampled thread also carries a task-event ring, and the
   fork record a clone produces names the new thread, which is sampled

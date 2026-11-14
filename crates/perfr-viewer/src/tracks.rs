@@ -410,12 +410,15 @@ pub struct OrderHints {
     pub service: Option<u32>,
 }
 
-/// The rail's tiers, top to bottom: the target, every other process by
-/// what it said, the service and the viewer last. Header drags reorder
-/// within a tier; the tiers themselves do not move.
+/// The rail's tiers, top to bottom: the target, the machine health track
+/// (what the machine was doing while the target ran, so it sits where a
+/// stall in the target is read against it), every other process by what it
+/// said, the service and the viewer last. Header drags reorder within a
+/// tier; the tiers themselves do not move.
 const TIER_TARGET: u8 = 0;
-const TIER_INSTRUMENTED: u8 = 1;
-const TIER_AUTO: u8 = 2;
+const TIER_HEALTH: u8 = 1;
+const TIER_INSTRUMENTED: u8 = 2;
+const TIER_AUTO: u8 = 3;
 
 impl TrackStrip {
     /// Rebuilds the lane catalogue if the index's lane set changed.
@@ -1630,11 +1633,14 @@ fn machine_rank(machine_sort: &HashMap<MachineId, i32>, m: MachineId) -> i64 {
         .unwrap_or(1_000 + m.sort_key() as i64)
 }
 
-/// The tier a process sorts into: the target, then everything
-/// instrumented, then the service and the viewer's own rows.
+/// The tier a process sorts into: the target, then the machine health
+/// track, then everything instrumented, then the service and the viewer's
+/// own rows.
 fn process_tier(pid: u32, hints: OrderHints) -> u8 {
     if hints.target == Some(pid) {
         TIER_TARGET
+    } else if perfr_live_event::health::is_health_pid(pid) {
+        TIER_HEALTH
     } else if hints.service == Some(pid) || is_self_pid(pid) {
         TIER_AUTO
     } else {
@@ -2102,6 +2108,54 @@ mod tests {
         strip.toggle(RowId::Process(40));
         strip.sync(&idx, None);
         assert!(!strip.collapsed(RowId::Process(40)));
+    }
+
+    #[test]
+    fn machine_health_sits_right_under_the_target_in_its_own_order() {
+        use perfr_live_event::health;
+        let mut idx = TrackIndex::default();
+        // The health lanes arrive first and in no order; 11 says far more
+        // than anyone; 30 is the target.
+        for id in [health::lane::IO_PRESSURE, health::lane::MEMORY_USED, health::lane::CPU_PRESSURE, health::lane::CPU] {
+            let lane = health::lane_by_id(id).unwrap();
+            idx.insert(LiveEvent::from_value(5, health::PID, lane.group, lane.id, 1.0));
+        }
+        for i in 0..64 {
+            idx.insert(scope(11, 3, i + 1));
+        }
+        idx.insert(scope(30, 1, 1));
+        idx.insert(scope(40, 4, 1));
+        let mut strip = TrackStrip { order_hints: OrderHints { target: Some(30), service: Some(40) }, ..Default::default() };
+        strip.sync(&idx, None);
+        strip.sort_by_activity(&idx);
+        strip.tick(1.0, &idx, None);
+        assert_eq!(strip.process_order, [30, health::PID, 11, 40]);
+        assert!(!strip.collapsed(RowId::Process(health::PID)), "it arrives open");
+        // With no target (a capture of the machine alone) it leads.
+        let mut alone = TrackStrip { order_hints: OrderHints { target: None, service: Some(40) }, ..Default::default() };
+        alone.sync(&idx, None);
+        assert_eq!(alone.process_order[0], health::PID);
+        // A header drag does not take it out of its place.
+        strip.reorder_process(health::PID, 3);
+        strip.sync(&idx, None);
+        assert_eq!(strip.process_order, [30, health::PID, 11, 40]);
+        // Its graphs: cpu, memory, io, and within cpu the table's order.
+        let graphs: Vec<u32> = strip
+            .rows()
+            .iter()
+            .filter_map(|row| match row.id {
+                RowId::Lane(k) if k.pid == health::PID => Some((u32::from(k.extra) << 8) | u32::from(k.depth)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            graphs,
+            [health::lane::CPU, health::lane::CPU_PRESSURE, health::lane::MEMORY_USED, health::lane::IO_PRESSURE]
+        );
+        // And shorter than any other graph.
+        let health_lane = LiveEvent::from_value(0, health::PID, health::group::CPU, health::lane::CPU, 0.0).lane_key();
+        let other_lane = LiveEvent::from_value(0, 11, 3, 7, 0.0).lane_key();
+        assert!(lane_height(health_lane) < lane_height(other_lane));
     }
 
     #[test]

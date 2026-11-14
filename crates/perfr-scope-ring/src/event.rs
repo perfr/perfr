@@ -31,6 +31,13 @@ pub mod kind {
     /// Bits 4..7 of `flags` are the [`level`]. The line names no scope: the
     /// viewer files it under the scopes open on its thread at its timestamp.
     pub const LOG: u8 = 6;
+    /// A frame boundary: the frame that was running ends here and the next
+    /// one begins. Named like a scope, and the name says which series of
+    /// frames the mark belongs to, so a render thread and a fixed-step
+    /// simulation can each mark their own; no name is the main series. The
+    /// consumer turns two consecutive marks of one series into a frame. A
+    /// reader from before this kind skips the record.
+    pub const FRAME: u8 = 7;
 }
 
 /// Log levels, as stored in bits 4..7 of a [`kind::LOG`] record's `flags`

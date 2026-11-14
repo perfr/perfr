@@ -51,6 +51,14 @@ pub mod kind {
     /// A loss marker. `duration_ns` is the count, not a duration.
     /// `extra` is the ring-record kind that was lost, or 0xFF if unknown.
     pub const DROP: u8 = 9;
+    /// One frame of a program that marks its frames: the time from one
+    /// frame mark to the next of the same series. `name_id` is the series
+    /// (`frame` for the main one), `tid` the thread that made the mark the
+    /// frame starts at, and `extra` the low byte of the frame's number in
+    /// its series, which is only there so that neighbours can be told
+    /// apart. A frame is context for everything else on the timeline, not a
+    /// measurement of its own: it is on no thread's stack and nests nothing.
+    pub const FRAME: u8 = 10;
 }
 
 /// The process id agent scopes are filed under (TODO item 12): scopes an
@@ -206,6 +214,18 @@ impl LiveEvent {
                 kind: self.kind,
                 depth: 0,
                 extra: 0,
+            };
+        }
+        if self.kind == kind::FRAME {
+            // One lane per series. Two series marked on one thread overlap
+            // in time, and a lane's events may not; the series is folded in
+            // the way a value's name is, below.
+            return LaneKey {
+                pid: self.pid,
+                tid: self.tid,
+                kind: self.kind,
+                depth: (self.name_id & 0xFF) as u8,
+                extra: ((self.name_id >> 8) & 0xFF) as u8,
             };
         }
         if self.kind == kind::VALUE {
@@ -806,6 +826,29 @@ mod tests {
         assert!((ev.value_f32().unwrap() + 0.5).abs() < 1e-6);
         assert_eq!(ev.duration_ns, f32::to_bits(-0.5) as u64);
         assert_eq!(std::mem::size_of_val(&ev), 32);
+    }
+
+    #[test]
+    fn each_series_of_frames_has_a_lane_and_a_frames_number_does_not_split_it() {
+        let frame = |name_id: u32, number: u8| LiveEvent {
+            start_ns: 100,
+            duration_ns: 50,
+            tid: 7,
+            pid: 1,
+            kind: kind::FRAME,
+            depth: 0,
+            extra: number,
+            _pad: 0,
+            name_id,
+        };
+        // Two series marked on one thread overlap in time; one lane cannot
+        // hold both.
+        assert_ne!(frame(300, 0).lane_key(), frame(301, 0).lane_key());
+        assert_eq!(frame(300, 0).lane_key(), frame(300, 1).lane_key());
+        // A frame is a span, and its two greys take turns.
+        assert_eq!(frame(300, 0).end_ns(), 150);
+        assert_ne!(frame(300, 0).color_rgba(), frame(300, 1).color_rgba());
+        assert_eq!(frame(300, 0).color_rgba(), frame(300, 2).color_rgba());
     }
 
     #[test]

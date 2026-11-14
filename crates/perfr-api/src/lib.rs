@@ -4,7 +4,7 @@
 
 //! perfr manual instrumentation: the producer behind `include/perfr.h`.
 //!
-//! Thirteen functions, exported with a C ABI for every language that loads
+//! Fourteen functions, exported with a C ABI for every language that loads
 //! the library, and offered natively for Rust. Every one is safe from any
 //! thread at any time; before [`init`], and while nobody is capturing, each
 //! is a load and a predictable branch.
@@ -483,6 +483,37 @@ pub fn value(name: impl AsRef<[u8]>, value: f64) {
     });
 }
 
+/// Marks a frame boundary: the frame that was running ends here and the next
+/// one begins.
+///
+/// Call it once per frame, at the same point of the loop each time. The
+/// viewer draws the time between two marks as one frame on a `frames` lane
+/// under the calling thread, and a line down the timeline at each mark.
+/// Nothing is drawn for the time before the first mark or after the last.
+pub fn frame_mark() {
+    frame_mark_named(b"");
+}
+
+/// [`frame_mark`] for a series of frames of its own, called `name`: a render
+/// thread's frames, a fixed-step simulation's ticks. Each name is one series
+/// with one lane; the empty name is the main series, the one [`frame_mark`]
+/// marks.
+pub fn frame_mark_named(name: impl AsRef<[u8]>) {
+    let Some(writer) = active_segment() else { return };
+    with_thread(writer.rings().ring_count(), |state| {
+        let head = ScopeEvent {
+            timestamp_ns: clock_ns(),
+            // A handle only so a long name's continuations have a key to
+            // share; nothing links to a frame mark.
+            scope_id: next_handle(state),
+            tid: state.tid,
+            kind: kind::FRAME,
+            ..ScopeEvent::default()
+        };
+        push_named(writer, state, head, name.as_ref());
+    });
+}
+
 /// A scope that stops when dropped. `let _s = perfr_api::scope("update");`
 pub struct Scope(Handle);
 
@@ -643,6 +674,13 @@ pub unsafe extern "C" fn perfr_log(level: u8, message: *const libc::c_char, mess
     log(level, bytes(message, message_len));
 }
 
+/// # Safety
+/// `name` must point at `name_len` readable bytes, or `name_len` must be 0.
+#[no_mangle]
+pub unsafe extern "C" fn perfr_frame_mark(name: *const libc::c_char, name_len: usize) {
+    frame_mark_named(bytes(name, name_len));
+}
+
 // ------------------------------------------------------- loadable table --
 
 /// The ABI the single-header `perfr.h` speaks. Bumped only when a field is
@@ -680,6 +718,8 @@ pub struct ApiTableV1 {
     /// only when `size` covers it, so every field above this line is the
     /// part an older library is guaranteed to have.
     pub log: unsafe extern "C" fn(u8, *const libc::c_char, usize),
+    /// Appended after `log`, and read by a header the same way.
+    pub frame_mark: unsafe extern "C" fn(*const libc::c_char, usize),
 }
 
 static API_TABLE: ApiTableV1 = ApiTableV1 {
@@ -698,6 +738,7 @@ static API_TABLE: ApiTableV1 = ApiTableV1 {
     span: perfr_span,
     span_async: perfr_span_async,
     log: perfr_log,
+    frame_mark: perfr_frame_mark,
 };
 
 /// The table for `abi_version`, or null when this library does not speak
@@ -729,6 +770,12 @@ mod tests {
             std::mem::offset_of!(ApiTableV1, log),
             8 + 12 * std::mem::size_of::<usize>()
         );
+        // The same goes for each field appended since: a header already
+        // released finds it at this offset.
+        assert_eq!(
+            std::mem::offset_of!(ApiTableV1, frame_mark),
+            8 + 13 * std::mem::size_of::<usize>()
+        );
         assert!((table.now_ns)() > 0);
         assert!(perfr_api_table_v1(API_ABI_VERSION + 1).is_null());
         assert!(perfr_api_table_v1(0).is_null());
@@ -746,7 +793,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let fields = [
             "abi_version", "size", "init", "shutdown", "start", "start_dynamic", "start_async", "stop",
-            "instant", "link", "value", "now_ns", "span", "span_async", "log",
+            "instant", "link", "value", "now_ns", "span", "span_async", "log", "frame_mark",
         ];
         let mut program = String::from("#include <stdio.h>\n#include \"perfr.h\"\nint main(void) {\n");
         for field in fields {
@@ -792,6 +839,7 @@ mod tests {
             offset_of!(ApiTableV1, start_async), offset_of!(ApiTableV1, stop), offset_of!(ApiTableV1, instant),
             offset_of!(ApiTableV1, link), offset_of!(ApiTableV1, value), offset_of!(ApiTableV1, now_ns),
             offset_of!(ApiTableV1, span), offset_of!(ApiTableV1, span_async), offset_of!(ApiTableV1, log),
+            offset_of!(ApiTableV1, frame_mark),
         ];
         for (field, offset) in fields.iter().zip(in_rust) {
             assert_eq!(in_c[*field], offset, "perfr.h puts `{field}` somewhere else");
@@ -1186,6 +1234,8 @@ mod tests {
         link(7, 8);
         value(b"idle", 1.0);
         log_info(b"idle");
+        frame_mark();
+        frame_mark_named(b"idle");
         assert_eq!(reads() - before, 0, "the clock was read with nobody capturing");
 
         // And once per record when somebody is.
@@ -1196,6 +1246,54 @@ mod tests {
         span(b"replayed", 1, 2);
         assert_eq!(reads() - before, 2, "a span brings its own timestamps");
         reader.set_capturing(false);
+    }
+
+    #[test]
+    fn a_frame_mark_is_one_record_named_by_its_series() {
+        let _serial = WRITES.lock().unwrap_or_else(|p| p.into_inner());
+        init().expect("init");
+        let reader = ScopeRingReader::open(std::process::id()).unwrap();
+        reader.set_capturing(false);
+        frame_mark_named(b"not captured");
+        reader.set_capturing(true);
+        frame_mark();
+        frame_mark_named(b"render");
+        // Through the C entry point, with the null name a C caller passes
+        // for the main series.
+        unsafe { perfr_frame_mark(std::ptr::null(), 0) };
+        let long = "a series whose name does not fit in one record";
+        frame_mark_named(long);
+        reader.set_capturing(false);
+
+        let events = all_events();
+        let tid = perfr_scope_ring::platform::thread_id() as u32;
+        let mut asm = TextAssembler::new();
+        let mut marks = Vec::new();
+        let mut last = 0;
+        for e in events.iter().filter(|e| e.tid == tid) {
+            if e.kind == kind::FRAME {
+                assert!(e.timestamp_ns >= last, "marks are stamped in the order they were made");
+                last = e.timestamp_ns;
+            }
+            if e.kind != kind::FRAME && e.kind != kind::TEXT {
+                continue;
+            }
+            // The assembler has nothing to say about a record with no text,
+            // which is what the main series' mark is.
+            if e.kind == kind::FRAME && e.text_len == 0 {
+                marks.push(String::new());
+                continue;
+            }
+            if let Some((name, completeness)) = asm.accept(e) {
+                // A continuation completes whichever head it belongs to;
+                // only this test's names are checked.
+                if ["", "render", long, "not captured"].contains(&name.as_str()) {
+                    assert_eq!(completeness, Completeness::Complete);
+                    marks.push(name);
+                }
+            }
+        }
+        assert_eq!(marks, ["", "render", "", long], "one mark per call, in order, nothing while capture is off");
     }
 
     #[test]

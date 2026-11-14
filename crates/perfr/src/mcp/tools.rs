@@ -959,7 +959,7 @@ pub fn tool_specs() -> Vec<Value> {
         ),
         tool(
             "perfr_function_stats",
-            "Timing for hooked functions and manual scopes in the current capture. Times are integer nanoseconds: count, total_ns, avg_ns, min_ns, max_ns, stddev_ns. kind is hook, scope, or track. Sampled call-stack frames are excluded. Filter with query (name substring) and pid. order is total (default), count, avg, or max. This is the reading to use after a dynamic hook, including on macOS.",
+            "Timing for hooked functions and manual scopes in the current capture. Times are integer nanoseconds: count, total_ns, avg_ns, min_ns, max_ns, stddev_ns. kind is hook, scope, track, or frame. A frame row is a series of frames the program marked (query `frame` for the main one): count is the frames, avg_ns, min_ns and max_ns its frame times. Sampled call-stack frames are excluded. Filter with query (name substring) and pid. order is total (default), count, avg, or max. This is the reading to use after a dynamic hook, including on macOS.",
             json!({
                 "type": "object",
                 "properties": {

@@ -51,6 +51,11 @@ which is the one thing worth knowing before you sum it:
     measurement; a hooked function's call has ``extra == 0`` and a real one.
   * LOG (8): an instant; ``duration_ns`` is 0.
   * DROP (9): a marker for lost records; ``duration_ns`` is how many.
+  * FRAME (10): one frame of a program that marks its frames, from one mark
+    to the next; ``name`` is the series (``frame`` for the main one) and
+    ``extra`` the low byte of the frame's number. The duration is real, but
+    it spans every scope that ran in the frame: read frame times from these
+    rows, and do not add them to the scopes'.
 
 So keep to ``is_span()`` rows before you add durations up.
 """
@@ -69,6 +74,7 @@ KINDS = {
     7: "SAMPLE",
     8: "LOG",
     9: "DROP",
+    10: "FRAME",
 }
 
 # Kinds whose duration_ns really is a span you can sum: API_SCOPE,

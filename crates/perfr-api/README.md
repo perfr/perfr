@@ -5,10 +5,20 @@ scopes, async spans, instants, links and values that a running
 `perfr` draws on its live timeline.
 
 ```rust
-let _frame = perfr_api::scope("frame");
-perfr_api::value("fps", 59.9);
+let _update = perfr_api::scope("update");
+perfr_api::value("entities", 1024.0);
 perfr_api::log_info("tick");
+perfr_api::frame_mark(); // once per turn of the loop
 ```
+
+`frame_mark` says where one frame ends and the next begins. The viewer draws
+the time between two marks as one frame: a bar in a strip of frame times
+that always shows the whole capture, where a click on a bar shows that frame
+in the timeline, and a band behind this process's tracks, every other frame
+a little darker. `frame_mark_named("physics")` marks a series of its own for a
+program with more than one loop. In C it is `perfr_frame_mark(name, len)`,
+`PERFR_FRAME_MARK()` and `PERFR_FRAME_MARK_NAMED("physics")`; in Python
+`perfr.frame_mark()`.
 
 `log` is a no-op until a service is capturing, then the line is another event
 on the same ring as scopes. A line carries its level, thread and timestamp.

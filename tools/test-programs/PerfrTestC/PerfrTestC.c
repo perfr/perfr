@@ -138,6 +138,9 @@ int main(int argc, char** argv) {
   double started = now_s(), last = started;
   unsigned frame = 0;
   while (seconds == 0 || now_s() < started + (double)seconds) {
+    /* The frame boundary: the sleep at the bottom of the loop belongs to the
+     * frame it ends, which the `frame` scope below does not show. */
+    PERFR_FRAME_MARK();
     perfr_scope frame_scope = perfr_start(PERFR_LIT("frame"));
     perfr_instant(PERFR_LIT("vsync"));
 

@@ -244,6 +244,9 @@ fn main() {
     let mut frame: u32 = 0;
     let mut last = Instant::now();
     while deadline.is_none_or(|d| Instant::now() < d) {
+        // The frame boundary: the sleep at the bottom of the loop belongs to
+        // the frame it ends, which the `frame` scope below does not show.
+        perfr_api::frame_mark();
         let _frame = perfr_api::scope("frame");
         perfr_api::instant("vsync");
         {

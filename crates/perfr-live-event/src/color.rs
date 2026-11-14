@@ -61,6 +61,13 @@ pub fn log_level_color(level: u8) -> u32 {
     }
 }
 
+/// A frame on the `frames` lane. Two greys that take turns, so that each
+/// frame can be told from the one before it at any zoom without the lane
+/// competing with the scopes under it for attention.
+pub fn frame_color(number: u8) -> u32 {
+    if number & 1 == 0 { 0xFF78_909C } else { 0xFF54_6E7A }
+}
+
 /// A loss marker, and the loudest log levels: the red that means "look here".
 pub const DROP_MARK: u32 = 0xFFF4_4336;
 pub const SHADE_LEFT: f32 = 0.94;
@@ -227,6 +234,8 @@ pub fn event_color_hashed(
         kind::SAMPLE => sample_tick(),
         kind::LOG => log_level_color(extra),
         kind::DROP => DROP_MARK,
+        // `extra` is the frame's number: neighbours take turns.
+        kind::FRAME => frame_color(extra),
         kind::API_SCOPE | kind::API_TRACK | kind::VALUE => {
             let hash = name_hash.unwrap_or_else(|| self::name_hash(&name_id.to_le_bytes()));
             apply_even_depth(palette_index(hash), depth)

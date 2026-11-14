@@ -43,7 +43,7 @@ Typical loop:
 4. `perfr_arm_hooks` (at most 16 functions; pass `module` when a name is ambiguous)
 5. `perfr_start_capture`
 6. `perfr_stop_capture`
-7. `perfr_function_stats` for hooks and manual scopes
+7. `perfr_function_stats` for hooks and manual scopes, and for frame times when the program marks its frames (`query` `frame`; rows of kind `frame`)
 8. `perfr_sampling_report` and `perfr_callstacks` when sampling is supported
 9. `perfr_logs` for what the program logged; pass `scope` to read the lines inside one scope
 

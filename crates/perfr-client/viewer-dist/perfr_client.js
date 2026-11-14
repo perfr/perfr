@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import { perfrPickPresets, perfrSavePreset } from './snippets/perfr-viewer-e5ae10a0f7bc743d/inline0.js';
-import { perfrPickTrackOrder, perfrSaveTrackOrder } from './snippets/perfr-viewer-e5ae10a0f7bc743d/inline1.js';
+import { perfrPickTrackOrder, perfrSaveTrackOrder } from './snippets/perfr-viewer-e5ae10a0f7bc743d/inline0.js';
+import { perfrPickPresets, perfrSavePreset } from './snippets/perfr-viewer-e5ae10a0f7bc743d/inline1.js';
 import { startWorkers } from './snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src/workerHelpers.no-bundler.js';
 
 let wasm;
@@ -284,11 +284,7 @@ function __wbg_adapter_38(arg0, arg1, arg2) {
 }
 
 function __wbg_adapter_43(arg0, arg1) {
-    wasm._dyn_core__ops__function__FnMut_____Output___R_as_wasm_bindgen__closure__WasmClosure___describe__invoke__hefd63cc6d9e83414(arg0, arg1);
-}
-
-function __wbg_adapter_46(arg0, arg1, arg2) {
-    wasm.closure681_externref_shim(arg0, arg1, arg2);
+    wasm._dyn_core__ops__function__FnMut_____Output___R_as_wasm_bindgen__closure__WasmClosure___describe__invoke__h9be0cc5e812fcd69(arg0, arg1);
 }
 
 function takeFromExternrefTable0(idx) {
@@ -296,11 +292,15 @@ function takeFromExternrefTable0(idx) {
     wasm.__externref_table_dealloc(idx);
     return value;
 }
-function __wbg_adapter_49(arg0, arg1) {
-    const ret = wasm._dyn_core__ops__function__FnMut_____Output___R_as_wasm_bindgen__closure__WasmClosure___describe__invoke__he8dd50b31c6fcee1_multivalue_shim(arg0, arg1);
+function __wbg_adapter_46(arg0, arg1) {
+    const ret = wasm._dyn_core__ops__function__FnMut_____Output___R_as_wasm_bindgen__closure__WasmClosure___describe__invoke__hc863515fbb3ce2ee_multivalue_shim(arg0, arg1);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
+}
+
+function __wbg_adapter_49(arg0, arg1, arg2) {
+    wasm.closure685_externref_shim(arg0, arg1, arg2);
 }
 
 function __wbg_adapter_54(arg0, arg1, arg2) {
@@ -3316,27 +3316,27 @@ function __wbg_get_imports() {
         const ret = makeMutClosure(arg0, arg1, 167, __wbg_adapter_38);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper1844 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 340, __wbg_adapter_43);
+    imports.wbg.__wbindgen_closure_wrapper2237 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 374, __wbg_adapter_43);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper4013 = function(arg0, arg1, arg2) {
+    imports.wbg.__wbindgen_closure_wrapper4016 = function(arg0, arg1, arg2) {
         const ret = makeMutClosure(arg0, arg1, 682, __wbg_adapter_46);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper4015 = function(arg0, arg1, arg2) {
+    imports.wbg.__wbindgen_closure_wrapper4018 = function(arg0, arg1, arg2) {
         const ret = makeMutClosure(arg0, arg1, 682, __wbg_adapter_49);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper4017 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 682, __wbg_adapter_46);
+    imports.wbg.__wbindgen_closure_wrapper4020 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 682, __wbg_adapter_49);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper5700 = function(arg0, arg1, arg2) {
+    imports.wbg.__wbindgen_closure_wrapper5703 = function(arg0, arg1, arg2) {
         const ret = makeMutClosure(arg0, arg1, 1400, __wbg_adapter_54);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper5702 = function(arg0, arg1, arg2) {
+    imports.wbg.__wbindgen_closure_wrapper5705 = function(arg0, arg1, arg2) {
         const ret = makeMutClosure(arg0, arg1, 1400, __wbg_adapter_54);
         return ret;
     };

@@ -490,6 +490,52 @@ fn clamp_window_contain(t0: f64, t1: f64, cap0: f64, cap1: f64) -> (f64, f64) {
     (nt0, nt0 + span)
 }
 
+/// Arrowhead size, the gap between the label and the line, and the length
+/// of an arrow that stands outside a narrow span.
+const MEASURE_HEAD: f32 = 5.0;
+const MEASURE_PAD: f32 = 6.0;
+const MEASURE_TAIL: f32 = 14.0;
+
+/// How the dimension line of a measured span is laid out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MeasureLine {
+    /// The span holds its label: the line runs from edge to edge, broken
+    /// around the label, with an arrowhead inside each edge.
+    Inside { text_left: f32 },
+    /// The span is narrower than its label and the arrowheads that go with
+    /// it: the arrows stand outside the span, pointing in at its edges, and
+    /// the label is beside one of them.
+    Outside { text_left: f32 },
+}
+
+/// The layout for a span from `x0` to `x1` whose label is `text_w` wide, on
+/// a ruler from `left` to `right`. `None` when the span is off the ruler.
+///
+/// Inside, the label is centred on the part of the span that is on screen,
+/// so a span zoomed into past both edges still says what it measures. A
+/// label that goes outside goes after the span, or before it when the
+/// ruler's end is in the way.
+fn measure_line(x0: f32, x1: f32, text_w: f32, left: f32, right: f32) -> Option<MeasureLine> {
+    if x1 < left || x0 > right {
+        return None;
+    }
+    let (shown0, shown1) = (x0.max(left), x1.min(right));
+    if shown1 - shown0 >= text_w + 2.0 * (MEASURE_PAD + MEASURE_HEAD) {
+        return Some(MeasureLine::Inside { text_left: (shown0 + shown1 - text_w) / 2.0 });
+    }
+    let after = x1 + MEASURE_TAIL + MEASURE_PAD;
+    let before = x0 - MEASURE_TAIL - MEASURE_PAD - text_w;
+    let text_left = if after + text_w <= right {
+        after
+    } else if before >= left {
+        before
+    } else {
+        // A ruler with room on neither side: as far after as it goes.
+        (right - text_w).max(left)
+    };
+    Some(MeasureLine::Outside { text_left })
+}
+
 /// `TimeGraph::Zoom(min, max)`: window = 1.1 × duration, scope centered.
 fn zoom_scope_window(start_ns: f64, end_ns: f64) -> (f64, f64) {
     let start = start_ns.min(end_ns);
@@ -8087,25 +8133,47 @@ impl PerfrLiveApp {
             let hi = m.start_ns.max(m.stop_ns);
             let x0 = x_at_time(lo, ruler, t0, t1);
             let x1 = x_at_time(hi, ruler, t0, t1);
-            if (x1 - x0).abs() < 14.0 {
-                continue; // too short (or off-screen) to annotate legibly
-            }
             let text = display_time_ns(hi.saturating_sub(lo));
-            let mid = (x0 + x1) * 0.5;
             let galley = painter.layout_no_wrap(text, FontId::new(12.0, fonts::medium()), Color32::WHITE);
-            let half = galley.size().x * 0.5 + 6.0;
-            // The line, broken around the label in the middle.
-            painter.line_segment([Pos2::new(x0, arrow_y), Pos2::new((mid - half).max(x0), arrow_y)], stroke);
-            painter.line_segment([Pos2::new((mid + half).min(x1), arrow_y), Pos2::new(x1, arrow_y)], stroke);
-            // Outward arrowheads and end caps at each edge.
-            let head = 5.0;
-            for (x, dir) in [(x0, 1.0f32), (x1, -1.0f32)] {
-                painter.line_segment([Pos2::new(x, arrow_y), Pos2::new(x + dir * head, arrow_y - head)], stroke);
-                painter.line_segment([Pos2::new(x, arrow_y), Pos2::new(x + dir * head, arrow_y + head)], stroke);
-                painter.line_segment([Pos2::new(x, arrow_y - head), Pos2::new(x, arrow_y + head)], Stroke::new(1.0, Color32::WHITE));
-            }
             let sz = galley.size();
-            painter.galley(Pos2::new(mid - sz.x * 0.5, arrow_y - sz.y * 0.5), galley, Color32::WHITE);
+            let Some(line) = measure_line(x0, x1, sz.x, ruler.left(), ruler.right()) else {
+                continue; // off-screen
+            };
+            let head = MEASURE_HEAD;
+            let at = |x: f32| Pos2::new(x, arrow_y);
+            // An arrowhead with its tip on the edge at `x`, opening towards `dir`.
+            let arrowhead = |x: f32, dir: f32| {
+                painter.line_segment([at(x), Pos2::new(x + dir * head, arrow_y - head)], stroke);
+                painter.line_segment([at(x), Pos2::new(x + dir * head, arrow_y + head)], stroke);
+            };
+            // End caps at each edge, whichever way the arrows stand.
+            for x in [x0, x1] {
+                painter.line_segment(
+                    [Pos2::new(x, arrow_y - head), Pos2::new(x, arrow_y + head)],
+                    Stroke::new(1.0, Color32::WHITE),
+                );
+            }
+            let text_left = match line {
+                MeasureLine::Inside { text_left } => {
+                    // The line, broken around the label, with the arrows
+                    // inside the span pointing out at its edges.
+                    painter.line_segment([at(x0), at((text_left - MEASURE_PAD).max(x0))], stroke);
+                    painter.line_segment([at((text_left + sz.x + MEASURE_PAD).min(x1)), at(x1)], stroke);
+                    arrowhead(x0, 1.0);
+                    arrowhead(x1, -1.0);
+                    text_left
+                }
+                MeasureLine::Outside { text_left } => {
+                    // The span is narrower than its own label: the arrows
+                    // stand outside it and point in at its edges, and the
+                    // label goes beside them, as on a drawing.
+                    painter.line_segment([at(x0 - MEASURE_TAIL), at(x1 + MEASURE_TAIL)], stroke);
+                    arrowhead(x0, -1.0);
+                    arrowhead(x1, 1.0);
+                    text_left
+                }
+            };
+            painter.galley(Pos2::new(text_left, arrow_y - sz.y * 0.5), galley, Color32::WHITE);
         }
     }
 
@@ -15032,6 +15100,32 @@ mod tests {
         assert!(is_time_zoom_gesture(0.0, 1.0, true, false));
         assert!(is_time_zoom_gesture(0.0, 1.0, false, true));
         assert!(!is_time_zoom_gesture(0.0, 1.0, false, false));
+    }
+
+    #[test]
+    fn a_measured_span_too_narrow_for_its_label_has_it_beside_and_not_across_the_arrows() {
+        // A ruler from 200 to 1600, a label 70 wide.
+        let line = |x0: f32, x1: f32| measure_line(x0, x1, 70.0, 200.0, 1600.0);
+        // Room for the label and an arrowhead either side: centred inside.
+        assert_eq!(line(500.0, 700.0), Some(MeasureLine::Inside { text_left: 565.0 }));
+        assert_eq!(line(500.0, 592.0), Some(MeasureLine::Inside { text_left: 511.0 }));
+        // A pixel less: the label goes after the span, clear of the arrow
+        // that points in at its right edge.
+        assert_eq!(line(500.0, 591.0), Some(MeasureLine::Outside { text_left: 611.0 }));
+        // However narrow, down to nothing: it is still annotated.
+        assert_eq!(line(500.0, 500.5), Some(MeasureLine::Outside { text_left: 520.5 }));
+        // Up against the ruler's right end the label goes before it.
+        assert_eq!(line(1560.0, 1580.0), Some(MeasureLine::Outside { text_left: 1470.0 }));
+        // Zoomed into a span past both of its edges: centred on what shows.
+        assert_eq!(line(-5_000.0, 9_000.0), Some(MeasureLine::Inside { text_left: 865.0 }));
+        // A wide span with only a sliver on screen is laid out as narrow.
+        assert_eq!(line(1570.0, 9_000.0), Some(MeasureLine::Outside { text_left: 1480.0 }));
+        assert_eq!(line(-900.0, 230.0), Some(MeasureLine::Outside { text_left: 250.0 }));
+        // Off the ruler altogether.
+        assert_eq!(line(10.0, 150.0), None);
+        assert_eq!(line(1700.0, 1800.0), None);
+        // A ruler too short for the label on either side keeps it on the ruler.
+        assert_eq!(measure_line(210.0, 215.0, 70.0, 200.0, 260.0), Some(MeasureLine::Outside { text_left: 200.0 }));
     }
 
     #[test]

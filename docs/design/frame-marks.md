@@ -90,7 +90,10 @@ catalogue and of the level-of-detail decision. It is drawn twice
   carries the pointer's distance from what it moves, so nothing jumps when a
   handle is taken a little off its edge or the window is drawn wider than it
   is. A drag that begins off the window takes the window by its middle, as
-  the capture slider does.
+  the capture slider does. The wheel over the strip, or a pinch, grows and
+  shrinks the window by the same step as over the ruler, anchored the way
+  the capture slider anchors it: on the time under the pointer while the
+  pointer is on the window, on the window's nearer edge otherwise.
 - **The bands** behind the tracks of the process that marked the frames:
   every other frame a little darker. They are drawn behind that process's
   rows and no others (its header, threads, async blocks and graphs,

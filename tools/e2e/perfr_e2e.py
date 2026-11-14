@@ -701,6 +701,30 @@ def frame_marks(run):
     run.chrome.move(wx - 100 + ww * 0.5, strip[1] + strip[3] * 0.5)
     run.shot("53-frame-window", settle=0.8)
 
+    # The wheel over the strip grows and shrinks the window, a tenth a notch,
+    # about the time under the pointer; the strip itself does not move.
+    def wheel(x, notches):
+        y = strip[1] + strip[3] * 0.5
+        run.chrome.move(x, y)
+        time.sleep(0.2)
+        for _ in range(abs(notches)):
+            run.chrome.call("Input.dispatchMouseEvent", type="mouseWheel", x=x, y=y,
+                            deltaX=0, deltaY=120 if notches > 0 else -120)
+            time.sleep(0.15)
+        time.sleep(0.4)
+        return run.sel()["view"]
+
+    wx, wy, ww, wh = run.rect("frames:window")
+    centre = wx + ww * 0.5
+    start = run.sel()["view"]
+    out = wheel(centre, 3)  # wheel down: zoom out, the window grows
+    grew = (out[1] - out[0]) / (start[1] - start[0])
+    check(abs(grew - 1.1 ** 3) < 0.01, f"three notches out grew the window {grew:.3f}x, not {1.1 ** 3:.3f}x")
+    near((out[0] + out[1]) / 2, (start[0] + start[1]) / 2, "the window's middle, wheeled about it")
+    back = wheel(centre, -3)
+    near(back[1] - back[0], start[1] - start[0], "the window's length after three notches back in")
+    check(run.rect("frames") == strip, f"the strip moved under the wheel: {strip} -> {run.rect('frames')}")
+
     # A right-drag measures, on the strip as on the ruler and the tracks, and
     # the selection is one column from the ruler down, across the strip. A
     # span narrower than its own label has the label beside its arrows.

@@ -7798,8 +7798,9 @@ impl PerfrLiveApp {
     /// capture, as the slider at the bottom does, and does not follow the
     /// timeline's zoom. A click on a bar shows that frame in the timeline;
     /// the timeline's window is drawn on it, and is dragged, or resized by
-    /// its handles, from there. A right-drag on it measures, as on the
-    /// ruler above and the lanes below. Returns the strip's rectangle.
+    /// its handles, from there, and grown or shrunk by the wheel. A
+    /// right-drag on it measures, as on the ruler above and the lanes below.
+    /// Returns the strip's rectangle.
     fn paint_frame_strip(&mut self, ui: &mut Ui, series: LaneKey, header_w: f32) -> Rect {
         let (rect, _) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), crate::frame_marks::STRIP_H), Sense::hover());
@@ -7882,6 +7883,33 @@ impl PerfrLiveApp {
         }
         if action.is_some() || self.frame_strip_grab.is_some() {
             self.needs_repaint = true;
+        }
+        // The wheel over the strip grows and shrinks the timeline's window,
+        // a step a notch as it does over the ruler, and a pinch does the
+        // same. The time under the pointer stays where it is while the
+        // pointer is on the window; off it, the window's nearer edge does.
+        // That is the capture slider's rule, for the same reason: the strip
+        // stands for the whole capture, and the pointer need not be on the
+        // part of it the timeline is showing. Not during a drag of the
+        // window, which is already saying where its edges go.
+        if strip_resp.hovered() && self.frame_strip_grab.is_none() {
+            let (scroll_y, zoom, pinch) =
+                ui.ctx().input(|i| (i.raw_scroll_delta.y, i.zoom_delta(), i.multi_touch().is_some()));
+            let step = time_zoom_step(scroll_y, zoom);
+            if step != 0 {
+                let anchor = strip_resp
+                    .hover_pos()
+                    .map(|p| (p.x - strip.left()) / strip.width().max(1.0))
+                    .map(|at| capture_anchor_ratio(at, cap.0, cap.1, self.t0, self.t1))
+                    .unwrap_or(0.5);
+                let scale = if step > 0 { 1.0 + ZOOM_TIME_RATIO } else { 1.0 / (1.0 + ZOOM_TIME_RATIO) };
+                let (t0, t1) = zoom_time_by_scale_limited(self.t0, self.t1, scale, anchor, self.zoom_max_ns());
+                self.apply_zoom_window(t0, t1);
+                self.needs_repaint = true;
+                if pinch || scroll_y != 0.0 {
+                    consume_scroll(&strip_resp.ctx);
+                }
+            }
         }
         // The timeline's own right-drag: measure, add to the selection with
         // Shift, zoom with Ctrl. In the timeline's scale, not the strip's.

@@ -7,7 +7,7 @@ description: Write a capture story for a perfr blog post or an iframe. Use when 
 
 A story is a JSON document (`format` `perfr.story`, `version` 1) of ordered steps. The viewer plays it over a capture: each step is a camera (time range, which tracks are open, where the rail is scrolled) and overlays anchored to the capture (a timestamp, a thread or track id, a scope id). Anchors are not screen pixels.
 
-The story is not part of the capture. Export it and keep it beside the `.perfr.stream`. The viewer opens both with `?capture=<stream url>&story=<story url>`. Add `chrome=compact` for an iframe (see Embed, below, for the block to paste). perfr-web can store the JSON as `captures/<id>.perfr.story` next to `captures/<id>.perfr.stream`; a short link can later resolve to those two URLs. This skill does not upload either file. `perfr_story_export` and `perfr_story_load` take a `path` only inside the MCP server's story directory, which is the directory it was started in unless `perfr mcp --story-dir <dir>` names another: pass a relative path. Export never replaces a file that is not already a story. To keep the document anywhere else, take the `json` the export returns and write it yourself.
+The story is not part of the capture. Export it and keep it beside the `.perfr.stream`. The viewer opens both with `?capture=<stream url>&story=<story url>`. The viewer is the page that shows a capture with no perfr service behind it (the `perfr-viewer` pack, hosted at `https://perfr.dev/viewer/`): it plays the story for a reader who has not installed anything. The page perfr itself serves plays stories too, and is where one is written. Add `chrome=compact` for an iframe (see Embed, below, for the block to paste). perfr-web can store the JSON as `captures/<id>.perfr.story` next to `captures/<id>.perfr.stream`; a short link can later resolve to those two URLs. This skill does not upload either file. `perfr_story_export` and `perfr_story_load` take a `path` only inside the MCP server's story directory, which is the directory it was started in unless `perfr mcp --story-dir <dir>` names another: pass a relative path. Export never replaces a file that is not already a story. To keep the document anywhere else, take the `json` the export returns and write it yourself.
 
 ## Investigate first
 
@@ -62,7 +62,7 @@ The viewer URL, with the stream and the story each encoded:
 viewer/?capture=<encoded stream url>&story=<encoded story url>&chrome=compact
 ```
 
-`chrome=compact` hides the capture controls and leaves one bar: Play, Previous and Next, the step's title, the step list, Share, and a fullscreen button. The current step's text is shown under the timeline. `?capture=` still selects the capture; the story's `capture` field is used only when the page did not pass one.
+`chrome=compact` hides the toolbar and leaves one bar: Play, Previous and Next, the step's title, the step list, and a fullscreen button. The viewer has no Record and no Share: it shows the capture it is given. The current step's text is shown under the timeline. `?capture=` still selects the capture; the story's `capture` field is used only when the page did not pass one.
 
 In a post, the iframe is that URL, and under it goes a small perfr credit that links to perfr.dev. Use this block as it is and change only the two URLs:
 

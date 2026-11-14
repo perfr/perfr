@@ -99,6 +99,9 @@ int main(int argc, char** argv) {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
   };
   while (seconds == 0 || elapsed() < static_cast<double>(seconds)) {
+    // The frame boundary: the sleep at the bottom of the loop belongs to the
+    // frame it ends, which the `frame` scope below does not show.
+    PERFR_FRAME_MARK();
     PERFR_SCOPE("frame");
     PERFR_INSTANT("vsync");
     {

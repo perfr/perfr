@@ -72,6 +72,9 @@ def main():
     last = started
     frame = 0
     while seconds == 0 or time.perf_counter() < started + seconds:
+        # The frame boundary: the sleep at the bottom of the loop belongs to
+        # the frame it ends, which the `frame` scope below does not show.
+        perfr.frame_mark()
         with perfr.scope("frame"):
             perfr.instant("vsync")
             with perfr.scope("update"):

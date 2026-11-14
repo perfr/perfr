@@ -44,8 +44,10 @@ pub const READ_CURSOR_SLOTS: usize = 32;
 pub const DROP_TABLE_OFFSET: usize = 768;
 pub const DROP_CELLS: usize = 32;
 pub const DROP_CELL_STRIDE: usize = 40;
-/// Kinds 0..=6 are the real record kinds. Slot 7 counts a loss whose record
-/// could not be read back.
+/// Kinds 0..=6 have a slot each. Slot 7 counts a loss whose record could not
+/// be read back, and every kind added since the table was laid out (a
+/// [`crate::event::kind::FRAME`] mark): the table is shared with producers
+/// built before them, so it cannot grow a slot.
 pub const DROP_KIND_SLOTS: usize = 8;
 pub const DROP_KIND_UNKNOWN: u8 = 0xFF;
 

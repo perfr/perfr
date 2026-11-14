@@ -14,6 +14,7 @@
  *         ...
  *         perfr_stop(s);
  *         PERFR_VALUE("fps", 59.9);
+ *         PERFR_FRAME_MARK();                  // this frame ends, the next begins
  *       }
  *     }
  *
@@ -134,6 +135,8 @@ struct perfr_api_table_v1 {
    * library's `size` covers it, so a library built before logging still
    * loads and perfr_log stays a no-op against it. */
   void (*log)(uint8_t level, const char* message, size_t message_len);
+  /* Appended after log, and checked the same way. */
+  void (*frame_mark)(const char* name, size_t name_len);
 };
 
 /* The table as first released: the fields every library has. */
@@ -162,6 +165,7 @@ uint64_t perfr_now_ns(void);
 void perfr_span(const char* name, size_t name_len, uint64_t start_ns, uint64_t end_ns);
 void perfr_span_async(const char* name, size_t name_len, uint64_t start_ns, uint64_t end_ns);
 void perfr_log(uint8_t level, const char* message, size_t message_len);
+void perfr_frame_mark(const char* name, size_t name_len);
 
 /* Whether a library is loaded and the process has a segment. Always 1 here:
  * the library is linked in. */
@@ -500,9 +504,10 @@ static inline void perfr_stop(perfr_scope scope) {
   if (t) t->stop(scope);
 }
 
-/* A point in time with a name and no duration: a frame boundary, "level
- * loaded", a signal fired. Drawn as a tick, not a bar. Returns a handle so an
- * instant can be either end of a link. */
+/* A point in time with a name and no duration: "level loaded", a signal
+ * fired. Drawn as a tick, not a bar. Returns a handle so an instant can be
+ * either end of a link. A frame boundary is not an instant: see
+ * perfr_frame_mark. */
 static inline perfr_scope perfr_instant(const char* name, size_t name_len) {
   const struct perfr_api_table_v1* t = perfr_api_get_();
   return t ? t->instant(name, name_len) : 0;
@@ -567,6 +572,24 @@ static inline void perfr_log(uint8_t level, const char* message, size_t message_
   if (t && PERFR_API_HAS_(t, log) && t->log) t->log(level, message, message_len);
 }
 
+/* Marks a frame boundary: the frame that was running ends here and the next
+ * one begins. Call it once per frame, at the same point of the loop each
+ * time. The viewer draws the time between two marks as one frame, on a
+ * `frames` lane under the calling thread, and a line down the timeline at
+ * each mark.
+ *
+ * `name` says which series of frames the mark belongs to, for a program with
+ * more than one loop: a render thread's frames, a fixed-step simulation's
+ * ticks. Each name is one series with a lane of its own. A null or empty
+ * name is the main series; PERFR_FRAME_MARK() marks it.
+ *
+ * A no-op when nobody is capturing, and against a library built before
+ * frame marks. */
+static inline void perfr_frame_mark(const char* name, size_t name_len) {
+  const struct perfr_api_table_v1* t = perfr_api_get_();
+  if (t && PERFR_API_HAS_(t, frame_mark) && t->frame_mark) t->frame_mark(name, name_len);
+}
+
 #endif /* PERFR_STATIC */
 
 /* --------------------------------------------------------------------------
@@ -589,6 +612,11 @@ static inline void perfr_log(uint8_t level, const char* message, size_t message_
 #define PERFR_LOG_FATAL 5u
 
 #define PERFR_LOG(level, lit) perfr_log((uint8_t)(level), PERFR_LIT(lit))
+
+/* The end of one frame and the start of the next: of the main series, or of
+ * the series called `lit`. */
+#define PERFR_FRAME_MARK() perfr_frame_mark((const char*)0, 0)
+#define PERFR_FRAME_MARK_NAMED(lit) perfr_frame_mark(PERFR_LIT(lit))
 
 #define PERFR_CONCAT_(a, b) a##b
 #define PERFR_CONCAT(a, b) PERFR_CONCAT_(a, b)

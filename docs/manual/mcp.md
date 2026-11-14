@@ -101,7 +101,7 @@ Call `perfr_capabilities` first. It reports the platform, whether the service is
 | `perfr_capture_status` | Running or not, event count, instrumentation line |
 | `perfr_sampling_report` | Hottest sampled functions, one page |
 | `perfr_callstacks` | Hottest distinct stacks, outermost frame first |
-| `perfr_function_stats` | Count, total, average, min, max, stddev for hooks and manual scopes |
+| `perfr_function_stats` | Count, total, average, min, max, stddev for hooks and manual scopes, and frame times for a program that marks its frames (`kind` `frame`) |
 | `perfr_logs` | Log lines in a time range, or those logged inside a named scope, folded with counts |
 
 Pages are small on purpose. A raw report or the event ring is not a useful tool result. `offset` walks the next page. Search refuses an offset that would read past 200 hits: narrow the query.

@@ -80,7 +80,10 @@ PERFR_SCOPE("frame");
 perfr_scope s = perfr_start(PERFR_LIT("physics"));
 perfr_stop(s);
 PERFR_VALUE("fps", 59.9);
+PERFR_FRAME_MARK();              // once per turn of the loop
 ```
+
+A frame mark says where one frame ends and the next begins. The viewer draws the frames as a strip of frame times under the ruler and as bands behind that process's tracks; see [Frames](timeline.html#frames).
 
 `perfr_init()` looks for `libperfr` in `$PERFR_LIB`, beside `perfr` on `PATH` (then `~/.local/bin`), beside the executable, then the system loader. After install the header is `~/.local/include/perfr.h` (`-I~/.local/include`); on Windows it is `<install dir>\include\perfr.h`. In this repository it is `crates/perfr-api/include/perfr.h`.
 
@@ -89,6 +92,7 @@ Rust, from the `perfr-api` crate:
 ```rust
 let _frame = perfr_api::scope("frame");
 perfr_api::value("fps", 59.9);
+perfr_api::frame_mark();
 ```
 
 Python, the `perfr-api` package:
@@ -99,6 +103,7 @@ perfr.init()
 with perfr.scope("update"):
     ...
 perfr.value("fps", 59.9)
+perfr.frame_mark()
 ```
 
 C#, the `Perfr` package at `crates/perfr-api/csharp` (`net6.0`, `net8.0`, and `netstandard2.1`):

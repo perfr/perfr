@@ -10,6 +10,10 @@
 //! the population standard deviation (Welford, the same running numbers the
 //! Live tab keeps). Sampled call-stack frames are left out. Their duration
 //! is the sampling period, not a measured call.
+//!
+//! A program that marks its frames has one row per series of them, of kind
+//! `frame`: the count is the frames, and the average, minimum, maximum and
+//! deviation are its frame times.
 
 use std::collections::HashMap;
 
@@ -21,7 +25,8 @@ pub struct TimingRow {
     pub pid: u32,
     pub name_id: u32,
     pub name: String,
-    /// `hook` (dynamic instrumentation), `scope` (manual), or `track` (async).
+    /// `hook` (dynamic instrumentation), `scope` (manual), `track` (async),
+    /// or `frame` (a series of frames the program marked).
     pub kind: &'static str,
     pub count: u64,
     pub total_ns: u64,
@@ -55,12 +60,14 @@ fn source_kind(event: &LiveEvent) -> Option<u8> {
                 Some(event.kind)
             }
         }
+        kind::FRAME => Some(kind::FRAME),
         _ => None,
     }
 }
 
 fn kind_label(kind_id: u8) -> &'static str {
     match kind_id {
+        kind::FRAME => "frame",
         kind::FUNCTION_CALL => "hook",
         kind::API_SCOPE => "scope",
         kind::API_TRACK => "track",
@@ -272,5 +279,24 @@ mod tests {
         // Population stddev of 100 and 300 is 100.
         assert_eq!(hook.stddev_ns, 100);
         assert!(rows.iter().any(|r| r.kind == "scope" && r.count == 1));
+    }
+
+    #[test]
+    fn a_series_of_frames_is_a_row_of_its_frame_times() {
+        // Frames carry their number in `extra`; it must not split the row.
+        let events = vec![
+            ev(9, 3, kind::FRAME, 0, 0, 7_000_000),
+            ev(9, 3, kind::FRAME, 1, 0, 9_000_000),
+            ev(9, 3, kind::FRAME, 2, 0, 5_000_000),
+            ev(9, 4, kind::FRAME, 0, 0, 20_000_000),
+            ev(9, 3, kind::API_SCOPE, 0, 0, 50),
+        ];
+        let rows = fold_timing(&events, |id| if id == 3 { "frame".into() } else { "physics".into() });
+        let frames: Vec<&TimingRow> = rows.iter().filter(|r| r.kind == "frame").collect();
+        assert_eq!(frames.len(), 2, "one row a series");
+        let main = frames.iter().find(|r| r.name == "frame").unwrap();
+        assert_eq!((main.count, main.avg_ns, main.min_ns, main.max_ns), (3, 7_000_000, 5_000_000, 9_000_000));
+        // A scope that happens to be called `frame` is a row of its own.
+        assert!(rows.iter().any(|r| r.kind == "scope" && r.name == "frame" && r.count == 1));
     }
 }

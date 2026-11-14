@@ -50,6 +50,9 @@ The one thing to know before summing numbers: some rows reuse the
   a sampling period wide: the period again, not a measurement. A hooked
   function's call has `extra == 0` and a real duration.
 - `LOG` (8) is an instant (0), and `DROP` (9) holds a count of lost records.
+- `FRAME` (10) is one frame of a program that marks its frames, from one mark
+  to the next. Its duration is real, but it spans every scope that ran in the
+  frame, so it is a row to read frame times from, not one to add to theirs.
 
 So keep to `API_SCOPE`, `API_TRACK`, `SCHEDULING_SLICE` and the `FUNCTION_CALL`
 rows with `extra == 0` before you add durations up; `open_capture.py` has

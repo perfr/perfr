@@ -18,6 +18,8 @@
 //! - an instant is an `API_SCOPE` of zero duration, which the renderer draws
 //!   one pixel wide;
 //! - a value is a `VALUE` sample on a lane named by the track;
+//! - two consecutive frame marks of one series become a `FRAME` span from
+//!   the first to the second, on the thread that made the first;
 //! - a link is counted and otherwise dropped, until the viewer can draw an
 //!   arrow.
 //!
@@ -91,6 +93,28 @@ const NAME_TEXT_BUDGET_BYTES: usize = 64 << 20;
 
 const NAME_DROPPED: &str = "(name not kept: this capture's name budget is spent)";
 
+/// What the main series of frames is called: the one a frame mark with no
+/// name belongs to.
+const MAIN_FRAME_SERIES: &str = "frame";
+
+/// How many series of frames one process may have in progress. A series is
+/// a loop of the program, and a program has a handful; past this a mark for
+/// a new one is not followed, so that a producer naming a series per mark
+/// cannot grow the table without limit.
+const MAX_FRAME_SERIES: usize = 256;
+
+/// A frame that has started and whose end, the next mark of its series, has
+/// not been read yet.
+#[derive(Clone, Copy)]
+struct OpenFrame {
+    start_ns: u64,
+    /// The thread that made the mark the frame starts at.
+    tid: u32,
+    /// Which frame of its series this is, counting from the first one this
+    /// capture saw.
+    number: u32,
+}
+
 /// A scope started and not yet stopped.
 #[derive(Clone, Copy)]
 struct Open {
@@ -118,6 +142,8 @@ struct Segment {
     open: HashMap<u64, Open>,
     /// Per-thread count of open sync scopes, which is the depth of the next.
     sync_depth: HashMap<u32, u8>,
+    /// The frame in progress of each series, by the series' name id.
+    frames: HashMap<u32, OpenFrame>,
 }
 
 impl Segment {
@@ -143,6 +169,7 @@ impl Segment {
             awaiting_name: HashMap::new(),
             open: HashMap::new(),
             sync_depth: HashMap::new(),
+            frames: HashMap::new(),
         }
     }
 
@@ -216,6 +243,9 @@ pub struct ScopeSource {
     /// Name ids of hooks the Frida agent switched off for firing over its
     /// call-rate limit (a `\x02` marker record), in the order they arrived.
     pub auto_unhooked: Vec<u32>,
+    /// Whether a process has been told that it marks more series of frames
+    /// than are followed ([`MAX_FRAME_SERIES`]). Said once a capture.
+    frame_series_refused: bool,
 }
 
 impl ScopeSource {
@@ -247,6 +277,7 @@ impl ScopeSource {
             name_text_bytes: 0,
             events_without_name: 0,
             auto_unhooked: Vec::new(),
+            frame_series_refused: false,
         }
     }
 
@@ -494,6 +525,10 @@ impl ScopeSource {
                 let discarded = segment.open.len();
                 segment.open.clear();
                 segment.sync_depth.clear();
+                // A frame mark may be among what was lost, and the frame in
+                // progress would then run on into the next one. It is not
+                // drawn; the next mark starts a frame afresh.
+                segment.frames.clear();
                 self.scopes_discarded_on_loss = self.scopes_discarded_on_loss.saturating_add(discarded as u64);
             }
             // Sort this pass by timestamp before pairing. The rings arrive in
@@ -587,7 +622,7 @@ impl ScopeSource {
                 }
             }
             _ => {
-                // START, INSTANT, VALUE, LOG: named by inline text, possibly
+                // START, INSTANT, VALUE, LOG, FRAME: named by inline text, possibly
                 // continued. Feed the assembler first; it answers now for a
                 // name that fits, or later via a TEXT record.
                 if event.has_more_text() {
@@ -614,6 +649,10 @@ impl ScopeSource {
     fn named(&mut self, index: usize, event: ScopeEvent, text: &[u8], cut: bool, batch: &mut Vec<LiveEvent>) {
         if event.kind == rk::LOG {
             self.log_line(index, event, text, cut, batch);
+            return;
+        }
+        if event.kind == rk::FRAME {
+            self.frame_mark(index, event, text, cut, batch);
             return;
         }
         // A cut name keeps its prefix and says so.
@@ -732,6 +771,58 @@ impl ScopeSource {
             })
             .collect();
         parts.join(", ")
+    }
+
+    /// A frame mark whose series name is all in: the frame its series had
+    /// in progress ends here, as one `FRAME` span, and the next begins.
+    ///
+    /// The first mark of a series only begins a frame, and the frame in
+    /// progress when the capture ends, or when its process goes, is never
+    /// pushed: neither the time before the first mark nor the time after the
+    /// last is a frame anyone measured.
+    fn frame_mark(&mut self, index: usize, mark: ScopeEvent, series: &[u8], cut: bool, batch: &mut Vec<LiveEvent>) {
+        let marked;
+        let series: &[u8] = if series.is_empty() {
+            MAIN_FRAME_SERIES.as_bytes()
+        } else if cut {
+            marked = mark_cut(series);
+            &marked
+        } else {
+            series
+        };
+        let name_id = self.name_id(series);
+        let segment = &mut self.segments[index];
+        let pid = segment.pid;
+        let number = match segment.frames.get(&name_id) {
+            Some(open) => {
+                batch.push(LiveEvent {
+                    start_ns: open.start_ns,
+                    // Marks of one series made on two threads can be read a
+                    // little out of order; a frame is never negative.
+                    duration_ns: mark.timestamp_ns.saturating_sub(open.start_ns),
+                    tid: open.tid,
+                    pid,
+                    kind: kind::FRAME,
+                    depth: 0,
+                    extra: open.number as u8,
+                    _pad: 0,
+                    name_id,
+                });
+                self.events_pushed += 1;
+                open.number.wrapping_add(1)
+            }
+            None if segment.frames.len() >= MAX_FRAME_SERIES => {
+                if !self.frame_series_refused {
+                    self.frame_series_refused = true;
+                    log::warn!(
+                        "pid {pid} marks more than {MAX_FRAME_SERIES} series of frames at once: the rest are not followed"
+                    );
+                }
+                return;
+            }
+            None => 0,
+        };
+        segment.frames.insert(name_id, OpenFrame { start_ns: mark.timestamp_ns, tid: mark.tid, number });
     }
 
     /// A log line whose text is all in: one instant on its thread.
@@ -1041,6 +1132,7 @@ fn kind_label(kind_id: u8) -> &'static str {
         rk::TEXT => "text",
         rk::LINK => "link",
         rk::LOG => "log",
+        rk::FRAME => "frame_mark",
         _ => "unknown",
     }
 }
@@ -1348,6 +1440,86 @@ mod log_tests {
             "the scope open across the change is closed by its own stop"
         );
         assert_eq!(source.events_lost, 0);
+    }
+
+    fn frame_mark(timestamp_ns: u64, tid: u32, id: u64, series: &str) -> Vec<ScopeEvent> {
+        let mut head = ScopeEvent { timestamp_ns, scope_id: id, tid, kind: rk::FRAME, ..ScopeEvent::default() };
+        let mut records = split_name(&mut head, series);
+        records.insert(0, head);
+        records
+    }
+
+    #[test]
+    fn two_marks_of_a_series_are_one_frame_and_the_frame_in_progress_is_not_one() {
+        let (_serial, service, mut source) = source();
+        let mut batch = Vec::new();
+        let mark = |source: &mut ScopeSource, batch: &mut Vec<LiveEvent>, at: u64, tid: u32, series: &str| {
+            for record in frame_mark(at, tid, at, series) {
+                source.accept(0, record, batch);
+            }
+        };
+        // The main series on thread 90, with a second series marked between
+        // its marks on the same thread, and a third whose name spills over
+        // into continuation records.
+        let long = "a series whose name does not fit in one record";
+        mark(&mut source, &mut batch, 1_000, 90, "");
+        assert!(batch.is_empty(), "the first mark only begins a frame");
+        mark(&mut source, &mut batch, 1_400, 90, "physics");
+        mark(&mut source, &mut batch, 2_000, 90, "");
+        mark(&mut source, &mut batch, 2_100, 90, "physics");
+        mark(&mut source, &mut batch, 2_500, 91, long);
+        // The main series moves to another thread: the frame belongs to the
+        // thread that began it.
+        mark(&mut source, &mut batch, 3_500, 91, "");
+        mark(&mut source, &mut batch, 4_500, 91, long);
+        source.announce_new_names();
+
+        let frames: Vec<(String, u64, u64, u32, u8)> = batch
+            .iter()
+            .filter(|e| e.kind == kind::FRAME && [90, 91].contains(&e.tid))
+            .map(|e| (text_of(&service, e), e.start_ns, e.duration_ns, e.tid, e.extra))
+            .collect();
+        assert_eq!(
+            frames,
+            [
+                ("frame".to_string(), 1_000, 1_000, 90, 0),
+                ("physics".to_string(), 1_400, 700, 90, 0),
+                ("frame".to_string(), 2_000, 1_500, 90, 1),
+                (long.to_string(), 2_500, 2_000, 91, 0),
+            ]
+        );
+        // Two series on one thread overlap in time, so each has its own lane.
+        let lanes: HashSet<_> = batch.iter().filter(|e| e.kind == kind::FRAME && e.tid == 90).map(|e| e.lane_key()).collect();
+        assert_eq!(lanes.len(), 2);
+
+        // What is still in progress when the capture ends was never ended
+        // by the program, and is not drawn as if it had been.
+        batch.clear();
+        source.finish(10_000, &mut batch);
+        assert!(batch.iter().all(|e| e.kind != kind::FRAME), "a frame nobody ended: {batch:?}");
+    }
+
+    #[test]
+    fn a_frame_does_not_run_on_across_records_that_were_lost() {
+        let (_serial, _service, mut source) = source();
+        let mut batch = Vec::new();
+        for record in frame_mark(1_000, 92, 1, "") {
+            source.accept(0, record, &mut batch);
+        }
+        assert_eq!(source.segments[0].frames.len(), 1);
+        // What the drain does when a ring lapped: a mark may be among what
+        // was lost, so the frame in progress is not trusted to end at the
+        // next mark that does arrive.
+        source.segments[0].frames.clear();
+        for record in frame_mark(9_000, 92, 2, "") {
+            source.accept(0, record, &mut batch);
+        }
+        assert!(batch.iter().all(|e| e.kind != kind::FRAME), "an 8 µs frame that was really several");
+        for record in frame_mark(9_500, 92, 3, "") {
+            source.accept(0, record, &mut batch);
+        }
+        let frame = batch.iter().find(|e| e.kind == kind::FRAME && e.tid == 92).expect("the next frame");
+        assert_eq!((frame.start_ns, frame.duration_ns), (9_000, 500));
     }
 
     #[test]

@@ -249,6 +249,10 @@ const _: () = assert!(READER_LEASES_OFFSET + std::mem::size_of::<ReaderLeases>()
 /// counts what it overwrites in the control page's drop table (see
 /// [`crate::meta`]). The byte layout of the record and the segment is
 /// unchanged from version 1, so a reader accepts either.
+///
+/// [`crate::event::kind::FRAME`] records were added without a bump: no
+/// existing call changed meaning, and a reader that does not know the kind
+/// skips it.
 pub const API_VERSION: u32 = 2;
 
 const _: () = assert!(std::mem::size_of::<Header>() == CACHE_LINE);

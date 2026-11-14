@@ -41,8 +41,8 @@ public:
 	/** What `-perfr`, UE_EXTERNAL_PROFILER and the ini key match. */
 	virtual const TCHAR* GetProfilerName() const override { return TEXT("perfr"); }
 
-	/** Once per game-thread frame, from FEngineLoop::Tick: a tick on the timeline. */
-	virtual void FrameSync() override { perfr_instant(PERFR_LIT("frame")); }
+	/** Once per game-thread frame, from FEngineLoop::Tick: where one frame ends and the next begins. */
+	virtual void FrameSync() override { PERFR_FRAME_MARK(); }
 
 	/** perfr records from the outside (Record in the viewer, or the API); nothing to pause here. */
 	virtual void ProfilerPauseFunction() override {}

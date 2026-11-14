@@ -47,7 +47,7 @@ import sys
 
 __all__ = [
     "ABI_VERSION", "DEBUG", "E_ABI", "E_NOLIB", "ERROR", "FATAL", "INFO", "TRACE", "WARN",
-    "available", "init", "instant", "library_path", "link", "log", "now_ns", "scope",
+    "available", "frame_mark", "init", "instant", "library_path", "link", "log", "now_ns", "scope",
     "scope_async", "shutdown", "span", "span_async", "start", "start_async", "stop", "value",
 ]
 __version__ = "0.1.3"
@@ -130,6 +130,10 @@ def _open(path):
     if hasattr(lib, "perfr_log"):
         lib.perfr_log.argtypes = (ctypes.c_uint8, ctypes.c_char_p, ctypes.c_size_t)
         lib.perfr_log.restype = None
+    # So were frame marks.
+    if hasattr(lib, "perfr_frame_mark"):
+        lib.perfr_frame_mark.argtypes = (ctypes.c_char_p, ctypes.c_size_t)
+        lib.perfr_frame_mark.restype = None
     return lib
 
 
@@ -311,4 +315,24 @@ def log(level, message):
     if _lib and hasattr(_lib, "perfr_log"):
         b = _name(message)
         _lib.perfr_log(int(level) & 0xFF, b, len(b))
+
+
+def frame_mark(name=""):
+    """Marks a frame boundary: the frame that was running ends here and the
+    next one begins. Call it once per frame, at the same point of the loop
+    each time. The viewer draws the time between two marks as one frame, on a
+    ``frames`` lane under the calling thread, and a line down the timeline at
+    each mark.
+
+    ``name`` says which series of frames the mark belongs to, for a program
+    with more than one loop; leave it out for the main one. A no-op when the
+    library is missing or nobody is capturing.
+
+        while running:
+            update()
+            perfr.frame_mark()
+    """
+    if _lib and hasattr(_lib, "perfr_frame_mark"):
+        b = _name(name)
+        _lib.perfr_frame_mark(b, len(b))
 

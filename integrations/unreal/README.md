@@ -30,7 +30,7 @@ in the environment or `[Core.ProfilingDebugging] ExternalProfiler=perfr` in
 | `SCOPED_NAMED_EVENT(Name, Color)`, `_TEXT`, `_TCHAR`, `_F`, `_FSTRING` | a scope on the calling thread |
 | `SCOPE_CYCLE_COUNTER(STAT_x)`, `QUICK_SCOPE_CYCLE_COUNTER(x)` | a scope, when stat named events are on: `-statnamedevents` or `stats.NamedEvents on` |
 | the engine's own named events (`FEngineLoop::Tick`, render and RHI thread work, task graph, …) | scopes, same as above |
-| each game-thread frame (`FExternalProfiler::FrameSync`) | a `frame` instant |
+| each game-thread frame (`FExternalProfiler::FrameSync`) | a frame mark: a bar in the viewer's strip of frame times and a band behind the game's tracks |
 | thread names | come from the OS; Unreal names its threads |
 
 The plugin is one Core-only module: at startup it calls `perfr_init()`, which
@@ -114,5 +114,6 @@ arrive twice if `-perfr` is also passed; pick one route.
 The game log says `perfr: libperfr loaded` at module startup. The
 service log says `opened segment of pid <n>` when Record starts, and
 `manual instrumentation: <n> events` when it stops. In the viewer the game's
-threads carry scope bands named as the macros named them, and the game
-thread has a `frame` tick per frame.
+threads carry scope bands named as the macros named them, the strip under
+the ruler has a bar per game-thread frame, and the ground behind the game's
+tracks is a little darker every other frame.

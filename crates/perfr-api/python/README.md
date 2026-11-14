@@ -16,6 +16,8 @@ def render(frame):
 
 perfr.value("fps", 59.9)
 perfr.instant("level loaded")
+perfr.log(perfr.INFO, "tick")
+perfr.frame_mark()                # once per turn of the loop
 ```
 
 Run `perfr`, open its viewer, pick the Python process, press Record.
@@ -37,7 +39,15 @@ and `init()` returns `perfr_api.E_NOLIB`.
 `start(name) -> handle`, `start_async(name)`, `stop(handle)`,
 `instant(name) -> handle`, `link(src, dst)`, `value(name, v)`,
 `now_ns()`, `span(name, start_ns, end_ns)`, `span_async(...)`,
+`log(level, message)` with `TRACE` .. `FATAL`, `frame_mark(name="")`,
 `scope(name)` and `scope_async(name)` as context managers or decorators.
+
+`frame_mark()` says where one frame ends and the next begins; the viewer
+draws the frames as a strip of frame times and as bands behind this
+process's tracks. A
+name marks a series of its own, for a program with more than one loop. With
+a `libperfr` from before frame marks, or before logging, that call is a
+no-op and the rest work.
 
 Names may be `str` or `bytes`; `bytes` skips an encode on the hot path.
 Handles are ints; `0` means "no event" and every function accepts it.

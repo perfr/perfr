@@ -50,6 +50,8 @@ fn main() {
                 kind::VALUE => "value",
                 kind::TEXT => "text_continuation",
                 kind::LINK => "link",
+                kind::LOG => "log",
+                kind::FRAME => "frame_mark",
                 _ => "unknown",
             };
             *by_kind.entry(k).or_default() += 1;

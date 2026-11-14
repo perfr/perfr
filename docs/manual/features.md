@@ -277,8 +277,9 @@ opens on first load with a service and closes with its ×. Its rows:
   that frame in the timeline, centred and filling nine tenths of the
   width. Behind the tracks of the process that marked the frames, and only
   those, every other frame is a little darker, so where a frame ends can be
-  read off any of its threads; the scheduler and other processes keep their
-  plain ground, and a second process that marks frames has bands of its
+  read off any of its threads; the scheduler, other processes and the row
+  that names the process keep their plain ground (a folded process shows no
+  bands), and a second process that marks frames has bands of its
   own. A right-drag on the strip measures as it does on the ruler, and a
   selection crosses the strip as one column. The bands fade out once frames are
   a few pixels wide. The rail beside the strip names the series and its

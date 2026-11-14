@@ -96,9 +96,10 @@ catalogue and of the level-of-detail decision. It is drawn twice
   pointer is on the window, on the window's nearer edge otherwise.
 - **The bands** behind the tracks of the process that marked the frames:
   every other frame a little darker. They are drawn behind that process's
-  rows and no others (its header, threads, async blocks and graphs,
-  wherever a track of it has been dragged to), so the scheduler and every
-  other process keep their plain ground: a frame of one program says
+  tracks and nothing else (its threads, async blocks and graphs, wherever
+  a track of it has been dragged to; not the row that names the process,
+  so a folded process shows none), and the scheduler and every other
+  process keep their plain ground: a frame of one program says
   nothing about another's threads. When several processes mark frames each
   has its own bands, from one series of its own, and the strip offers the
   series of the capture's process first. Whose

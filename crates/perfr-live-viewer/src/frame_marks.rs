@@ -15,8 +15,9 @@
 //!   and dragging the handle on either edge of it moves that edge;
 //! - bands behind the tracks of the process that marked the frames, every
 //!   other frame a little darker, so that where one frame ends and the next
-//!   begins can be read off any of its threads. The scheduler and every
-//!   other process keep their plain ground: the frames are not theirs.
+//!   begins can be read off any of its threads. The scheduler, every other
+//!   process, and the row that names the process itself keep their plain
+//!   ground, so a folded process shows none.
 //!
 //! What a draw costs does not grow with the capture: the strip's bars are
 //! worked out when the frames or the strip's width change and kept until
@@ -535,22 +536,24 @@ pub fn band_strength(points_per_frame: f32) -> f32 {
     ((points_per_frame - BAND_MIN_PT) / (BAND_FULL_PT - BAND_MIN_PT)).clamp(0.0, 1.0)
 }
 
-/// Where the rows of process `pid` are, top to bottom: `(top, bottom)` in
+/// Where the tracks of process `pid` are, top to bottom: `(top, bottom)` in
 /// points from the top of the lanes, rows that touch joined into one span.
 ///
 /// These are the rows the frames of that process are drawn behind: its
-/// header, its threads with the lanes under them, their async blocks and
-/// graphs. A track of it that was dragged under another process is still
-/// its own and is found where it is; a guest in its section is not.
+/// threads with the lanes under them, their async blocks and graphs. Not
+/// the row that names the process: that is a heading, with nothing on it a
+/// frame boundary could be read against, and it is all that is left of a
+/// process that has been folded, which then shows no bands at all. A track
+/// that was dragged under another process is still its own and is found
+/// where it is; a guest in its section is not.
 pub fn process_spans(rows: &[TrackRow], pid: u32) -> Vec<(f32, f32)> {
     let mut spans: Vec<(f32, f32)> = rows
         .iter()
         .filter(|row| match row.id {
-            RowId::Process(p) => p == pid,
             RowId::Thread(t) | RowId::Async(t) => t.pid == pid,
             // A scheduler lane's key has pid 0 and belongs to no process.
             RowId::Lane(key) => key.pid == pid && !key.is_scheduler(),
-            RowId::Scheduler | RowId::Machine(_) => false,
+            RowId::Process(_) | RowId::Scheduler | RowId::Machine(_) => false,
         })
         .filter(|row| row.height > 0.0)
         .map(|row| (row.y, row.y + row.height))
@@ -855,8 +858,12 @@ mod tests {
             // A track of 7 that was dragged under process 9.
             row(graph(7), 309.0, 39.0),
         ];
-        assert_eq!(process_spans(&rows, 7), [(33.0, 152.0), (191.0, 251.0), (309.0, 348.0)]);
-        assert_eq!(process_spans(&rows, 9), [(152.0, 191.0), (251.0, 309.0)]);
+        // From under each process's own heading, never on it.
+        assert_eq!(process_spans(&rows, 7), [(51.0, 152.0), (191.0, 251.0), (309.0, 348.0)]);
+        assert_eq!(process_spans(&rows, 9), [(152.0, 191.0), (269.0, 309.0)]);
+        // A folded process is its heading and nothing else: no bands.
+        let folded = [row(RowId::Scheduler, 0.0, 20.0), row(RowId::Process(7), 20.0, 18.0), row(RowId::Process(9), 38.0, 18.0)];
+        assert!(process_spans(&folded, 7).is_empty());
         // The scheduler's lanes are keyed with pid 0, and are nobody's.
         assert!(process_spans(&rows, 0).is_empty());
         assert!(process_spans(&rows, 1234).is_empty());

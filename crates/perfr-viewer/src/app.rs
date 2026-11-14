@@ -40,7 +40,7 @@ use std::sync::Arc;
 use crate::dev::DevFrame;
 use crate::fonts;
 use crate::net::{
-    instances_from_timeline, scale_frame_rgba, CaptureStart, FunctionHit, Net, ProcessJson,
+    instances_from_timeline, scale_frame_rgba, CaptureStart, FunctionHit, Host, Net, ProcessJson,
     ServiceFrame, StatusJson, SymbolsStatusJson, TimelineJson,
 };
 use crate::theme;
@@ -802,6 +802,9 @@ pub struct PerfrLiveApp {
     /// not reopened.
     ws_incompatible: Option<String>,
     net: Net,
+    /// What the page is built on: whether a capture service serves it, and
+    /// whether it can share. The viewer's own page has neither.
+    host: Host,
     processes: Vec<ProcessJson>,
     selected_pid: Option<u32>,
     /// The last capture target picked automatically (see `adopt_capture_target`).
@@ -1788,7 +1791,7 @@ impl PerfrLiveApp {
 }
 
 impl PerfrLiveApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, host: Host) -> Self {
         fonts::install(&cc.egui_ctx);
         // Pick the colour scheme before building visuals from it: `?theme=`
         // wins (a shared link or screenshot pins the look), else the reader's
@@ -1804,15 +1807,12 @@ impl PerfrLiveApp {
         cc.egui_ctx.options_mut(|o| o.input_options.max_double_click_delay = 0.5);
         let intern = InternTable::default();
         let static_capture = crate::dev::query_capture_url_from_location();
-        let (share_token, share_resume) = Net::stored_share_auth();
         let share_cross_origin = crate::share::share_is_cross_origin(
             &crate::dev::location_href(),
             &crate::share::resolve_share_base(&crate::dev::location_search()),
         );
-        let net = match &static_capture {
-            Some(url) => Net::from_capture_url(url),
-            None => Net::connect(),
-        };
+        let net = (host.connect)(static_capture.as_deref());
+        let (share_token, share_resume) = net.stored_share_auth();
         let mut story = crate::story::StorySession::from_query(
             crate::dev::query_story_url_from_location().as_deref(),
             crate::dev::query_chrome_compact_from_location(),
@@ -1842,6 +1842,7 @@ impl PerfrLiveApp {
             frames_skipped: 0,
             ws_incompatible: None,
             net,
+            host,
             processes: Vec::new(),
             selected_pid: None,
             adopted_target_pid: None,
@@ -1937,6 +1938,7 @@ impl PerfrLiveApp {
             column_rasters: 0,
             report_tab: crate::dev::query_report_tab_from_location()
                 .and_then(|v| ReportTab::from_query(&v))
+                .filter(|tab| host.service || *tab != ReportTab::Functions)
                 .unwrap_or(ReportTab::Flat),
             tree: None,
             tree_expanded: std::collections::HashSet::new(),
@@ -2221,10 +2223,11 @@ impl PerfrLiveApp {
         self.static_capture.is_some() || self.held_stream.is_local() || self.trace_name.is_some()
     }
 
-    /// Whether there is a service to ask: a page opened on a capture file
-    /// (`?capture=`) has none, and a request it sends goes nowhere.
+    /// Whether there is a service to ask. The viewer's own page never has
+    /// one, and a page opened on a capture file (`?capture=`) has none
+    /// either: a request it sends goes nowhere.
     fn has_service(&self) -> bool {
-        self.static_capture.is_none()
+        self.host.service && self.static_capture.is_none()
     }
 
     /// Reports a failure of something the reader asked for. See `notice`.
@@ -2705,7 +2708,7 @@ impl PerfrLiveApp {
             .and_then(|()| crate::frames::end_of_stream(&mut self.leftover));
         if let Err(fault) = read {
             let message = fault.file_message();
-            log::warn!(target: "perfr_client::net", "{message}");
+            log::warn!(target: "perfr_viewer::net", "{message}");
             self.fail(message);
         }
         // A stream saved while its capture ran carries the status of that
@@ -2735,7 +2738,8 @@ impl PerfrLiveApp {
     }
 
     fn can_share(&self) -> bool {
-        self.held_stream.can_share(
+        self.host.share
+            && self.held_stream.can_share(
             self.static_capture.is_some(),
             self.trace_name.is_some(),
             self.index.event_count(),
@@ -3079,8 +3083,12 @@ impl PerfrLiveApp {
                 } else if is_bundle_name(&file.name()) {
                     // A perfr capture: the service opens it and streams it
                     // back like a capture, names and samples included.
-                    self.import_pending = true;
-                    self.net.import_capture_file(file);
+                    if self.has_service() {
+                        self.import_pending = true;
+                        self.net.import_capture_file(file);
+                    } else {
+                        self.fail(bundle_needs_service(&file.name()));
+                    }
                 } else {
                     self.begin_trace_load(chrome_load::start_wasm_file(file));
                 }
@@ -3207,6 +3215,7 @@ impl PerfrLiveApp {
         }
         if is_bundle_name(&name) {
             match &f.bytes {
+                Some(_) if !self.has_service() => self.fail(bundle_needs_service(&name)),
                 Some(bytes) => {
                     self.import_pending = true;
                     self.net.import_capture(bytes.to_vec());
@@ -3411,7 +3420,7 @@ impl PerfrLiveApp {
         }
         // A capture started from the API (not this viewer) still names its
         // target: the Functions view and the hook menu need a process.
-        if self.static_capture.is_none() {
+        if self.has_service() {
             let (selected, adopted) =
                 adopt_capture_target(self.selected_pid, self.adopted_target_pid, s.target_pid);
             self.selected_pid = selected;
@@ -3419,7 +3428,7 @@ impl PerfrLiveApp {
         }
         if self.defer_default_pid {
             self.defer_default_pid = false;
-            if self.selected_pid.is_none() && self.static_capture.is_none() {
+            if self.selected_pid.is_none() && self.has_service() {
                 let has_one = self.processes.iter().any(|p| p.pid == 1);
                 self.selected_pid = default_pid_for_first_list(true, s.hooks, s.capturing, s.target_pid, has_one);
             }
@@ -3443,7 +3452,7 @@ impl PerfrLiveApp {
             // And the floor of its bounds, when what is held is the
             // service's capture and not a file or the demo, whose times are
             // on another clock altogether.
-            if !s.demo && self.static_capture.is_none() && !self.held_stream.is_local() && self.trace_name.is_none() {
+            if !s.demo && self.has_service() && !self.held_stream.is_local() && self.trace_name.is_none() {
                 self.index.set_extent_floor(s.capture_start_ns);
                 self.refresh_content_bounds();
             }
@@ -3797,7 +3806,7 @@ impl PerfrLiveApp {
         // while the service is down would otherwise fill the log with
         // the same line.
         if e != self.error {
-            log::warn!(target: "perfr_client::net", "{e}");
+            log::warn!(target: "perfr_viewer::net", "{e}");
         }
         if self.recording && !self.recording_confirmed {
             if let Some(reason) = refused_start(&e) {
@@ -3826,7 +3835,7 @@ impl PerfrLiveApp {
             // times a second.
             if self.frames_skipped == 0 {
                 log::warn!(
-                    target: "perfr_client::net",
+                    target: "perfr_viewer::net",
                     "the stream has frames of a type this viewer does not know; they are skipped"
                 );
             }
@@ -3841,7 +3850,7 @@ impl PerfrLiveApp {
     /// stood still while memory grew.
     fn socket_fault(&mut self, fault: crate::frames::StreamFault) {
         let message = fault.socket_message();
-        log::warn!(target: "perfr_client::net", "{message}");
+        log::warn!(target: "perfr_viewer::net", "{message}");
         // What is queued continues the stream that just failed.
         self.ws_queue.clear();
         if !fault.reconnect_helps() {
@@ -3885,7 +3894,7 @@ impl PerfrLiveApp {
                 // A capture started elsewhere (the API, an agent) names its
                 // target: with nothing picked here, that is the process the
                 // symbols, the hooks and the Functions view are about.
-                if pid > 0 && self.selected_pid.is_none() && self.static_capture.is_none() {
+                if pid > 0 && self.selected_pid.is_none() && self.has_service() {
                     self.selected_pid = Some(pid);
                 }
                 // A fresh capture is a fresh adoption, even of a recycled pid.
@@ -4145,14 +4154,17 @@ impl PerfrLiveApp {
         // The wide bar has Save and Share of its own; the narrow bar keeps
         // them here.
         if self.chrome_collapsed() || self.was_narrow {
-            if self.static_capture.is_none() {
+            if self.has_service() {
                 self.transport_save(ui);
             }
             self.transport_share(ui);
         }
-        let presets = ui.button("Instrumentation presets…");
-        note_ui_rect("Presets", presets.rect);
-        if presets.clicked() { self.presets.open = true; ui.close(); }
+        // Hooks are set up for a capture the service will take.
+        if self.host.service {
+            let presets = ui.button("Instrumentation presets…");
+            note_ui_rect("Presets", presets.rect);
+            if presets.clicked() { self.presets.open = true; ui.close(); }
+        }
         ui.set_min_width(220.0);
         if self.has_service()
             && (!self.status.hooks || !self.status.capturing)
@@ -4402,6 +4414,11 @@ impl PerfrLiveApp {
     }
 
     fn paint_link_dot(&self, ui: &mut Ui) {
+        if !self.host.service && self.static_capture.is_none() {
+            // The viewer with no capture named in its address: there is no
+            // service to be connected to and no file to name.
+            return;
+        }
         if let Some(url) = &self.static_capture {
             let (rect, resp) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
             ui.painter().circle_filled(rect.center(), 4.0, LINK_GREEN);
@@ -4480,7 +4497,7 @@ impl PerfrLiveApp {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 5.0;
             self.paint_link_dot(ui);
-            if self.static_capture.is_none() {
+            if self.has_service() {
                 let recording = self.recording || self.status.demo || self.status.capturing;
                 if record_button(ui, recording).on_hover_text("Start/stop capture (X)").clicked() {
                     if recording { self.stop_record(); } else { self.start_record(); }
@@ -4495,6 +4512,12 @@ impl PerfrLiveApp {
                 }
                 self.paint_process_picker(ui, "perfr_processes_strip");
             } else {
+                // A page with no service has nothing to record or save. It
+                // opens files, unless its address already named the one it
+                // shows.
+                if self.static_capture.is_none() {
+                    self.transport_open(ui);
+                }
                 self.transport_share(ui);
             }
             self.paint_search(ui);
@@ -4580,7 +4603,9 @@ impl PerfrLiveApp {
     /// the native build: the upload uses the browser, and there is nothing
     /// to post to without one.
     fn share_state(&self) -> Option<(bool, &'static str)> {
-        if !cfg!(target_arch = "wasm32") {
+        // No Share on a page that cannot share (the viewer's own), which is
+        // every place the button is drawn: this is where they all ask.
+        if !cfg!(target_arch = "wasm32") || !self.host.share {
             return None;
         }
         let enabled = self.can_share();
@@ -4950,6 +4975,15 @@ impl PerfrLiveApp {
     fn symbol_status_line(&self) -> String {
         if let Some(load) = &self.trace_load { return load.progress_line(); }
         if self.static_capture.is_some() { return "Saved capture".into(); }
+        if !self.host.service {
+            // No service, so no process and no symbols to load: the line
+            // names what the reader opened, or says nothing.
+            return match &self.trace_name {
+                Some(name) => name.clone(),
+                None if self.index.event_count() > 0 => "Saved capture".into(),
+                None => String::new(),
+            };
+        }
         if self.selected_pid.is_none() {
             return self.trace_name.clone().unwrap_or_else(|| "Select a process to load symbols".into());
         }
@@ -5496,6 +5530,7 @@ impl PerfrLiveApp {
                 note_ui_rect(&format!("danger:{}", f.name), name_rect);
             }
             if let Some(action) = hook_menu(
+                self.host.service,
                 &label, f.function_id,
                 if selected { all_selected_hooked } else { hooked },
                 if selected { self.report_selection.len() } else { 1 },
@@ -5593,53 +5628,60 @@ impl PerfrLiveApp {
     }
 
     fn chrome(&mut self, ui: &mut Ui) {
-        section(ui, "PROCESS");
-        self.paint_process_picker(ui, "perfr_processes_side");
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new(self.symbol_status_line())
-                .font(FontId::monospace(11.0))
-                .color(theme::MUTED()),
-        );
+        // The viewer's own page has no process to pick, no ring to size and
+        // no service to wait for: those parts are the client's.
+        let service = self.host.service;
+        if service {
+            section(ui, "PROCESS");
+            self.paint_process_picker(ui, "perfr_processes_side");
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(self.symbol_status_line())
+                    .font(FontId::monospace(11.0))
+                    .color(theme::MUTED()),
+            );
+        }
         section(ui, "VIEWER");
         self.paint_verbose_stats(ui);
         status_row(ui, "Frame rate", &format!("{:.0} fps", self.fps_ema));
         status_row(ui, "Stream", &format_rate(self.ws_rate_bps));
         status_row(ui, "Renderer", self.gpu_backend);
-        if ui.button("Retry symbol loading").clicked() {
-            self.loaded_symbol_pid = None;
-        }
+        if service {
+            if ui.button("Retry symbol loading").clicked() {
+                self.loaded_symbol_pid = None;
+            }
 
-        section(ui, "RING / SPILL");
-        ui.label(RichText::new("Ring bytes").size(11.0).color(muted()));
-        let ring = ui.add(
-            egui::TextEdit::singleline(&mut self.ring_bytes)
-                .desired_width(ui.available_width())
-                .font(FontId::monospace(12.0))
-                .background_color(theme::INPUT()),
-        );
-        ui.add_space(4.0);
-        ui.label(RichText::new("Spill path").size(11.0).color(muted()));
-        let spill = ui.add(
-            egui::TextEdit::singleline(&mut self.spill_path)
-                .desired_width(ui.available_width())
-                .hint_text("/tmp/perfr-spill")
-                .font(FontId::proportional(12.5))
-                .background_color(theme::INPUT()),
-        );
-        if ring.changed() || spill.changed() {
-            self.config_edited = true;
-        }
-        ui.add_space(6.0);
-        if pill(ui, "Apply", false).clicked() {
-            match self.ring_bytes.trim().parse::<u64>() {
-                Ok(n) => {
-                    self.clear_errors();
-                    self.net.apply_config(n, self.spill_path.trim());
-                    // Sent: the boxes go back to showing what the service has.
-                    self.config_edited = false;
+            section(ui, "RING / SPILL");
+            ui.label(RichText::new("Ring bytes").size(11.0).color(muted()));
+            let ring = ui.add(
+                egui::TextEdit::singleline(&mut self.ring_bytes)
+                    .desired_width(ui.available_width())
+                    .font(FontId::monospace(12.0))
+                    .background_color(theme::INPUT()),
+            );
+            ui.add_space(4.0);
+            ui.label(RichText::new("Spill path").size(11.0).color(muted()));
+            let spill = ui.add(
+                egui::TextEdit::singleline(&mut self.spill_path)
+                    .desired_width(ui.available_width())
+                    .hint_text("/tmp/perfr-spill")
+                    .font(FontId::proportional(12.5))
+                    .background_color(theme::INPUT()),
+            );
+            if ring.changed() || spill.changed() {
+                self.config_edited = true;
+            }
+            ui.add_space(6.0);
+            if pill(ui, "Apply", false).clicked() {
+                match self.ring_bytes.trim().parse::<u64>() {
+                    Ok(n) => {
+                        self.clear_errors();
+                        self.net.apply_config(n, self.spill_path.trim());
+                        // Sent: the boxes go back to showing what the service has.
+                        self.config_edited = false;
+                    }
+                    Err(_) => self.fail("Ring bytes: expected an integer.".into()),
                 }
-                Err(_) => self.fail("Ring bytes: expected an integer.".into()),
             }
         }
 
@@ -5655,7 +5697,7 @@ impl PerfrLiveApp {
         } else {
             "Idle"
         };
-        if !self.got_status {
+        if service && !self.got_status {
             ui.label(
                 RichText::new("Waiting for /api/status…")
                     .size(12.0)
@@ -5673,33 +5715,37 @@ impl PerfrLiveApp {
                     muted()
                 }),
         );
-        status_row(
-            ui,
-            "Live",
-            &format!(
-                "{} / {}",
-                fmt_int(self.status.events_live),
-                fmt_int(self.status.events_capacity)
-            ),
-        );
-        status_row(ui, "Dropped", &fmt_int(self.status.dropped));
-        status_row(ui, "Spilled", &fmt_int(self.status.spilled));
-        status_row(ui, "Produced", &fmt_int(self.status.produced));
-        status_row(
-            ui,
-            "Ring",
-            &format!("{} B", fmt_int(self.status.ring_bytes)),
-        );
+        if service {
+            status_row(
+                ui,
+                "Live",
+                &format!(
+                    "{} / {}",
+                    fmt_int(self.status.events_live),
+                    fmt_int(self.status.events_capacity)
+                ),
+            );
+            status_row(ui, "Dropped", &fmt_int(self.status.dropped));
+            status_row(ui, "Spilled", &fmt_int(self.status.spilled));
+            status_row(ui, "Produced", &fmt_int(self.status.produced));
+            status_row(
+                ui,
+                "Ring",
+                &format!("{} B", fmt_int(self.status.ring_bytes)),
+            );
+        }
         status_row(ui, "LOD", self.lod_label);
-        status_row(
-            ui,
-            "Link",
-            &format!(
-                "http {}   ws {}",
-                if self.http_ok { "ok" } else { "…" },
-                if self.ws_ok { "ok" } else { "…" }
-            ),
-        );
+        if service {
+            status_row(
+                ui,
+                "Link",
+                &format!(
+                    "http {}   ws {}",
+                    if self.http_ok { "ok" } else { "…" },
+                    if self.ws_ok { "ok" } else { "…" }
+                ),
+            );
+        }
         if !self.error.is_empty() {
             ui.add_space(6.0);
             ui.label(
@@ -6006,7 +6052,7 @@ impl PerfrLiveApp {
                 && self.service_frame.is_none()
                 && self.trace_load.is_none();
             if empty {
-                paint_empty(ui, body, dropping);
+                paint_empty(ui, body, dropping, self.host.service);
                 paint_selection_overlay(ui, body, self.t0, self.t1, &self.sample_sels, self.measure, true, &|_| None);
                 self.paint_story_overlays(ui, body);
                 self.refresh_scope_stats(t0, t1, Some(y_cull));
@@ -7661,7 +7707,7 @@ impl PerfrLiveApp {
             self.follow = !self.follow;
         }
         // X starts and stops a capture, as the Record button does.
-        if !self.in_self_pane && self.static_capture.is_none() && ctx.input(|i| i.key_pressed(Key::X) && i.modifiers.is_none()) {
+        if !self.in_self_pane && self.has_service() && ctx.input(|i| i.key_pressed(Key::X) && i.modifiers.is_none()) {
             if self.recording || self.status.demo || self.status.capturing {
                 self.stop_record();
             } else {
@@ -8686,10 +8732,16 @@ impl PerfrLiveApp {
                         ReportTab::Inspector,
                         ReportTab::Selection,
                     ];
-                    let labels: Vec<&str> = TABS.iter().map(|t| t.label()).collect();
-                    let current = TABS.iter().position(|t| *t == self.report_tab).unwrap_or(0);
+                    // Functions lists what the service indexed, to hook from.
+                    let tabs: Vec<ReportTab> = TABS
+                        .iter()
+                        .copied()
+                        .filter(|t| self.host.service || *t != ReportTab::Functions)
+                        .collect();
+                    let labels: Vec<&str> = tabs.iter().map(|t| t.label()).collect();
+                    let current = tabs.iter().position(|t| *t == self.report_tab).unwrap_or(0);
                     if let Some(i) = tab_strip(ui, &labels, current) {
-                        let tab = TABS[i];
+                        let tab = tabs[i];
                         if self.report_tab != tab {
                             let was_tree_mode = self.report_tab.mode();
                             self.report_tab = tab;
@@ -9086,7 +9138,7 @@ impl PerfrLiveApp {
             // Match the manually positioned row columns: add_space supplies the gap.
             ui.spacing_mut().item_spacing.x = 0.0;
             for (i, (h, w)) in [
-                ("hooked", widths[0]),
+                (if self.host.service { "hooked" } else { "" }, widths[0]),
                 ("self", widths[1]),
                 ("incl", widths[2]),
                 ("function", name_w),
@@ -9143,7 +9195,7 @@ impl PerfrLiveApp {
             // hooked: a painted box, like the Functions view; rows with no
             // function id (no file offset) show none.
             let check_rect = Rect::from_min_size(Pos2::new(x, row_rect.top()), Vec2::new(widths[0], row_h));
-            if row.function_id != 0 {
+            if self.host.service && row.function_id != 0 {
                 let check = ui.interact(check_rect, ui.id().with(("rephook", first + n)), Sense::click());
                 paint_hook_box(ui, check_rect, hooked);
                 if check.clicked() {
@@ -9178,6 +9230,7 @@ impl PerfrLiveApp {
             );
             note_ui_rect(&format!("report:{}", row.name), name_rect);
             if let Some(action) = hook_menu(
+                self.host.service,
                 &label, row.function_id,
                 if selected { all_selected_hooked } else { hooked },
                 if selected { self.report_selection.len() } else { 1 },
@@ -9580,7 +9633,7 @@ impl PerfrLiveApp {
     /// The batch-hook controls a report shows once a drag has selected rows.
     fn selection_hook_controls(&mut self, ui: &mut Ui) {
         let n = self.report_selection.len();
-        if n == 0 {
+        if n == 0 || !self.host.service {
             return;
         }
         let label = if self.selection_all_hooked() { format!("Unhook {n}") } else { format!("Hook {n}") };
@@ -9785,6 +9838,9 @@ impl PerfrLiveApp {
     /// The line above a report that says what is hooked and what to do
     /// about it: hooks arm on the next Record, not on the capture in view.
     fn hooked_hint(&self, ui: &mut Ui) {
+        if !self.host.service {
+            return;
+        }
         // Always one line, so hooking a row does not shift the rows under
         // it: with nothing hooked the line says so, in the muted colour.
         let (text, accent) = hooked_hint_line(
@@ -9886,7 +9942,8 @@ impl PerfrLiveApp {
             .spacing([self.ui_tweaks.report_col_gap, self.ui_tweaks.report_row_gap])
             .striped(true)
             .show(ui, |ui| {
-                for (col, h) in ["hook", "inclusive", "self", "of parent", "function", "module"].iter().enumerate() {
+                let hook = if self.host.service { "hook" } else { "" };
+                for (col, h) in [hook, "inclusive", "self", "of parent", "function", "module"].iter().enumerate() {
                     sort_header(ui, h, col as u8, &mut self.tree_sort, col < 4, self.ui_tweaks.report_font);
                 }
                 ui.end_row();
@@ -9918,7 +9975,7 @@ impl PerfrLiveApp {
                         Vec2::new(16.0, self.ui_tweaks.report_font + 4.0),
                         egui::Sense::click(),
                     );
-                    if !is_thread && node.function_id != 0 {
+                    if self.host.service && !is_thread && node.function_id != 0 {
                         note_ui_rect(&format!("hook:{}", node.name), crect);
                         paint_hook_box(ui, crect, hooked);
                         if cresp.clicked() {
@@ -9984,7 +10041,7 @@ impl PerfrLiveApp {
                         }
                         if !is_thread {
                             note_ui_rect(&format!("tree:{}", node.name), label.rect);
-                            if let Some(action) = hook_menu(&label, node.function_id, if selected { all_selected_hooked } else { hooked }, if selected { self.report_selection.len() } else { 1 }) {
+                            if let Some(action) = hook_menu(self.host.service, &label, node.function_id, if selected { all_selected_hooked } else { hooked }, if selected { self.report_selection.len() } else { 1 }) {
                                 tree_actions.push((action, node.function_id, node.name.clone(), node.module.clone()));
                             }
                         }
@@ -10273,7 +10330,7 @@ impl PerfrLiveApp {
                     .spacing([self.ui_tweaks.report_col_gap, self.ui_tweaks.report_row_gap])
                     .striped(true)
                     .show(ui, |ui| {
-                        sort_header(ui, "hook", 9, &mut self.live_sort, true, font);
+                        sort_header(ui, if self.host.service { "hook" } else { "" }, 9, &mut self.live_sort, true, font);
                         for (col, h) in ["type", "function", "count", "total", "avg", "min", "max", "std dev", "module"].iter().enumerate() {
                             sort_header(ui, h, col as u8, &mut self.live_sort, (2..=7).contains(&col), font);
                         }
@@ -10380,7 +10437,7 @@ impl PerfrLiveApp {
                             let selected = fid != 0 && self.report_selection.contains(&fid);
                             let (rect, response) = ui.allocate_exact_size(Vec2::new(16.0, font + 4.0), Sense::click());
                             selection_rows.push((fid, rect));
-                            if let Some(f) = function {
+                            if let Some(f) = function.filter(|_| self.host.service) {
                                 paint_hook_box(ui, rect, hooked);
                                 note_ui_rect(&format!("hook:{name}"), rect);
                                 if response.clicked() {
@@ -10407,7 +10464,7 @@ impl PerfrLiveApp {
                             note_ui_rect(&format!("live:{name}"), label.rect);
                             note_ui_rect(&format!("live-type:{}:{name}", r.type_label()), label.rect);
                             if let Some(f) = function {
-                                if let Some(action) = hook_menu(&label, fid,
+                                if let Some(action) = hook_menu(self.host.service, &label, fid,
                                     if selected { all_selected_hooked } else { hooked },
                                     if selected { self.report_selection.len() } else { 1 }) {
                                     actions.push((action, f.clone()));
@@ -10628,7 +10685,7 @@ impl PerfrLiveApp {
         }
         if let Some((function_id, name, module)) = self.flame_menu.clone() {
             let hooked = self.is_hooked(function_id);
-            if let Some(action) = hook_menu(&resp, function_id, hooked, 1) {
+            if let Some(action) = hook_menu(self.host.service, &resp, function_id, hooked, 1) {
                 self.apply_hook_action(action, function_id, &name, &module);
                 self.flame_menu = None;
             }
@@ -11329,7 +11386,7 @@ impl eframe::App for PerfrLiveApp {
                 // the signal that arrives reliably (CaptureStarted/Finished set
                 // the flag outside apply_status's own transition tracking).
                 let capturing_now = self.status.capturing || self.recording;
-                if self.capture_was_active && !capturing_now && self.static_capture.is_none() {
+                if self.capture_was_active && !capturing_now && self.has_service() {
                     self.report_tab = ReportTab::TopDown;
                     self.report_open = true;
                     if self.report_collapsed || self.report_w_last < REPORT_COLLAPSE_W {
@@ -11372,7 +11429,7 @@ impl eframe::App for PerfrLiveApp {
                     self.tick_follow(dt, hold_window);
                 }
                 let now = ctx.input(|i| i.time);
-                let has_service = self.static_capture.is_none();
+                let has_service = self.has_service();
                 if has_service && now - self.last_status_request > 0.25 {
                     self.last_status_request = now;
                     self.net.get_status();
@@ -11785,9 +11842,13 @@ fn sort_header(ui: &mut Ui, name: &str, col: u8, sort: &mut (u8, bool), descendi
 }
 
 /// The right-click menu of a function in a report: hook it for dynamic
-/// instrumentation, or unhook it. A function the service could not place
+/// instrumentation, or unhook it. Not `offered` on a page with no capture
+/// service: a hook arms on the next Record, and such a page has none. A function the service could not place
 /// in a file (the vDSO, an imported capture) says so instead.
-fn hook_menu(label: &egui::Response, function_id: u64, hooked: bool, count: usize) -> Option<HookAction> {
+fn hook_menu(offered: bool, label: &egui::Response, function_id: u64, hooked: bool, count: usize) -> Option<HookAction> {
+    if !offered {
+        return None;
+    }
     let mut action = None;
     label.context_menu(|ui| {
         if function_id == 0 {
@@ -13092,6 +13153,13 @@ fn name_column_width(view_w: f32, others: f32, module_w: f32, min_w: f32) -> f32
 
 /// A file the viewer opens as a perfr capture rather than a Chrome or
 /// Perfetto trace.
+/// What a page with no service says to a `.perfr.zip`: the bundle holds
+/// symbols and samples that the service turns into a stream, and there is
+/// nobody here to do it.
+fn bundle_needs_service(name: &str) -> String {
+    format!("{name}: a .perfr.zip is opened by the perfr service. Open it from perfr, or save it there as a .perfr.stream and open that here.")
+}
+
 fn is_bundle_name(name: &str) -> bool {
     name.to_ascii_lowercase().ends_with(perfr_capture_suffix())
 }
@@ -13563,7 +13631,9 @@ fn paint_handle_dots(painter: &egui::Painter, r: Rect, active: bool) {
     }
 }
 
-fn paint_empty(ui: &Ui, rect: Rect, dropping: bool) {
+/// The body with nothing in it. `service` is whether the page can record:
+/// the viewer's own page can only be given a file.
+fn paint_empty(ui: &Ui, rect: Rect, dropping: bool, service: bool) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(
         Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 80.0), rect.max),
@@ -13573,10 +13643,14 @@ fn paint_empty(ui: &Ui, rect: Rect, dropping: bool) {
     painter.text(
         rect.center() + Vec2::new(0.0, -10.0),
         Align2::CENTER_CENTER,
-        if dropping {
+        if dropping && service {
             "Drop Chrome / Perfetto trace"
-        } else {
+        } else if dropping {
+            "Drop a capture or a trace"
+        } else if service {
             "Idle"
+        } else {
+            "No capture"
         },
         FontId::new(15.0, fonts::medium()),
         theme::TEXT(),
@@ -13584,7 +13658,11 @@ fn paint_empty(ui: &Ui, rect: Rect, dropping: bool) {
     painter.text(
         rect.center() + Vec2::new(0.0, 12.0),
         Align2::CENTER_CENTER,
-        "Open or drop a Chrome .json  ·  or Record a process",
+        if service {
+            "Open or drop a Chrome .json  ·  or Record a process"
+        } else {
+            "Open or drop a .perfr.stream, a Chrome .json or a Perfetto trace"
+        },
         FontId::new(12.0, FontFamily::Proportional),
         muted(),
     );

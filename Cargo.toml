@@ -6,8 +6,8 @@
 # browser viewer and its server, the instrumentation API, the test program.
 # `cargo build -p perfr` compiles the full service (capture pipeline and the
 # viewer format crates it writes). The eframe/wgpu tree is `perfr-viewer`,
-# which opens a capture file and draws it, and `perfr-client`, the page the
-# service serves, built on it. The service links neither.
+# the page that shows a capture, and `perfr-client`, the layer on top that
+# puts the capture service behind it. The service links neither.
 # `cargo test --workspace` covers all of it. crates/README.md describes the
 # crates and the build targets.
 #
@@ -116,7 +116,8 @@ debug = false
 lto = false
 debug = true
 
-# The wasm32 viewer pack (crates/perfr-client/build_wasm.sh). A plain
+# The wasm32 packs: the viewer's and the client's, both built by
+# crates/perfr-viewer/wasm_pack.sh. A plain
 # release build with no DWARF: the pack is shipped to browsers, where line
 # tables and thin LTO buy nothing and cost download size and build time.
 [profile.wasm]
@@ -125,12 +126,3 @@ lto = false
 codegen-units = 16
 debug = false
 panic = "abort"
-
-# The viewer's pack only (`crates/perfr-viewer/build_wasm.sh`). The client's
-# pack stays on `wasm` above. Native release is untouched, including `strip = "none"`.
-[profile.wasm-viewer]
-inherits = "wasm"
-opt-level = "z"
-lto = "fat"
-codegen-units = 1
-strip = "symbols"

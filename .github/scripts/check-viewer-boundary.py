@@ -7,19 +7,20 @@
 Three checks:
 
 1. The workspace crates perfr-viewer links, by any chain of dependencies,
-   are the event format, the stream framing and the rasterizer. Read from
+   are the event format, the stream framing, the rasterizer, the trace
+   importers, the story document and the build stamp. Read from
    `cargo metadata`, so it is the graph cargo builds: a dependency inherited
    from the workspace, renamed, or declared for one target counts like any
    other. Dev-dependencies are left out; they are not in the pack.
 
 2. Its sources do not `include_str!` or `include_bytes!` a file outside the
-   crate's directory. That is a dependency cargo does not know about: a test
-   here once read the client's index.html this way.
+   crate's directory, apart from the two example files the code view shows
+   (EXAMPLES). That is a dependency cargo does not know about: a test here
+   once read the client's index.html this way.
 
-3. perfr-client builds on perfr-viewer with the `page` feature off. The
-   viewer's page is then not in the client's pack, which is why the page's
-   files are left out of that pack's source id
-   (crates/perfr-client/source_id.py).
+3. perfr-client builds on perfr-viewer with the `page` feature off. `page`
+   is the viewer's own entry point, and an entry point compiled into a
+   crate is exported from every pack that links it.
 
     python3 .github/scripts/check-viewer-boundary.py
 """
@@ -38,6 +39,15 @@ ALLOWED = {
     "perfr-live-event",
     "perfr-live-protocol",
     "perfr-live-render",
+    "perfr-live-chrome",
+    "perfr-story",
+    "perfr-build-info",
+}
+# Text the code view shows as examples when nothing is captured: two files
+# of this repository embedded as strings, not code the viewer runs.
+EXAMPLES = {
+    "crates/perfr/src/uprobes.rs",
+    "tools/test-programs/PerfrTestCpp/PerfrTestCpp.cpp",
 }
 INCLUDE = re.compile(r'include_(?:str|bytes)!\s*\(\s*"([^"]+)"')
 
@@ -84,8 +94,11 @@ def escaping_includes():
                     text = handle.read()
                 for target in INCLUDE.findall(text):
                     resolved = os.path.normpath(os.path.join(folder, target))
-                    if os.path.commonpath([crate, resolved]) != crate:
-                        found.append((os.path.relpath(path, ROOT), target))
+                    if os.path.commonpath([crate, resolved]) == crate:
+                        continue
+                    if os.path.relpath(resolved, ROOT).replace(os.sep, "/") in EXAMPLES:
+                        continue
+                    found.append((os.path.relpath(path, ROOT), target))
     return found
 
 
@@ -133,7 +146,7 @@ def main():
         print(f"{path} includes {target}, a file outside its crate", file=sys.stderr)
     for reason in client_page_feature(metadata):
         failed = True
-        print(f"{reason}: the client's pack must not carry the viewer's page", file=sys.stderr)
+        print(f"{reason}: the client's pack must not export the viewer's entry point", file=sys.stderr)
     if failed:
         return 1
     print("viewer workspace crates: " + ", ".join(sorted(chains)))

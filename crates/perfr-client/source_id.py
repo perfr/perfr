@@ -7,7 +7,8 @@
 The id is a SHA-256 over the tracked files of perfr-client and of every
 workspace crate it depends on (followed through `path = "../x"` in each
 Cargo.toml), taken from the working copy, excluding viewer-dist/ itself, docs,
-examples, tests, benches and perfr-viewer's own page (NOT_IN_PACK below).
+examples, tests, benches and what only perfr-viewer's own pack is made from
+(NOT_IN_PACK below).
 build_wasm.sh writes it to viewer-dist/VERSION;
 perfr-web's build_site.py recomputes it over the checkout it deploys and
 refuses a pack whose id differs. Content, not commits: a squash merge keeps
@@ -33,16 +34,13 @@ import sys
 
 VIEWER = "perfr-client"
 SKIP_DIRS = {"viewer-dist", "examples", "tests", "benches"}
-# perfr-viewer's own page and what only its pack is built from. perfr-client
-# depends on perfr-viewer with the `page` feature off, so none of this is
-# compiled into the client's pack, and a change to it must not ask for that
-# pack to be rebuilt. .github/scripts/check-viewer-boundary.py fails if the
-# client ever turns the feature on.
+# What only perfr-viewer's own pack is made from: its page and the script
+# that assembles it. The client's pack has its own page, so a change to
+# these must not ask for the client's pack to be rebuilt. Everything else
+# in perfr-viewer is the interface both packs are compiled from, and counts.
 NOT_IN_PACK = (
-    "crates/perfr-viewer/src/page.rs",
-    "crates/perfr-viewer/viewer.html",
+    "crates/perfr-viewer/web/",
     "crates/perfr-viewer/build_wasm.sh",
-    "crates/perfr-viewer/fonts/",
 )
 
 

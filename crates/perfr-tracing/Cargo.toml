@@ -1,0 +1,23 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+[package]
+name = "perfr-tracing"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "A tracing-subscriber layer that records tracing spans as perfr scopes and events as perfr log lines; how Bevy reaches perfr"
+keywords = ["profiling", "tracing", "bevy", "perfr"]
+categories = ["development-tools::profiling"]
+
+[dependencies]
+perfr-api = { path = "../perfr-api" }
+tracing-core = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
+
+[dev-dependencies]
+perfr-scope-ring = { path = "../perfr-scope-ring" }
+tracing = "0.1"

@@ -54,7 +54,7 @@ pub use lod::{
     collect_instances_cached, ListingCache,ThreadFocus, 
     apply_highlight_flags, choose_lod, choose_lod_hint, collect_instances,
     collect_instances_layout, collect_instances_layout_opts,
-    instance_for_event, lane_gap, lane_height, leaf_label, pick_column_event, pick_instance_at,
+    instance_for_event, is_overview_lane, lane_gap, lane_height, leaf_label, pick_column_event, pick_instance_at,
     sample_lod_lanes, sort_thread_leaves, stack_height, stack_height_keys,
     stacked_layout, value_lanes_in_view, CollectOpts, InstanceFrame,
     ScopeInstance, ScopePick, TimelineLod, YCull, FLAG_DIMMED, FLAG_HOVER, FLAG_NONE,

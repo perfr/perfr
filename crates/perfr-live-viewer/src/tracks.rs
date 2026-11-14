@@ -294,7 +294,11 @@ impl LaneCatalogue {
         // rows for threads that were only ever asleep.
         let mut explicit: FastSet<(u32, u32)> = FastSet::default();
         for (k, lane) in index.lanes() {
-            if !is_cpu_lane(k) && k.kind != kind::THREAD_STATE && !is_sampled_frame_lane(k, lane) {
+            if !is_cpu_lane(k)
+                && k.kind != kind::THREAD_STATE
+                && !is_sampled_frame_lane(k, lane)
+                && !perfr_live_render::is_overview_lane(k)
+            {
                 explicit.insert((k.pid, k.tid));
             }
         }
@@ -308,6 +312,11 @@ impl LaneCatalogue {
             // they are not drawn: a sample is a tick on the sample bar, as
             // in C++ perfr, not a flame of guessed spans on the thread.
             if is_sampled_frame_lane(k, lane) {
+                continue;
+            }
+            // A program's frames are the strip under the ruler and the
+            // bands behind every row (`frame_marks`), not a row.
+            if perfr_live_render::is_overview_lane(k) {
                 continue;
             }
             if !explicit.contains(&(k.pid, k.tid)) {
@@ -2356,6 +2365,24 @@ mod tests {
 
     fn row_ids(strip: &TrackStrip) -> Vec<RowId> {
         strip.rows().iter().map(|r| r.id).collect()
+    }
+
+    #[test]
+    fn a_programs_frames_are_no_row_and_earn_a_thread_none() {
+        let mut idx = TrackIndex::default();
+        idx.insert(ev(kind::API_SCOPE, 1, 1, 0, 0));
+        idx.insert(ev(kind::FRAME, 1, 1, 0, 0));
+        // A thread that did nothing in the capture but mark frames.
+        idx.insert(ev(kind::FRAME, 1, 2, 0, 0));
+        let mut strip = TrackStrip::default();
+        strip.sync(&idx, None);
+        strip.tick(1.0, &idx, None);
+        assert_eq!(strip.track_order, vec![TrackKey::Thread(ThreadId { pid: 1, tid: 1 })]);
+        assert!(
+            strip.layout().iter().all(|(k, _)| k.kind != kind::FRAME),
+            "frames are the strip under the ruler, not a lane: {:?}",
+            strip.layout()
+        );
     }
 
     #[test]

@@ -1250,6 +1250,14 @@ pub struct PerfrLiveApp {
     /// Log window: lines in the visible range, or the lines inside a clicked
     /// scope.
     log_ui: crate::logs::LogUi,
+    /// Which series of frames the strip under the ruler and the bands behind
+    /// the timeline show, for a capture of a program that marks its frames.
+    /// Chosen for the user until they pick another; `None` until there is one.
+    frame_series: Option<LaneKey>,
+    /// That strip's bars, kept from one draw to the next.
+    frame_strip: crate::frame_marks::StripMemo,
+    /// The drag of the timeline's window on that strip, while one is held.
+    frame_strip_grab: Option<crate::frame_marks::Grab>,
     #[cfg(target_arch = "wasm32")]
     pending_file: chrome_load::PendingFile,
     /// The file `?trace=` named. Apart from `pending_file`: the reader
@@ -2040,6 +2048,9 @@ impl PerfrLiveApp {
             thread_names: HashMap::new(),
             trace_processes: Vec::new(),
             log_ui: crate::logs::LogUi::default(),
+            frame_series: None,
+            frame_strip: crate::frame_marks::StripMemo::default(),
+            frame_strip_grab: None,
             #[cfg(target_arch = "wasm32")]
             pending_file: {
                 let p = chrome_load::new_pending_file();
@@ -5757,6 +5768,12 @@ impl PerfrLiveApp {
             hairline(),
         );
 
+        // A program that marks its frames gets a strip of them under the
+        // ruler, and bands behind the lanes below. Not in the Self pane:
+        // that timeline is the viewer's own, and its frames are its rows.
+        let frame_series = if self.in_self_pane { None } else { self.pick_frame_series() };
+        let frame_strip = frame_series.map(|series| self.paint_frame_strip(ui, series, header_w));
+
         egui::TopBottomPanel::bottom(egui::Id::new("perfr_time_slider").with(self.gpu_slot))
             .exact_height(TIME_SLIDER_H)
             .resizable(false)
@@ -5994,6 +6011,35 @@ impl PerfrLiveApp {
                     view.origin[0] -= self.listing_pan_pts * ppp;
                 }
                 self.last_view = Some(view);
+                // Frame bands: each process that marks frames has its own,
+                // behind its rows and no others, over the rows' own ground,
+                // which the headers painted above, and under what is drawn
+                // on it.
+                if frame_series.is_some() {
+                    let all = crate::frame_marks::series(&self.index, &self.intern, self.selected_pid);
+                    for series in crate::frame_marks::band_series(&all, frame_series) {
+                        let Some(lane) = self.index.lane(series) else { continue };
+                        let spans = crate::frame_marks::process_spans(self.tracks.rows(), series.pid);
+                        if let (Some(first), Some(last)) = (spans.first(), spans.last()) {
+                            note_ui_rect_fmt(
+                                format_args!("frames:bands:{}", series.pid),
+                                Rect::from_min_max(
+                                    Pos2::new(body.left(), body.top() + first.0),
+                                    Pos2::new(body.right(), body.top() + last.1),
+                                ),
+                            );
+                        }
+                        crate::frame_marks::paint_bands(
+                            ui,
+                            body,
+                            self.t0,
+                            self.t1,
+                            lane,
+                            &spans,
+                            perfr_live_event::theme::active().light,
+                        );
+                    }
+                }
                 self.paint_sample_bars(ui, body, Some(y_cull));
                 {
                     let _cb = dev.scope(TID_RENDER, NAME_PAINT_CALLBACK);
@@ -6157,9 +6203,17 @@ impl PerfrLiveApp {
         // whole drag. Painting it here reads the same `self.measure` the lane
         // overlay just used, whichever region the drag started in.
         paint_selection_overlay(ui, ruler, self.t0, self.t1, &self.sample_sels, self.measure, false, &|_| None);
+        // The frame strip sits between the ruler and the lanes, and a
+        // selection is one column from the ruler down: it crosses the strip
+        // too, at the timeline's scale like the rest of it.
+        if let Some(strip) = frame_strip {
+            paint_selection_overlay(ui, strip, self.t0, self.t1, &self.sample_sels, self.measure, false, &|_| None);
+        }
         // The dimension arrows are pinned under the ruler (fixed layer), so a
-        // measured span stays visible however far the lanes are scrolled.
-        self.paint_measure_arrows(ui, ruler, self.t0, self.t1);
+        // measured span stays visible however far the lanes are scrolled:
+        // under the frame strip when there is one, clear of its bars.
+        let pinned = frame_strip.map_or(ruler, |strip| ruler.with_max_y(strip.bottom()));
+        self.paint_measure_arrows(ui, pinned, self.t0, self.t1);
         let fps_area = Rect::from_min_max(
             Pos2::new(ui.max_rect().left() + header_w, time_rect.bottom()),
             ui.max_rect().max,
@@ -7684,6 +7738,109 @@ impl PerfrLiveApp {
         self.user_set_view = true;
         self.log_ui.highlight_ns = Some(ns);
         self.needs_repaint = true;
+    }
+
+    /// The series of frames to show: the one already showing while the
+    /// capture still has it, else the capture's main one.
+    fn pick_frame_series(&mut self) -> Option<LaneKey> {
+        let all = crate::frame_marks::series(&self.index, &self.intern, self.selected_pid);
+        self.frame_series = self.frame_series.filter(|series| all.contains(series)).or_else(|| all.first().copied());
+        self.frame_series
+    }
+
+    /// The strip of frame times under the ruler. It stands for the whole
+    /// capture, as the slider at the bottom does, and does not follow the
+    /// timeline's zoom. A click on a bar shows that frame in the timeline;
+    /// the timeline's window is drawn on it, and is dragged, or resized by
+    /// its handles, from there. A right-drag on it measures, as on the
+    /// ruler above and the lanes below. Returns the strip's rectangle.
+    fn paint_frame_strip(&mut self, ui: &mut Ui, series: LaneKey, header_w: f32) -> Rect {
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), crate::frame_marks::STRIP_H), Sense::hover());
+        let head = rect.with_max_x(rect.left() + header_w);
+        let strip = rect.with_min_x(rect.left() + header_w);
+        ui.painter().rect_filled(head, 0.0, self.rail_color());
+        ui.painter().line_segment([head.left_bottom(), head.right_bottom()], hairline());
+        let Some(lane) = self.index.lane(series) else { return strip };
+        note_ui_rect("frames", strip);
+        note_ui_rect("frames:series", head);
+        let cap = self.capture_slider_span();
+        let name = crate::frame_marks::series_name(lane, &self.intern).to_string();
+        let (bars, scale) = self.frame_strip.get(series, lane, cap.0, cap.1, strip.width());
+        let strip_resp =
+            ui.interact(strip, ui.id().with("perfr_frame_strip").with(self.gpu_slot), Sense::click_and_drag());
+        let action = crate::frame_marks::paint_strip(
+            ui,
+            strip,
+            &strip_resp,
+            lane.events(),
+            bars,
+            scale,
+            cap,
+            (self.t0, self.t1),
+            ZOOM_MIN_NS,
+            &name,
+            &mut self.frame_strip_grab,
+        );
+
+        // The rail's share of the strip says which series this is and what
+        // a typical frame of it takes. With more than one series in the
+        // capture, a click moves on to the next.
+        let others = crate::frame_marks::series(&self.index, &self.intern, self.selected_pid);
+        let title = if name == "frame" { "frames".to_string() } else { format!("frames: {name}") };
+        let typical = format!(
+            "{}  {}",
+            crate::rect_select::fmt_dur(scale.median_ns),
+            crate::frame_marks::fmt_fps(scale.median_ns)
+        );
+        let label = ui.interact(head, ui.id().with("perfr_frame_series").with(self.gpu_slot), Sense::click());
+        let ink = if others.len() > 1 && label.hovered() { theme::TEXT() } else { theme::MUTED() };
+        let right = head.right() - 10.0;
+        let room = (head.width() - 20.0).max(0.0);
+        let painter = ui.painter_at(head);
+        let title = truncate_to_width(&title, room, 10.5);
+        painter.text(
+            Pos2::new(right, head.top() + 5.0),
+            Align2::RIGHT_TOP,
+            title,
+            FontId::new(10.5, fonts::medium()),
+            ink,
+        );
+        painter.text(
+            Pos2::new(right, head.bottom() - 5.0),
+            Align2::RIGHT_BOTTOM,
+            typical,
+            FontId::monospace(10.0),
+            theme::MUTED(),
+        );
+        if others.len() > 1 {
+            if label.clicked() {
+                let at = others.iter().position(|other| *other == series).unwrap_or(0);
+                self.frame_series = Some(others[(at + 1) % others.len()]);
+                self.needs_repaint = true;
+            }
+            label.on_hover_text(format!("{} series of frames. Click: show the next", others.len()));
+        } else {
+            label.on_hover_text("Frame times over the whole capture; the median frame");
+        }
+
+        use crate::frame_marks::StripAction;
+        match action {
+            Some(StripAction::ShowFrame(frame)) => {
+                let (t0, t1) = crate::frame_marks::frame_window(&frame);
+                self.apply_zoom_window(t0, t1);
+            }
+            Some(StripAction::Pan(t0, t1)) => self.apply_pan_window(t0, t1),
+            Some(StripAction::Resize(t0, t1)) => self.apply_zoom_window(t0, t1),
+            None => {}
+        }
+        if action.is_some() || self.frame_strip_grab.is_some() {
+            self.needs_repaint = true;
+        }
+        // The timeline's own right-drag: measure, add to the selection with
+        // Shift, zoom with Ctrl. In the timeline's scale, not the strip's.
+        self.handle_measure(&strip_resp, strip, false, PointerButton::Secondary, false);
+        strip
     }
 
     fn zoom_to_scope(&mut self, pick: ScopePick) {

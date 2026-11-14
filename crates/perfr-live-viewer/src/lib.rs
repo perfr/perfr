@@ -26,6 +26,8 @@ mod local_report;
 mod logging;
 #[cfg(feature = "egui")]
 mod fonts;
+#[cfg(feature = "egui")]
+mod frame_marks;
 mod frames;
 #[cfg(feature = "egui")]
 mod net;

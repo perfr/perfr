@@ -260,6 +260,30 @@ opens on first load with a service and closes with its ×. Its rows:
   drag pans, W/S zoom and A/D pan while held, Home or a double-click on the
   ruler fits the capture. The window cannot pan before the first event or
   past the last, and Home never fits narrower than a few microseconds.
+- **Frames.** A capture of a program that marks its frames
+  (`perfr_frame_mark`, section 8) has a strip under the ruler with one bar
+  per frame, as tall as the frame was long. The strip always shows the
+  whole capture and does not follow the timeline's zoom, so a slow frame is
+  in sight from anywhere. The time the timeline is showing is a window on
+  it, lit while the rest steps back: dragging the window pans the timeline,
+  and the handle on each edge moves that edge, to grow or shrink what the
+  timeline shows.
+  A bar is drawn against the median frame: the accent colour up to 1.5
+  medians, amber up to 2.5, red past that, and the strip is three medians
+  tall, so one hitch does not flatten the rest. Where several frames share
+  a pixel the bar is the longest of them. Hovering a bar gives its time,
+  the rate that time comes to, and its ratio to the median; a click shows
+  that frame in the timeline, centred and filling nine tenths of the
+  width. Behind the tracks of the process that marked the frames, and only
+  those, every other frame is a little darker, so where a frame ends can be
+  read off any of its threads; the scheduler and other processes keep their
+  plain ground, and a second process that marks frames has bands of its
+  own. A right-drag on the strip measures as it does on the ruler, and a
+  selection crosses the strip as one column. The bands fade out once frames are
+  a few pixels wide. The rail beside the strip names the series and its
+  median frame, and with more than one series in the capture a click there
+  moves on to the next. Screenshots: `51-frame-strip.png`,
+  `52-frame-clicked.png`, `53-frame-window.png`.
 - **Scrolling the tracks.** Wheel over the tracks scrolls them with inertia;
   the vertical scrollbar at the timeline's right edge is the viewer's own:
   drag its handle, or click the track above or below it to page. The
@@ -449,7 +473,7 @@ in the URL opens a tab on load.
 
 - **The API** is the `perfr-api` crate at `crates/perfr-api`: Rust
   functions `init`, `shutdown`, `start`, `stop`, `start_async`, `instant`,
-  `link`, `value`, `now_ns`, and the RAII helpers `span`, `span_async`,
+  `link`, `value`, `now_ns`, `log`, `frame_mark`, and the RAII helpers `span`, `span_async`,
   `scope`, `scope_async`. The same crate builds the static `libperfr_api.a`,
   and `crates/perfr-lib` builds the shared `libperfr` from it, with a C ABI (`perfr_init`, `perfr_start`, `perfr_stop`,
   `perfr_instant`, `perfr_link`, `perfr_value`, `perfr_now_ns`, ...) and a
@@ -537,12 +561,28 @@ in the URL opens a tab on load.
   (one Core-only module: registers perfr as an Unreal external profiler, so
   `-perfr -statnamedevents` sends every `SCOPED_NAMED_EVENT`,
   `SCOPE_CYCLE_COUNTER` and engine named event to a capturing service, plus
-  a `frame` instant per frame, and gives game modules `perfr.h`), an
+  a frame mark per frame, and gives game modules `perfr.h`), an
   optional one-header engine patch for `TRACE_CPUPROFILER_EVENT_SCOPE*`,
   and the guide. Screenshot: `unreal-named-events.png`.
+- **Bevy.** `crates/perfr-tracing` is a `tracing-subscriber` layer for
+  Bevy's `LogPlugin::custom_layer`: with Bevy's `trace` feature every
+  system, schedule and render pass is a scope named by its path, `info!`
+  and friends are log lines, and each frame is a frame mark.
+  `integrations/bevy/` is the guide.
 - **What reaches the timeline.** Scopes nest per thread, async spans get
   their own track, `instant` is a zero-length mark, `link` joins a start to
   a later thread, `value` draws a lane.
+- **Frame marks.** `frame_mark()` (`perfr_frame_mark`, `PERFR_FRAME_MARK()`,
+  `perfr_api.frame_mark()`), called once per turn of the program's loop,
+  says where one frame ends and the next begins. Two consecutive marks are
+  one frame: a bar in the frame strip and a band behind the process's tracks
+  (section 4). A name (`frame_mark_named("physics")`,
+  `PERFR_FRAME_MARK_NAMED`) marks a series of its own, for a render thread
+  or a fixed-step simulation beside the main loop. The time before the
+  first mark and after the last is no frame, and a frame during which the
+  ring lost records is not drawn. `GET /api/functions/stats` and
+  `perfr_function_stats` have one row per series, of kind `frame`: its
+  count, average, minimum and maximum are the frame times.
 - **Log lines.** `log(level, text)` (`perfr_log`, `PERFR_LOG`,
   `perfr_api.log`) writes a line on the same ring as scopes, with its
   level, thread and timestamp. Each thread grows a `logs` lane of ticks,

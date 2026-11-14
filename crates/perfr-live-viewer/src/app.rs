@@ -6056,6 +6056,7 @@ impl PerfrLiveApp {
                     self.tracks.scale,
                     Some(y_cull),
                     self.hover_body_x,
+                    self.live_edge_ns,
                 );
                 if let Some(x) = self.hover_body_x {
                     paint_cursor_line(ui, body, x);
@@ -12513,6 +12514,47 @@ fn paint_cursor_line(ui: &Ui, body: Rect, x: f32) {
     );
 }
 
+/// Include the samples bracketing the view and hold the newest value up to
+/// the capture edge, even when this lane has received no new samples.
+fn value_graph_samples(
+    lane: &perfr_live_render::Lane,
+    t0: u64,
+    t1: u64,
+    width: f32,
+    capture_end_ns: u64,
+) -> Vec<(f32, f32)> {
+    if t1 <= t0 {
+        return Vec::new();
+    }
+    let span = (t1 - t0) as f64;
+    let events = lane.events();
+    let mut samples: Vec<(f32, f32)> = Vec::new();
+    // From the last sample before the window to the first one after
+    // it: a step graph holds its value until the next sample, so the
+    // curve must enter the window at the value it had, not start at
+    // the first sample inside it -- zoomed out, that was most of a
+    // lane drawn empty.
+    let mut i = lane.first_ending_after(t0).saturating_sub(1);
+    while let Some(e) = events.get(i) {
+        if let Some(v) = e.value_f32() {
+            let x = ((e.start_ns as f64 - t0 as f64) / span * width as f64) as f32;
+            samples.push((x, v));
+        }
+        i += 1;
+        if e.start_ns >= t1 {
+            break;
+        }
+    }
+    let end = capture_end_ns.min(t1);
+    if let (Some(last), Some(&(_, value))) = (events.last(), samples.last()) {
+        if last.start_ns < end && end > t0 {
+            let x = ((end - t0) as f64 / span * width as f64) as f32;
+            samples.push((x, value));
+        }
+    }
+    samples
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_value_graphs(
     ui: &Ui,
@@ -12525,6 +12567,7 @@ fn paint_value_graphs(
     scale: f32,
     y_cull: Option<YCull>,
     hover_x: Option<f32>,
+    capture_end_ns: u64,
 ) {
     if t1 <= t0 {
         return;
@@ -12538,23 +12581,7 @@ fn paint_value_graphs(
             continue;
         };
         let events = lane.events();
-        let mut samples: Vec<(f32, f32)> = Vec::new();
-        // From the last sample before the window to the first one after
-        // it: a step graph holds its value until the next sample, so the
-        // curve must enter the window at the value it had, not start at
-        // the first sample inside it -- zoomed out, that was most of a
-        // lane drawn empty.
-        let mut i = lane.first_ending_after(t0).saturating_sub(1);
-        while let Some(e) = events.get(i) {
-            if let Some(v) = e.value_f32() {
-                let x = ((e.start_ns as f64 - t0 as f64) / span * body.width() as f64) as f32;
-                samples.push((x, v));
-            }
-            i += 1;
-            if e.start_ns >= t1 {
-                break;
-            }
-        }
+        let samples = value_graph_samples(lane, t0, t1, body.width(), capture_end_ns);
         if samples.is_empty() {
             continue;
         }
@@ -15514,6 +15541,27 @@ mod tests {
         let hit = pick_value_at(&idx, &[(key, 0.0)], 0, 2_000, 100.0, 50.0, 10.0, 1.0);
         assert_eq!(hit.map(|p| p.name_id), Some(5_100));
         assert_eq!(hit.map(|p| p.kind), Some(kind::VALUE));
+    }
+
+    #[test]
+    fn value_graph_holds_latest_value_as_capture_advances() {
+        let mut index = TrackIndex::default();
+        index.insert(LiveEvent::from_value(10, 1, 600, 5_100, 2.0));
+        let key = index.lanes().next().unwrap().0;
+        let samples = |index: &TrackIndex, t0, t1, end| {
+            value_graph_samples(index.lane(key).unwrap(), t0, t1, 100.0, end)
+        };
+        assert_eq!(samples(&index, 0, 100, 30), vec![(10.0, 2.0), (30.0, 2.0)]);
+        assert_eq!(samples(&index, 0, 100, 60), vec![(10.0, 2.0), (60.0, 2.0)]);
+        // A viewport after the only sample still has a continuous line.
+        assert_eq!(samples(&index, 20, 120, 80), vec![(-10.0, 2.0), (60.0, 2.0)]);
+        // Stop at the viewport edge when the capture continues beyond it.
+        assert_eq!(samples(&index, 0, 100, 150), vec![(10.0, 2.0), (100.0, 2.0)]);
+        index.insert(LiveEvent::from_value(70, 1, 600, 5_100, 5.0));
+        let points = step_graph_points(&samples(&index, 0, 100, 90), VALUE_TICK_PTS);
+        assert_eq!(points, vec![(10.0, 2.0), (70.0, 2.0), (70.0, 5.0), (90.0, 5.0)]);
+        // A real sample beyond the window already supplies its closing step.
+        assert_eq!(samples(&index, 0, 50, 90), vec![(20.0, 2.0), (140.0, 5.0)]);
     }
 
     #[test]

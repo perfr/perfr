@@ -60,6 +60,7 @@ What runs inside a profiled program, and what puts it there:
 | `perfr-hook` | The Frida Core controller the service spawns to attach to a target and load `libperfr` into it. |
 | `perfr-frida-transport` | The capture lease and the counters shared by the service, the helper and the agent. |
 | `perfr-frida-build` | Build-script helper that compiles the two small C adapters against the Frida devkits (`tools/frida/devkits.sh` downloads them). A debug build without devkits links a stub, so workspace-wide commands work on a fresh checkout. |
+| `perfr-tracing` | A `tracing-subscriber` layer over `perfr-api`: `tracing` spans become scopes, events log lines, and the frame-mark event a frame mark. How a Bevy app reaches perfr; see [`integrations/bevy`](../integrations/bevy/README.md). |
 | `perfr-test-rust` | `PerfrTestRust`, a program that makes every manual-instrumentation call. Its C, C++ and Python siblings are in `tools/test-programs`. |
 
 The viewer and its server:

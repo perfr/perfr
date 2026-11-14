@@ -42,6 +42,7 @@ members = [
     "crates/perfr",
     "crates/perfr-test-rust",
     "crates/perfr-thread-states",
+    "crates/perfr-tracing",
     "crates/perfr-tracing-state",
     "crates/perfr-unwind",
     "crates/perfr-web",

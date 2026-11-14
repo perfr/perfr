@@ -388,7 +388,9 @@ in the URL opens a tab on load.
   on the filter row under the tabs, so the title row above the tabs never
   moves. A tree arrives open along every node over the slider's share of
   the samples; at the left end ("open all", the default) the whole tree
-  is open, towards the right only the hottest path. Screenshots: `04-report-topdown.png`,
+  is open, towards the right only the hottest path. A node opens or folds
+  on its triangle, or on its name with Ctrl held (Cmd on a Mac); a plain
+  click on the name leaves the tree alone. Screenshots: `04-report-topdown.png`,
   `05-report-bottomup.png`.
 - **Modules** the loaded modules and their function counts. Screenshot:
   `06-report-modules.png`.

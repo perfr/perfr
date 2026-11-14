@@ -61,7 +61,7 @@ The window is never drawn narrower than ten pixels, so that zoomed in to one fra
 
 A bar is drawn against the median frame of its series: the accent colour up to 1.5 medians, amber up to 2.5, red past that. The strip is three medians tall, so one long hitch does not flatten every other bar. Where several frames share a pixel the bar is the longest of them, and a click there goes to that one. The label beside the strip names the series and its median frame.
 
-Behind the tracks of the process that marked the frames, every other frame is a little darker, so where a frame ends can be read off any of its threads. The scheduler and every other process keep their plain ground: the frames are not theirs. When several processes in a capture mark frames, each has its own bands behind its own tracks, and the strip shows the series of the process the capture is of. The bands fade out once frames are only a few pixels wide.
+Behind the tracks of the process that marked the frames, every other frame is a little darker, so where a frame ends can be read off any of its threads. The scheduler and every other process keep their plain ground: the frames are not theirs. So does the row that names the process, so a folded process shows no bands. When several processes in a capture mark frames, each has its own bands behind its own tracks, and the strip shows the series of the process the capture is of. The bands fade out once frames are only a few pixels wide.
 
 ## Scope search
 

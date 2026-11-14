@@ -635,13 +635,13 @@ def frame_marks(run):
     check(not run.rects_matching("row:lane:") or
           not [label for label in run.rects_matching("row:lane:") if label.endswith(":10")],
           "a frames lane is drawn as a track row")
-    # The bands are drawn behind the rows of the process that marked the
-    # frames: from its header down, clear of the scheduler above it and of
-    # any other process on the rail (this machine's other instrumented
-    # programs, the service's own rows).
+    # The bands are drawn behind the tracks of the process that marked the
+    # frames: from under the row that names it, clear of the scheduler above
+    # and of any other process on the rail (this machine's other
+    # instrumented programs, the service's own rows).
     bx, by, bw, bh = run.rect(f"frames:bands:{app.pid}")
     px, py, pw, ph = run.rect(f"row:process:{app.pid}")
-    check(abs(by - py) <= 1, f"the bands start at y {by}, the process's header at {py}")
+    check(abs(by - (py + ph)) <= 1, f"the bands start at y {by}, the process's tracks at {py + ph}")
     sx, sy, sw, sh = run.rect("row:scheduler")
     check(by >= sy + sh - 1, f"the bands (y {by}) reach into the scheduler (y {sy}, h {sh})")
     for label, (ox, oy, ow, oh) in run.rects_matching("row:process:").items():
@@ -750,6 +750,24 @@ def frame_marks(run):
     right_drag(mid, mid + 24, strip[1] + strip[3] + 200)
     run.wait_for(lambda: run.sel().get("ranges") not in (None, [], measured), "a second, narrow range")
     run.shot("55-measure-narrow", settle=0.6)
+
+    # A folded process is the row that names it and nothing else, and the
+    # bands are behind its tracks: folded, it shows none. The strip stays.
+    label = f"row:process:{app.pid}"
+    for _ in range(6):
+        if not run.rects_matching(f"row:thread:{app.pid}:"):
+            break
+        px, py, pw, ph = run.rect(label)
+        run.chrome.move(px + 16, py + ph * 0.5)
+        time.sleep(0.15)
+        run.chrome.click(px + 16, py + ph * 0.5)
+        time.sleep(0.4)
+    check(not run.rects_matching(f"row:thread:{app.pid}:"), "could not fold the process")
+    time.sleep(0.4)
+    check(f"frames:bands:{app.pid}" not in run.ui(), "a folded process still has frame bands")
+    # (Narrower than at the start: the measure above opened the report panel.)
+    check(run.rect("frames")[3] == strip[3], "the strip went with the process's tracks")
+    run.shot("56-frames-folded", settle=0.6)
     return (f"{frames['count']} frames, {frames['avg_ns'] / 1e6:.2f} ms; a click shows {span * 0.9 / 1e6:.2f} ms "
             f"of {span / 1e6:.2f}; the window dragged to {(widened[1] - widened[0]) / 1e6:.0f} ms")
 

@@ -7,13 +7,13 @@
 use std::io::Read;
 use std::time::Instant;
 
+use perfr_client::tracks::{RowId, TrackStrip};
 use perfr_live_chrome::{
     ChromeIngestor, ChromeStream, TID_ASYNC_BASE, TID_COUNTER_BASE, TID_OBJECT_BASE,
 };
 use perfr_live_render::{
     collect_instances_layout_opts, CollectOpts, TrackIndex, YCull,
 };
-use perfr_live_viewer::tracks::{RowId, TrackStrip};
 
 fn ingest(path: &str) -> (ChromeIngestor, TrackIndex) {
     let mut f = std::fs::File::open(path).expect("open");

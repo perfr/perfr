@@ -70,8 +70,8 @@ rm -rf "$ROOT/viewer-dist/snippets"
 wasm-bindgen \
   --target web \
   --out-dir "$ROOT/viewer-dist" \
-  --out-name perfr_live_viewer \
-  "$WORKSPACE/target/wasm32-unknown-unknown/wasm/perfr_live_viewer.wasm"
+  --out-name perfr_client \
+  "$WORKSPACE/target/wasm32-unknown-unknown/wasm/perfr_client.wasm"
 
 # wasm-bindgen overwrites the glue. CI requires the perfr header on *.js.
 stamp_perfr_js_header() {
@@ -94,7 +94,7 @@ stamp_perfr_js_header() {
   mv "$tmp" "$f"
 }
 
-stamp_perfr_js_header "$ROOT/viewer-dist/perfr_live_viewer.js"
+stamp_perfr_js_header "$ROOT/viewer-dist/perfr_client.js"
 while IFS= read -r -d '' f; do
   stamp_perfr_js_header "$f"
   # wasm-bindgen-rayon's worker helper still calls the module's init with
@@ -104,7 +104,7 @@ while IFS= read -r -d '' f; do
   sed -i 's/await pkg\.default(data\.module, data\.memory);/await pkg.default({ module_or_path: data.module, memory: data.memory });/' "$f"
 done < <(find "$ROOT/viewer-dist/snippets" -name '*.js' -print0 2>/dev/null || true)
 
-echo "Wrote $ROOT/viewer-dist/perfr_live_viewer.js and .wasm"
+echo "Wrote $ROOT/viewer-dist/perfr_client.js and .wasm"
 if [[ -d "$ROOT/viewer-dist/snippets" ]]; then
   echo "Worker snippets: $ROOT/viewer-dist/snippets"
 fi

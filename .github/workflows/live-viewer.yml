@@ -9,16 +9,16 @@ on:
     branches: ['main']
     paths:
       - 'crates/perfr-live-*/**'
+      - 'crates/perfr-client/**'
       - 'crates/perfr-viewer/**'
-      - 'crates/perfr-viewer-embed/**'
       - '.github/scripts/check-viewer-boundary.py'
       - '.github/workflows/live-viewer.yml'
   pull_request:
     branches: ['main']
     paths:
       - 'crates/perfr-live-*/**'
+      - 'crates/perfr-client/**'
       - 'crates/perfr-viewer/**'
-      - 'crates/perfr-viewer-embed/**'
       - '.github/scripts/check-viewer-boundary.py'
       - '.github/workflows/live-viewer.yml'
 
@@ -40,22 +40,22 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       # The viewer crates: the server side perfr links, the trace importers,
-      # the viewer core, and the two eframe pages built on it (their tests
-      # run natively, no window). The service crates have their own jobs.
+      # the viewer, and the client built on it (their tests run natively,
+      # no window). The service crates have their own jobs.
       - name: Test the live-viewer crates
         run: >
           cargo test -p perfr-live-event -p perfr-live-ring -p perfr-live-protocol
           -p perfr-live-render -p perfr-live-server -p perfr-live-chrome
-          -p perfr-viewer -p perfr-viewer-embed -p perfr-live-viewer
+          -p perfr-viewer -p perfr-client
       - name: Compile eframe WebRunner for wasm32
-        run: cargo build -p perfr-live-viewer --target wasm32-unknown-unknown
-      - name: Compile the slim embed for wasm32
-        run: cargo build -p perfr-viewer-embed --target wasm32-unknown-unknown
-      - name: Compile the slim embed with WebGL and the full fonts
+        run: cargo build -p perfr-client --target wasm32-unknown-unknown
+      - name: Compile the viewer's page for wasm32
+        run: cargo build -p perfr-viewer --target wasm32-unknown-unknown
+      - name: Compile the viewer's page with WebGL and the full fonts
         run: >
-          cargo check -p perfr-viewer-embed --target wasm32-unknown-unknown
+          cargo check -p perfr-viewer --target wasm32-unknown-unknown
           --features webgl,full-fonts
-      - name: Slim viewer does not depend on the capture pipeline or the full page
+      - name: The viewer does not depend on the capture pipeline or the client
         run: python3 .github/scripts/check-viewer-boundary.py
       - name: Compile benches
         run: cargo bench -p perfr-live-render -p perfr-live-ring --no-run

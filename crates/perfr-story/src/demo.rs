@@ -191,7 +191,7 @@ mod tests {
     fn served_file_matches_the_demo() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../perfr-live-viewer/viewer-dist/stories/box3d.perfr.story"
+            "/../perfr-client/viewer-dist/stories/box3d.perfr.story"
         );
         let disk = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
         assert_eq!(disk, demo_box3d_json());

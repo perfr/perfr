@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! [2026-09-26T14:03:22.123456] [INFO ] [serve.rs:773] 3 sampling ring(s) at 1000 Hz, unwinder ready
-//! [2026-09-26T14:03:24.010775] [WARN ] [viewer 7c1e perfr_live_viewer::net] WebSocket closed
+//! [2026-09-26T14:03:24.010775] [WARN ] [viewer 7c1e perfr_client::net] WebSocket closed
 //! ```
 //!
 //! UTC time to the microsecond, the level, where the line came from, the

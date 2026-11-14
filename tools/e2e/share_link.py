@@ -35,7 +35,7 @@ from share_capture import port, wait_until  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[2]
-VIEWER = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "crates/perfr-live-viewer/viewer-dist"
+VIEWER = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "crates/perfr-client/viewer-dist"
 
 
 def frame(kind, payload):

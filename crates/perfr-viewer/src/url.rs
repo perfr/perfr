@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Query-string decoding shared by the pages built on this core.
+//! Query-string decoding shared by the viewer's page and `perfr-client`.
 
 /// Undoes percent-encoding. The decoded bytes are read as UTF-8, so
 /// `%C3%A9` is one character; a `%` not followed by two hex digits stays as

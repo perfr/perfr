@@ -2,9 +2,16 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Viewer core: the WebGPU timeline and the `.perfr.stream` parser. A library
-# only: the full page (`perfr-live-viewer`) and the slim embed
-# (`perfr-viewer-embed`) are the two wasm entry points built on it.
+# The viewer: opens a `.perfr.stream` and draws it. No capture service, no
+# live connection, no import.
+#
+# Two things are built from this crate:
+#
+# * Its own page, the `page` feature (on by default): `build_wasm.sh` makes
+#   the wasm pack another page can embed.
+# * `perfr-client`, the page the service serves, which adds its client and the
+#   rest of the product on top. It depends on this crate with `page` off, so
+#   the pack the service embeds carries none of this crate's page.
 #
 # Path dependencies are an allow-list (.github/scripts/check-viewer-boundary.py):
 # the event format, the stream framing, and the rasterizer. Nothing from the
@@ -17,29 +24,69 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Viewer core: WebGPU timeline and .perfr.stream parser, with no capture-pipeline dependencies"
+description = "Viewer for a .perfr.stream: WebGPU timeline, stream parser and a page to embed, with no capture-pipeline dependencies"
 
 [lints]
 workspace = true
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [features]
-default = ["egui"]
+default = ["egui", "page"]
+# The timeline renderer and the theme. Off, the crate is the stream parser
+# and the track model alone.
 egui = ["dep:egui", "dep:egui-wgpu"]
+# The viewer's own page (`src/page.rs`) and its wasm entry point. Everything
+# it needs beyond the library is listed here, so a dependent that turns it
+# off (`perfr-client`) links none of it.
+page = [
+    "egui",
+    "dep:eframe",
+    "dep:wasm-bindgen",
+    "dep:js-sys",
+    "dep:wasm-bindgen-futures",
+    "dep:console_error_panic_hook",
+    "dep:wgpu",
+    "web-sys/HtmlCanvasElement",
+    "web-sys/Location",
+    "web-sys/Response",
+]
+# GLES backend for the page. With it the page falls back to WebGL when the
+# browser has no WebGPU adapter, and `?webgl` asks for it. Off in the default
+# pack, where it costs about 1.9 MB of wasm; `./build_wasm.sh --features
+# webgl` turns it on.
+webgl = ["page", "wgpu/webgl"]
+# egui's four default fonts in place of the page's Latin subset of Hack, for
+# captures whose thread and process names are not Latin-1 (Cyrillic, Greek,
+# symbols). About 1.4 MB of wasm; `./build_wasm.sh --features full-fonts`.
+full-fonts = ["page", "egui/default_fonts"]
 
 [dependencies]
 perfr-live-event = { path = "../perfr-live-event" }
 perfr-live-protocol = { path = "../perfr-live-protocol" }
 perfr-live-render = { path = "../perfr-live-render" }
-# default-features off so a pack that links only this core does not embed
-# egui's four fonts. The full page depends on egui with its defaults, and the
-# slim embed installs its own Latin subset.
+# default-features off so the viewer's pack does not embed egui's four fonts:
+# the page installs its own Latin subset. `perfr-client` depends on egui with
+# its defaults.
 egui = { version = "0.32.3", default-features = false, optional = true }
 egui-wgpu = { version = "0.32.3", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 perfr-live-render = { path = "../perfr-live-render", features = ["parallel"] }
+eframe = { version = "0.32.3", default-features = false, features = ["wgpu", "wayland", "x11"], optional = true }
 
-# The frame clock in `dev.rs` when no shared clock hook is installed.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+eframe = { version = "0.32.3", default-features = false, features = ["wgpu"], optional = true }
+wasm-bindgen = { version = "=0.2.100", optional = true }
+js-sys = { version = "=0.3.77", optional = true }
+wasm-bindgen-futures = { version = "=0.4.50", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+# WebGPU, not WebGL. `webgl` above adds the GLES backend.
+wgpu = { version = "25", default-features = false, features = ["webgpu", "wgsl"], optional = true }
+
+# `Performance` and `Window` are the frame clock in `dev.rs` when no shared
+# clock hook is installed. `page` adds what the page itself calls.
 [target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
 version = "0.3"
 features = ["Performance", "Window"]

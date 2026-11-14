@@ -122,7 +122,7 @@
     a current Chrome, Edge, Firefox or Safari has both. The browser's
     console has the reason.
     If you built perfr yourself, run <code>build_wasm.sh</code> so
-    <code>perfr_live_viewer.js</code> and its <code>.wasm</code> are served.
+    <code>perfr_client.js</code> and its <code>.wasm</code> are served.
   </div>
   <script src="embed.js"></script>
   <script type="module">
@@ -194,7 +194,7 @@
       fallback.style.display = "block";
     }
     try {
-      const mod = await import("./perfr_live_viewer.js");
+      const mod = await import("./perfr_client.js");
       await mod.default();
       // SAB + COOP/COEP: init the rayon pool once, before the first collect.
       // Old browsers / missing isolation headers → sequential, no crash.

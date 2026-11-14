@@ -2,24 +2,24 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Thin page around the viewer core: open a `.perfr.stream` and draw it.
+//! The viewer's page: open a `.perfr.stream` and draw it (`start_viewer`).
 //!
-//! This is the embeddable shell (`start_embed`). It does not talk to the
-//! capture service, import Chrome or Perfetto traces, or draw the live
-//! product's chrome. The full page is `perfr-live-viewer`, which does not
-//! link this crate.
+//! It does not talk to the capture service, import Chrome or Perfetto
+//! traces, or draw the client's chrome. `perfr-client` is the page that
+//! does; it builds on this crate with the `page` feature off, so its pack
+//! carries none of this module.
 
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Vec2};
 use perfr_live_render::{choose_lod, ThreadFocus, INSTANCE_MIN_PX};
-use perfr_viewer::dev::DevFrame;
-use perfr_viewer::open::{open_capture, OpenedCapture};
-use perfr_viewer::theme;
-use perfr_viewer::timeline::{
+use crate::dev::DevFrame;
+use crate::open::{open_capture, OpenedCapture};
+use crate::theme;
+use crate::timeline::{
     paint_callback, quant_px, TimelineGpu, TimelineGpuSlot, TimelinePayload, ViewUniforms,
 };
-use perfr_viewer::tracks::{RowId, TrackStrip};
+use crate::tracks::{RowId, TrackStrip};
 
 /// Width of the column of track names left of the timeline, in points.
 const LABEL_W: f32 = 160.0;
@@ -39,7 +39,7 @@ const NOTCH_LINES: f32 = 3.0;
 
 type Incoming = Arc<Mutex<Option<Result<Vec<u8>, String>>>>;
 
-/// A capture on a canvas. Wasm boots it from [`start_embed`]; native tests
+/// A capture on a canvas. Wasm boots it from [`start_viewer`]; native tests
 /// drive [`Self::load_bytes`].
 pub struct CaptureViewer {
     opened: OpenedCapture,
@@ -80,7 +80,7 @@ struct DrawKey {
 /// and a status line. A name outside Latin-1 shows as `?`; the `full-fonts`
 /// feature links egui's fonts instead. License: `fonts/LICENSE-Hack.txt`.
 #[cfg(not(feature = "full-fonts"))]
-fn install_embed_font(ctx: &egui::Context) {
+fn install_latin_font(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::empty();
     fonts.font_data.insert(
         "HackLatin".to_owned(),
@@ -100,7 +100,7 @@ fn install_embed_font(ctx: &egui::Context) {
 impl CaptureViewer {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         #[cfg(not(feature = "full-fonts"))]
-        install_embed_font(&cc.egui_ctx);
+        install_latin_font(&cc.egui_ctx);
         let mut has_gpu = false;
         let mut backend = "no GPU device";
         if let Some(rs) = &cc.wgpu_render_state {
@@ -567,7 +567,7 @@ fn query_capture(search: &str) -> Option<String> {
         if raw.is_empty() {
             return None;
         }
-        return Some(perfr_viewer::url::percent_decode(raw));
+        return Some(crate::url::percent_decode(raw));
     }
     None
 }
@@ -589,7 +589,7 @@ enum Backend {
     WebGl,
 }
 
-/// What `start_embed` rejects with when the page cannot draw. `embed.html`
+/// What `start_viewer` rejects with when the page cannot draw. `viewer.html`
 /// shows it in place of the canvas.
 #[cfg(any(test, target_arch = "wasm32"))]
 const NO_WEBGPU: &str = "This viewer draws with WebGPU, and this browser did not provide a WebGPU adapter.";
@@ -661,7 +661,7 @@ async fn request_webgpu_adapter() -> bool {
 /// rejects with a sentence for the reader when the page cannot draw.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
-pub async fn start_embed(canvas: web_sys::HtmlCanvasElement) -> Result<(), wasm_bindgen::JsValue> {
+pub async fn start_viewer(canvas: web_sys::HtmlCanvasElement) -> Result<(), wasm_bindgen::JsValue> {
     console_error_panic_hook::set_once();
     let asked_webgl = location_search().is_some_and(|s| query_asks_webgl(&s));
     let backend = pick_backend(
@@ -792,7 +792,7 @@ mod tests {
             canvas & 0xFF
         );
         assert!(
-            include_str!("../embed.html").contains(&format!("background: {css};")),
+            include_str!("../viewer.html").contains(&format!("background: {css};")),
             "page background should be the default canvas {css}"
         );
     }
@@ -801,7 +801,7 @@ mod tests {
     fn every_character_the_page_writes_itself_is_in_the_latin_font() {
         // The subset covers U+0020-7E and U+00A0-FF. An em dash in the status
         // line was drawn as `?` on every page.
-        let source = include_str!("lib.rs");
+        let source = include_str!("page.rs");
         let shell = source.split("#[cfg(test)]\nmod tests").next().unwrap_or("");
         for (n, line) in shell.lines().enumerate() {
             let code = line.split("//").next().unwrap_or("");

@@ -25,7 +25,7 @@ perfr.nameProcess("api tour");
 perfr.nameThread("main");
 
 // --- the viewer, in the page rather than floating over it ----------------
-const viewerUrl = new URL("../../crates/perfr-live-viewer/viewer-dist/index.html", import.meta.url);
+const viewerUrl = new URL("../../crates/perfr-client/viewer-dist/index.html", import.meta.url);
 const viewer = perfr.attachViewer({
   viewerUrl: viewerUrl.href,
   container: $("viewer"),

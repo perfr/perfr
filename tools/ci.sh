@@ -16,7 +16,7 @@
 #   clippy   cargo clippy over the workspace, all targets, no warnings
 #   test     cargo test over the workspace, under a memory cap
 #   musl     the static release build of the service, as shipped
-#   wasm     the full viewer page and the slim embed, compiled for wasm32
+#   wasm     the client and the viewer's page, compiled for wasm32
 #   docs     crates/README.md names every crate directory, and the Unreal
 #            plugin's copy of perfr.h is the header it was copied from
 #
@@ -138,11 +138,11 @@ step_musl() {
 }
 
 step_wasm() {
-  cargo check --locked -p perfr-live-viewer --target wasm32-unknown-unknown || return 1
-  # The embeddable viewer: the slim page over the viewer core, with and
-  # without the two optional features of its pack.
-  cargo check --locked -p perfr-viewer-embed --target wasm32-unknown-unknown || return 1
-  cargo check --locked -p perfr-viewer-embed --target wasm32-unknown-unknown \
+  cargo check --locked -p perfr-client --target wasm32-unknown-unknown || return 1
+  # The viewer's own page, with and without the two optional features of
+  # its pack.
+  cargo check --locked -p perfr-viewer --target wasm32-unknown-unknown || return 1
+  cargo check --locked -p perfr-viewer --target wasm32-unknown-unknown \
     --features webgl,full-fonts || return 1
   python3 .github/scripts/check-viewer-boundary.py
 }

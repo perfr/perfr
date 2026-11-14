@@ -1970,7 +1970,7 @@ fn the_level_of_detail_is_decided_once_for_a_view_that_holds_still() {
 /// each kind of input, at three zoom levels. The capture is a `.perfr.stream`
 /// named by `PERFR_PROBE_STREAM`; `PERFR_PROBE_ONLY=<scenario>` with
 /// `PERFR_PROBE_SECONDS=<n>` loops one scenario for a sampler to look at.
-/// `cargo test --release -p perfr-live-viewer --lib -- --ignored --nocapture render_frame_times`.
+/// `cargo test --release -p perfr-client --lib -- --ignored --nocapture render_frame_times`.
 #[test]
 #[ignore]
 fn render_frame_times() {

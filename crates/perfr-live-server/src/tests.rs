@@ -942,7 +942,7 @@ fn what_the_browser_says_of_the_page_decides_too() {
     // The same site's image, script, frame and form; and a link straight
     // into the API, which would hand the capture to the browser to save.
     assert!(!allows(Some("cross-site"), Some("no-cors"), Some("image"), Method::GET, "/api/status"));
-    assert!(!allows(Some("cross-site"), Some("no-cors"), Some("script"), Method::GET, "/perfr_live_viewer.js"));
+    assert!(!allows(Some("cross-site"), Some("no-cors"), Some("script"), Method::GET, "/perfr_client.js"));
     assert!(!allows(Some("cross-site"), Some("navigate"), Some("iframe"), Method::GET, "/"));
     assert!(!allows(Some("cross-site"), Some("navigate"), Some("document"), Method::POST, "/"));
     assert!(!allows(Some("cross-site"), Some("navigate"), Some("document"), Method::GET, "/api/capture/export"));
@@ -1675,7 +1675,7 @@ fn a_viewer_asset_is_served_with_an_etag_and_revalidated_by_it() {
         let condition = etag.map(|tag| format!("If-None-Match: {tag}\r\n")).unwrap_or_default();
         send_raw(served.addr, format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{condition}\r\n").as_bytes())
     };
-    for path in ["/", "/perfr_live_viewer.js", "/perfr_live_viewer_bg.wasm"] {
+    for path in ["/", "/perfr_client.js", "/perfr_client_bg.wasm"] {
         let (status, head, _) = fetch(path, None);
         assert_eq!(status, 200, "{path}");
         assert_eq!(header_of(&head, "cache-control").as_deref(), Some("no-cache"), "{path}");
@@ -1690,7 +1690,7 @@ fn a_viewer_asset_is_served_with_an_etag_and_revalidated_by_it() {
     }
     // Two assets do not share a tag.
     let tag = |path: &str| header_of(&fetch(path, None).1, "etag").unwrap();
-    assert_ne!(tag("/perfr_live_viewer.js"), tag("/index.html"));
+    assert_ne!(tag("/perfr_client.js"), tag("/index.html"));
     assert_eq!(tag("/"), tag("/index.html"));
 }
 
@@ -1704,7 +1704,7 @@ fn etag_bench() {
     let revalidate = |etag: &str| {
         send_raw(
             served.addr,
-            format!("GET /perfr_live_viewer_bg.wasm HTTP/1.1\r\nHost: {host}\r\nIf-None-Match: {etag}\r\n\r\n").as_bytes(),
+            format!("GET /perfr_client_bg.wasm HTTP/1.1\r\nHost: {host}\r\nIf-None-Match: {etag}\r\n\r\n").as_bytes(),
         )
     };
     let etag = header_of(&revalidate("\"\"").1, "etag").unwrap();

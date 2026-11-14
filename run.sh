@@ -17,7 +17,7 @@
 #   ./run.sh -- --pid 1234 --duration-ms 5000 --out /tmp/c.pod   # file mode
 #
 # This builds the service and native Frida components, not the viewer pack. Run
-# crates/perfr-live-viewer/build_wasm.sh if you changed the front end; the script
+# crates/perfr-client/build_wasm.sh if you changed the front end; the script
 # warns when it looks stale.
 
 set -euo pipefail
@@ -122,15 +122,15 @@ fi
 # The service embeds the pack that was in viewer-dist when it was built
 # (perfr-live-server's build script), so a stale pack shows a stale page, and
 # a refreshed pack shows only after the build above has run again.
-PACK="$ROOT/crates/perfr-live-viewer/viewer-dist/perfr_live_viewer_bg.wasm"
-# The page and the viewer core it is built on: the renderer, the track rail
-# and the stream parser are in perfr-viewer.
-VIEWER_SRC=("$ROOT/crates/perfr-live-viewer/src" "$ROOT/crates/perfr-viewer/src")
+PACK="$ROOT/crates/perfr-client/viewer-dist/perfr_client_bg.wasm"
+# The client and the viewer it is built on: the renderer, the track rail and
+# the stream parser are in perfr-viewer.
+VIEWER_SRC=("$ROOT/crates/perfr-client/src" "$ROOT/crates/perfr-viewer/src")
 if [[ "$SERVE" -eq 1 && -f "$PACK" && -d "${VIEWER_SRC[0]}" && -d "${VIEWER_SRC[1]}" ]] &&
    [[ -n "$(find "${VIEWER_SRC[@]}" -name '*.rs' -newer "$PACK" -print -quit)" ]]; then
-  warn "viewer-dist/ is older than the viewer sources (crates/perfr-live-viewer/src,"
+  warn "viewer-dist/ is older than the viewer sources (crates/perfr-client/src,"
   warn "crates/perfr-viewer/src) — the page will serve the previous pack. Run"
-  warn "crates/perfr-live-viewer/build_wasm.sh to refresh it, then this script"
+  warn "crates/perfr-client/build_wasm.sh to refresh it, then this script"
   warn "again: the pack is embedded when the service is built."
 fi
 

@@ -1996,9 +1996,15 @@ def website(run):
         capture_output=True, text=True, timeout=120,
     )
     check(build.returncode == 0, f"build_site.py failed: {build.stderr[-400:]}")
-    for needed in ("index.html", "features.html", "viewer/perfr_client_bg.wasm", "captures/e2e.perfr.stream",
+    for needed in ("index.html", "features.html", "captures/e2e.perfr.stream",
                    "manual/index.html", "blog/index.html", "e2e/report.html", "site.css"):
         check(os.path.exists(os.path.join(site, needed)), f"the site is missing {needed}")
+    # The site hosts the viewer's pack when this checkout has one built
+    # (crates/perfr-viewer/build_wasm.sh), and the client's, which is
+    # committed, when it does not.
+    packs = ("viewer/perfr_viewer_bg.wasm", "viewer/perfr_client_bg.wasm")
+    check(any(os.path.exists(os.path.join(site, pack)) for pack in packs),
+          f"the site has neither {packs[0]} nor {packs[1]}")
     port = run.service.port + 7
     server = subprocess.Popen(
         [sys.executable, os.path.join(WEB, "serve.py"), "--dir", site, "--port", str(port),

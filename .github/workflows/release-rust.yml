@@ -14,9 +14,11 @@
 # tag to build that tag's commit and attach a release to it, whichever
 # branch the run is started from. This workflow never creates a tag.
 #
-# The viewer job packs crates/perfr-client/viewer-dist, built for
-# this tag, as perfr-viewer.tar.gz plus perfr-viewer.tar.gz.sha256.
-# publish attaches both. The platform jobs embed that same pack.
+# The viewer job builds the two packs for this tag, each with a .sha256
+# sidecar: perfr-client.tar.gz (crates/perfr-client/viewer-dist), the page
+# the service serves, which the platform jobs embed in the binary; and
+# perfr-viewer.tar.gz (crates/perfr-viewer/viewer-dist), the same interface
+# with no service behind it, which perfr.dev hosts. publish attaches both.
 
 env:
   # Empty on a manual run with no tag, so the stamp stays `dev+<hash>`.
@@ -48,7 +50,7 @@ concurrency:
 
 jobs:
   viewer:
-    name: Viewer pack
+    name: Viewer and client packs
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
@@ -68,21 +70,33 @@ jobs:
           echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
           echo "PERFR_GIT_HASH=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
 
-      - name: Build the viewer and pack it
+      - name: Build the client and the viewer and pack them
         run: |
           set -euo pipefail
-          ./crates/perfr-client/build_wasm.sh
-          # Paths inside the archive are relative to viewer-dist/, so a
+          # Paths inside each archive are relative to its viewer-dist/, so a
           # static host extracts it and serves index.html at the top.
-          tar -C crates/perfr-client/viewer-dist -czf perfr-viewer.tar.gz .
+          #
+          # The client: the page the service serves. The platform jobs
+          # embed this pack in the binary.
+          ./crates/perfr-client/build_wasm.sh
+          tar -C crates/perfr-client/viewer-dist -czf perfr-client.tar.gz .
+          sha256sum perfr-client.tar.gz | tee perfr-client.tar.gz.sha256
+          tar -tzf perfr-client.tar.gz | grep -qE '(^|/)index.html$'
+          tar -tzf perfr-client.tar.gz | grep -qE '(^|/)perfr_client_bg.wasm$'
+          # The viewer: the same interface with no service behind it, which
+          # is what perfr.dev hosts.
+          ./crates/perfr-viewer/build_wasm.sh
+          tar -C crates/perfr-viewer/viewer-dist -czf perfr-viewer.tar.gz .
           sha256sum perfr-viewer.tar.gz | tee perfr-viewer.tar.gz.sha256
           tar -tzf perfr-viewer.tar.gz | grep -qE '(^|/)index.html$'
-          tar -tzf perfr-viewer.tar.gz | grep -qE '(^|/)perfr_client_bg.wasm$'
+          tar -tzf perfr-viewer.tar.gz | grep -qE '(^|/)perfr_viewer_bg.wasm$'
 
       - uses: actions/upload-artifact@v4
         with:
-          name: perfr-viewer
+          name: perfr-packs
           path: |
+            perfr-client.tar.gz
+            perfr-client.tar.gz.sha256
             perfr-viewer.tar.gz
             perfr-viewer.tar.gz.sha256
           if-no-files-found: error
@@ -105,18 +119,18 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: perfr-viewer
+          name: perfr-packs
           path: dist/viewer-pack
 
-      - name: Install the viewer pack built for this tag
+      - name: Install the client pack built for this tag
         run: |
           set -euo pipefail
           cd dist/viewer-pack
-          sha256sum -c perfr-viewer.tar.gz.sha256
+          sha256sum -c perfr-client.tar.gz.sha256
           cd ../..
           rm -rf crates/perfr-client/viewer-dist
           mkdir -p crates/perfr-client/viewer-dist
-          tar -C crates/perfr-client/viewer-dist -xzf dist/viewer-pack/perfr-viewer.tar.gz
+          tar -C crates/perfr-client/viewer-dist -xzf dist/viewer-pack/perfr-client.tar.gz
           test -f crates/perfr-client/viewer-dist/index.html
           test -f crates/perfr-client/viewer-dist/perfr_client_bg.wasm
 
@@ -244,18 +258,18 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: perfr-viewer
+          name: perfr-packs
           path: dist/viewer-pack
 
-      - name: Install the viewer pack built for this tag
+      - name: Install the client pack built for this tag
         run: |
           set -euo pipefail
           cd dist/viewer-pack
-          shasum -a 256 -c perfr-viewer.tar.gz.sha256
+          shasum -a 256 -c perfr-client.tar.gz.sha256
           cd ../..
           rm -rf crates/perfr-client/viewer-dist
           mkdir -p crates/perfr-client/viewer-dist
-          tar -C crates/perfr-client/viewer-dist -xzf dist/viewer-pack/perfr-viewer.tar.gz
+          tar -C crates/perfr-client/viewer-dist -xzf dist/viewer-pack/perfr-client.tar.gz
           test -f crates/perfr-client/viewer-dist/index.html
           test -f crates/perfr-client/viewer-dist/perfr_client_bg.wasm
 
@@ -361,24 +375,24 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: perfr-viewer
+          name: perfr-packs
           path: dist/viewer-pack
 
-      - name: Install the viewer pack built for this tag
+      - name: Install the client pack built for this tag
         run: |
           $ErrorActionPreference = 'Stop'
-          $sidecar = Get-Content -Raw dist\viewer-pack\perfr-viewer.tar.gz.sha256
+          $sidecar = Get-Content -Raw dist\viewer-pack\perfr-client.tar.gz.sha256
           $expected = ($sidecar -split '\s+')[0].Trim().ToLowerInvariant()
-          $actual = (Get-FileHash -Algorithm SHA256 dist\viewer-pack\perfr-viewer.tar.gz).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "viewer pack checksum mismatch: $actual" }
+          $actual = (Get-FileHash -Algorithm SHA256 dist\viewer-pack\perfr-client.tar.gz).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "client pack checksum mismatch: $actual" }
           if (Test-Path crates\perfr-client\viewer-dist) {
             Remove-Item -Recurse -Force crates\perfr-client\viewer-dist
           }
           New-Item -ItemType Directory -Force crates\perfr-client\viewer-dist | Out-Null
-          tar -C crates\perfr-client\viewer-dist -xzf dist\viewer-pack\perfr-viewer.tar.gz
+          tar -C crates\perfr-client\viewer-dist -xzf dist\viewer-pack\perfr-client.tar.gz
           foreach ($required in 'index.html', 'perfr_client_bg.wasm') {
             if (-not (Test-Path (Join-Path crates\perfr-client\viewer-dist $required))) {
-              throw "missing $required in the viewer pack"
+              throw "missing $required in the client pack"
             }
           }
 
@@ -559,11 +573,14 @@ jobs:
               "debug archive, not this zip. Call-stack sampling, the scheduler and thread states come from the kernel "
               "logger (ETW) and need an elevated prompt; manual scopes and Frida hooks do not. No auto-profiling, no "
               "kernel hook engine, no GPU helper.\n\n"
-              "**Viewer** (`perfr-viewer.tar.gz`): the live viewer built for this tag, "
-              "a gzip tar of `crates/perfr-client/viewer-dist` with paths relative to that "
-              "directory (`index.html` at the top, plus the wasm glue, `.wasm`, `snippets/` and "
-              "`stories/`). `perfr-viewer.tar.gz.sha256` is the `sha256sum` sidecar. perfr.dev "
-              "embeds this asset instead of the viewer at the top of `main`.\n\n"
+              "**Viewer** (`perfr-viewer.tar.gz`): the viewer built for this tag, the page that shows a "
+              "capture file with no service behind it. A gzip tar of `crates/perfr-viewer/viewer-dist` "
+              "with paths relative to that directory (`index.html` at the top, plus the wasm glue, "
+              "`.wasm`, `snippets/` and `stories/`). `perfr-viewer.tar.gz.sha256` is the `sha256sum` "
+              "sidecar. perfr.dev hosts this asset.\n\n"
+              "**Client** (`perfr-client.tar.gz`): the page the service serves, the same interface with "
+              "the service behind it, as it is embedded in the binaries above. Packed the same way "
+              "from `crates/perfr-client/viewer-dist`, with its own `.sha256`.\n\n"
               "Checksums: `SHA256SUMS` and the per-archive `.sha256` files.\n\n"
               "Install (fails with a clear message until a non-prerelease `perfr-v*` tag exists):\n\n"
               "```\n"

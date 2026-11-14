@@ -127,16 +127,16 @@ wheels and never publishes.
 
 ## release-rust.yml
 
-The viewer pack is built first. The three platform jobs then run in parallel, and `publish` runs after them. Each platform job embeds that pack in the `perfr` binary, so the binary's viewer and the release asset are the same build.
+The two packs are built first: the client's, which is the page the service serves, and the viewer's, which is the same interface with no service behind it. The three platform jobs then run in parallel, and `publish` runs after them. Each platform job embeds the client's pack in the `perfr` binary, so the binary's page and the release asset are the same build.
 
 | Job | Runner | Builds | Installer archive |
 |---|---|---|---|
-| `viewer` | `ubuntu-22.04` | `crates/perfr-client/build_wasm.sh`, with `PERFR_RELEASE_TAG` set when this run publishes a tag | `perfr-viewer.tar.gz` |
+| `viewer` | `ubuntu-22.04` | `crates/perfr-client/build_wasm.sh` and `crates/perfr-viewer/build_wasm.sh`, with `PERFR_RELEASE_TAG` set when this run publishes a tag | `perfr-client.tar.gz`, `perfr-viewer.tar.gz` |
 | `linux` | `ubuntu-22.04` | static musl `perfr` (viewer embedded); glibc `perfr-hook`, `libperfr.so` (`--features native`), `perfr-gpu` | `perfr-linux-x86_64.tar.gz` |
 | `macos` | `macos-15` | `tools/build/build-service-macos.sh --universal`: universal `perfr`, `perfr-hook`, `libperfr.dylib`. Ad-hoc signed, not notarized. No GPU helper. | `perfr-macos-universal.tar.gz` |
 | `windows` | `windows-2022` | `tools/build/build-service-windows.ps1`: static-CRT `perfr.exe`, `perfr-hook.exe`, `libperfr.dll`. Not code-signed. No GPU helper. | `perfr-windows-x86_64.zip` |
 
-**Viewer pack.** `perfr-viewer.tar.gz` is a gzip-compressed tar of the files in `crates/perfr-client/viewer-dist/` (paths relative to that directory, so `index.html` is at the top, with the wasm-bindgen glue, `perfr_client_bg.wasm`, `snippets/` and `stories/`). `perfr-viewer.tar.gz.sha256` is the `sha256sum` sidecar: one line, the hash, two spaces, then the file name. `publish` attaches both to the GitHub Release. perfr.dev embeds this asset for the hosted viewer instead of the pack at the top of `main`. The About window in that pack shows the tag, the short commit, and the build date; `perfr --version` on the binaries from the same run prints the same line.
+**The packs.** `perfr-viewer.tar.gz` is a gzip-compressed tar of the files in `crates/perfr-viewer/viewer-dist/` (paths relative to that directory, so `index.html` is at the top, with the wasm-bindgen glue, `perfr_viewer_bg.wasm`, `snippets/` and `stories/`). It is the viewer: the page that shows a capture file, with no service behind it. perfr.dev hosts this asset instead of a pack from the top of `main`. `perfr-client.tar.gz` is packed the same way from `crates/perfr-client/viewer-dist/` (`perfr_client_bg.wasm`): the page the service serves, and the pack the platform jobs embed. Each has a `.sha256` sidecar in `sha256sum` form: one line, the hash, two spaces, then the file name. `publish` attaches all four to the GitHub Release. The About window in either pack shows the tag, the short commit, and the build date; `perfr --version` on the binaries from the same run prints the same line.
 
 Each installer archive has a top-level `perfr/` directory and `licenses/` (the Frida
 notices). `perfr.h` is `include/perfr.h` in that directory, not beside the

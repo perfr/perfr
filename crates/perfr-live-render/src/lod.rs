@@ -519,6 +519,14 @@ fn is_tick_lane(key: LaneKey) -> bool {
     matches!(key.kind, kind::VALUE | kind::SAMPLE | kind::LOG | kind::DROP)
 }
 
+/// Lanes that are no row of the timeline: a program's frames, which the
+/// viewer draws as a strip of its own and as bands behind every row (see
+/// [`kind::FRAME`]). They take no part in laying the timeline out, and a
+/// frame, which is always wide, does not make a view instanced.
+pub fn is_overview_lane(key: LaneKey) -> bool {
+    key.kind == kind::FRAME
+}
+
 /// Sample a few lanes. If any overlapping event is ≥ `min_wide_px`, use
 /// instanced SDF quads. Does not walk all scopes.
 ///
@@ -557,7 +565,7 @@ pub fn choose_lod_hint(
 pub fn sample_lod_lanes(index: &TrackIndex, hint: Option<LaneKey>) -> Vec<LaneKey> {
     let mut scored: Vec<(usize, LaneKey)> = index
         .lanes()
-        .filter(|(k, _)| !is_tick_lane(*k))
+        .filter(|(k, _)| !is_tick_lane(*k) && !is_overview_lane(*k))
         .map(|(k, lane)| (lane.len(), k))
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
@@ -622,7 +630,7 @@ fn choose_lod_from_keys(
     // of its events in view, paid only when the sample already failed to
     // find anything wide.
     for (key, lane) in index.lanes() {
-        if is_tick_lane(key) {
+        if is_tick_lane(key) || is_overview_lane(key) {
             continue;
         }
         if lane.any_duration(t0, t1, wide) {
@@ -671,6 +679,21 @@ mod value_lod_tests {
             _pad: 0,
             name_id: name,
         }
+    }
+
+    /// A frame is as wide as everything that happened in it, and is not
+    /// drawn on the timeline at all: it must not be what decides how the
+    /// timeline is drawn.
+    #[test]
+    fn frames_do_not_force_instanced_lod() {
+        let mut idx = TrackIndex::default();
+        for i in 0..64u64 {
+            idx.insert(scope(i * 20, 8, 1, 1));
+        }
+        for i in 0..4u64 {
+            idx.insert(LiveEvent { kind: kind::FRAME, ..scope(i * 250_000, 250_000, 1, 2) });
+        }
+        assert_eq!(choose_lod(&idx, 0, 1_000_000, 200, INSTANCE_MIN_PX), TimelineLod::PixelColumns);
     }
 
     /// A sample tick's `duration_ns` is the sampling period and a drop

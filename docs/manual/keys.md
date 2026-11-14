@@ -44,6 +44,10 @@ More also lists “Pan time: A / D”, “Zoom: W / S” and “Scroll tracks: �
 | Double-click | Ruler | Fit, same as Home |
 | Click | Thread header | Focus that thread, or release it |
 | Click | Sample tick | Copy its call stack |
+| Click | A bar of the frame strip | Show that frame, centred, at 90% of the timeline's width |
+| Left-drag | The window on the frame strip | Pan the timeline |
+| Left-drag | A handle of that window | Move that edge of the timeline's window |
+| Click | The frame strip's label | Show the next series of frames, when the capture has more than one |
 | Click | Empty canvas | Clear the selection |
 | Right-click | A scope | **Sampling report for this scope**, **Highlight every instance** |
 | Right-click | A function, in a report or on a flame bar | Hook or unhook it. The report item is **Hook function for dynamic instrumentation**. The flame item is **Hook function**. **Show disassembly and source** opens Code |

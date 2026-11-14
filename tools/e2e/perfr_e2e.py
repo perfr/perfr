@@ -602,6 +602,134 @@ def api_python(run):
     return _instrumented_app(run, "python", 10)
 
 
+@scenario("frame-marks", "A program's frame marks: the strip of frame times, a click on a bar, the bands")
+def frame_marks(run):
+    # PerfrTestRust marks a frame at the top of its loop: 6 ms of work and an
+    # 8 ms sleep a turn, so some 70 frames a second.
+    app = Target(_build_app("rust"))
+    try:
+        run.service.post("/api/capture/clear")
+        run.service.post("/api/capture/start", {"pid": app.pid})
+        time.sleep(4.0)
+        run.service.post("/api/capture/stop")
+        time.sleep(1.5)
+    finally:
+        app.stop()
+    stats = run.service.get(f"/api/functions/stats?pid={app.pid}&q=frame")
+    series = [row for row in stats["rows"] if row["kind"] == "frame"]
+    check(len(series) == 1, f"one series of frames, the main one: {series}")
+    frames = series[0]
+    check(frames["name"] == "frame", f"the main series is called frame: {frames['name']!r}")
+    check_at_least(frames["count"], 100, "frames in four seconds")
+    check(10e6 < frames["avg_ns"] < 40e6, f"a frame of PerfrTestRust takes about 14 ms: {frames['avg_ns']} ns")
+    # The frame is the loop's whole turn, sleep included; the `frame` scope
+    # inside it is not longer than the frame it is in.
+    scopes = [row for row in stats["rows"] if row["kind"] == "scope" and row["name"] == "frame"]
+    check(scopes and scopes[0]["avg_ns"] <= frames["avg_ns"] * 1.05, f"the frame scope outlasts its frame: {scopes}")
+    if run.chrome is None:
+        return f"{frames['count']} frames, {frames['avg_ns'] / 1e6:.2f} ms (no browser)"
+
+    run.open_viewer("?collapse=scheduler")
+    strip = run.rect("frames")
+    # Frames are the strip and the bands, not a row under their thread.
+    check(not run.rects_matching("row:lane:") or
+          not [label for label in run.rects_matching("row:lane:") if label.endswith(":10")],
+          "a frames lane is drawn as a track row")
+    # The bands are drawn behind the rows of the process that marked the
+    # frames: from its header down, clear of the scheduler above it and of
+    # any other process on the rail (this machine's other instrumented
+    # programs, the service's own rows).
+    bx, by, bw, bh = run.rect(f"frames:bands:{app.pid}")
+    px, py, pw, ph = run.rect(f"row:process:{app.pid}")
+    check(abs(by - py) <= 1, f"the bands start at y {by}, the process's header at {py}")
+    sx, sy, sw, sh = run.rect("row:scheduler")
+    check(by >= sy + sh - 1, f"the bands (y {by}) reach into the scheduler (y {sy}, h {sh})")
+    for label, (ox, oy, ow, oh) in run.rects_matching("row:process:").items():
+        if label != f"row:process:{app.pid}":
+            check(not (by < oy + oh - 1 and oy < by + bh - 1),
+                  f"the bands (y {by}..{by + bh}) cover {label} (y {oy}..{oy + oh})")
+    run.shot("51-frame-strip", settle=1.0)
+
+    # A click on a bar shows that frame at nine tenths of the timeline's
+    # width, whatever the timeline was showing; the strip itself stays put.
+    before = run.sel()["view"]
+    run.click("frames", dx=0.5, dy=0.7)
+    view = run.wait_for(lambda: run.sel()["view"] != before and run.sel()["view"], "the view to move to the frame")
+    span = view[1] - view[0]
+    shortest, longest = frames["min_ns"] / 0.9, frames["max_ns"] / 0.9
+    check(shortest * 0.999 <= span <= longest * 1.001,
+          f"the window is {span} ns, not a frame of {frames['min_ns']}..{frames['max_ns']} ns over 0.9")
+    check(run.rect("frames") == strip, f"the strip moved with the zoom: {strip} -> {run.rect('frames')}")
+    run.shot("52-frame-clicked", settle=1.0)
+
+    # The timeline's window is drawn on the strip. Its handles move one edge
+    # each, and a drag of the window itself pans; each by exactly what the
+    # pointer travelled, in the strip's scale (the whole capture across it).
+    content = run.sel()["content"]
+    per_px = (content[1] - content[0]) / strip[2]
+
+    def drag(from_x, by):
+        y = strip[1] + strip[3] * 0.5
+        mouse = lambda kind, x, **more: run.chrome.call(
+            "Input.dispatchMouseEvent", type=kind, x=x, y=y, **more)
+        mouse("mouseMoved", from_x)
+        mouse("mousePressed", from_x, button="left", buttons=1, clickCount=1)
+        for step in range(1, 11):
+            mouse("mouseMoved", from_x + by * step / 10, button="left", buttons=1)
+            time.sleep(0.04)
+        mouse("mouseReleased", from_x + by, button="left", buttons=0, clickCount=1)
+        time.sleep(0.5)
+        return run.sel()["view"]
+
+    def near(got, want, what):
+        # A pixel of the strip either way: the pointer's position is whole pixels.
+        check(abs(got - want) <= per_px * 1.5, f"{what}: {got}, expected {want} within {per_px * 1.5:.0f} ns")
+
+    wx, wy, ww, wh = run.rect("frames:window")
+    check(ww >= 9, f"the window of one frame is drawn wide enough to take hold of: {ww} px")
+    grown = drag(wx + ww, 300)
+    near(grown[0], view[0], "the right handle moved the left edge")
+    near(grown[1], view[1] + 300 * per_px, "the right handle's edge after 300 px")
+    wx, wy, ww, wh = run.rect("frames:window")
+    panned = drag(wx + ww * 0.5, -200)
+    near(panned[0], grown[0] - 200 * per_px, "the window's start after a drag of -200 px")
+    near(panned[1] - panned[0], grown[1] - grown[0], "the window's length after a pan")
+    wx, wy, ww, wh = run.rect("frames:window")
+    widened = drag(wx, -100)
+    near(widened[1], panned[1], "the left handle moved the right edge")
+    near(widened[0], panned[0] - 100 * per_px, "the left handle's edge after -100 px")
+    run.chrome.move(wx - 100 + ww * 0.5, strip[1] + strip[3] * 0.5)
+    run.shot("53-frame-window", settle=0.8)
+
+    # A right-drag measures, on the strip as on the ruler and the tracks, and
+    # the selection is one column from the ruler down, across the strip. A
+    # span narrower than its own label has the label beside its arrows.
+    def right_drag(x0, x1, y):
+        mouse = lambda kind, x, **more: run.chrome.call(
+            "Input.dispatchMouseEvent", type=kind, x=x, y=y, **more)
+        mouse("mouseMoved", x0)
+        mouse("mousePressed", x0, button="right", buttons=2, clickCount=1)
+        for step in range(1, 9):
+            mouse("mouseMoved", x0 + (x1 - x0) * step / 8, button="right", buttons=2)
+            time.sleep(0.04)
+        mouse("mouseReleased", x1, button="right", buttons=0, clickCount=1)
+        time.sleep(0.5)
+
+    view = run.sel()["view"]
+    mid = strip[0] + strip[2] * 0.5
+    right_drag(mid, mid + 240, strip[1] + strip[3] * 0.5)
+    # A finished drag is a range of the selection.
+    measured = run.wait_for(lambda: run.sel().get("ranges"), "a range from a right-drag on the frame strip")
+    check(len(measured) == 1, f"one range: {measured}")
+    check(run.sel()["view"] == view, "a right-drag on the strip moved the view")
+    run.shot("54-measure-over-frames", settle=0.6)
+    right_drag(mid, mid + 24, strip[1] + strip[3] + 200)
+    run.wait_for(lambda: run.sel().get("ranges") not in (None, [], measured), "a second, narrow range")
+    run.shot("55-measure-narrow", settle=0.6)
+    return (f"{frames['count']} frames, {frames['avg_ns'] / 1e6:.2f} ms; a click shows {span * 0.9 / 1e6:.2f} ms "
+            f"of {span / 1e6:.2f}; the window dragged to {(widened[1] - widened[0]) / 1e6:.0f} ms")
+
+
 @scenario("track-move", "Graph and async tracks move on their own, into another process, and come home")
 def track_move(run):
     """A thread's graphs and its async block are tracks of their own -- rows

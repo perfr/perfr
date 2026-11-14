@@ -33,7 +33,7 @@ These keys do nothing while a text field has focus, except **Escape**, which cle
 | Click a thread header | Focus that thread. Click it again to release. Other threads’ scheduler slices go grey, and a chip above the timeline names the thread |
 | Click a sample tick | Copy that sample’s call stack to the clipboard, leaf first |
 | Left-drag on a thread’s sample bar | Select that thread’s samples. The report recomputes for them |
-| Right-drag anywhere | Select every thread’s samples in that range (ruler, bar, or empty space) |
+| Right-drag anywhere | Select every thread’s samples in that range (ruler, frame strip, bar, or empty space). The span’s length is written between two arrows under the ruler; when the span is narrower than that text, the arrows stand outside it pointing in and the text goes beside them |
 | Shift+drag | Add to the sample selection |
 | Ctrl+drag or ⌘+drag | Draw a rectangle over scopes. On release the scopes inside are summarised and copied to the clipboard. The per-function summary covers all of them; the individual list stops at 500 and says how many more there were |
 | Right-click a scope | Menu: **Sampling report for this scope**, **Highlight every instance** |
@@ -41,6 +41,26 @@ These keys do nothing while a text field has focus, except **Escape**, which cle
 Ctrl+drag does not zoom. The old note that said it did was wrong.
 
 **Escape** clears the scope search, a Live-row highlight, the selection, and a rectangle drag, all at once.
+
+## Frames
+
+A program that marks its frames (`perfr_frame_mark`, see [Instrument your code](index.html#instrument-your-code)) gets a strip under the ruler: one bar per frame, as tall as the frame was long. The strip always shows the whole capture. It does not zoom or pan with the timeline. The time the timeline is showing is a window on the strip, lit while the rest steps back, with a handle on each edge.
+
+| Gesture | Result |
+|---|---|
+| Hover a bar | Its frame time, the rate that comes to, and its ratio to the median frame |
+| Click a bar | The timeline jumps to that frame, centred, filling 90% of the width |
+| Drag the window | Pan the timeline. The window keeps its length and stops at the capture's ends |
+| Drag a handle | Move that edge of the timeline's window; the other edge stays. Out to grow it, in to shrink it |
+| Drag from outside the window | The window comes to the pointer, by its middle, and follows it |
+| Click the label beside the strip | The next series of frames, when the capture has more than one |
+| Right-drag | Measure, as on the ruler and the tracks, in the timeline's scale and not the strip's. The selection is one column from the ruler down, across the strip |
+
+The window is never drawn narrower than ten pixels, so that zoomed in to one frame of a long capture it can still be seen and taken hold of; a drag moves the timeline by what the pointer travelled all the same.
+
+A bar is drawn against the median frame of its series: the accent colour up to 1.5 medians, amber up to 2.5, red past that. The strip is three medians tall, so one long hitch does not flatten every other bar. Where several frames share a pixel the bar is the longest of them, and a click there goes to that one. The label beside the strip names the series and its median frame.
+
+Behind the tracks of the process that marked the frames, every other frame is a little darker, so where a frame ends can be read off any of its threads. The scheduler and every other process keep their plain ground: the frames are not theirs. When several processes in a capture mark frames, each has its own bands behind its own tracks, and the strip shows the series of the process the capture is of. The bands fade out once frames are only a few pixels wide.
 
 ## Scope search
 

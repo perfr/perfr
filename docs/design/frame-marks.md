@@ -75,7 +75,7 @@ reader does not know.
 A frame is not a row of the timeline. Its lane (one per series, keyed like a
 value's by the series name) stays in the index and is left out of the track
 catalogue and of the level-of-detail decision. It is drawn twice
-(`perfr-live-viewer/src/frame_marks.rs`):
+(`perfr-viewer/src/frame_marks.rs`):
 
 - **The strip** under the ruler: one bar per frame, as tall as the frame was
   long, across the whole capture whatever the timeline is zoomed to. Where

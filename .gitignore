@@ -13,8 +13,9 @@ __pycache__
 # Cargo build output
 target/
 
-# The viewer's own pack (crates/perfr-viewer/build_wasm.sh).
-# The service embeds crates/perfr-client/viewer-dist, which stays committed.
+# The viewer's pack (crates/perfr-viewer/build_wasm.sh), built where it is
+# hosted. The service embeds crates/perfr-client/viewer-dist, which stays
+# committed.
 /crates/perfr-viewer/viewer-dist/
 
 # The in-page package's installed toolchain. dist/ and pkg/ are generated and committed.

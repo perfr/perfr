@@ -7,7 +7,7 @@
 use std::io::Read;
 use std::time::Instant;
 
-use perfr_client::tracks::{RowId, TrackStrip};
+use perfr_viewer::tracks::{RowId, TrackStrip};
 use perfr_live_chrome::{
     ChromeIngestor, ChromeStream, TID_ASYNC_BASE, TID_COUNTER_BASE, TID_OBJECT_BASE,
 };

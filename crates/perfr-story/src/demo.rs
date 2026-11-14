@@ -187,13 +187,18 @@ mod tests {
         assert!(again.summary.contains("do not state"));
     }
 
+    /// Both packs serve the demo story as a file: the client's, committed
+    /// with the rest of its pack, and the viewer's, copied into its pack
+    /// from `web/` when it is built.
     #[test]
-    fn served_file_matches_the_demo() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../perfr-client/viewer-dist/stories/box3d.perfr.story"
-        );
-        let disk = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-        assert_eq!(disk, demo_box3d_json());
+    fn served_files_match_the_demo() {
+        for served in [
+            "/../perfr-client/viewer-dist/stories/box3d.perfr.story",
+            "/../perfr-viewer/web/stories/box3d.perfr.story",
+        ] {
+            let path = format!("{}{served}", env!("CARGO_MANIFEST_DIR"));
+            let disk = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+            assert_eq!(disk, demo_box3d_json(), "{path}");
+        }
     }
 }

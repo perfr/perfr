@@ -12,9 +12,14 @@ use super::*;
 use eframe::egui::{Event, Modifiers, RawInput};
 use perfr_live_protocol::encode_frame;
 
-/// The app as a page with a service would build it.
+/// The app as a page with a service builds it: `perfr-client`'s.
 pub(super) fn app() -> PerfrLiveApp {
-    PerfrLiveApp::new(&eframe::CreationContext::_new_kittest(egui::Context::default()))
+    PerfrLiveApp::new(&eframe::CreationContext::_new_kittest(egui::Context::default()), Host::with_service())
+}
+
+/// The app as the viewer's own page builds it: no service, no sharing.
+pub(super) fn viewer_app() -> PerfrLiveApp {
+    PerfrLiveApp::new(&eframe::CreationContext::_new_kittest(egui::Context::default()), Host::viewer())
 }
 
 /// The app as the static site builds it: opened on `?capture=<url>`.
@@ -44,8 +49,17 @@ impl Page {
 
     /// `setup` runs before the first frame.
     pub fn with(setup: impl FnOnce(&mut PerfrLiveApp)) -> Self {
+        Self::on(Host::with_service(), setup)
+    }
+
+    /// The viewer's own page: no service behind it.
+    pub fn viewer() -> Self {
+        Self::on(Host::viewer(), |_| {})
+    }
+
+    fn on(host: Host, setup: impl FnOnce(&mut PerfrLiveApp)) -> Self {
         let ctx = egui::Context::default();
-        let mut app = PerfrLiveApp::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        let mut app = PerfrLiveApp::new(&eframe::CreationContext::_new_kittest(ctx.clone()), host);
         setup(&mut app);
         Page {
             app,
@@ -1970,7 +1984,7 @@ fn the_level_of_detail_is_decided_once_for_a_view_that_holds_still() {
 /// each kind of input, at three zoom levels. The capture is a `.perfr.stream`
 /// named by `PERFR_PROBE_STREAM`; `PERFR_PROBE_ONLY=<scenario>` with
 /// `PERFR_PROBE_SECONDS=<n>` loops one scenario for a sampler to look at.
-/// `cargo test --release -p perfr-client --lib -- --ignored --nocapture render_frame_times`.
+/// `cargo test --release -p perfr-viewer --lib -- --ignored --nocapture render_frame_times`.
 #[test]
 #[ignore]
 fn render_frame_times() {
@@ -2249,4 +2263,128 @@ fn a_selected_scope_that_shares_its_columns_instance_is_drawn_selected_on_its_ow
     // And it stays the one: a frame later it is not added again.
     page.frame(vec![]);
     assert_eq!(page.app.last_instances.iter().filter(|i| pick.matches_instance(i)).count(), 1);
+}
+
+// The viewer's own page: `Host::viewer()`, no service behind it and no
+// sharing. `perfr-client` is the same page over a host that has both.
+
+/// The viewer's page with a capture the reader opened.
+fn loaded_viewer_app() -> PerfrLiveApp {
+    let mut app = viewer_app();
+    app.accept_stream(capture_stream(
+        status_frame(false, false),
+        vec![scope(100, 101, 5_000_000_000, 1_000_000, 7), scope(100, 101, 6_000_000_000, 1_000_000, 7)],
+    ));
+    app
+}
+
+#[test]
+fn the_viewers_page_has_no_service_and_does_not_share() {
+    let viewer = loaded_viewer_app();
+    assert!(viewer.index.event_count() > 0, "the capture it was given is on screen");
+    assert!(!viewer.has_service());
+    assert!(!viewer.can_share());
+    assert!(viewer.share_state().is_none(), "no Share button anywhere");
+    // The same capture on the client's page.
+    let mut client = app();
+    client.accept_stream(capture_stream(status_frame(false, false), vec![scope(100, 101, 5_000_000_000, 1_000_000, 7)]));
+    assert!(client.has_service());
+    assert!(client.can_share());
+}
+
+#[test]
+fn the_viewers_page_does_not_start_a_capture() {
+    for start in [PerfrLiveApp::start_record, PerfrLiveApp::start_demo_path, PerfrLiveApp::start_bench] {
+        let mut app = loaded_viewer_app();
+        let view = (app.t0, app.t1);
+        start(&mut app);
+        assert!(!app.recording, "nothing answers a start, so nothing ever ends it");
+        assert_eq!((app.t0, app.t1), view);
+        assert!(!app.wants_live_repaint());
+    }
+}
+
+#[test]
+fn the_viewers_bar_opens_files_and_has_nothing_to_record() {
+    let mut page = Page::viewer();
+    page.frames(3);
+    assert!(page.shows("Open"), "a page with nothing loaded offers to open a file: {:?}", page.texts);
+    assert!(page.shows("No capture"), "{:?}", page.texts);
+    assert!(!page.texts.iter().any(|t| t.contains("Record") || t.contains("process")), "{:?}", page.texts);
+    assert!(page.rect_of("Record").is_none(), "{:?}", page.labels());
+    assert!(page.rect_of("Share").is_none(), "{:?}", page.labels());
+    let more = page.rect_of("More").expect("the bar keeps More");
+    page.click(more.center());
+    page.frames(2);
+    let labels = page.labels();
+    assert!(labels.iter().any(|l| l == "Report"), "the More menu is open: {labels:?}");
+    for absent in ["Presets", "Benchmark", "Share"] {
+        assert!(!labels.iter().any(|l| l == absent), "{absent} is offered with no service: {labels:?}");
+    }
+    assert!(!page.shows("Demo"), "{:?}", page.texts);
+    // The client's bar, for contrast, records.
+    let mut client = Page::new();
+    client.frames(3);
+    assert!(client.rect_of("Record").is_some(), "{:?}", client.labels());
+}
+
+#[test]
+fn a_viewer_opened_on_a_capture_address_shows_that_capture_and_no_open_button() {
+    let mut page = Page::viewer();
+    page.app.static_capture = Some("capture.perfr.stream".into());
+    page.frames(3);
+    assert!(!page.shows("Open"), "{:?}", page.texts);
+    assert!(page.rect_of("Record").is_none());
+}
+
+#[test]
+fn the_viewers_report_has_no_functions_tab() {
+    let open_report = |page: &mut Page| {
+        page.app.report_open = true;
+        page.app.report_collapsed = false;
+        page.frames(3);
+    };
+    let mut viewer = Page::viewer();
+    viewer.app.accept_stream(capture_stream(status_frame(false, false), vec![scope(100, 101, 5_000_000_000, 1_000_000, 7)]));
+    open_report(&mut viewer);
+    assert!(viewer.shows("Flat"), "the report is open: {:?}", viewer.texts);
+    assert!(!viewer.shows("Functions"), "Functions lists what a service indexed: {:?}", viewer.texts);
+    let mut client = Page::new();
+    open_report(&mut client);
+    assert!(client.shows("Functions"), "{:?}", client.texts);
+}
+
+#[test]
+fn the_viewers_inspector_has_no_process_ring_or_service_status() {
+    let inspect = |page: &mut Page| {
+        page.app.open_right_tab(ReportTab::Inspector);
+        page.frames(3);
+    };
+    let mut viewer = Page::viewer();
+    inspect(&mut viewer);
+    assert!(viewer.shows("VIEWER"), "the inspector is open: {:?}", viewer.texts);
+    for absent in ["PROCESS", "RING / SPILL", "Waiting for /api/status…"] {
+        assert!(!viewer.shows(absent), "{absent} is shown with no service");
+    }
+    let mut client = Page::new();
+    inspect(&mut client);
+    for present in ["PROCESS", "RING / SPILL", "Waiting for /api/status…"] {
+        assert!(client.shows(present), "{present} is missing from the client: {:?}", client.texts);
+    }
+}
+
+#[test]
+fn the_viewer_says_why_it_cannot_open_a_capture_bundle() {
+    let mut page = Page::viewer();
+    page.drop_file("capture.perfr.zip", b"PK\x03\x04");
+    assert!(page.app.error.contains("opened by the perfr service"), "{:?}", page.app.error);
+    assert!(!page.app.import_pending, "nothing will ever answer the import");
+    // A stream file is the viewer's own to open.
+    let mut page = Page::viewer();
+    page.drop_file(
+        "capture.perfr.stream",
+        &capture_stream(status_frame(false, false), vec![scope(100, 101, 5_000_000_000, 1_000_000, 7)]),
+    );
+    assert!(page.app.error.is_empty(), "{:?}", page.app.error);
+    assert!(page.app.index.event_count() > 0);
 }

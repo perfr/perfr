@@ -77,7 +77,9 @@ mod wasm {
 
     impl log::Log for ViewerLogger {
         fn enabled(&self, metadata: &log::Metadata) -> bool {
-            let floor = if metadata.target().starts_with("perfr_live") {
+            // This page's own crates: perfr_viewer, perfr_client and the
+            // perfr_live_* ones under them.
+            let floor = if metadata.target().starts_with("perfr_") {
                 log::Level::Info
             } else {
                 log::Level::Warn
@@ -138,13 +140,13 @@ mod wasm {
             *page = format!("{:04x}", (js_sys::Math::random() * 65_536.0) as u32);
         }
         std::panic::set_hook(Box::new(|info| {
-            log::error!(target: "perfr_client", "panic: {info}");
+            log::error!(target: "perfr_viewer", "panic: {info}");
             flush_inner(true);
             console_error_panic_hook::hook(info);
         }));
     }
 
-    /// Whether there is a service to send to. Off until `Net::connect`.
+    /// Whether there is a service to send to. Off until a backend that has one says so.
     pub fn set_relay(enabled: bool) {
         RELAY.store(enabled, Ordering::Relaxed);
     }
@@ -170,7 +172,7 @@ mod wasm {
         if queue.dropped > 0 {
             let note = format!("{} viewer log line(s) dropped before this batch", queue.dropped);
             queue.dropped = 0;
-            queue.lines.push(Line { t_ms: now as u64, level: "warn", target: "perfr_client".into(), message: note });
+            queue.lines.push(Line { t_ms: now as u64, level: "warn", target: "perfr_viewer".into(), message: note });
         }
         let page = PAGE.try_lock().map(|p| p.clone()).unwrap_or_default();
         let Ok(body) = serde_json::to_string(&Batch { page: &page, lines: &queue.lines }) else {

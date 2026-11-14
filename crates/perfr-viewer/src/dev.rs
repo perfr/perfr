@@ -4,11 +4,12 @@
 
 //! RAII self-profile scopes. No timers or allocations when disabled.
 //!
-//! URL parameters stay in `perfr-client`. That crate re-exports this
-//! module together with them, which is how `app.rs` still names both through
-//! `crate::dev`.
+//! The parameters the page reads from its own URL (`url_params`) are
+//! re-exported here, which is how `app.rs` names both through `crate::dev`.
 
 use std::cell::RefCell;
+
+pub use crate::url_params::*;
 
 use perfr_live_event::dev::{RelScope, VIEWER_PID};
 

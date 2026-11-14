@@ -2,21 +2,20 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# The viewer: opens a `.perfr.stream` and draws it. No capture service, no
-# live connection, no import.
+# The viewer: the page that shows a capture. The timeline, the track rail,
+# the reports, search, stories and the import of Chrome and Perfetto traces
+# are all here, and so is the page built from them (`build_wasm.sh`), which
+# opens a capture file and has no service behind it.
 #
-# Two things are built from this crate:
-#
-# * Its own page, the `page` feature (on by default): `build_wasm.sh` makes
-#   the wasm pack another page can embed.
-# * `perfr-client`, the page the service serves, which adds its client and the
-#   rest of the product on top. It depends on this crate with `page` off, so
-#   the pack the service embeds carries none of this crate's page.
+# `perfr-client` is the layer on top: the connection to the capture service,
+# and with it capture control and sharing. It builds on this crate with the
+# `page` feature off, so its pack has the viewer's interface and not the
+# viewer's entry point.
 #
 # Path dependencies are an allow-list (.github/scripts/check-viewer-boundary.py):
-# the event format, the stream framing, and the rasterizer. Nothing from the
-# capture service, eBPF, language bindings, or the live server. Those crates
-# depend on this format; this crate does not depend on them.
+# the event format, the stream framing, the rasterizer, the trace importers,
+# the story document and the build stamp. Nothing from the capture service,
+# eBPF, language bindings, or the live server.
 [package]
 name = "perfr-viewer"
 version = "0.1.1"
@@ -24,7 +23,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Viewer for a .perfr.stream: WebGPU timeline, stream parser and a page to embed, with no capture-pipeline dependencies"
+description = "The perfr viewer: the page that shows a capture, with no capture service behind it"
 
 [lints]
 workspace = true
@@ -33,60 +32,84 @@ workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["egui", "page"]
-# The timeline renderer and the theme. Off, the crate is the stream parser
-# and the track model alone.
-egui = ["dep:egui", "dep:egui-wgpu"]
-# The viewer's own page (`src/page.rs`) and its wasm entry point. Everything
-# it needs beyond the library is listed here, so a dependent that turns it
-# off (`perfr-client`) links none of it.
-page = [
-    "egui",
-    "dep:eframe",
-    "dep:wasm-bindgen",
-    "dep:js-sys",
-    "dep:wasm-bindgen-futures",
-    "dep:console_error_panic_hook",
-    "dep:wgpu",
-    "web-sys/HtmlCanvasElement",
-    "web-sys/Location",
-    "web-sys/Response",
-]
-# GLES backend for the page. With it the page falls back to WebGL when the
-# browser has no WebGPU adapter, and `?webgl` asks for it. Off in the default
-# pack, where it costs about 1.9 MB of wasm; `./build_wasm.sh --features
-# webgl` turns it on.
-webgl = ["page", "wgpu/webgl"]
-# egui's four default fonts in place of the page's Latin subset of Hack, for
-# captures whose thread and process names are not Latin-1 (Cyrillic, Greek,
-# symbols). About 1.4 MB of wasm; `./build_wasm.sh --features full-fonts`.
-full-fonts = ["page", "egui/default_fonts"]
+default = ["page"]
+# The viewer's own wasm entry point (`start_viewer`). `perfr-client` turns it
+# off: its pack starts from its own entry point, and an entry point compiled
+# in is exported from whatever links it.
+page = []
+# Nightly + atomics + build-std. `build_wasm.sh` enables this. Plain
+# `cargo build --target wasm32-unknown-unknown` stays sequential so CI
+# does not need a rebuilt std.
+wasm-threads = ["perfr-live-render/parallel", "dep:wasm-bindgen-rayon"]
 
 [dependencies]
+perfr-build-info = { path = "../perfr-build-info" }
 perfr-live-event = { path = "../perfr-live-event" }
+perfr-story = { path = "../perfr-story" }
+perfr-live-chrome = { path = "../perfr-live-chrome" }
 perfr-live-protocol = { path = "../perfr-live-protocol" }
 perfr-live-render = { path = "../perfr-live-render" }
-# default-features off so the viewer's pack does not embed egui's four fonts:
-# the page installs its own Latin subset. `perfr-client` depends on egui with
-# its defaults.
-egui = { version = "0.32.3", default-features = false, optional = true }
-egui-wgpu = { version = "0.32.3", optional = true }
+wasm-bindgen = "=0.2.100"
+js-sys = "=0.3.77"
+console_error_panic_hook = "0.1"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Optional: only compiled when `--features wasm-threads` (wasm pack).
+# no-bundler: viewer-dist is served as raw ES modules (no webpack/vite).
+wasm-bindgen-rayon = { version = "1.3.0", features = ["no-bundler"], optional = true }
+# eframe 0.32 (MSRV 1.85, wgpu 25). This workspace pins rustc 1.88.
+eframe = { version = "0.32.3", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+egui = "0.32.3"
+egui-wgpu = "0.32.3"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "BinaryType",
+    "Blob",
+    "console",
+    "DataTransfer",
+    "Document",
+    "DragEvent",
+    "Element",
+    "Event",
+    "File",
+    "FileList",
+    "Headers",
+    "HtmlCanvasElement",
+    "HtmlInputElement",
+    "Location",
+    "MessageEvent",
+    "Navigator",
+    "Performance",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "ProgressEvent",
+    "RequestCredentials",
+    "RequestInit",
+    "RequestMode",
+    "RequestRedirect",
+    "Response",
+    "Storage",
+    "StorageEvent",
+    "WebSocket",
+    "XmlHttpRequest",
+    "XmlHttpRequestEventTarget",
+    "XmlHttpRequestUpload",
+    "Window",
+    "VisualViewport",
+    "CssStyleDeclaration",
+    "HtmlElement",
+    "HtmlDocument",
+]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 perfr-live-render = { path = "../perfr-live-render", features = ["parallel"] }
-eframe = { version = "0.32.3", default-features = false, features = ["wgpu", "wayland", "x11"], optional = true }
+rfd = "0.15"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-eframe = { version = "0.32.3", default-features = false, features = ["wgpu"], optional = true }
-wasm-bindgen = { version = "=0.2.100", optional = true }
-js-sys = { version = "=0.3.77", optional = true }
-wasm-bindgen-futures = { version = "=0.4.50", optional = true }
-console_error_panic_hook = { version = "0.1", optional = true }
-# WebGPU, not WebGL. `webgl` above adds the GLES backend.
-wgpu = { version = "25", default-features = false, features = ["webgpu", "wgsl"], optional = true }
-
-# `Performance` and `Window` are the frame clock in `dev.rs` when no shared
-# clock hook is installed. `page` adds what the page itself calls.
-[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
-version = "0.3"
-features = ["Performance", "Window"]
+perfr-live-render = { path = "../perfr-live-render" }
+wasm-bindgen-futures = "=0.4.50"
+# WebGPU first, WebGL fallback (egui-wgpu default).
+wgpu = { version = "25", default-features = false, features = ["webgpu", "webgl", "wgsl"] }

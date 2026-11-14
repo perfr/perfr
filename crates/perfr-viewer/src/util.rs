@@ -22,9 +22,7 @@ pub fn percent_encode(s: &str) -> String {
     out
 }
 
-// One copy, in `perfr-viewer`: the viewer's page decodes its `?capture=`
-// with the same function.
-pub use perfr_viewer::url::percent_decode;
+pub use crate::url::percent_decode;
 
 /// A size in decimal units: `12.4 MB` is 12.4 million bytes. Under 1000
 /// bytes the unit is `B` with no decimal.

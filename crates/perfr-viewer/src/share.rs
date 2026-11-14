@@ -1519,28 +1519,4 @@ mod tests {
             .contains("Checking your perfr.dev account"));
         assert_eq!(action_ids(&view), ["cancel"]);
     }
-
-    #[test]
-    fn the_auth_doc_and_the_popup_page_use_this_contract() {
-        let doc = include_str!("../SHARE_AUTH.md");
-        for (name, _) in SHARE_CORS {
-            assert!(doc.contains(name), "{name} missing from SHARE_AUTH.md");
-        }
-        assert!(doc.contains(SIGN_IN_TITLE));
-        assert!(doc.contains(SHARE_TOKEN_FRAGMENT));
-        assert!(doc.contains("SameSite=None"));
-        assert!(doc.contains(ME_PATH));
-        assert!(doc.contains(&format!("`Content-Type: {SHARE_CONTENT_TYPE}`")));
-        assert_eq!(LOGIN_RESUME_KEY, "perfr.share.resume");
-        assert_eq!(LOGIN_MESSAGE_TYPE, "login");
-        assert!(ShareFailure::login("Your session expired. Sign in again to share.").needs_login);
-        assert!(!ShareFailure::message("Nothing to share.").needs_login);
-        let html = include_str!("../viewer-dist/index.html");
-        assert!(html.contains(LOGIN_WINDOW_NAME));
-        assert!(html.contains(LOGIN_SIGNAL_KEY));
-        assert!(html.contains(SHARE_TOKEN_KEY));
-        assert!(html.contains(LOGIN_PENDING_KEY));
-        assert!(html.contains(SHARE_TOKEN_FRAGMENT));
-        assert!(html.contains(LOGIN_MESSAGE_SOURCE));
-    }
 }

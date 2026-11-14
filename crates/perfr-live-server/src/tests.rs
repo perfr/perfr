@@ -1112,8 +1112,11 @@ impl Viewer {
     fn connect_with(addr: std::net::SocketAddr, prepare: impl FnOnce(&std::net::TcpStream)) -> Viewer {
         let stream = std::net::TcpStream::connect(addr).unwrap();
         prepare(&stream);
-        stream.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
-        let (ws, _) = tokio_tungstenite::tungstenite::client(format!("ws://{addr}/ws"), stream).expect("the handshake");
+        // The short timeout is for the poll below, not the handshake. With it
+        // already set, a server busy sending another viewer's snapshot makes
+        // this read time out and tungstenite reports the handshake interrupted.
+        let (mut ws, _) = tokio_tungstenite::tungstenite::client(format!("ws://{addr}/ws"), stream).expect("the handshake");
+        ws.get_mut().set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
         Viewer { ws, events: Vec::new(), names: Default::default(), hellos: 0, finished: 0, statuses: 0, messages: 0 }
     }
 

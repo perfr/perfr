@@ -992,6 +992,53 @@ fn the_tree_tab_walks_what_is_expanded_in_sorted_order() {
     assert_eq!(tree_rows(&page)[0], "Thread 2");
 }
 
+#[test]
+fn a_tree_node_folds_on_its_triangle_or_a_ctrl_click_and_not_on_a_click_on_its_name() {
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.apply_service_reports(None, Some(small_tree()));
+        app.open_right_tab(ReportTab::TopDown);
+    });
+    page.frames(2);
+    let open = ["Thread 1", "  main", "    work", "      leaf_a", "Thread 2", "  main", "    idle"];
+    let folded = ["Thread 1", "  main", "    work", "Thread 2", "  main", "    idle"];
+    assert_eq!(tree_rows(&page), open);
+    let name = |page: &Page| page.rect_of("tree:work").expect("the node's name is in the readout").center();
+    let triangle = |page: &Page| page.rect_of("chevron:work").expect("and so is its triangle").center();
+
+    // A click on the name is not a click on the tree.
+    let at = name(&page);
+    page.click(at);
+    assert_eq!(tree_rows(&page), open, "a click on a name folded its node");
+
+    // The triangle folds the node, and opens it again.
+    let at = triangle(&page);
+    page.click(at);
+    assert_eq!(tree_rows(&page), folded);
+    let at = name(&page);
+    page.click(at);
+    assert_eq!(tree_rows(&page), folded, "a click on a name opened its node");
+    let at = triangle(&page);
+    page.click(at);
+    assert_eq!(tree_rows(&page), open);
+
+    // So does the name with Ctrl held.
+    let ctrl_click = |page: &mut Page| {
+        let at = name(page);
+        page.frame_with(vec![Event::PointerMoved(at)], Modifiers::CTRL);
+        page.frame_with(vec![pointer_button(at, true)], Modifiers::CTRL);
+        page.frame_with(vec![pointer_button(at, false)], Modifiers::CTRL);
+        page.frame(Vec::new());
+    };
+    ctrl_click(&mut page);
+    assert_eq!(tree_rows(&page), folded);
+    ctrl_click(&mut page);
+    assert_eq!(tree_rows(&page), open);
+
+    // A leaf has no triangle to click.
+    assert!(page.rect_of("chevron:leaf_a").is_none());
+}
+
 /// A connected page with the Inspector tab open and the service's ring
 /// size in its box.
 fn inspector_page() -> Page {

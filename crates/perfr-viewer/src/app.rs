@@ -9956,8 +9956,12 @@ impl PerfrLiveApp {
     }
 
     /// One row per node, indented by depth, with a click target on the
-    /// expander. Rendered from a clone so the expansion set stays mutable
-    /// while the tree is read.
+    /// expander. A node opens or folds on its triangle, or on its name with
+    /// Ctrl held; a plain click on the name leaves the tree as it is, since
+    /// that is also where a row is right-clicked, hovered and dragged from,
+    /// and a tree that moved under each of those lost the reader's place.
+    /// Rendered from a clone so the expansion set stays mutable while the
+    /// tree is read.
     fn call_tree_rows(&mut self, ui: &mut Ui) {
         let Some(tree) = self.tree.clone() else {
             ui.label(RichText::new("No call tree yet.").color(theme::MUTED()).size(self.ui_tweaks.report_font));
@@ -10064,7 +10068,11 @@ impl PerfrLiveApp {
                         ui.add_space(depth as f32 * self.ui_tweaks.report_indent);
                         // A painted triangle, not a glyph: the font atlas has
                         // no chevron and renders one as a replacement box.
-                        toggle |= inline_chevron(ui, expandable.then_some(expanded));
+                        let (chevron, chevron_clicked) = inline_chevron(ui, expandable.then_some(expanded));
+                        if expandable {
+                            note_ui_rect_fmt(format_args!("chevron:{}", node.name), chevron);
+                        }
+                        toggle |= chevron_clicked;
                         // A hooked function reads in blue in every report, the
                         // way the flat report already marks it.
                         let name_color = if is_thread {
@@ -10087,9 +10095,8 @@ impl PerfrLiveApp {
                         } else {
                             node.name.clone()
                         });
-                        if expandable && label.clicked() {
-                            toggle = true;
-                        }
+                        let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+                        toggle |= expandable && name_click_toggles(label.clicked(), ctrl);
                         if !is_thread {
                             note_ui_rect(&format!("tree:{}", node.name), label.rect);
                             if let Some(action) = hook_menu(self.host.service(), &label, node.function_id, if selected { all_selected_hooked } else { hooked }, if selected { self.report_selection.len() } else { 1 }) {
@@ -13151,9 +13158,10 @@ fn expandable_paths_over(roots: &[crate::net::TreeNodeJson], threshold: f32) -> 
 /// Same reason as [`chevron`]: the WASM font atlas has no glyph for the
 /// triangles, so drawing them as text renders a replacement box. `open` is
 /// `None` for a leaf, which reserves the same width so sibling labels line up.
-fn inline_chevron(ui: &mut Ui, open: Option<bool>) -> bool {
+/// Returns where it is and whether it was clicked.
+fn inline_chevron(ui: &mut Ui, open: Option<bool>) -> (Rect, bool) {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(12.0, 12.0), Sense::click());
-    let Some(open) = open else { return false };
+    let Some(open) = open else { return (rect, false) };
     let c = rect.center();
     let color = if resp.hovered() { theme::TEXT() } else { theme::MUTED() };
     let pts = if open {
@@ -13170,7 +13178,14 @@ fn inline_chevron(ui: &mut Ui, open: Option<bool>) -> bool {
         ]
     };
     ui.painter().add(Shape::convex_polygon(pts, color, Stroke::NONE));
-    resp.clicked()
+    (rect, resp.clicked())
+}
+
+/// Whether a click on a call tree node's name opens or folds it: only with
+/// Ctrl (Cmd on a Mac) held. The triangle beside the name does it on a plain
+/// click.
+fn name_click_toggles(clicked: bool, ctrl: bool) -> bool {
+    clicked && ctrl
 }
 
 /// A percentage as a filled bar with the number drawn on top, the way the Qt

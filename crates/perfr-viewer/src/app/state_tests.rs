@@ -2924,3 +2924,72 @@ fn a_capture_shared_with_deflated_batches_opens_like_any_other() {
     }
     assert!(sizes[1] < sizes[0], "deflated {} packed {}", sizes[1], sizes[0]);
 }
+
+/// Puts the default colour scheme back when a test that switched it ends,
+/// passed or not: the scheme is the process's, and the next test's too.
+struct DefaultSchemeAfter;
+
+impl Drop for DefaultSchemeAfter {
+    fn drop(&mut self) {
+        perfr_live_event::theme::restore_default();
+    }
+}
+
+/// The colours of what the timeline last collected, in order.
+fn instance_colours(page: &Page) -> Vec<u32> {
+    page.app.last_instances.iter().map(|i| i.color).collect()
+}
+
+#[test]
+fn a_new_colour_scheme_is_drawn_at_once_on_a_view_that_holds_still() {
+    let _scheme = crate::theme::scheme_lock();
+    let _restore = DefaultSchemeAfter;
+    // Scopes drawn one by one.
+    let mut page = two_name_page();
+    assert_eq!(page.app.last_lod, perfr_live_render::TimelineLod::Instanced);
+    page.frames(3);
+    assert_eq!(upload_mode_of(&page), "Skip", "a still view is kept");
+    let view = (page.app.t0, page.app.t1);
+    let nord = instance_colours(&page);
+    assert!(!nord.is_empty());
+
+    let ctx = page.ctx.clone();
+    page.app.set_color_scheme("dracula", &ctx);
+    page.frames(1);
+    assert_eq!(upload_mode_of(&page), "Full", "the scheme changed and the timeline was kept as it was");
+    let dracula = instance_colours(&page);
+    assert_eq!(dracula.len(), nord.len());
+    assert_ne!(dracula, nord, "the scopes are still in the old scheme's colours");
+    assert_eq!((page.app.t0, page.app.t1), view, "nothing else moved");
+    // Drawn once: the view is kept again from the next frame.
+    page.frames(2);
+    assert_eq!(upload_mode_of(&page), "Skip");
+    assert_eq!(instance_colours(&page), dracula);
+    // They are the colours a page that started in that scheme collects.
+    let fresh = two_name_page();
+    assert_eq!(instance_colours(&fresh), dracula);
+
+    // And back.
+    page.app.set_color_scheme("nord", &ctx);
+    page.frames(1);
+    assert_eq!(upload_mode_of(&page), "Full");
+    assert_eq!(instance_colours(&page), nord);
+}
+
+#[test]
+fn a_new_colour_scheme_rasterizes_a_zoomed_out_view_again() {
+    let _scheme = crate::theme::scheme_lock();
+    let _restore = DefaultSchemeAfter;
+    let mut page = zoomed_out_page(6, 40_000);
+    page.frames(3);
+    let drawn = page.app.column_rasters;
+    page.frames(3);
+    assert_eq!(page.app.column_rasters, drawn, "a still view is not drawn again");
+
+    let ctx = page.ctx.clone();
+    page.app.set_color_scheme("dracula", &ctx);
+    page.frames(1);
+    assert_eq!(page.app.column_rasters, drawn + 1, "the columns are still the old scheme's");
+    page.frames(3);
+    assert_eq!(page.app.column_rasters, drawn + 1, "and they are drawn once");
+}

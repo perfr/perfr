@@ -933,6 +933,11 @@ pub struct PerfrLiveApp {
     /// frame after growth is the fix, and costs a cached re-list.
     uploaded_prims_max: usize,
     reupload_next_frame: bool,
+    /// The colour scheme this page draws in (`Theme::key`): the one it
+    /// started with, then the last it was switched to. It is the active
+    /// scheme, kept here because that one is the whole process's and the
+    /// timeline's key is this page's.
+    scheme: &'static str,
     /// What the last timeline payload decided, for `window.__perfr_sel`:
     /// a harness can see the LOD, the counts, the dest rect and the upload
     /// mode without reading pixels.
@@ -2106,6 +2111,7 @@ impl PerfrLiveApp {
             settle_frames: 0,
             uploaded_prims_max: 0,
             reupload_next_frame: false,
+            scheme: perfr_live_event::theme::active().key,
             draw_readout: String::new(),
             report_filter: String::new(),
             hook_crash: None,
@@ -4432,19 +4438,15 @@ impl PerfrLiveApp {
     }
 
     /// Switch the colour scheme: set it active, rebuild egui's visuals from
-    /// it, drop the caches that hold baked-in colours, remember the choice,
-    /// and repaint.
+    /// it, remember the choice, and repaint. Each timeline drops what it
+    /// holds in the old colours when it is next drawn: the scheme is part
+    /// of the key it compares (`GpuDirtyKey::scheme`).
     fn set_color_scheme(&mut self, key: &str, ctx: &Context) {
         if !perfr_live_event::theme::set_active_by_key(key) {
             return;
         }
+        self.scheme = perfr_live_event::theme::active().key;
         apply_perfr_visuals(ctx);
-        // Collected instances carry their colour, and lanes are cached across
-        // frames; without this the old palette lingers until each lane next
-        // changes. The pixel-raster path recolours every frame, so it needs no
-        // help.
-        self.listing_cache.clear();
-        self.self_tl.listing_cache.clear();
         save_theme(key);
         self.needs_repaint = true;
     }
@@ -7370,7 +7372,17 @@ impl PerfrLiveApp {
             search: if self.search_active() { self.search_gen } else { 0 },
             thread_sel: self.thread_focus().selected,
             target: self.thread_focus().target_pid,
+            scheme: self.scheme,
         };
+        // The colour scheme changed since this timeline was last drawn. The
+        // key makes it a full upload; but a full upload of an unmoved view
+        // takes last frame's instances and the lanes' cached rows as they
+        // are, and those carry the colours they were collected with.
+        if self.last_dirty.is_some_and(|prev| prev.scheme != next_key.scheme) {
+            self.last_instances.clear();
+            self.last_instanced_window = None;
+            self.listing_cache.clear();
+        }
         if std::mem::take(&mut self.reupload_next_frame) {
             self.last_dirty = None;
         }

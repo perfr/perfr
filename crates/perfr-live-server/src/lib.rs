@@ -1103,18 +1103,28 @@ impl LiveService {
     /// next to the viewer pack and needs no service. With `window`, only the
     /// events overlapping it, kept whole.
     pub fn capture_stream(&self, window: Option<(u64, u64)>) -> Vec<u8> {
+        self.capture_stream_as(window, self.wire())
+    }
+
+    /// [`Self::capture_stream`] with its event batches in `wire`, whatever
+    /// the service sends its viewers. A viewer reads every format, and a
+    /// file may be asked for smaller than the socket's batches are: a
+    /// capture on its way to a website is, deflated.
+    pub fn capture_stream_as(&self, window: Option<(u64, u64)>, wire: WireFormat) -> Vec<u8> {
         // Written straight into the one buffer, sized up front: a full ring
         // is hundreds of megabytes, and a list of frames joined afterwards
-        // was a second copy of all of them.
+        // was a second copy of all of them. The size is the ring's count,
+        // which is in the service's own format: right for that one, and for
+        // another a first guess the buffer grows from or is cut back to.
         let mut out = Vec::with_capacity(match window {
-            None => self.stream_bytes() as usize,
-            Some(_) => 0,
+            None if wire == self.wire() => self.stream_bytes() as usize,
+            None if wire == WireFormat::Deflate => self.stream_bytes() as usize / 2,
+            _ => 0,
         });
         out.extend_from_slice(&self.hello_frame());
         for frame in self.names_and_status_frames() {
             out.extend_from_slice(&frame);
         }
-        let wire = self.wire();
         for chunk in self.snapshot_in(window).chunks(SNAPSHOT_BATCH_EVENTS) {
             out.extend_from_slice(&encode_event_batch_with(chunk, wire));
         }

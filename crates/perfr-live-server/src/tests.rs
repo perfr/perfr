@@ -689,6 +689,70 @@ fn the_size_the_service_reports_is_the_size_of_the_stream_it_writes() {
 }
 
 #[test]
+fn a_stream_can_be_asked_for_in_another_format_than_the_service_sends() {
+    fn events_of(stream: &[u8]) -> Vec<LiveEvent> {
+        let frames = decode_all(stream).expect("the stream decodes");
+        assert!(matches!(frames.first(), Some(LiveFrame::Hello { .. })));
+        assert!(matches!(frames.last(), Some(LiveFrame::CaptureFinished)));
+        frames
+            .into_iter()
+            .flat_map(|frame| match frame {
+                LiveFrame::EventBatch { events } => events,
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+    use crate::WireFormat::{Deflate, Packed, Raw};
+    for served_as in [Packed, Raw, Deflate] {
+        let (svc, served) = serve_with(ServerConfig { ring_buffer_bytes: 64 << 20, wire: served_as, ..ServerConfig::default() });
+        for i in 0..13u32 {
+            svc.intern_id(i, &format!("scope-{i}"));
+        }
+        svc.set_thread_name(1, 100, "main");
+        svc.push_events(&busy(0, 2_048 * 6 + 300));
+        // The status and the length of the reply, which is all a test's
+        // text of a binary body is good for.
+        let export = |query: &str| {
+            let request = format!("GET /api/capture/export?format=stream{query} HTTP/1.1\r\nHost: {}\r\n\r\n", host_of(served.addr));
+            let (status, head, _) = send_raw(served.addr, request.as_bytes());
+            let length = head.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+            });
+            (status, length)
+        };
+        // Asked for nothing, it is what the service counts and reports.
+        let plain = svc.capture_stream(None);
+        assert_eq!(svc.stream_bytes(), plain.len() as u64);
+        assert_eq!(export(""), (200, Some(plain.len())), "{served_as:?}");
+        // Each format by name, whatever the service's own: the same events.
+        let held = events_of(&plain);
+        assert_eq!(held.len(), 2_048 * 6 + 300);
+        let mut sizes = Vec::new();
+        for (name, wire) in [("raw", Raw), ("packed", Packed), ("deflate", Deflate)] {
+            let stream = svc.capture_stream_as(None, wire);
+            assert_eq!(events_of(&stream), held, "{served_as:?} asked for {name}");
+            assert_eq!(export(&format!("&wire={name}")), (200, Some(stream.len())), "{served_as:?} asked for {name}");
+            if wire == served_as {
+                assert_eq!(stream, plain);
+            }
+            sizes.push(stream.len());
+        }
+        // Deflated is the smallest, by a good margin on a capture's mix.
+        assert!(sizes[1] * 2 < sizes[0], "packed {} raw {}", sizes[1], sizes[0]);
+        assert!(sizes[2] * 10 < sizes[1] * 8, "deflate {} packed {}", sizes[2], sizes[1]);
+        // A slice, too.
+        let slice = svc.capture_stream_as(Some((1_000_000, 1_500_000)), Deflate);
+        assert_eq!(export("&wire=deflate&t0=1000000&t1=1500000"), (200, Some(slice.len())));
+        assert!(!events_of(&slice).is_empty() && slice.len() < sizes[2]);
+        // A format there is not is said, not guessed at.
+        assert_eq!(export("&wire=zstd").0, 400);
+        // And asking changes nothing of what the service counts.
+        assert_eq!(svc.stream_bytes(), plain.len() as u64);
+    }
+}
+
+#[test]
 fn a_capture_that_outgrows_the_ring_saves_as_no_more_than_the_ring_size() {
     const BUDGET: u64 = 1 << 20;
     let (svc, served) = serve_with(ServerConfig { ring_buffer_bytes: BUDGET, ..ServerConfig::default() });

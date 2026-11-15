@@ -2894,3 +2894,33 @@ fn a_page_with_no_service_to_ask_keeps_no_room_for_a_capture_size() {
     assert_eq!(service.1, viewer.1);
     assert!(service.0 < viewer.0 - 50.0, "service {service:?}, viewer {viewer:?}");
 }
+
+#[test]
+fn a_capture_shared_with_deflated_batches_opens_like_any_other() {
+    use perfr_live_protocol::{encode_event_batch_with, encode_frame, WireFormat};
+    let events: Vec<LiveEvent> =
+        (0..5_000u64).map(|i| scope(100, 101, 5_000_000_000 + i * 1_000_000, 900_000 + (i * 7919) % 50_000, 7)).collect();
+    let mut sizes = Vec::new();
+    for wire in [WireFormat::Packed, WireFormat::Deflate] {
+        let mut bytes = stream(&[
+            hello(),
+            LiveFrame::InternedString { id: 7, text: "work".into() },
+            LiveFrame::ProcessName { pid: 100, name: "target".into() },
+            LiveFrame::ThreadName { pid: 100, tid: 101, name: "main".into() },
+            status_frame(false, false),
+        ]);
+        for batch in events.chunks(2_048) {
+            bytes.extend_from_slice(&encode_event_batch_with(batch, wire));
+        }
+        bytes.extend_from_slice(&encode_frame(&LiveFrame::CaptureFinished));
+        sizes.push(bytes.len());
+        // The page a share's address opens.
+        let mut app = static_app();
+        app.accept_stream(bytes);
+        assert!(app.error.is_empty(), "{wire:?}: {}", app.error);
+        assert_eq!(app.index.event_count(), 5_000, "{wire:?}");
+        assert_eq!(app.content_span(), Some((5_000_000_000.0, events.last().unwrap().end_ns() as f64)), "{wire:?}");
+        assert!(app.can_share(), "{wire:?}");
+    }
+    assert!(sizes[1] < sizes[0], "deflated {} packed {}", sizes[1], sizes[0]);
+}

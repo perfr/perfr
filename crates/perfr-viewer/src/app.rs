@@ -4781,6 +4781,7 @@ impl PerfrLiveApp {
                 crate::util::fmt_bytes(size.ring_bytes)
             )
         };
+        tip.push_str("\nShare uploads it compressed further, at a little over half of this.");
         if self.eviction.done_ns > self.status.evicted_before_ns {
             tip.push_str(&format!(
                 "\nThis page shows the newest {} events of it, which is what it has memory for. A save holds all of it.",

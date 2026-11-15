@@ -481,6 +481,10 @@ struct ExportQuery {
     format: Option<String>,
     t0: Option<u64>,
     t1: Option<u64>,
+    /// For `format=stream`: how its event batches are written, `raw`,
+    /// `packed` or `deflate`. Without it, as the service sends them to its
+    /// viewers (`--wire`), which is the size `/api/status` reports.
+    wire: Option<String>,
 }
 
 /// The file name a download gets: the format's extension, and `-slice`
@@ -508,9 +512,14 @@ async fn capture_export(
         }
     };
     if format == "stream" {
+        let wire = match q.wire.as_deref().map(perfr_live_protocol::WireFormat::parse) {
+            None => svc.wire(),
+            Some(Some(wire)) => wire,
+            Some(None) => return (StatusCode::BAD_REQUEST, "wire is raw, packed or deflate").into_response(),
+        };
         let filename = export_filename(&format, window.is_some());
         return blocking(move || {
-            let bytes = svc.capture_stream(window);
+            let bytes = svc.capture_stream_as(window, wire);
             (
                 [
                     (header::CONTENT_TYPE, "application/octet-stream"),

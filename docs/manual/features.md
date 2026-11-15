@@ -93,7 +93,10 @@ Left to right, in clusters separated by thin rules. A filled pill is on.
   service counts it as the ring fills (the size of each batch as it is
   written, and the names), so it is the number of bytes
   `/api/capture/export?format=stream` returns, and `/api/status` carries
-  it as `stream_bytes`; the page reads it four times a second. It grows
+  it as `stream_bytes`; the page reads it four times a second. Share
+  uploads less: it asks for the same stream with its batches deflated
+  (`&wire=deflate`), a little over half the size, and its dialog shows
+  the size it will post. It grows
   until it reaches the ring's size and stays there, in the accent colour:
   the ring is full, and the oldest events go as new ones arrive. Shown
   whenever the service holds a capture, running or not; not for a file on
@@ -493,7 +496,10 @@ in the URL opens a tab on load.
   ..., "t1": ...}` to open a file the service can see. Screenshot:
   `17-opened-slice.png`.
 - **Stream export.** `GET /api/capture/export?format=stream` writes the
-  frames a connecting viewer receives as one `.perfr.stream` file. The
+  frames a connecting viewer receives as one `.perfr.stream` file. Its
+  event batches are in the format the service sends its viewers
+  (`--wire`, packed unless set), or the one named by `&wire=raw`,
+  `&wire=packed` or `&wire=deflate`; a viewer reads all three. The
   viewer opens it with `viewer/index.html?capture=<url>` and no service:
   the pills that need a service are hidden and the file name shows next to
   the link dot. Everything else works, the sampling report included: with

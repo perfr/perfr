@@ -2990,6 +2990,7 @@ dependencies = [
  "perfr-live-server",
  "perfr-maps",
  "perfr-object",
+ "perfr-perf-data",
  "perfr-perf-records",
  "perfr-perf-ring",
  "perfr-scope-ring",
@@ -3124,6 +3125,7 @@ version = "0.1.1"
 dependencies = [
  "flate2",
  "perfr-live-event",
+ "perfr-perf-data",
  "serde",
  "serde_json",
 ]
@@ -3198,6 +3200,13 @@ dependencies = [
  "msvc-demangler",
  "object",
  "pdb",
+]
+
+[[package]]
+name = "perfr-perf-data"
+version = "0.1.0"
+dependencies = [
+ "ruzstd",
 ]
 
 [[package]]
@@ -3282,6 +3291,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "epaint_default_fonts",
+ "flate2",
  "js-sys",
  "log",
  "perfr-build-info",
@@ -3289,6 +3299,7 @@ dependencies = [
  "perfr-live-event",
  "perfr-live-protocol",
  "perfr-live-render",
+ "perfr-perf-data",
  "perfr-story",
  "rfd",
  "serde",

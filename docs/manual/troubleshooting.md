@@ -85,6 +85,14 @@ Clear, and opening a `.perfr.zip`, are refused until you stop:
 
 Opening a Chrome or Perfetto trace is different. The viewer stops the capture itself, then replaces the timeline. If a live capture ends the moment you open a `.json` trace, that is this path, not a crash.
 
+## A perf.data shows `module+0x…` instead of function names
+
+A `perf.data` has addresses and no names; whoever opens it reads the names from the binaries. [Linux perf recordings](everywhere.html#linux-perf-recordings) has the whole rule. In short:
+
+- The page has no service behind it, or the service is not on Linux: the page read the file itself, and cannot see the binaries. Open the recording in the page perfr serves on the machine that recorded it.
+- The service did read it, and some frames are still `module+0x…`: the binary is not at the recorded path any more, has been rebuilt since (the build ids differ), or has no symbols. The service log says which: `N files read, N not found, N of another build`. Kernel frames need this machine to be running the kernel that was recorded, and `/proc/kallsyms` to show addresses (`kernel.kptr_restrict = 0`, or run the service with `CAP_SYSLOG`).
+- Frames that are a bare address (`0x7f…`) were in no mapped file: code a JIT wrote, or what a frame-pointer walk makes of a program built without frame pointers. Record with `--call-graph dwarf` for the second.
+
 ## The timeline stays empty
 
 - No process selected, and **CSW** / **States** off, and nothing in the target calling `perfr.h`: there is nothing to draw. Turn on Sample or CSW, or [instrument the code](index.html#instrument-your-code).

@@ -52,7 +52,9 @@ cargo run -p perfr-client --features native --release -- --offline
 
 The executable is `target/release/perfr-client`. `--service` accepts an
 HTTP(S) origin. Open and drag-and-drop accept streams, Chrome/Perfetto traces,
-and stories; with a service connection they also import `.perfr.zip` bundles.
+a Linux `perf.data` and stories; with a service connection they also import
+`.perfr.zip` bundles, and a `perf.data` is opened by the service, which names
+its frames.
 Save opens the service's download URL in the default browser. Sharing/sign-in
 remains in the web client.
 
@@ -154,6 +156,36 @@ Timestamps are microseconds by default (`×1000` → ns). If `displayTimeUnit` i
 hover string keyed by intern id. `systemTraceEvents` is ingested when it is
 an event array or a Linux/Android `tracing_mark_write` string (theverge’s
 field is an empty list).
+
+### Linux perf.data
+
+A `perf.data` (what `perf record` writes; also `perf.data.old`, a name ending
+in `.data`, a pipe's output, a `-z` recording) is sniffed by its first eight
+bytes, `PERFILE2`. `perfr-perf-data` reads it: header, event attributes and
+records, put back in time order (`perf` writes one CPU's ring after another,
+and marks where a pass ends), with the address spaces its `MMAP2`, `COMM` and
+`FORK` records describe.
+
+| In the file | Live viewer |
+| --- | --- |
+| `SAMPLE` | a tick on the thread's sample bar and one sampled frame per level of its call chain |
+| `COMM`, `FORK` | thread and process names |
+| `MMAP`, `MMAP2` | the module each frame is named after |
+| `SWITCH`, `SWITCH_CPU_WIDE` (`--switch-events`) | running and runnable thread states; scheduling slices when the records name the CPU (`-a`) |
+
+The file has addresses and no symbols, so there are two readers:
+
+- The page, when there is no service or the service does not say
+  `perf_data` in `/api/status`. Frames are `module+0xoffset`.
+- The service on Linux (`crates/perfr/src/perf_data.rs`), which the page
+  sends the file to (`POST /api/capture/import`, like a `.perfr.zip`). It
+  names frames from the binaries at the recorded paths when their build id
+  is the recorded one, kernel frames from `/proc/kallsyms` when the kernel
+  is, and unwinds `--call-graph dwarf` stack copies with `perfr-unwind`.
+  The result is a capture: it fills the ring and the sample store, and can
+  be saved as a `.perfr.zip`.
+
+The user-facing account is in the manual, under Everywhere.
 
 ### Perfetto proto traces
 
@@ -329,7 +361,7 @@ both.
 | Crates | Role | Built by |
 | --- | --- | --- |
 | `perfr-live-event`, `-ring`, `-protocol`, `-render`, `-server` | what the service links to serve the page | `cargo build -p perfr` |
-| `perfr-live-chrome`, `perfr-story` | Chrome JSON and Perfetto proto import; the story document | both packs, through `perfr-viewer` |
+| `perfr-live-chrome`, `perfr-perf-data`, `perfr-story` | Chrome JSON, Perfetto proto and `perf.data` import; the story document | both packs, through `perfr-viewer` |
 | `perfr-viewer` | the interface, and the viewer's own pack | `../perfr-viewer/build_wasm.sh` |
 | `perfr-client` | the service's backend, and the pack the service serves | `./build_wasm.sh` |
 

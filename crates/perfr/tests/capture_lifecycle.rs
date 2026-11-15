@@ -209,6 +209,80 @@ fn a_capture_is_recorded_stopped_and_recorded_again_and_refuses_what_would_mix_t
     assert!(!service.capturing());
 }
 
+#[inline(never)]
+fn a_function_of_this_test() -> u64 {
+    std::hint::black_box(7)
+}
+
+/// What `perf record -g` would have written about this test process caught
+/// in `a_function_of_this_test`: where the loader mapped the binary, and
+/// samples whose pc is in the function.
+fn perf_data_of_this_process() -> Vec<u8> {
+    use perfr_perf_data::testing::*;
+    let address = a_function_of_this_test as usize as u64;
+    let maps = std::fs::read("/proc/self/maps").unwrap();
+    let mapping = perfr_maps::parse_maps(&maps).into_iter().find(|m| m.start_address <= address && address < m.end_address).expect("the mapping of this code");
+    let path = String::from_utf8(mapping.pathname.clone()).unwrap();
+    let e = Event1 { sample_type: CALLCHAIN_SAMPLE, id: 7 };
+    let mut records = vec![
+        e.comm(4242, 4242, "recorded", true, 1_000),
+        e.mmap2(4242, mapping.start_address, mapping.end_address - mapping.start_address, mapping.offset, &path, 2_000),
+    ];
+    for i in 0..5u64 {
+        records.push(e.sample(4242, 4242, 1_000_000 + i * 1_000_000, address + 1, &[CONTEXT_USER, address + 1]));
+    }
+    records.push(finished_round());
+    file(&[(attr(CALLCHAIN_SAMPLE, SAMPLE_ID_ALL | FREQ, 1000), vec![7])], &records, &[])
+}
+
+/// A `perf.data` dropped on the page arrives where a `.perfr.zip` does,
+/// and is opened as a capture: its samples in the report, named from the
+/// binary on this machine.
+#[test]
+fn a_perf_data_is_opened_as_a_capture_with_its_frames_named() {
+    let service = Service::start();
+    assert_eq!(service.status()["perf_data"], true, "the page asks before it sends one");
+    let recording = perf_data_of_this_process();
+
+    let named = |service: &Service| {
+        let (code, report) = service.request("GET", "/api/sampling/report", "", b"");
+        assert_eq!(code, 200);
+        let report: serde_json::Value = serde_json::from_slice(&report).unwrap();
+        assert_eq!(report["samples"], 5, "{report}");
+        let name = report["functions"][0]["name"].as_str().unwrap_or_default().to_string();
+        assert!(name.contains("a_function_of_this_test"), "{report}");
+    };
+
+    let (code, summary) = service.request("POST", "/api/capture/import", "application/octet-stream", &recording);
+    assert_eq!(code, 200, "{}", String::from_utf8_lossy(&summary));
+    let summary: serde_json::Value = serde_json::from_slice(&summary).unwrap();
+    assert_eq!((&summary["source"], &summary["samples"], &summary["target_pid"]), (&"perf.data".into(), &5.into(), &4242.into()), "{summary}");
+    assert_eq!((&summary["files_read"], &summary["named_frames"]), (&1.into(), &1.into()), "{summary}");
+    assert!(!service.capturing(), "an import is a capture that started and finished");
+    assert_eq!(service.status()["target_pid"], 4242);
+    named(&service);
+
+    // The native client opens it by path, as it opens a bundle.
+    assert_eq!(service.post("/api/capture/clear", "").0, 200);
+    let path = service.dir.path().join("perf.data");
+    std::fs::write(&path, &recording).unwrap();
+    let (code, summary) = service.post("/api/capture/open", &serde_json::json!({ "path": path }).to_string());
+    assert_eq!(code, 200, "{summary}");
+    named(&service);
+
+    // And what it exports is a capture like any other.
+    let bundle = service.export();
+    assert_eq!(service.post("/api/capture/clear", "").0, 200);
+    let (code, summary) = service.request("POST", "/api/capture/import", "application/zip", &bundle);
+    assert_eq!(code, 200, "{}", String::from_utf8_lossy(&summary));
+    named(&service);
+
+    // A file that only starts like one says what is wrong with it.
+    let (code, why) = service.request("POST", "/api/capture/import", "application/octet-stream", &recording[..60]);
+    assert_eq!(code, 400);
+    assert!(String::from_utf8_lossy(&why).contains("perf.data"), "{}", String::from_utf8_lossy(&why));
+}
+
 #[test]
 fn a_capture_ends_with_its_target_and_the_next_one_starts_cleanly() {
     let service = Service::start();

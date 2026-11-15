@@ -2,7 +2,7 @@
 
 The page that shows a capture: the timeline, the track rail, the reports,
 search, the log window, stories, and the import of Chrome and Perfetto
-traces. It has no capture service behind it. It is given a capture and
+traces and of Linux `perf.data`. It has no capture service behind it. It is given a capture and
 shows it.
 
 ```
@@ -16,7 +16,7 @@ Host that folder anywhere and open it on a capture:
 | `index.html?capture=<url>` | a `.perfr.stream` |
 | `...&story=<url>` | a story played over it |
 | `...&chrome=compact` | the same without the toolbar, for an iframe |
-| `index.html` | nothing: Open, or drop a `.perfr.stream`, a Chrome `.json` or a Perfetto trace on the page |
+| `index.html` | nothing: Open, or drop a `.perfr.stream`, a Chrome `.json`, a Perfetto trace or a Linux `perf.data` on the page |
 
 There is no Record, no process picker, no hooks and no Share: those need
 the capture service, and belong to `perfr-client`, the layer on top of this
@@ -43,8 +43,9 @@ On Linux, use a Wayland or X11 desktop with working graphics drivers.
 X11 also needs the xkbcommon X11 runtime (`libxkbcommon-x11-0` on Ubuntu).
 
 The executable is `target/release/perfr-viewer`. It accepts local perfr
-streams, Chrome/Perfetto traces, and story JSON files (capture first, story
-second). It uses the same file loader as Open and drag-and-drop. Like the
+streams, Chrome/Perfetto traces, a Linux `perf.data` (frames as
+`module+0xoffset`: naming them takes the service), and story JSON files
+(capture first, story second). It uses the same file loader as Open and drag-and-drop. Like the
 standalone web viewer, it has no capture-service connection; recording,
 sharing and opening `.perfr.zip` bundles still belong to the service client.
 

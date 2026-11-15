@@ -167,6 +167,9 @@ struct StatusBody {
     target_pid: u32,
     /// The service's own pid, so the viewer can put its rows last.
     service_pid: u32,
+    /// `POST /api/capture/import` also takes a Linux `perf.data` and names
+    /// its frames from this machine's files.
+    perf_data: bool,
     /// Machines linked to this one (`GET /api/peers` lists them).
     peers: usize,
 }
@@ -206,6 +209,7 @@ impl StatusBody {
             dropped_before_start: svc.dropped_before_start(),
             target_pid: svc.capture_pid(),
             service_pid: std::process::id(),
+            perf_data: svc.opens_perf_data(),
             peers: svc.peers.len(),
         }
     }
@@ -750,7 +754,8 @@ async fn capture_open(State(svc): State<Arc<LiveService>>, Json(body): Json<Open
     }
 }
 
-/// `POST /api/capture/import` with a `.perfr.zip` body: opens that capture
+/// `POST /api/capture/import` with a `.perfr.zip` body (or a Linux
+/// `perf.data`, when the status says `perf_data`): opens that capture
 /// as the current one. 501 when the service cannot, 400 when the bytes are
 /// not a capture, 409 when a capture is running.
 async fn capture_import(State(svc): State<Arc<LiveService>>, body: Bytes) -> Response {

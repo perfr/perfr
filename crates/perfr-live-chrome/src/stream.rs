@@ -2,15 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Stream-parse Chrome Trace Event Format JSON (array or `{traceEvents:[…]}`)
-//! or a Perfetto proto trace (length-delimited `TracePacket`s).
+//! Stream-parse Chrome Trace Event Format JSON (array or `{traceEvents:[…]}`),
+//! a Perfetto proto trace (length-delimited `TracePacket`s), or a Linux
+//! `perf.data`.
 //!
 //! Bytes are pushed as they arrive. Complete events / packets are decoded one
 //! at a time — never a `Vec<Value>` of the whole file. gzip is inflated a
 //! slice at a time, as the parser asks for more: what is pushed ahead of the
 //! parser waits compressed. zip is accepted when it holds a single
 //! deflated/stored file. The format is sniffed from the first decoded bytes:
-//! `[` / `{` is JSON, a `0x0a` packet tag is Perfetto.
+//! `[` / `{` is JSON, a `0x0a` packet tag is Perfetto, `PERFILE2` is
+//! `perf.data`.
 
 use std::io::Write;
 
@@ -18,6 +20,7 @@ use flate2::write::MultiGzDecoder;
 use crate::ingest::{ChromeEvent, ChromeIngestor, StackFrame, TimeUnit};
 use crate::json::{parse_json_string, skip_ws, ValueScan};
 use crate::id::FlexId;
+use crate::perfdata::PerfDataState;
 use crate::perfetto::PerfettoState;
 use crate::proto::{is_message, varint};
 
@@ -53,6 +56,8 @@ pub enum Format {
     Unknown,
     Json,
     Perfetto,
+    /// Linux `perf record`'s file.
+    PerfData,
 }
 
 /// `Trace.packet` is field 1, length-delimited: every Perfetto file starts
@@ -109,12 +114,14 @@ pub struct ChromeStream {
     container_known: bool,
     format: Format,
     perfetto: Option<Box<PerfettoState>>,
+    perfdata: Option<Box<PerfDataState>>,
     eof: bool,
     /// The last pump stopped for want of input, not of budget.
     drained: bool,
     pub bytes_in: u64,
     pub bytes_decoded: u64,
-    /// JSON events or Perfetto packets decoded so far (the progress line).
+    /// JSON events, Perfetto packets or `perf.data` records decoded so far
+    /// (the progress line).
     pub events_seen: u64,
     /// Bytes of a JSON trace that were given up on: a last value the file
     /// ends in the middle of, or anything after the closing bracket.
@@ -137,6 +144,7 @@ impl Default for ChromeStream {
             container_known: false,
             format: Format::Unknown,
             perfetto: None,
+            perfdata: None,
             eof: false,
             drained: false,
             bytes_in: 0,
@@ -472,12 +480,20 @@ impl ChromeStream {
                     self.perfetto = Some(Box::default());
                     ing.unit = TimeUnit::Nanos;
                 }
+                Some(Format::PerfData) => {
+                    self.format = Format::PerfData;
+                    self.perfdata = Some(Box::default());
+                    ing.unit = TimeUnit::Nanos;
+                }
                 Some(f) => self.format = f,
                 None => return Step::NeedBytes,
             }
         }
         if self.format == Format::Perfetto {
             return self.step_perfetto(ing, out);
+        }
+        if self.format == Format::PerfData {
+            return self.step_perfdata(ing, out);
         }
         self.pos = skip_ws(&self.raw, self.pos);
         if self.pos >= self.raw.len() {
@@ -737,6 +753,14 @@ impl ChromeStream {
         if b.is_empty() {
             return ended.then_some(Format::Json);
         }
+        // A perf.data says what it is in its first eight bytes, and no
+        // other format here starts with a `P`.
+        if perfr_perf_data::is_perf_data(b) {
+            return Some(Format::PerfData);
+        }
+        if !ended && perfr_perf_data::MAGIC.starts_with(b) {
+            return None;
+        }
         let i = skip_ws(b, 0);
         let opener = i < b.len() && (b[i] == b'[' || b[i] == b'{');
         if b[0] != PACKET_TAG {
@@ -809,6 +833,37 @@ impl ChromeStream {
         self.pos += end;
         self.events_seen += 1;
         Step::Event
+    }
+}
+
+impl ChromeStream {
+    /// One record of a `perf.data`, or a handful of the events an earlier
+    /// record released. A file cut short is read as far as it goes.
+    fn step_perfdata(&mut self, ing: &mut ChromeIngestor, out: &mut Vec<perfr_live_event::LiveEvent>) -> Step {
+        if self.phase == Phase::Done {
+            return Step::Done;
+        }
+        let ended = self.input_ended();
+        let Some(state) = self.perfdata.as_mut() else {
+            return Step::Done;
+        };
+        match state.step(&self.raw[self.pos..], ended, ing, out) {
+            Ok(Some(used)) => {
+                self.pos += used;
+                self.events_seen = state.records();
+                if state.is_done() {
+                    self.pos = self.raw.len();
+                    self.phase = Phase::Done;
+                    return Step::Done;
+                }
+                Step::Event
+            }
+            Ok(None) => Step::NeedBytes,
+            Err(e) => {
+                self.error = Some(e);
+                Step::Done
+            }
+        }
     }
 }
 

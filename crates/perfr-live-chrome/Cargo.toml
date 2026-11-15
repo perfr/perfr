@@ -9,7 +9,7 @@ edition = "2021"
 license = "BSD-2-Clause"
 repository = "https://github.com/perfr/perfr"
 rust-version = "1.88"
-description = "Streaming Chrome Trace Event Format ingest into 32-byte LiveEvents"
+description = "Streaming Chrome Trace Event Format, Perfetto and perf.data ingest into 32-byte LiveEvents"
 
 [lints]
 workspace = true
@@ -17,5 +17,9 @@ workspace = true
 [dependencies]
 flate2 = { version = "1.0", default-features = true }
 perfr-live-event = { path = "../perfr-live-event" }
+perfr-perf-data = { path = "../perfr-perf-data" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[dev-dependencies]
+perfr-perf-data = { path = "../perfr-perf-data", features = ["testing"] }

@@ -1,0 +1,28 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+[package]
+name = "perfr-perf-data"
+version = "0.1.0"
+description = "Reads perf.data, the file `perf record` writes"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["zstd"]
+# Reads a recording made with `perf record -z`, whose records are a zstd
+# stream. Without it such a recording is refused with the reason.
+zstd = ["dep:ruzstd"]
+# The byte-by-byte writer the tests build their files with, for the crates
+# that test what they make of a perf.data.
+testing = []
+
+# One dependency, and an optional one: the zstd decoder, in pure Rust.
+[dependencies]
+ruzstd = { version = "0.7.3", default-features = false, features = ["std"], optional = true }

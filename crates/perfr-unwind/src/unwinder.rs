@@ -5,7 +5,7 @@
 //! The per-process unwinder: modules from the process's maps, frames from a
 //! copied stack slice.
 
-use crate::modules::load_module;
+use crate::modules::{load_module, load_module_at};
 use framehop::{UnwindIterator, Unwinder};
 use perfr_maps::{parse_maps, MemoryMapping, PROT_EXEC};
 use std::collections::HashMap;
@@ -125,16 +125,30 @@ fn file_spans(mappings: &[MemoryMapping]) -> HashMap<&[u8], FileSpan<'_>> {
 }
 
 impl ProcessUnwinder {
+    /// An unwinder that knows no module yet; see [`Self::add_module_at`].
+    pub fn empty() -> ProcessUnwinder {
+        ProcessUnwinder { unwinder: ArchUnwinder::new(), cache: ArchCache::new(), modules_loaded: 0, files: HashMap::new() }
+    }
+
     /// Builds an unwinder from the content of a `/proc/<pid>/maps`.
     pub fn from_maps_content(maps_content: &[u8]) -> ProcessUnwinder {
-        let mut unwinder = ProcessUnwinder {
-            unwinder: ArchUnwinder::new(),
-            cache: ArchCache::new(),
-            modules_loaded: 0,
-            files: HashMap::new(),
-        };
+        let mut unwinder = ProcessUnwinder::empty();
         unwinder.refresh_from_maps_content(maps_content);
         unwinder
+    }
+
+    /// Loads the file at `path` as a module whose load bias is `base_avma`
+    /// (where the file's virtual address 0 is in the process). For a
+    /// process that is not there to read the maps of: a recording says
+    /// where each file's text was mapped, and the caller works the bias
+    /// out from that. False when the file is not an object that can be
+    /// read. Such a module is not known to
+    /// [`Self::refresh_from_maps_content`]: use one way or the other.
+    pub fn add_module_at(&mut self, path: &str, base_avma: u64) -> bool {
+        let Some((module, _)) = load_module_at(path, base_avma) else { return false };
+        self.unwinder.add_module(module);
+        self.modules_loaded += 1;
+        true
     }
 
     pub fn for_pid(pid: i32) -> std::io::Result<ProcessUnwinder> {

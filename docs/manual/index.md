@@ -137,7 +137,7 @@ The viewer and the API share the port. The routes the page itself uses:
 | `GET /api/processes` | The process list |
 | `POST /api/capture/start` | Start. `pid` 0 means no target. The body also carries the COLLECT switches, `samples_per_second` (1000 by default), `unwinding` (`dwarf` or `frame_pointers`) and `dynamic_instrumentation_method` (`frida` or `kernel_uprobes`) |
 | `POST /api/capture/stop` | Stop |
-| `POST /api/capture/open`, `POST /api/capture/import` | Open a saved `.perfr.zip`. Both refuse while a capture is running: `busy: stop the capture before opening one` |
+| `POST /api/capture/open`, `POST /api/capture/import` | Open a saved `.perfr.zip`, or on Linux a `perf.data` (`/api/status` says `perf_data`). Both refuse while a capture is running: `busy: stop the capture before opening one` |
 | `POST /api/capture/clear` | Refuses the same way: `busy: stop the capture before clearing` |
 | `GET` / `PUT /api/settings` | Auto-unhook, stored in `~/.config/perfr/settings.json` |
 | `GET /api/capture/export` | Download the capture, including `?format=stream` |

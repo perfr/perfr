@@ -67,7 +67,7 @@ pub const DEFAULT_PORT: u16 = 44766;
 /// Name ids for symbolized frames start here, clear of the ids the server
 /// assigns to its own lanes.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-const FRAME_NAME_ID_BASE: u32 = 1 << 20;
+pub(crate) const FRAME_NAME_ID_BASE: u32 = 1 << 20;
 
 /// And end here, where the names of manual scopes begin (`scopes.rs`). Both
 /// allocators write into the service's one table of names, so a frame id
@@ -77,7 +77,7 @@ const FRAME_NAME_ID_END: u32 = 2 << 20;
 
 /// The last frame id, shared by every name that no longer fits the range.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-const FRAME_NAME_ID_OTHER: u32 = FRAME_NAME_ID_END - 1;
+pub(crate) const FRAME_NAME_ID_OTHER: u32 = FRAME_NAME_ID_END - 1;
 
 // The fixed lanes sit below the frames, and the frames below the agent
 // names (hashed into the top half of the id space).
@@ -3432,9 +3432,14 @@ pub fn run_on(
             // The file's row-group statistics decide what is read; a slice
             // of a large capture touches a few groups and the footer.
             Some((a, b)) => perfr_capture::slice_bundle_file(path, a, b).map(|(b, _)| b),
-            None => std::fs::read(path)
-                .map_err(perfr_capture::CaptureError::Io)
-                .and_then(|bytes| perfr_capture::CaptureBundle::from_zip(&bytes)),
+            None => {
+                let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+                #[cfg(target_os = "linux")]
+                if perfr_perf_data::is_perf_data(&bytes) {
+                    return crate::perf_data::open_perf_data(&open_service, &open_store, &open_target, &bytes).map_err(|e| format!("{path}: {e}"));
+                }
+                perfr_capture::CaptureBundle::from_zip(&bytes)
+            }
         }
         .map_err(|e| format!("{path}: {e}"))?;
         open_bundle(&open_service, &open_store, &open_target, bundle)
@@ -3448,9 +3453,16 @@ pub fn run_on(
         let Some(_idle) = idle_capture_slot(&import_worker) else {
             return Err("busy: stop the capture before opening one".to_string());
         };
+        // What `perf record` wrote, opened like a capture of our own.
+        #[cfg(target_os = "linux")]
+        if perfr_perf_data::is_perf_data(&bytes) {
+            return crate::perf_data::open_perf_data(&import_service, &import_store, &import_target, &bytes);
+        }
         let bundle = perfr_capture::CaptureBundle::from_zip(&bytes).map_err(|e| format!("not a capture: {e}"))?;
         open_bundle(&import_service, &import_store, &import_target, bundle)
     }));
+    #[cfg(target_os = "linux")]
+    service.set_opens_perf_data(true);
 
 
     let start_service = service.clone();

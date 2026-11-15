@@ -71,6 +71,11 @@ pub struct StatusJson {
     /// PerfrService registered control hooks (real capture).
     #[serde(default)]
     pub hooks: bool,
+    /// The service opens a Linux `perf.data` it is sent, naming its frames
+    /// from the files of its machine. False from an older service, or one
+    /// that is not on Linux: the page then reads the file itself.
+    #[serde(default)]
+    pub perf_data: bool,
     /// What dynamic instrumentation did for the running capture: how many
     /// functions were armed, or why none were. Empty when none were asked for.
     #[serde(default)]
@@ -782,8 +787,9 @@ pub trait Backend {
     fn start_demo(&self) {}
     fn stop_demo(&self) {}
     fn apply_config(&self, _ring_bytes: u64, _spill: &str) {}
-    /// Posts a `.perfr.zip` to the service, which opens it as the current
-    /// capture and streams it back.
+    /// Posts a `.perfr.zip`, or a Linux `perf.data` when the service's
+    /// status says it opens them, to the service, which opens it as the
+    /// current capture and streams it back.
     fn import_capture(&self, _bytes: Vec<u8>) {}
     /// As [`import_capture`](Self::import_capture), reading the browser
     /// `File` first.

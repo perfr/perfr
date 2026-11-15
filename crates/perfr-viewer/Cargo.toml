@@ -133,3 +133,9 @@ perfr-live-render = { path = "../perfr-live-render" }
 wasm-bindgen-futures = "=0.4.50"
 # WebGPU first, WebGL fallback (egui-wgpu default).
 wgpu = { version = "25", default-features = false, features = ["webgpu", "webgl", "wgsl"] }
+
+# The byte-by-byte perf.data writer, for the tests that drop one on the page
+# (and gzip, for the one that drops it compressed).
+[dev-dependencies]
+flate2 = "1.0"
+perfr-perf-data = { path = "../perfr-perf-data", features = ["testing"] }

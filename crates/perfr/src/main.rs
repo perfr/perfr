@@ -43,6 +43,8 @@ mod lan;
 mod logging;
 mod names;
 #[cfg(target_os = "linux")]
+mod perf_data;
+#[cfg(target_os = "linux")]
 mod privileges;
 mod procs;
 mod report;

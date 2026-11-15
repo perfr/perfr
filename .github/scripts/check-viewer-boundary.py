@@ -8,7 +8,9 @@ Three checks:
 
 1. The workspace crates perfr-viewer links, by any chain of dependencies,
    are the event format, the stream framing, the rasterizer, the trace
-   importers, the story document and the build stamp. Read from
+   importers (with the reader of the perf.data file format, which is not
+   the capture pipeline: that is perfr-perf-ring and perfr-perf-records),
+   the story document and the build stamp. Read from
    `cargo metadata`, so it is the graph cargo builds: a dependency inherited
    from the workspace, renamed, or declared for one target counts like any
    other. Dev-dependencies are left out; they are not in the pack.
@@ -40,6 +42,7 @@ ALLOWED = {
     "perfr-live-protocol",
     "perfr-live-render",
     "perfr-live-chrome",
+    "perfr-perf-data",
     "perfr-story",
     "perfr-build-info",
 }

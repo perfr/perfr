@@ -2,15 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Streaming Chrome Trace Event Format and Perfetto proto traces →
-//! 32-byte [`LiveEvent`]s.
+//! Streaming Chrome Trace Event Format, Perfetto proto traces and Linux
+//! `perf.data` → 32-byte [`LiveEvent`]s.
 //!
 //! JSON: an array of events (legacy `chrome://tracing`) or an object with
 //! `traceEvents[]`, plus `stackFrames`, `samples` and `systemTraceEvents`.
 //! Times are microseconds, as the format says; `displayTimeUnit` is a
 //! display preference and does not change how they are read.
 //! Proto: Perfetto `.pftrace` / `.perfetto-trace` / `.pb` (see
-//! [`perfetto`](crate::perfetto) for what maps). gzip and a single-file zip
+//! [`perfetto`](crate::perfetto) for what maps).
+//! `perf.data`: what `perf record` writes (see [`perfdata`](crate::perfdata)
+//! for what maps). gzip and a single-file zip
 //! are decoded into the parser a slice at a time: the decoded text is never
 //! in memory whole. What a caller pushes ahead of the parser is (compressed,
 //! when the file is).
@@ -21,6 +23,7 @@
 mod id;
 mod ingest;
 mod json;
+mod perfdata;
 mod perfetto;
 pub mod proto;
 mod stream;
@@ -150,11 +153,14 @@ mod any_input_tests {
     fn any_chunking_gives_the_events_of_one_push() {
         let json = json_trace();
         let proto = crate::perfetto::test_trace();
+        let perf = crate::perfdata::test_recording();
         let inputs = [
             ("json", json.clone()),
             ("json.gz", gzip(&json)),
             ("perfetto", proto.clone()),
             ("perfetto.gz", gzip(&proto)),
+            ("perf.data", perf.clone()),
+            ("perf.data.gz", gzip(&perf)),
         ];
         let mut rng = Rng(0x0123_4567_89AB_CDEF);
         for (label, bytes) in &inputs {
@@ -178,7 +184,8 @@ mod any_input_tests {
     fn damaged_input_never_panics_and_always_ends() {
         let json = json_trace();
         let proto = crate::perfetto::test_trace();
-        let seeds = [json.clone(), gzip(&json), proto.clone(), gzip(&proto)];
+        let perf = crate::perfdata::test_recording();
+        let seeds = [json.clone(), gzip(&json), proto.clone(), gzip(&proto), perf.clone(), gzip(&perf)];
         let mut rng = Rng(0xDEAD_BEEF_CAFE_F00D);
         for round in 0..3_000 {
             let mut bytes = seeds[round % seeds.len()].clone();
@@ -215,11 +222,13 @@ mod any_input_tests {
             let len = rng.below(300);
             let mut bytes: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
             // Lean on the bytes the sniffers and the framing look at.
-            let head: &[u8] = match round % 5 {
+            let head: &[u8] = match round % 7 {
                 0 => &[0x0a],
                 1 => &[0x1f, 0x8b, 8, 0],
                 2 => b"PK\x03\x04",
                 3 => b"[{",
+                4 => b"PERFILE2\x10\0\0\0\0\0\0\0",
+                5 => b"PERFILE2\x68\0\0\0\0\0\0\0",
                 _ => &[],
             };
             bytes.splice(0..0, head.iter().copied());

@@ -1853,6 +1853,14 @@ impl PerfrLiveApp {
         })
     }
 
+    /// What the timeline's GPU callback took on the frame before this one,
+    /// in microseconds of CPU time: preparing (the uploads) and painting.
+    /// Cheap enough to read every frame.
+    #[cfg(feature = "native")]
+    pub fn gpu_times_us(&self) -> (f32, f32) {
+        (self.last_gpu_prepare_us, self.last_gpu_paint_us)
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, host: Host) -> Self {
         fonts::install(&cc.egui_ctx);
         // Pick the colour scheme before building visuals from it: `?theme=`

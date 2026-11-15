@@ -3,8 +3,10 @@
 // found in the LICENSE file.
 
 // A real native window receiving a real service stream. No synthetic update
-// calls and no Self pane: the same UI/renderer as the shipped client.
-use eframe::egui;
+// calls and no Self pane. The window and renderer are the shipped client's
+// own (`perfr_viewer::native_options`), but for a size that cannot change,
+// so that every trial draws the same number of pixels.
+use perfr_viewer::eframe::{self, egui};
 use std::time::Instant;
 
 struct Measured {
@@ -13,7 +15,7 @@ struct Measured {
     last: Instant,
     until: f64,
     output: String,
-    frames: Vec<[f64; 3]>,
+    frames: Vec<[f64; 4]>,
     counters: Vec<serde_json::Value>,
     next_counter: f64,
 }
@@ -26,7 +28,11 @@ impl eframe::App for Measured {
         self.last = now;
         self.app.update(ctx, frame);
         let update_ms = now.elapsed().as_secs_f64() * 1000.0;
-        self.frames.push([seconds, period_ms, update_ms]);
+        // The GPU callback runs after update(), so this is what the frame
+        // before this one took there. Read on every frame: a reading taken
+        // once a second sees one frame in sixty.
+        let (gpu_prepare_us, _) = self.app.gpu_times_us();
+        self.frames.push([seconds, period_ms, update_ms, f64::from(gpu_prepare_us)]);
         if seconds >= self.next_counter {
             self.counters
                 .push(serde_json::json!({"seconds":seconds,"state":self.app.profile_readout()}));
@@ -41,7 +47,7 @@ impl eframe::App for Measured {
 impl Drop for Measured {
     fn drop(&mut self) {
         let data = serde_json::json!({
-            "frame_columns":["seconds","period_ms","update_ms"],
+            "frame_columns":["seconds","period_ms","update_ms","gpu_prepare_us"],
             "frames":self.frames,"counters":self.counters,
         });
         std::fs::write(&self.output, serde_json::to_vec_pretty(&data).unwrap()).unwrap();
@@ -56,15 +62,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = perfr_client::native_host(&args[1])?;
     let until: f64 = args[2].parse()?;
     let output = args[3].clone();
+    let mut options = perfr_viewer::native_options();
+    options.viewport = options.viewport.with_resizable(false);
     eframe::run_native(
         "perfr live benchmark",
-        eframe::NativeOptions {
-            renderer: eframe::Renderer::Wgpu,
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([1280.0, 800.0])
-                .with_resizable(false),
-            ..Default::default()
-        },
+        options,
         Box::new(move |cc| {
             let now = Instant::now();
             Ok(Box::new(Measured {

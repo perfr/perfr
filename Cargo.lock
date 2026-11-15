@@ -3037,7 +3037,6 @@ name = "perfr-client"
 version = "0.1.1"
 dependencies = [
  "axum",
- "eframe",
  "futures-util",
  "js-sys",
  "log",

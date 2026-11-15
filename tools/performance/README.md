@@ -7,7 +7,9 @@ rendering and vsync. It does not open the Self pane.
 
 Use a **dedicated service**: the runner stops its benchmark and clears its
 capture at the beginning of each trial. Its default port is deliberately
-different from the normal service/profiler port.
+different from the normal service/profiler port. A service that is still
+capturing ten seconds after its benchmark was stopped has a capture of its
+own, and the runner stops there, before clearing anything.
 
 ```sh
 cargo build --release -p perfr-client --features native --example live_bench
@@ -27,27 +29,42 @@ with it. On a hybrid CPU, repeat trials using the same performance cores,
 for example `taskset -c 4,6 python3 ...` on the machine used in the article;
 choose suitable CPU IDs on your own machine. Alternate the variant order.
 
-For a baseline predating the harness, apply just the example, its Cargo dev
-dependency, and `PerfrLiveApp::profile_readout` to that revision. Build and
+For a baseline predating the harness, apply just the example and what it
+uses of `perfr-viewer` to that revision: `native_options`, the `eframe`
+re-export, and `PerfrLiveApp::profile_readout` and `gpu_times_us`. Build and
 copy each executable before making the rendering changes. The intermediate
 variant only removes row padding in `TimelineGpu::upload_columns`.
 
 The output preserves:
 
-- `frames.json`: every update duration and start-to-start frame period, plus
-  once-per-second app counters. Update duration excludes egui tessellation
-  and GPU submission after `App::update`; `gpu_prepare_us` is CPU elapsed
-  time in the timeline callback, not GPU execution time.
+- `frames.json`: for every frame its update duration, its start-to-start
+  period and `gpu_prepare_us`, plus once-per-second app counters. Update
+  duration excludes egui tessellation and GPU submission after `App::update`;
+  `gpu_prepare_us` is CPU elapsed time in the timeline callback, not GPU
+  execution time. The callback runs after `App::update`, so a frame's row
+  carries the reading of the frame before it.
 - `process.json`: Linux `/proc` process CPU time and RSS, benchmark achieved
   rate, and service status, polled once a second. CPU cores means CPU seconds
   divided by elapsed seconds across all client threads, not percent of the
   whole machine. RSS includes retained event storage and driver allocations.
+  A poll the service did not answer within two seconds keeps its process half
+  and is counted in `command.json` as `missed_polls`; the trial goes on.
 - `command.json`, `client.log`, and `pid`: settings, inherited CPU affinity,
   exit status, diagnostics, and the PID to attach the profiler to.
 
+The producer is stopped when the runner ends, however it ends. The client
+writes `frames.json` when its window closes after `--seconds`, so a trial
+that is interrupted has none.
+
 The summary excludes the first 15 seconds from frame/counter readings and
 16 seconds from process readings (the latter clock starts before the window).
-Its quantiles select the nearest-ranked observed value. Queue counters are
+Its quantiles select the nearest-ranked observed value. The `gpu_prepare`
+figures are over every frame after warmup, and `gpu_prepare_readings` is how
+many that was. A run recorded before the harness kept the reading per frame
+has it once a second only, some twenty readings to a trial: a mean over
+those moves with a single slow frame and is not comparable with a per-frame
+one. A run with too little after warmup to summarize is named on standard
+error and left out, and the exit status is then 1. Queue counters are
 snapshots of the viewer's pending-message queue, not an end-to-end latency or
 loss detector. These short trials accumulate events; they are not a memory
 steady-state or maximum-throughput benchmark.

@@ -959,8 +959,27 @@ impl TrackStrip {
 
     /// A track shows when its thread does: hiding or filtering a thread
     /// takes its graphs and async block with it, wherever they were moved.
+    /// A graph also goes when its thread is folded and has nothing but
+    /// graphs ([`Self::folded_away`]).
     fn shown(&self, key: TrackKey) -> bool {
-        self.is_shown(key.owner())
+        self.is_shown(key.owner()) && !self.folded_away(key)
+    }
+
+    /// Whether `key` is a graph that its thread's fold hides.
+    ///
+    /// Folding a thread hides the lanes packed under its row. Its graphs
+    /// are tracks of their own and stay, which suits a thread that has
+    /// both. A thread that has only graphs (a group of the machine health
+    /// track, a GPU) would have nothing to fold, and its triangle would
+    /// turn and do nothing: there the fold hides the graphs. One that was
+    /// moved under another process is not under that header any more, and
+    /// stays.
+    fn folded_away(&self, key: TrackKey) -> bool {
+        let TrackKey::Value(_) = key else { return false };
+        let t = key.owner();
+        self.collapsed.contains(&RowId::Thread(t))
+            && self.catalogue.leaves_of(t).iter().all(|k| k.kind == kind::VALUE)
+            && !self.is_guest(key)
     }
 
     /// Threads in rail order, the shown ones.
@@ -2156,6 +2175,82 @@ mod tests {
         let health_lane = LiveEvent::from_value(0, health::PID, health::group::CPU, health::lane::CPU, 0.0).lane_key();
         let other_lane = LiveEvent::from_value(0, 11, 3, 7, 0.0).lane_key();
         assert!(lane_height(health_lane) < lane_height(other_lane));
+    }
+
+    #[test]
+    fn folding_a_thread_that_has_only_graphs_hides_them() {
+        use perfr_live_event::health;
+        let mut idx = TrackIndex::default();
+        for id in [health::lane::CPU, health::lane::CPU_PRESSURE, health::lane::MEMORY_USED, health::lane::IO_PRESSURE] {
+            let lane = health::lane_by_id(id).unwrap();
+            idx.insert(LiveEvent::from_value(5, health::PID, lane.group, lane.id, 1.0));
+        }
+        // A thread with a scope and a graph, and one with a graph alone.
+        idx.insert(scope(30, 1, 1));
+        idx.insert(LiveEvent::from_value(5, 30, 1, 7, 1.0));
+        idx.insert(LiveEvent::from_value(5, 30, 2, 8, 1.0));
+        let mut strip = TrackStrip::default();
+        strip.sync(&idx, None);
+        strip.tick(1.0, &idx, None);
+        // The graphs on the rail and the lanes the timeline paints, as
+        // (pid, tid) of each.
+        fn graphs(strip: &TrackStrip) -> Vec<(u32, u32)> {
+            let rows: Vec<(u32, u32)> = strip
+                .rows()
+                .iter()
+                .filter_map(|row| match row.id {
+                    RowId::Lane(k) if k.kind == kind::VALUE => Some((k.pid, k.tid)),
+                    _ => None,
+                })
+                .collect();
+            let painted: Vec<(u32, u32)> =
+                strip.layout().iter().filter(|(k, _)| k.kind == kind::VALUE).map(|(k, _)| (k.pid, k.tid)).collect();
+            assert_eq!(rows, painted);
+            rows
+        }
+        let (cpu, memory, io) = (health::group::CPU, health::group::MEMORY, health::group::IO);
+        let health_graphs = [(health::PID, cpu), (health::PID, cpu), (health::PID, memory), (health::PID, io)];
+        let all: Vec<(u32, u32)> = health_graphs.iter().copied().chain([(30, 1), (30, 2)]).collect();
+        assert_eq!(graphs(&strip), all);
+        let open_h = strip.total_height();
+
+        // A group of the health track has nothing but graphs: they go, its
+        // header stays, and what is below moves up.
+        let group = |tid| RowId::Thread(ThreadId { pid: health::PID, tid });
+        strip.toggle(group(cpu));
+        strip.tick(1.0, &idx, None);
+        assert_eq!(graphs(&strip), all[2..]);
+        assert!(strip.rows().iter().any(|row| row.id == group(cpu)));
+        let cpu_graph = LiveEvent::from_value(0, health::PID, cpu, health::lane::CPU, 0.0).lane_key();
+        let graph_h = strip.block_h(TrackKey::Value(cpu_graph));
+        assert!((open_h - strip.total_height() - 2.0 * graph_h).abs() < 0.01);
+        // Each group folds its own.
+        strip.toggle(group(io));
+        strip.tick(1.0, &idx, None);
+        assert_eq!(graphs(&strip), [(health::PID, memory), (30, 1), (30, 2)]);
+        // Unfolded, they are back where they were.
+        strip.toggle(group(cpu));
+        strip.toggle(group(io));
+        strip.tick(1.0, &idx, None);
+        assert_eq!(graphs(&strip), all);
+        assert!((strip.total_height() - open_h).abs() < 0.01);
+
+        // The same for any thread that is only graphs. One with scopes of
+        // its own folds those, and keeps its graph as before.
+        strip.toggle(RowId::Thread(ThreadId { pid: 30, tid: 2 }));
+        strip.toggle(RowId::Thread(ThreadId { pid: 30, tid: 1 }));
+        strip.tick(1.0, &idx, None);
+        let mut kept = health_graphs.to_vec();
+        kept.push((30, 1));
+        assert_eq!(graphs(&strip), kept);
+
+        // A graph moved under another process is not under its group's
+        // header any more: the fold leaves it.
+        strip.host.insert(TrackKey::Value(cpu_graph), 30);
+        strip.toggle(group(cpu));
+        strip.tick(1.0, &idx, None);
+        let shown = graphs(&strip);
+        assert_eq!(shown.iter().filter(|g| **g == (health::PID, cpu)).count(), 1, "{shown:?}");
     }
 
     #[test]

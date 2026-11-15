@@ -50,6 +50,8 @@ A stall in the target is not always the target's doing: the machine may have bee
 | gpu | `GPU %` | The busiest GPU |
 | | `GPU memory %` | Memory in use, every GPU together |
 
+Each group has a header on the rail. The triangle on it folds the group: its graphs go and the groups below move up. The label of each fold triangle in `window.__perfr_ui` is `fold:thread:<pid>:<tid>`.
+
 The three pressure graphs are the kernel's PSI `some` totals (`/proc/pressure`), differenced over each interval rather than read as the kernel's ten-second average, so a stall of 100 ms shows as a 20 percent step and not as a ripple. They need a kernel built with `CONFIG_PSI`. The GPU graphs come from sysfs for AMD cards (`gpu_busy_percent`) and from the NVML helper (`perfr-gpu`, beside `perfr`) for NVIDIA; an Intel GPU has neither. A source the machine lacks leaves its graphs out.
 
 Every graph of the track starts at zero. The percentages that are a share of a whole end at 100, the pressures at 10, the rates at 1; a larger value in view raises the top. A sample is about ten `pread` calls on files the service keeps open, some 70 µs on a 32-core machine. On macOS and Windows the switch does nothing yet.

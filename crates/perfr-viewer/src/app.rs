@@ -1836,6 +1836,23 @@ impl PerfrLiveApp {
 }
 
 impl PerfrLiveApp {
+    /// Low-frequency diagnostic counters for the native live-load harness.
+    /// Frame timings are measured by the harness outside update().
+    #[cfg(feature = "native")]
+    pub fn profile_readout(&self) -> serde_json::Value {
+        serde_json::json!({
+            "events": self.index.event_count(),
+            "bounds": self.index.time_bounds(),
+            "wire_bytes": self.ws_bytes_seen,
+            "queued_messages": self.ws_queue.len(),
+            "queued_bytes": self.ws_queue.iter().map(Vec::len).sum::<usize>(),
+            "primitives": self.last_n_prims,
+            "gpu_prepare_us": self.last_gpu_prepare_us,
+            "gpu_paint_us": self.last_gpu_paint_us,
+            "error": self.error,
+        })
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, host: Host) -> Self {
         fonts::install(&cc.egui_ctx);
         // Pick the colour scheme before building visuals from it: `?theme=`

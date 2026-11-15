@@ -932,7 +932,9 @@ impl TimelineGpu {
             let slot = self.layer(layer);
             slot.column_tex.is_some() && slot.column_w == width && slot.column_h == height
         };
-        let (padded, bytes_per_row) = pack_rgba_aligned(rgba, width, height);
+        // Queue::write_texture accepts tightly packed rows. The 256-byte
+        // alignment applies only to buffer-to-texture encoder copies.
+        let bytes_per_row = width * 4;
         if reuse {
             let slot = self.layer_mut(layer);
             if let Some(texture) = &slot.column_tex {
@@ -943,7 +945,7 @@ impl TimelineGpu {
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
                     },
-                    &padded,
+                    rgba,
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(bytes_per_row),
@@ -979,7 +981,7 @@ impl TimelineGpu {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &padded,
+            rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
@@ -1073,27 +1075,6 @@ impl TimelineGpu {
             }
         }
     }
-}
-
-/// WebGPU `write_texture` requires `bytes_per_row` to be a multiple of
-/// `COPY_BYTES_PER_ROW_ALIGNMENT` (256). Pack tightly stored RGBA8 into an
-/// aligned staging buffer. Returns `(padded_bytes, bytes_per_row)`.
-pub fn pack_rgba_aligned(src: &[u8], width: u32, height: u32) -> (Vec<u8>, u32) {
-    let src_stride = width.saturating_mul(4);
-    let padded = src_stride.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-    if padded == src_stride {
-        return (src.to_vec(), src_stride);
-    }
-    let mut out = vec![0u8; padded as usize * height as usize];
-    for y in 0..height as usize {
-        let s = y * src_stride as usize;
-        let d = y * padded as usize;
-        let n = src_stride as usize;
-        if s + n <= src.len() {
-            out[d..d + n].copy_from_slice(&src[s..s + n]);
-        }
-    }
-    (out, padded)
 }
 
 /// Pack dest-rect blit uniforms. WGSL aligns `vec4` to 16, so `viewport` is padded.
@@ -1215,25 +1196,6 @@ mod tests {
         let u = pack_blit_uniforms([1920.0, 1080.0], [10.0, 20.0, 100.0, 50.0]);
         assert_eq!(&u[16..20], &10f32.to_le_bytes());
         assert_eq!(&u[8..16], &[0u8; 8]);
-    }
-
-    #[test]
-    fn pack_rgba_pads_bytes_per_row_to_copy_alignment() {
-        let width = 100u32;
-        let height = 2u32;
-        let mut src = vec![0u8; (width * height * 4) as usize];
-        src[0..4].copy_from_slice(&[0xE7, 0x44, 0x35, 0xFF]);
-        src[(width * 4) as usize..(width * 4 + 4) as usize]
-            .copy_from_slice(&[0x32, 0x32, 0x32, 0xFF]);
-        let (padded, stride) = pack_rgba_aligned(&src, width, height);
-        let expect = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        assert_eq!(stride, expect);
-        assert_eq!(stride, 512);
-        assert_eq!(padded.len(), stride as usize * height as usize);
-        assert_eq!(&padded[0..4], &[0xE7, 0x44, 0x35, 0xFF]);
-        let row1 = stride as usize;
-        assert_eq!(&padded[row1..row1 + 4], &[0x32, 0x32, 0x32, 0xFF]);
-        assert_eq!(&padded[400..404], &[0, 0, 0, 0]);
     }
 
     #[test]

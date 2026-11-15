@@ -197,7 +197,7 @@ pub fn start_open_dialog(pending: &PendingFile) -> Option<TraceLoad> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn start_open_dialog() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new()
-        .add_filter("perfr stream", &["perfr.stream", "orbit.stream"])
+        .add_filter("perfr capture", &["perfr.stream", "orbit.stream", "perfr.zip"])
         .add_filter("Chrome / Perfetto trace", TRACE_EXTENSIONS)
         .add_filter("perfr story", &["perfr.story", "story.json"])
         .pick_file()

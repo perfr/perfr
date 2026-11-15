@@ -159,3 +159,23 @@ pub async fn run(canvas: web_sys::HtmlCanvasElement, host: Host) -> Result<(), J
 pub async fn start_viewer(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsValue> {
     run(canvas, Host::viewer()).await
 }
+
+/// Run the shared interface in a desktop window over a viewer or service host.
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+pub fn run_native(host: Host, paths: Vec<std::path::PathBuf>) -> eframe::Result {
+    eframe::run_native(
+        "perfr",
+        eframe::NativeOptions {
+            renderer: eframe::Renderer::Wgpu,
+            viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
+            ..Default::default()
+        },
+        Box::new(move |cc| {
+            let mut app = PerfrLiveApp::new(cc, host);
+            for path in paths {
+                app.open_path(&path);
+            }
+            Ok(Box::new(app))
+        }),
+    )
+}

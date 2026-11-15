@@ -3,7 +3,8 @@
 # found in the LICENSE file.
 
 # The perfr client: the viewer with the capture service behind it. This is
-# the page the service serves, the wasm32 cdylib behind viewer-dist/.
+# the page the service serves (the wasm32 cdylib behind viewer-dist/),
+# or a desktop executable with the native feature.
 #
 # The interface is `perfr-viewer`'s. What this crate adds is the layer that
 # needs the service: the event socket and the requests under /api
@@ -25,14 +26,22 @@ workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "perfr-client"
+path = "src/main.rs"
+required-features = ["native"]
+
 [features]
 default = []
+native = ["perfr-viewer/native", "dep:reqwest", "dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
 # Nightly + atomics + build-std. `build_wasm.sh` enables this. Plain
 # `cargo build --target wasm32-unknown-unknown` stays sequential so CI
 # does not need a rebuilt std.
 wasm-threads = ["perfr-viewer/wasm-threads"]
 
 [dependencies]
+log = "0.4"
+serde_json = "1.0"
 perfr-live-event = { path = "../perfr-live-event" }
 # The interface, with the parts that need a service compiled in (`service`).
 # Its defaults stay off: `page`, the viewer's own entry point, is not for
@@ -43,8 +52,6 @@ perfr-viewer = { path = "../perfr-viewer", default-features = false, features = 
 wasm-bindgen = "=0.2.100"
 js-sys = "=0.3.77"
 wasm-bindgen-futures = "=0.4.50"
-log = "0.4"
-serde_json = "1.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
 version = "0.3"
@@ -72,3 +79,14 @@ features = [
     "Window",
     "Document",
 ]
+
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"], optional = true }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"], optional = true }
+futures-util = { version = "0.3", features = ["sink"], optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+axum = { version = "0.7", features = ["ws"] }
+perfr-live-server = { path = "../perfr-live-server" }

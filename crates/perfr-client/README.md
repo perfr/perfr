@@ -1,4 +1,4 @@
-# perfr live WASM viewer
+# perfr client
 
 A **single perfr Service binary** can serve this page: point a browser at
 `--http_port` (default **44766**) and control a thin live capture from there.
@@ -31,6 +31,48 @@ Open `http://<host>:44766/`.
 | **Spill path** | Directory for serialize-on-overflow (`perfr-live-spill.bin`) |
 
 `--http_port 0` disables the viewer.
+
+## Native app
+
+The same client also runs in a native window, with the same capture controls,
+process picker, reports, symbol/code views and live event stream:
+
+```sh
+# Start the capture service separately.
+perfr --serve 44766
+cargo run -p perfr-client --features native --release
+
+# Connect to another service origin.
+cargo run -p perfr-client --features native --release -- --service http://127.0.0.1:44767
+
+# Local files open offline by default; no service is contacted.
+cargo run -p perfr-client --features native --release -- capture.perfr.stream
+cargo run -p perfr-client --features native --release -- --offline
+```
+
+The executable is `target/release/perfr-client`. `--service` accepts an
+HTTP(S) origin. Open and drag-and-drop accept streams, Chrome/Perfetto traces,
+and stories; with a service connection they also import `.perfr.zip` bundles.
+Save opens the service's download URL in the default browser. Sharing/sign-in
+remains in the web client.
+
+The native app and browser use the same `ServiceNet` request construction,
+response parsing, request ordering, and viewer interface. Native HTTP and
+WebSocket IO runs on two background Tokio threads; the UI thread does no
+network IO. The capture service is not linked into the desktop executable.
+
+Release builds retain the client's debug information. For source-level
+profiling of the shared UI and renderer dependencies too:
+
+```sh
+cargo build -p perfr-client --features native --release \
+  --config 'profile.release.package.perfr-viewer.debug=true' \
+  --config 'profile.release.package.perfr-live-render.debug=true'
+```
+
+Linux supports Wayland and X11; X11 needs `libxkbcommon-x11-0` on Ubuntu.
+The smaller, service-free [native viewer](../perfr-viewer/README.md#native-viewer)
+remains available.
 
 ## Toolbar and right pane
 

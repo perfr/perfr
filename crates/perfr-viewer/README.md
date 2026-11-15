@@ -28,6 +28,9 @@ the service too; the viewer says so when it is given one.
 
 ## Native viewer
 
+For capture control as well as local files, use the
+[native client](../perfr-client/README.md#native-app).
+
 The same interface and wgpu renderer also run in a desktop window:
 
 ```sh

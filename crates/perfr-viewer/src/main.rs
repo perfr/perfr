@@ -17,19 +17,5 @@ fn main() -> eframe::Result {
             paths.push(std::path::PathBuf::from(arg));
         }
     }
-    eframe::run_native(
-        "perfr",
-        eframe::NativeOptions {
-            renderer: eframe::Renderer::Wgpu,
-            viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
-            ..Default::default()
-        },
-        Box::new(move |cc| {
-            let mut app = perfr_viewer::PerfrLiveApp::new(cc, perfr_viewer::Host::viewer());
-            for path in paths {
-                app.open_path(&path);
-            }
-            Ok(Box::new(app))
-        }),
-    )
+    perfr_viewer::run_native(perfr_viewer::Host::viewer(), paths)
 }

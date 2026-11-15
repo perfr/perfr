@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Open / drop a Chrome Trace Event Format or Perfetto proto file into the
-//! live viewer.
+//! Open / drop a Chrome Trace Event Format file, a Perfetto proto file or a
+//! Linux `perf.data` into the live viewer.
 //!
 //! Parsing is incremental: the UI pumps a budget of events each frame so the
 //! first scopes paint before the file is finished. Bytes are never turned into
@@ -63,6 +63,7 @@ impl TraceLoad {
     pub fn source_label(&self) -> &'static str {
         match self.stream.format() {
             Format::Perfetto => "perfetto-trace",
+            Format::PerfData => "perf.data",
             _ => "chrome-trace",
         }
     }
@@ -154,7 +155,9 @@ fn fmt_int(n: u64) -> String {
 
 /// Every extension a file picker or a drop may hand us. Perfetto
 /// traces are `.pftrace` / `.perfetto-trace` (`_trace`) / `.pb`; the format
-/// itself is sniffed from the bytes, so a `.gz` of either is fine.
+/// itself is sniffed from the bytes, so a `.gz` of either is fine. What
+/// `perf record` writes is `perf.data`, and `perf.data.old` once the next
+/// recording has taken the name.
 pub const TRACE_EXTENSIONS: &[&str] = &[
     "json",
     "json.gz",
@@ -168,11 +171,25 @@ pub const TRACE_EXTENSIONS: &[&str] = &[
     "perfetto_trace.gz",
     "pb",
     "pb.gz",
+    "data",
+    "data.old",
+    "data.gz",
 ];
 
 pub fn is_trace_name(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    n.is_empty() || TRACE_EXTENSIONS.iter().any(|ext| n.ends_with(&format!(".{ext}")))
+    n.is_empty() || is_perf_data_name(name) || TRACE_EXTENSIONS.iter().any(|ext| n.ends_with(&format!(".{ext}")))
+}
+
+/// A name `perf record` gives its file, or one it was renamed to that
+/// still says what it is: `perf.data`, `perf.data.old`, `perf.data.2026…`,
+/// `server.data`. Whether the file is one is read from its first bytes;
+/// the name only decides who is asked to read it (see the app's
+/// `opens_perf_data`).
+pub fn is_perf_data_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    let file = n.rsplit(['/', '\\']).next().unwrap_or(&n);
+    file.starts_with("perf.data") || [".data", ".data.old"].iter().any(|ext| file.ends_with(ext))
 }
 
 /// Shared File from the hidden `<input>` or a window-level drop (WASM).
@@ -198,7 +215,7 @@ pub fn start_open_dialog(pending: &PendingFile) -> Option<TraceLoad> {
 pub fn start_open_dialog() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new()
         .add_filter("perfr capture", &["perfr.stream", "orbit.stream", "perfr.zip"])
-        .add_filter("Chrome / Perfetto trace", TRACE_EXTENSIONS)
+        .add_filter("Chrome / Perfetto trace, perf.data", TRACE_EXTENSIONS)
         .add_filter("perfr story", &["perfr.story", "story.json"])
         .pick_file()
 }
@@ -523,6 +540,22 @@ mod tests {
         assert!(!is_trace_name("notes.txt"));
         // `.perfr.zip` is a zip too; the app asks `is_bundle_name` first.
         assert!(is_trace_name("x.zip"));
+    }
+
+    #[test]
+    fn what_perf_record_writes_is_a_trace_by_any_of_its_names() {
+        for n in ["perf.data", "perf.data.old", "PERF.DATA", "perf.data.2026-11-14", "/tmp/run/perf.data", "server.data", "server.data.old", "run.data.gz"] {
+            assert!(is_trace_name(n), "{n}");
+        }
+        for n in ["perf.data", "perf.data.old", "/tmp/run/perf.data", "server.data"] {
+            assert!(is_perf_data_name(n), "{n}");
+        }
+        // A page reads a gzip of one itself: the service takes the file
+        // as `perf record` wrote it.
+        assert!(!is_perf_data_name("run.data.gz"));
+        assert!(!is_perf_data_name("trace.json"));
+        assert!(!is_perf_data_name("database.txt"));
+        assert!(!is_trace_name("perf.txt"));
     }
 
 }

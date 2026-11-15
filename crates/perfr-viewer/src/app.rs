@@ -2260,6 +2260,15 @@ impl PerfrLiveApp {
         self.host.service() && self.static_capture.is_none()
     }
 
+    /// Whether a `perf.data` goes to the service rather than being read
+    /// here. The file holds addresses, not names: the service reads the
+    /// names from the binaries on its machine (and unwinds the stack
+    /// copies of a `--call-graph dwarf` recording), which a page cannot.
+    /// Read here, the frames are `module+0xoffset`.
+    fn opens_perf_data(&self) -> bool {
+        self.has_service() && self.status.perf_data
+    }
+
     /// Reports a failure of something the reader asked for. See `notice`.
     fn fail(&mut self, message: String) {
         self.error = message.clone();
@@ -3188,6 +3197,10 @@ impl PerfrLiveApp {
                     } else {
                         self.fail(bundle_needs_service(&file.name()));
                     }
+                } else if chrome_load::is_perf_data_name(&file.name()) && self.opens_perf_data() {
+                    // The service names the frames; see `opens_perf_data`.
+                    self.import_pending = true;
+                    self.net.import_capture_file(file);
                 } else {
                     self.begin_trace_load(chrome_load::start_wasm_file(file));
                 }
@@ -3353,8 +3366,27 @@ impl PerfrLiveApp {
             return;
         }
         if !chrome_load::is_trace_name(&name) {
-            self.fail(format!("Not a Chrome or Perfetto trace: {name}"));
+            self.fail(format!("Not a Chrome or Perfetto trace, or a perf.data: {name}"));
             return;
+        }
+        if chrome_load::is_perf_data_name(&name) && self.opens_perf_data() {
+            // The service names the frames; see `opens_perf_data`.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(path) = &f.path {
+                match std::fs::read(path) {
+                    Ok(bytes) => {
+                        self.import_pending = true;
+                        self.net.import_capture(bytes);
+                    }
+                    Err(e) => self.fail(format!("{name}: {e}")),
+                }
+                return;
+            }
+            if let Some(bytes) = &f.bytes {
+                self.import_pending = true;
+                self.net.import_capture(bytes.to_vec());
+                return;
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -4090,6 +4122,7 @@ impl PerfrLiveApp {
                     target_pid: self.status.target_pid,
                     service_pid: self.status.service_pid,
                     hooks: self.status.hooks,
+                    perf_data: self.status.perf_data,
                     // This frame is the WebSocket's stats push, which carries
                     // no control state; keep what /api/status last said.
                     instrumentation: self.status.instrumentation.clone(),
@@ -4282,7 +4315,7 @@ impl PerfrLiveApp {
 
     fn transport_open(&mut self, ui: &mut Ui) {
         if pill(ui, "Open", false)
-            .on_hover_text("Open a saved capture (.perfr.zip, .perfr.stream), a Chrome trace (.json / .json.gz) or a Perfetto trace (.pftrace / .pb) — or drop the file on the page")
+            .on_hover_text("Open a saved capture (.perfr.zip, .perfr.stream), a Chrome trace (.json / .json.gz), a Perfetto trace (.pftrace / .pb) or a Linux perf.data — or drop the file on the page")
             .clicked()
         {
             self.open_file_dialog();
@@ -4321,7 +4354,7 @@ impl PerfrLiveApp {
         }
         if ui
             .button("Open…")
-            .on_hover_text("Open a saved capture (.perfr.zip, .perfr.stream), a Chrome trace (.json / .json.gz) or a Perfetto trace (.pftrace / .pb) — or drop the file on the page")
+            .on_hover_text("Open a saved capture (.perfr.zip, .perfr.stream), a Chrome trace (.json / .json.gz), a Perfetto trace (.pftrace / .pb) or a Linux perf.data — or drop the file on the page")
             .clicked()
         {
             self.open_file_dialog();
@@ -4859,7 +4892,7 @@ impl PerfrLiveApp {
         let tip = if enabled {
             "Upload this capture and get a link. Sign-in is required; the size is shown before anything is sent."
         } else if self.trace_name.is_some() {
-            "An imported Chrome or Perfetto trace cannot be shared yet."
+            "An imported Chrome or Perfetto trace, or a perf.data, cannot be shared yet."
         } else if self.static_capture.is_some() && self.held_stream.bytes().is_none() {
             "The capture is still loading."
         } else {
@@ -6310,7 +6343,7 @@ impl PerfrLiveApp {
                 ui.painter().text(
                     body.center(),
                     Align2::CENTER_CENTER,
-                    "Drop a Chrome (.json / .json.gz) or Perfetto (.pftrace) trace",
+                    "Drop a Chrome (.json / .json.gz) or Perfetto (.pftrace) trace, or a perf.data",
                     FontId::new(15.0, fonts::medium()),
                     theme::TEXT(),
                 );
@@ -14019,7 +14052,7 @@ fn paint_empty(ui: &Ui, rect: Rect, dropping: bool, service: bool) {
         rect.center() + Vec2::new(0.0, -10.0),
         Align2::CENTER_CENTER,
         if dropping && service {
-            "Drop Chrome / Perfetto trace"
+            "Drop a trace or a perf.data"
         } else if dropping {
             "Drop a capture or a trace"
         } else if service {
@@ -14034,9 +14067,9 @@ fn paint_empty(ui: &Ui, rect: Rect, dropping: bool, service: bool) {
         rect.center() + Vec2::new(0.0, 12.0),
         Align2::CENTER_CENTER,
         if service {
-            "Open or drop a Chrome .json  ·  or Record a process"
+            "Open or drop a Chrome .json or a perf.data  ·  or Record a process"
         } else {
-            "Open or drop a .perfr.stream, a Chrome .json or a Perfetto trace"
+            "Open or drop a .perfr.stream, a Chrome .json, a Perfetto trace or a perf.data"
         },
         FontId::new(12.0, FontFamily::Proportional),
         muted(),

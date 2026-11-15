@@ -251,6 +251,9 @@ pub struct LiveService {
     #[allow(clippy::type_complexity)]
     pub capture_import:
         Mutex<Option<std::sync::Arc<dyn Fn(Vec<u8>) -> Result<String, String> + Send + Sync>>>,
+    /// The import and open hooks read a `perf.data` too; see
+    /// [`Self::set_opens_perf_data`].
+    opens_perf_data: AtomicBool,
     /// Optional: a scope opened, closed or stamped by an agent over HTTP
     /// (`POST /api/scope`), on a named track. The service owns the clock
     /// and the ring, so it handles it. See [`AgentScope`].
@@ -497,6 +500,7 @@ impl LiveService {
             capture_export: Mutex::new(None),
             capture_share_export: Mutex::new(None),
             capture_import: Mutex::new(None),
+            opens_perf_data: AtomicBool::new(false),
             capture_open: Mutex::new(None),
             capture_clear: Mutex::new(None),
             agent_scope: Mutex::new(None),
@@ -687,6 +691,18 @@ impl LiveService {
         import: std::sync::Arc<dyn Fn(Vec<u8>) -> Result<String, String> + Send + Sync>,
     ) {
         *self.capture_import.lock() = Some(import);
+    }
+
+    /// Says that the import and open hooks also take a Linux `perf.data`
+    /// and name its frames from the files of this machine. A page sends
+    /// one here rather than reading it itself, which it can only do
+    /// without names.
+    pub fn set_opens_perf_data(&self, opens: bool) {
+        self.opens_perf_data.store(opens, Ordering::Relaxed);
+    }
+
+    pub fn opens_perf_data(&self) -> bool {
+        self.opens_perf_data.load(Ordering::Relaxed)
     }
 
     /// Names a thread for every viewer, now and for late subscribers.

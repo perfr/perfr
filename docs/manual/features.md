@@ -122,8 +122,10 @@ Left to right, in clusters separated by thin rules. A filled pill is on.
   running service only. The service holds the events unpacked, about
   three bytes of memory for each byte of saved stream, and takes sizes
   from 1 MiB to an eighth of the machine's memory (8 GiB at most).
-- **Open** opens a saved perfr capture (`.perfr.zip`) or a Chrome trace
-  (`.json` / `.json.gz`); dropping the file on the page does the same.
+- **Open** opens a saved perfr capture (`.perfr.zip`), a Chrome trace
+  (`.json` / `.json.gz`) or a Linux `perf.data`, whose frames the service
+  names from the binaries on its machine; dropping the file on the page
+  does the same.
   Screenshot: `17-opened-slice.png` (a slice reopened through the API).
 - **Save** (the tray icon) is a menu: the whole capture as `.perfr.zip`,
   the selected time slice as its own `.perfr.zip` (when a selection

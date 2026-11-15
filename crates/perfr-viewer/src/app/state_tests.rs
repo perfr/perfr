@@ -450,6 +450,67 @@ fn an_error_of_another_request_leaves_a_starting_capture_alone() {
     assert!(app.recording);
 }
 
+/// What `perf record -g` writes for a process with one thread: its name,
+/// where its program is mapped, three samples with their call chains.
+fn perf_data() -> Vec<u8> {
+    use perfr_perf_data::testing::*;
+    let e = Event1 { sample_type: CALLCHAIN_SAMPLE, id: 7 };
+    let mut records = vec![e.comm(10, 10, "busy", true, 1_000), e.mmap2(10, 0x40_0000, 0x1000, 0x1000, "/opt/busy", 1_100)];
+    for i in 0..3u64 {
+        records.push(e.sample(10, 10, 2_000_000 + i * 1_000_000, 0x40_0010, &[CONTEXT_USER, 0x40_0010, 0x40_0201]));
+    }
+    records.push(finished_round());
+    file(&[(attr(CALLCHAIN_SAMPLE, SAMPLE_ID_ALL | FREQ, 1000), vec![7])], &records, &[])
+}
+
+/// A `perf.data` holds addresses, not names. A page on its own draws it
+/// with what the file has: the module and the offset of each frame.
+#[test]
+fn a_dropped_perf_data_is_read_by_the_page_when_no_service_names_its_frames() {
+    // The viewer's own page, and a service too old (or not on Linux) to
+    // say it opens them.
+    for mut page in [Page::viewer(), Page::with(|app| app.apply_status(service_status(false)))] {
+        page.frames(2);
+        page.drop_file("perf.data", &perf_data());
+        page.frames(4);
+        assert!(page.app.error.is_empty(), "{}", page.app.error);
+        assert!(!page.app.import_pending, "nothing was sent to a service");
+        assert_eq!(page.app.trace_name.as_deref(), Some("perf.data"));
+        assert_eq!(page.app.thread_names.get(&(10, 10)).map(String::as_str), Some("busy"));
+        let process = page.app.trace_processes.iter().find(|p| p.pid == 10).expect("the recorded process");
+        assert_eq!((process.name.as_str(), process.path.as_str()), ("busy", "perf.data"));
+        let names: Vec<&str> = page.app.intern.iter().map(|(_, text)| text).collect();
+        assert!(names.contains(&"busy+0x1010") && names.contains(&"busy+0x1200"), "{names:?}");
+        // A tick and two frames per sample, and the report the page
+        // computes from them.
+        assert_eq!(page.app.index.event_count(), 9);
+        let report = crate::local_report::flat_report(&page.app.index, &page.app.intern, &[], "");
+        assert_eq!(report.samples, 3);
+    }
+}
+
+/// The service reads the names from the binaries on its machine, so a
+/// page that has one hands the file over instead of reading it.
+#[test]
+fn a_dropped_perf_data_goes_to_a_service_that_names_its_frames() {
+    let mut page = Page::with(|app| app.apply_status(StatusJson { perf_data: true, ..service_status(false) }));
+    page.frames(2);
+    page.drop_file("perf.data.old", &perf_data());
+    page.frames(2);
+    assert!(page.app.error.is_empty(), "{}", page.app.error);
+    assert!(page.app.import_pending, "the file was not handed to the service");
+    assert!(page.app.trace_name.is_none() && page.app.index.event_count() == 0, "and was read here as well");
+
+    // A gzip of one is not what the service takes: the page inflates it.
+    let mut page = Page::with(|app| app.apply_status(StatusJson { perf_data: true, ..service_status(false) }));
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    std::io::Write::write_all(&mut gz, &perf_data()).unwrap();
+    page.drop_file("run.data.gz", &gz.finish().unwrap());
+    page.frames(4);
+    assert!(!page.app.import_pending);
+    assert_eq!(page.app.index.event_count(), 9);
+}
+
 #[test]
 fn a_dropped_file_that_is_not_a_trace_says_so_where_it_can_be_seen() {
     let mut page = Page::with(|app| app.apply_status(service_status(false)));
@@ -458,7 +519,7 @@ fn a_dropped_file_that_is_not_a_trace_says_so_where_it_can_be_seen() {
     // The service keeps answering, four times a second.
     page.app.apply_status(service_status(false));
     page.frames(2);
-    let message = "Not a Chrome or Perfetto trace: notes.txt";
+    let message = "Not a Chrome or Perfetto trace, or a perf.data: notes.txt";
     assert!(!page.app.report_open, "the Inspector tab is not where this test looks");
     assert!(page.shows(message), "nothing on screen says the drop failed: {:?}", page.texts);
     // It stays until dismissed.

@@ -73,6 +73,19 @@ pub fn load_module(
     mappings: &[MemoryMapping],
     text: &MemoryMapping,
 ) -> Option<(Module<Vec<u8>>, Range<u64>)> {
+    load_module_with(path, |segments| load_bias(mappings, text, segments))
+}
+
+/// [`load_module`] for a caller that already knows the image's load bias:
+/// one that has a recording of where the file was mapped, not a process to
+/// read the maps of.
+pub fn load_module_at(path: &str, base_avma: u64) -> Option<(Module<Vec<u8>>, Range<u64>)> {
+    load_module_with(path, |_| base_avma)
+}
+
+/// `bias` is given the `(file offset, virtual address)` of each loadable
+/// segment and returns where the file's virtual address 0 landed.
+fn load_module_with(path: &str, bias: impl FnOnce(&[(u64, u64)]) -> u64) -> Option<(Module<Vec<u8>>, Range<u64>)> {
     let handle = std::fs::File::open(path).ok()?;
     // A path in the maps need not be a regular file, and a device mapped
     // executable has no end to read up to.
@@ -83,7 +96,7 @@ pub fn load_module(
     let file = object::File::parse(&contents).ok()?;
     let segments: Vec<(u64, u64)> =
         file.segments().map(|segment| (segment.file_range().0, segment.address())).collect();
-    let base_avma = load_bias(mappings, text, &segments);
+    let base_avma = bias(&segments);
     let extents: Vec<(u64, u64)> = file.segments().map(|segment| (segment.address(), segment.size())).collect();
     let avma_range = image_range(base_avma, &extents)?;
     let module = Module::new(path.to_string(), avma_range.clone(), base_avma, ObjectSectionInfo { file: &file });

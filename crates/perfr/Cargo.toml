@@ -55,9 +55,14 @@ perfr-wire = { path = "../perfr-wire" }
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+perfr-perf-data = { path = "../perfr-perf-data" }
 perfr-perf-ring = { path = "../perfr-perf-ring" }
 perfr-unwind = { path = "../perfr-unwind" }
 
 # The kernel logger: scheduler, thread states and stack samples on Windows.
 [target.'cfg(windows)'.dependencies]
 perfr-etw = { path = "../perfr-etw" }
+
+# The byte-by-byte perf.data writer, for the tests of the import.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+perfr-perf-data = { path = "../perfr-perf-data", features = ["testing"] }

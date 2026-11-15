@@ -865,8 +865,9 @@ impl Backend for ServiceNet {
         self.send("POST", "/api/capture/clear", "{}".into());
     }
 
-    /// Posts a `.perfr.zip` to the service, which opens it as the current
-    /// capture and streams it back over the WebSocket.
+    /// Posts a `.perfr.zip`, or a Linux `perf.data`, to the service, which
+    /// opens it as the current capture and streams it back over the
+    /// WebSocket. The service tells the two apart by their first bytes.
     fn import_capture(&self, bytes: Vec<u8>) {
         if self.offline {
             return;
@@ -879,8 +880,11 @@ impl Backend for ServiceNet {
         });
     }
 
-    /// As [`import_capture`](Self::import_capture), reading the browser
-    /// `File` first.
+    /// As [`import_capture`](Self::import_capture), for the browser's
+    /// `File`. The file is the request's body as it is: the browser reads
+    /// it from the disk as it sends it. Read into the page first, a
+    /// recording of a few gigabytes (a `perf.data` with stack copies is
+    /// one) was held twice in a heap that tops out at four.
     #[cfg(target_arch = "wasm32")]
     fn import_capture_file(&self, file: web_sys::File) {
         if self.offline {
@@ -888,14 +892,7 @@ impl Backend for ServiceNet {
         }
         let inbox = self.inbox.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let result = async {
-                let buf = JsFuture::from(file.array_buffer()).await.map_err(js_err)?;
-                let arr = js_sys::Uint8Array::new(&buf);
-                let mut bytes = vec![0u8; arr.length() as usize];
-                arr.copy_to(&mut bytes);
-                send_bytes("/api/capture/import", &bytes, "application/zip").await
-            }
-            .await;
+            let result = send_body("/api/capture/import", file.as_ref(), "application/octet-stream").await;
             if let Err(e) = result {
                 inbox.lock().unwrap_or_else(|p| p.into_inner()).error = Some(format!("open capture: {e}"));
             }
@@ -930,11 +927,19 @@ async fn pull_timeline_or_frame(http: &Http, qs: &str) -> Result<ViewPull, Strin
 /// success, the status or error otherwise.
 #[cfg(target_arch = "wasm32")]
 pub(crate) async fn send_bytes(url: &str, bytes: &[u8], content_type: &str) -> Result<String, String> {
-    let opts = RequestInit::new();
-    opts.set_method("POST");
     let body = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
     body.copy_from(bytes);
-    opts.set_body(&body.into());
+    send_body(url, &body.into(), content_type).await
+}
+
+/// POSTs `body` (bytes, or a `Blob` such as a `File`) with the given
+/// content type; the response text on success, the status or error
+/// otherwise.
+#[cfg(target_arch = "wasm32")]
+async fn send_body(url: &str, body: &JsValue, content_type: &str) -> Result<String, String> {
+    let opts = RequestInit::new();
+    opts.set_method("POST");
+    opts.set_body(body);
     let headers = js_sys::Object::new();
     js_sys::Reflect::set(
         &headers,

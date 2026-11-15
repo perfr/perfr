@@ -470,6 +470,95 @@ fn file_load_bias(mappings: &[MemoryMapping], mapping: &MemoryMapping, file: &Lo
     perfr_maps::load_bias(mappings, mapping, &layout)
 }
 
+/// One file's symbols, asked by where an address is *in the file*: what a
+/// recording made elsewhere has (`perf.data` says which file a sampled
+/// address was in and at what offset), with no process left to read the
+/// maps of.
+#[cfg(target_os = "linux")]
+pub(crate) struct FileSymbols {
+    file: LoadedFile,
+    /// Lower-case hex of the file's build id; empty when it has none.
+    build_id: String,
+}
+
+#[cfg(target_os = "linux")]
+impl FileSymbols {
+    /// The symbols of the ELF file at `path`: `None` when it is not there
+    /// or is not one.
+    pub(crate) fn load(path: &str) -> Option<FileSymbols> {
+        let _load = perfr_api::scope(format!("load symbols: {}", basename(path)));
+        let bytes = try_map_file(path).ok()?;
+        let metadata = parse_elf_metadata(&bytes, path).ok()?;
+        let symbols = sorted_symbols(&bytes, Some(path));
+        let image_base = image_base(&metadata.loadable_segments);
+        Some(FileSymbols { file: LoadedFile { segments: metadata.loadable_segments, symbols, image_base }, build_id: metadata.build_id })
+    }
+
+    /// A file made of its parts, for a test that has no ELF to read:
+    /// segments as `(offset in file, size, virtual address)`.
+    #[cfg(test)]
+    pub(crate) fn from_parts(segments: &[(u64, u64, u64)], mut symbols: Vec<(u64, u64, String)>, build_id: &str) -> FileSymbols {
+        let segments: Vec<ObjectSegment> = segments
+            .iter()
+            .map(|(offset, size, address)| ObjectSegment { offset_in_file: *offset, size_in_file: *size, address: *address, size_in_memory: *size })
+            .collect();
+        sort_symbols(&mut symbols);
+        let image_base = image_base(&segments);
+        FileSymbols { file: LoadedFile { segments, symbols, image_base }, build_id: build_id.to_string() }
+    }
+
+    /// The vDSO of the kernel the service runs on: the image every
+    /// process of this boot maps.
+    pub(crate) fn vdso() -> Option<FileSymbols> {
+        let symbols = sorted_symbols(&vdso_image()?, None);
+        Some(FileSymbols { file: LoadedFile { segments: Vec::new(), symbols, image_base: 0 }, build_id: String::new() })
+    }
+
+    pub(crate) fn build_id(&self) -> &str {
+        &self.build_id
+    }
+
+    /// The loadable segment whose bytes in the file include `offset`.
+    fn segment_at(&self, offset: u64) -> Option<&ObjectSegment> {
+        self.file.segments.iter().find(|s| offset >= s.offset_in_file && offset - s.offset_in_file < s.size_in_file)
+    }
+
+    /// The virtual address, in the file's own terms, of the byte at
+    /// `offset`: what its symbol table is keyed by. A segment's address
+    /// is not its offset plus one constant for the whole file (lld moves
+    /// each segment a page further), so the segment the offset is in
+    /// says.
+    fn address_of(&self, offset: u64) -> u64 {
+        match self.segment_at(offset) {
+            Some(segment) => segment.address.wrapping_add(offset - segment.offset_in_file),
+            None => offset.wrapping_add(self.file.image_base),
+        }
+    }
+
+    /// The function the byte at `offset` in the file is in, demangled.
+    pub(crate) fn name_at(&self, offset: u64) -> Option<String> {
+        find_symbol(&self.file.symbols, self.address_of(offset)).map(demangle)
+    }
+
+    /// Where the file's virtual address 0 is in a process that has the
+    /// file's bytes from `pgoff` on mapped at `start`: the load bias an
+    /// unwinder places the image by. The mapping is of the segment that
+    /// begins in the page at `pgoff`; where two segments share that page
+    /// (lld again: the tail of one, the head of the next), a mapping that
+    /// starts there is the later one's.
+    pub(crate) fn load_bias(&self, start: u64, pgoff: u64) -> u64 {
+        const PAGE: u64 = 4096;
+        let segment = self
+            .file
+            .segments
+            .iter()
+            .filter(|s| s.offset_in_file / PAGE * PAGE <= pgoff && pgoff < s.offset_in_file.saturating_add(s.size_in_file.max(1)))
+            .max_by_key(|s| s.offset_in_file);
+        let slide = segment.map_or(self.file.image_base, |s| s.address.wrapping_sub(s.offset_in_file));
+        start.wrapping_sub(pgoff).wrapping_sub(slide)
+    }
+}
+
 /// The first PT_LOAD's virtual address minus its file offset: where the
 /// file's virtual address space starts relative to its bytes. Zero for the
 /// usual layout, 0x200000 for a binary linked with an image base (Unreal).

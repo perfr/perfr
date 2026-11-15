@@ -1,6 +1,6 @@
 # Everywhere
 
-The same capture, in another colour scheme, on a phone, or loaded from a trace file. The recordings are on the [features page](../features.html#everywhere).
+The same capture, in another colour scheme, on a phone, or loaded from a trace file or a Linux `perf` recording. The recordings are on the [features page](../features.html#everywhere).
 
 ## Colour schemes
 
@@ -39,4 +39,33 @@ The WebAssembly heap is capped at 4 GiB (`--max-memory=4294967296` in `wasm_pack
 
 @clip 14-chrome-trace-import | Chrome trace | Opening a Chrome Trace Event JSON file onto the perfr timeline
 
-The drop overlay reads “Drop a Chrome (.json / .json.gz) or Perfetto (.pftrace) trace”. A file that is neither a capture nor a trace shows “Not a Chrome or Perfetto trace” plus the name.
+The drop overlay reads “Drop a Chrome (.json / .json.gz) or Perfetto (.pftrace) trace, or a perf.data”. A file that is none of those and not a capture shows “Not a Chrome or Perfetto trace, or a perf.data” plus the name.
+
+## Linux perf recordings
+
+**Open**, a drop, or **Ctrl+O** / **⌘O** also takes the file `perf record` writes: `perf.data`, `perf.data.old`, or one renamed to end in `.data`. What `perf record -o -` pipes into a file is read too, and so is a recording made with `-z`.
+
+```
+perf record -g -- ./my-program        # call chains from frame pointers
+perf record --call-graph dwarf -- ./my-program
+perf record -g -a -- sleep 5          # the whole machine
+```
+
+Each sample is a tick on its thread's sample bar, as for a capture perfr sampled itself: click one to copy its call stack, drag across the bar to select, and the flame graph and the sampling trees are computed from them. Threads and processes carry the names the recording has. A recording made with `--switch-events` also fills the thread-state bars (running, and runnable when a thread was pushed off its CPU), and the scheduler lanes when it covers the whole machine (`-a`).
+
+### Where the names come from
+
+A `perf.data` holds addresses, and for each one the file it was in. It holds no function names: `perf report` reads those from the binaries on the machine it runs on. So what you see depends on who reads the file.
+
+- **The page perfr serves, on Linux.** The file goes to the service, which names the frames from the binaries at the recorded paths (and their detached debug files), kernel frames from `/proc/kallsyms`, and unwinds the stack copies of a `--call-graph dwarf` recording. Open the recording on the machine that made it and the names are the ones `perf report` shows. A binary is used only if it is the build that was recorded (the build ids are compared), and the kernel's symbols only if it is the same kernel: a rebuilt program, or a recording from another machine, gets no wrong names.
+- **A page with no service** (the hosted viewer, a page opened on a file), or a service on macOS or Windows. The page reads the file itself and shows each frame as `module+0xoffset`, for example `libc.so.6+0x8f2a4`. The offset is the one in the file, which is what `addr2line -e` takes. Threads, the reports and the selection all work; only the names are missing. A `--call-graph dwarf` recording shows the sampled function alone, since unwinding a stack copy takes the binary.
+
+A frame the service cannot name is shown the same way, `module+0xoffset`. The service log has one line per recording opened: how many frames it named, and how many files it read, did not find, or found in another build.
+
+### What to know
+
+- The service opens a recording as it opens a `.perfr.zip`: it replaces the current capture, and answers `busy: stop the capture before opening one` while one is running. Read by the page, a recording stops a live capture first, as a trace does.
+- Samples need their time (`perf record` stores it by default; with `--no-inherit` on one process, add `-T`). A recording without it is refused with that advice.
+- Every event of the recording lands on the same sample bar. `perf record -e cycles -e cache-misses` is two profiles in one file, and they are not told apart.
+- Intel PT and other AUX data are skipped. Files written on a big-endian machine are not read.
+- A service takes a recording of up to 4 GiB. The page is bounded by its WebAssembly heap, as for a trace.

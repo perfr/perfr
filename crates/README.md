@@ -31,6 +31,7 @@ Where the events come from on Linux:
 |---|---|
 | `perfr-perf-records` | Packed layouts of the perf ring-buffer records the service reads. The kernel's `linux/perf_event.h` is the specification. No dependencies. |
 | `perfr-perf-ring` | `perf_event_open`, the event attributes and the mmap ring-buffer protocol. The unsafe code is confined to its `sys` module; `libc` is the one dependency. |
+| `perfr-perf-data` | Reads `perf.data`, the file `perf record` writes: its attributes and records, in time order, with the address spaces they describe. The viewer draws one with it; the service opens one as a capture and names its frames. Not Linux-only: it is compiled into the WebAssembly packs. |
 | `perfr-unwind` | DWARF callstack unwinding over sampled stack copies, with `framehop` and `object`. |
 | `perfr-maps` | Parsing of `/proc/<pid>/maps`. No dependencies. |
 | `perfr-thread-states` | The per-thread state machine over the scheduler tracepoints. |
@@ -71,9 +72,9 @@ The viewer and its server:
 | `perfr-live-protocol` | Binary framing of the WebSocket stream between service and viewer. |
 | `perfr-live-ring` | The service's in-process ring of live events, with optional spill to disk. |
 | `perfr-live-server` | The HTTP and WebSocket server inside `perfr`. Its build script embeds the viewer pack (`perfr-client/viewer-dist`) into the binary, so a rebuilt pack needs a rebuilt service. |
-| `perfr-live-chrome` | Import of Chrome Trace Event JSON and Perfetto proto traces into live events. |
+| `perfr-live-chrome` | Import of Chrome Trace Event JSON, Perfetto proto traces and Linux `perf.data` into live events. |
 | `perfr-live-render` | The pixel-column rasterizer of the timeline. |
-| `perfr-viewer` | The viewer: the page that shows a capture. The whole interface is here (the timeline, the track rail, the reports, search, stories, the import of Chrome and Perfetto traces), with no capture service behind it. `build_wasm.sh` makes its pack, which opens capture files and is what a website hosts or a post embeds. See its [README](perfr-viewer/README.md). |
+| `perfr-viewer` | The viewer: the page that shows a capture. The whole interface is here (the timeline, the track rail, the reports, search, stories, the import of Chrome and Perfetto traces and of `perf.data`), with no capture service behind it. `build_wasm.sh` makes its pack, which opens capture files and is what a website hosts or a post embeds. See its [README](perfr-viewer/README.md). |
 | `perfr-client` | The client: the viewer with the capture service behind it, which is the page the service serves. It adds the connection to the service and, with it, recording, the process picker, hooks and Share. Compiled to WebAssembly by `build_wasm.sh`. The built pack is committed in `viewer-dist/` and embedded in the `perfr` binary. See its [README](perfr-client/README.md). |
 | `perfr-story` | The versioned story document (camera targets and overlays) shared by the viewer and the MCP server. |
 | `perfr-web` | The recorder behind `@perfr/web` (`web/perfr`): a ring of live events encoded as a `.perfr.stream`, compiled to WebAssembly for a page that profiles itself, with a C ABI for Emscripten and native callers. |

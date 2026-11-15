@@ -8,7 +8,7 @@
 //! timeline is one `PaintCallback` (hybrid wgpu) over the pixel-column raster
 //! and the instanced scope quads in `perfr-live-render`. Around it are the
 //! track rail, the reports, search, the log window, stories and the import
-//! of Chrome and Perfetto traces.
+//! of Chrome and Perfetto traces and of Linux `perf.data`.
 //!
 //! Nothing of the capture pipeline is in here, and no connection to the
 //! capture service either. What is behind the page is a [`net::Backend`]:

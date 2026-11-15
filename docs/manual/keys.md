@@ -62,6 +62,7 @@ More also lists “Pan time: A / D”, “Zoom: W / S” and “Scroll tracks: �
 | `?collapse=scheduler` | Start with the scheduler track folded |
 | `?theme=` | `perfr`, `dracula`, `nord`, `gruvbox`, `solarized`, `solarized-light`, `gruvbox-light`. Omitted, the viewer uses Nord unless `perfr_theme` is already saved |
 | `?webgpu` | Try WebGPU instead of WebGL2 |
-| `?capture=` | Open a `.perfr.stream` with no service. The site’s embedded viewer uses this |
+| `?capture=` | Open a `.perfr.stream` with no service. The site’s embedded viewer uses this. The file is shown as it downloads |
+| `?replay=` | Play the `?capture=` file in at this many times the speed it was recorded at, with the view following it (`?replay=1`, or a bare `?replay`, is real time). A click, a key or the wheel ends the replay and shows the rest |
 | `?story=` | Open a story on that capture. `demo` is the story shipped with the viewer; any other value is a URL of a `perfr.story` document. `?capture=` still chooses the capture |
 | `?chrome=compact` | For an iframe: no capture controls, one story bar (Play, Previous, Next, the step list, fullscreen, and Share on the page perfr serves) and the step's text under the timeline. Give the iframe `allow="fullscreen"`; without it the fullscreen button opens the page in a tab of its own |

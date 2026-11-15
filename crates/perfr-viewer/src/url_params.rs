@@ -7,6 +7,7 @@
 //! | parameter | read by | meaning |
 //! |---|---|---|
 //! | `?capture=<url>` | here | open a `.perfr.stream` instead of connecting to a service |
+//! | `?replay=<speed>` | here | play that file in at `speed` times real time |
 //! | `?story=<url>\|demo\|box3d` | here | open a story over the capture |
 //! | `?chrome=compact` | here | a short bar, for an iframe |
 //! | `?collapse=scheduler` | here | start with the scheduler track folded |
@@ -277,9 +278,61 @@ pub fn query_theme(search: &str) -> Option<String> {
     None
 }
 
+/// `?replay=<speed>` -- play the `?capture=` file in as if it were being
+/// recorded: its events appear at `speed` times the rate they were captured
+/// at (`replay=1` is real time), with the view following them, and the whole
+/// capture is shown once they are all in. A bare `?replay` is `replay=1`.
+/// The first click, key or wheel on the page ends the replay and shows the
+/// rest at once. Without the parameter a file is shown as fast as it
+/// arrives.
+pub fn query_replay_speed_from_location() -> Option<f64> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.location().search().ok())
+            .and_then(|s| query_replay_speed(&s))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        None
+    }
+}
+
+/// The slowest and the fastest replay the address can ask for.
+const REPLAY_SPEED_RANGE: (f64, f64) = (0.01, 1000.0);
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn query_replay_speed(search: &str) -> Option<f64> {
+    for pair in search.trim_start_matches('?').split('&') {
+        if pair == "replay" {
+            return Some(1.0);
+        }
+        if let Some(value) = pair.strip_prefix("replay=") {
+            let speed = value.parse::<f64>().ok().filter(|s| s.is_finite() && *s > 0.0)?;
+            return Some(speed.clamp(REPLAY_SPEED_RANGE.0, REPLAY_SPEED_RANGE.1));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_query_is_a_speed_and_real_time_when_bare() {
+        assert_eq!(query_replay_speed("?capture=a.perfr.stream&replay=2"), Some(2.0));
+        assert_eq!(query_replay_speed("?replay=0.5"), Some(0.5));
+        assert_eq!(query_replay_speed("?replay&capture=a"), Some(1.0));
+        assert_eq!(query_replay_speed("?capture=a"), None);
+        assert_eq!(query_replay_speed("?xreplay=2"), None);
+        // Not a speed: the file is shown as it arrives.
+        for off in ["?replay=0", "?replay=-1", "?replay=fast", "?replay=", "?replay=inf", "?replay=NaN"] {
+            assert_eq!(query_replay_speed(off), None, "{off}");
+        }
+        assert_eq!(query_replay_speed("?replay=1e9"), Some(1000.0));
+        assert_eq!(query_replay_speed("?replay=0.000001"), Some(0.01));
+    }
 
     #[test]
     fn theme_query_reads_the_key() {

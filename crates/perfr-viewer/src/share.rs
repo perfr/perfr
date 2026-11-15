@@ -326,6 +326,26 @@ impl HeldStream {
         self.local = true;
     }
 
+    /// The file stopped arriving part way. What was read of it is on
+    /// screen, and is the capture as far as the page goes, but it is not
+    /// the file: there is nothing to post.
+    pub fn loaded_in_part(&mut self) {
+        self.loading = false;
+        self.bytes = None;
+        self.local = true;
+    }
+
+    /// The file that was being ingested is not going to be the capture:
+    /// something else took the screen before its end.
+    pub fn load_dropped(&mut self) {
+        self.loading = false;
+    }
+
+    /// A stream file is being ingested and is not all in yet.
+    pub fn is_loading(&self) -> bool {
+        self.loading
+    }
+
     /// The capture on screen is being replaced or cleared.
     pub fn forget(&mut self) {
         if !self.loading {

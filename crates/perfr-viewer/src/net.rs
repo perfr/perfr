@@ -317,6 +317,27 @@ pub struct ServiceFrame {
     pub rgba: Vec<u8>,
 }
 
+/// One step of a capture file's download, in the order they happen: a
+/// `Begin`, the file's bytes in as many pieces as the network made of them,
+/// then an `End` or a `Failed`.
+///
+/// A file used to be handed over whole (`Inbox::loaded_stream`), so the
+/// page showed nothing until its last byte was down. A stream is frames in
+/// capture order, readable from the first one, so the pieces are passed on
+/// as they arrive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StreamPiece {
+    /// The server answered and the body follows. Whatever was arriving
+    /// before this is another file, and is over. `total` is the body's
+    /// length when the server said.
+    Begin { total: Option<u64> },
+    Bytes(Vec<u8>),
+    /// That was the last byte.
+    End,
+    /// The file could not be fetched, or stopped arriving part way.
+    Failed(String),
+}
+
 #[derive(Default)]
 pub struct Inbox {
     pub share_notes: Vec<crate::share::ShareNote>,
@@ -331,6 +352,10 @@ pub struct Inbox {
     /// a story's `capture`) rather than opened by the reader. See
     /// `PerfrLiveApp::accept_stream_by_address`.
     pub loaded_stream_by_address: bool,
+    /// A `.perfr.stream` the page's address named, as it comes down: see
+    /// [`StreamPiece`]. The app shows what has arrived without waiting for
+    /// the rest.
+    pub stream_pieces: Vec<StreamPiece>,
     /// A story document fetched from `?story=`.
     pub loaded_story: Option<String>,
     pub status: Option<StatusJson>,
@@ -696,6 +721,7 @@ impl Inbox {
             share_token: self.share_token.take(),
             loaded_stream: self.loaded_stream.take(),
             loaded_stream_by_address: std::mem::take(&mut self.loaded_stream_by_address),
+            stream_pieces: std::mem::take(&mut self.stream_pieces),
             loaded_story: self.loaded_story.take(),
             status: self.status.take(),
             settings: self.settings.take(),
@@ -744,7 +770,8 @@ pub trait Backend {
 
     /// Fetch a story document. The text lands in `loaded_story`.
     fn fetch_story(&self, _url: &str) {}
-    /// Fetch a `.perfr.stream`. The bytes land in `loaded_stream`.
+    /// Fetch a `.perfr.stream`. The bytes land in `loaded_stream` once they
+    /// are all down, or in `stream_pieces` as they arrive.
     fn fetch_capture(&self, _url: &str) {}
     /// Reads a `.perfr.stream` the reader opened or dropped on the page.
     #[cfg(target_arch = "wasm32")]
@@ -916,7 +943,7 @@ fn open_files(capture: Option<&str>) -> Net {
 /// crate is built from as well.
 #[cfg(target_arch = "wasm32")]
 pub mod web {
-    use super::{Backend, Inbox};
+    use super::{Backend, Inbox, Latest, StreamPiece};
     use std::sync::{Arc, Mutex};
     use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsCast;
@@ -932,6 +959,10 @@ pub mod web {
     #[derive(Clone, Default)]
     pub struct FileBackend {
         inbox: SharedInbox,
+        /// Which capture download is the one the page waits for. A story
+        /// can name a second file while the first is still coming down, and
+        /// the pieces of the two must not be dealt into one inbox.
+        captures: Latest,
     }
 
     impl FileBackend {
@@ -952,23 +983,42 @@ pub mod web {
         /// static web page's mode: no service, no socket.
         pub fn from_capture_url(url: &str) -> Self {
             let backend = Self::default();
+            backend.stream_capture(url, true);
+            backend
+        }
+
+        /// Fetches a capture file and deals it into the inbox as it comes
+        /// down (`Inbox::stream_pieces`). `is_the_link` is the static page,
+        /// where the file stands in for the socket a service would have:
+        /// the link reads as up once the server has answered.
+        fn stream_capture(&self, url: &str, is_the_link: bool) {
             let url = url.to_string();
-            let fetch_into = backend.inbox.clone();
+            let inbox = self.inbox.clone();
+            let latest = self.captures.clone();
+            let seq = latest.next();
             wasm_bindgen_futures::spawn_local(async move {
-                let result = get_bytes(&url).await;
-                let mut g = fetch_into.lock().unwrap_or_else(|e| e.into_inner());
-                match result {
-                    Ok(bytes) => {
-                        g.bytes_in += bytes.len() as u64;
-                        g.loaded_stream = Some(bytes);
-                        g.loaded_stream_by_address = true;
-                        g.ws_ok = true;
-                        g.http_ok = true;
+                // False once another download has taken this one's place:
+                // the fetch is dropped where it stands.
+                let deliver = |piece: StreamPiece| {
+                    if !latest.is(seq) {
+                        return false;
                     }
-                    Err(e) => g.error = Some(format!("capture file: {e}")),
+                    let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
+                    match &piece {
+                        StreamPiece::Begin { .. } => {
+                            g.http_ok = true;
+                            g.ws_ok |= is_the_link;
+                        }
+                        StreamPiece::Bytes(bytes) => g.bytes_in += bytes.len() as u64,
+                        StreamPiece::End | StreamPiece::Failed(_) => {}
+                    }
+                    g.stream_pieces.push(piece);
+                    true
+                };
+                if let Err(e) = get_stream(&url, &deliver).await {
+                    deliver(StreamPiece::Failed(format!("capture file: {e}")));
                 }
             });
-            backend
         }
 
         /// [`from_capture_url`](Self::from_capture_url) when the page names
@@ -1005,21 +1055,7 @@ pub mod web {
         }
 
         fn fetch_capture(&self, url: &str) {
-            let url = url.to_string();
-            let inbox = self.inbox.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                let result = get_bytes(&url).await;
-                let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
-                match result {
-                    Ok(bytes) => {
-                        g.bytes_in += bytes.len() as u64;
-                        g.loaded_stream = Some(bytes);
-                        g.loaded_stream_by_address = true;
-                        g.http_ok = true;
-                    }
-                    Err(e) => g.error = Some(format!("capture file: {e}")),
-                }
-            });
+            self.stream_capture(url, false);
         }
 
         fn import_stream_file(&self, file: web_sys::File) {
@@ -1086,6 +1122,70 @@ pub mod web {
         let mut out = vec![0u8; arr.length() as usize];
         arr.copy_to(&mut out);
         Ok(out)
+    }
+
+    /// GET `url` and hand its body to `piece` as the network delivers it: a
+    /// `Begin` once the server has answered with a body, then its bytes,
+    /// then an `End`. `piece` answers false to stop the download there. An
+    /// error is a failed request, or a body that broke off; the `Begin` may
+    /// have gone out by then, and the caller says so with a `Failed`.
+    ///
+    /// The length is the response's `Content-Length`, which a server that
+    /// compresses the body counts in compressed bytes: it is a hint for a
+    /// progress line and nothing is cut to it.
+    pub async fn get_stream(url: &str, piece: &dyn Fn(StreamPiece) -> bool) -> Result<(), String> {
+        let window = web_sys::window().ok_or("no window")?;
+        let resp = JsFuture::from(window.fetch_with_str(url))
+            .await
+            .map_err(js_err)?;
+        let resp: Response = resp
+            .dyn_into()
+            .map_err(|_| "fetch: not a Response".to_string())?;
+        let status = resp.status();
+        if !(200..300).contains(&status) {
+            return Err(format!("{url}: {status}"));
+        }
+        let total = resp
+            .headers()
+            .get("content-length")
+            .ok()
+            .flatten()
+            .and_then(|length| length.trim().parse::<u64>().ok());
+        if !piece(StreamPiece::Begin { total }) {
+            return Ok(());
+        }
+        let Some(body) = resp.body() else {
+            // A browser that does not expose the body as a stream: the
+            // whole of it, as before.
+            let buf = JsFuture::from(resp.array_buffer().map_err(js_err)?)
+                .await
+                .map_err(js_err)?;
+            let _ = piece(StreamPiece::Bytes(js_sys::Uint8Array::new(&buf).to_vec())) && piece(StreamPiece::End);
+            return Ok(());
+        };
+        let reader: web_sys::ReadableStreamDefaultReader = body
+            .get_reader()
+            .dyn_into()
+            .map_err(|_| "fetch: the body has no reader".to_string())?;
+        loop {
+            let read = JsFuture::from(reader.read()).await.map_err(js_err)?;
+            let done = js_sys::Reflect::get(&read, &JsValue::from_str("done"))
+                .ok()
+                .and_then(|done| done.as_bool())
+                .unwrap_or(true);
+            if done {
+                break;
+            }
+            let value = js_sys::Reflect::get(&read, &JsValue::from_str("value")).map_err(js_err)?;
+            let bytes = js_sys::Uint8Array::new(&value).to_vec();
+            if !bytes.is_empty() && !piece(StreamPiece::Bytes(bytes)) {
+                // Nobody is waiting for the rest: stop the server sending it.
+                let _ = reader.cancel();
+                return Ok(());
+            }
+        }
+        piece(StreamPiece::End);
+        Ok(())
     }
 
     pub fn js_err(v: JsValue) -> String {

@@ -1138,6 +1138,36 @@ impl Page {
 }
 
 #[test]
+fn thread_header_stacks_name_and_id_and_keeps_hide_clear() {
+    let mut page = three_thread_page();
+    page.app.thread_names.insert((100, 102), "Render worker".into());
+    page.frames(2);
+    let name = page.text_rect("Render worker").expect("thread name");
+    let id = page.text_rect("102").expect("thread id");
+    assert!(name.bottom() <= id.top(), "name and ID should occupy separate lines");
+    assert!((name.left() - id.left()).abs() <= 1.0);
+    assert!(!page.texts.iter().any(|s| s.starts_with("thread  102")));
+
+    for width in [220.0, 120.0] {
+        page.app.header_w = width;
+        page.app.thread_names.insert((100, 102), "A very long rendering worker name that cannot fit".into());
+        page.frames(2);
+        let row = page.rect_of("row:thread:100:102").unwrap();
+        let hide = Pos2::new(row.right() - 12.0, row.top() + THREAD_H * page.app.tracks.scale * 0.5);
+        let label = page.texts.iter().position(|s| s.starts_with("A very")).expect("truncated name");
+        assert!(page.text_rects[label].right() <= hide.x - 7.0, "text overlaps the hide button");
+        page.click(hide);
+        page.frames(2);
+        assert_eq!(page.app.tracks.hidden_count(), 1);
+        let all = page.text_rect("all").expect("restore hidden threads");
+        page.click(all.center());
+        page.frames(2);
+        assert_eq!(page.app.tracks.hidden_count(), 0);
+        assert!(page.rect_of("row:thread:100:102").is_some());
+    }
+}
+
+#[test]
 fn a_track_dropped_outside_the_lanes_is_dropped() {
     let mut page = three_thread_page();
     let header = page.rect_of("row:thread:100:102").expect("the thread's header");

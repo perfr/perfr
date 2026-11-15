@@ -6734,24 +6734,41 @@ impl PerfrLiveApp {
                 let health_group = perfr_live_event::health::is_health_pid(th.pid)
                     .then(|| perfr_live_event::health::group_name(th.tid))
                     .flatten();
-                let thread_label = if let Some(group) = health_group {
-                    group.to_string()
-                } else if tight {
-                    if tname.is_empty() {
-                        format!("{}", th.tid)
-                    } else {
-                        tname
-                    }
-                } else {
-                    format!("thread  {}  {tname}", th.tid)
-                };
-                let label_r = ui.painter().text(
-                    Pos2::new(title.left() + text_x, title.center().y),
-                    Align2::LEFT_CENTER,
-                    thread_label,
+                // Keep both lines inside the space before the hide button.
+                let text_left = title.left() + text_x;
+                let text_right = (hide.left() - 6.0).max(text_left);
+                let text_rect = Rect::from_min_max(
+                    Pos2::new(text_left, title.top()),
+                    Pos2::new(text_right, title.bottom()),
+                );
+                let painter = ui.painter_at(text_rect);
+                let name = health_group.unwrap_or(&tname);
+                let mut job = egui::text::LayoutJob::simple_singleline(
+                    name.to_owned(),
                     FontId::new(11.0, FontFamily::Proportional),
                     theme::TEXT(),
                 );
+                job.wrap.max_width = text_rect.width();
+                job.wrap.max_rows = 1;
+                job.wrap.break_anywhere = true;
+                let galley = ui.fonts(|f| f.layout_job(job));
+                let name_y = if health_group.is_some() {
+                    title.center().y - galley.size().y * 0.5
+                } else {
+                    title.center().y - 13.0
+                };
+                let name_pos = Pos2::new(text_left, name_y);
+                let label_r = Rect::from_min_size(name_pos, galley.size());
+                painter.galley(name_pos, galley, theme::TEXT());
+                if health_group.is_none() {
+                    painter.text(
+                        Pos2::new(text_left, title.center().y + 1.0),
+                        Align2::LEFT_TOP,
+                        th.tid.to_string(),
+                        FontId::monospace(9.0),
+                        theme::MUTED(),
+                    );
+                }
                 self.paint_guest_badge(ui, title, label_r.right(), hide.left() - 4.0, TrackKey::Thread(th));
                 let hide_r =
                     ui.interact(hide, ui.id().with(("hide", th.pid, th.tid)), Sense::click());
@@ -6770,7 +6787,9 @@ impl PerfrLiveApp {
                     self.tracks.toggle_hidden(th);
                     self.relayout_tracks();
                 }
-                hide_r.on_hover_text("Hide thread");
+                hide_r.on_hover_text(
+                    "Hide thread. To bring it back, click “all” above the thread headers or “N hidden” on its process header.",
+                );
             }
             RowId::Async(th) => {
                 // A thread's async spans, as a track of their own: the head
@@ -6868,6 +6887,14 @@ impl PerfrLiveApp {
                     }
                     if resp.drag_stopped() {
                         self.tracks.end_drag();
+                    }
+                    if perfr_live_event::health::is_health_pid(key.pid) {
+                        let name = value_lane_name(&self.index, &self.intern, key);
+                        if let Some(tip) = perfr_live_event::health::metric_tooltip(&name) {
+                            resp.on_hover_text(format!(
+                                "{tip}\n\nMachine-wide readings from the captured machine, sampled about twice per second. Rates use the elapsed time between samples."
+                            ));
+                        }
                     }
                 }
                 let name = value_lane_name(&self.index, &self.intern, key);

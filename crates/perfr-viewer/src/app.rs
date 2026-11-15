@@ -6624,19 +6624,33 @@ impl PerfrLiveApp {
                 } else {
                     format!("process  {pid}  {name}")
                 };
-                ui.painter().text(
-                    Pos2::new(r.left() + if tight { 22.0 } else { 30.0 }, r.center().y),
-                    Align2::LEFT_CENTER,
+                let hidden_n = self.tracks.hidden_in_process(pid);
+                let hidden_chip = (hidden_n > 0 && !tight).then(|| {
+                    Rect::from_center_size(
+                        Pos2::new(r.right() - 36.0, r.center().y),
+                        Vec2::new(64.0, 16.0),
+                    )
+                });
+                // Reserve the restore control's space before laying out the
+                // process label, including when the header is resized.
+                let label_left = r.left() + if tight { 22.0 } else { 30.0 };
+                let label_right = hidden_chip.map_or(r.right() - 4.0, |chip| chip.left() - 6.0);
+                let label_rect = Rect::from_min_max(
+                    Pos2::new(label_left, r.top()),
+                    Pos2::new(label_right.max(label_left), r.bottom()),
+                );
+                let mut job = egui::text::LayoutJob::simple_singleline(
                     proc_label,
                     FontId::new(11.0, fonts::medium()),
                     theme::TEXT(),
                 );
-                let hidden_n = self.tracks.hidden_in_process(pid);
-                if hidden_n > 0 && !tight {
-                    let chip = Rect::from_center_size(
-                        Pos2::new(r.right() - 36.0, r.center().y),
-                        Vec2::new(64.0, 16.0),
-                    );
+                job.wrap.max_width = label_rect.width();
+                job.wrap.max_rows = 1;
+                job.wrap.break_anywhere = true;
+                let galley = ui.fonts(|f| f.layout_job(job));
+                let label_pos = Pos2::new(label_left, r.center().y - galley.size().y * 0.5);
+                ui.painter_at(label_rect).galley(label_pos, galley, theme::TEXT());
+                if let Some(chip) = hidden_chip {
                     let hit = ui.interact(chip, ui.id().with(("phide", pid, 0u32)), Sense::click());
                     ui.painter().text(
                         chip.center(),

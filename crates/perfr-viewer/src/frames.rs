@@ -97,21 +97,17 @@ pub fn drain_frames(
     let mut skipped = 0usize;
     let fault = loop {
         let rest = &leftover[off..];
-        if rest.len() < HEADER {
-            break None;
-        }
         // The header says whether the frame is all here. The decoder's own
         // answer cannot be used for that: it reports a whole frame whose
         // payload is too short for its type as truncated too, and waiting
         // on that one stalls the stream for good.
-        let payload_len = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
-        if payload_len > MAX_FRAME_PAYLOAD {
-            break Some(StreamFault::Corrupt(format!("a frame claims {payload_len} bytes")));
-        }
-        let total = HEADER + payload_len;
-        if rest.len() < total {
-            break None;
-        }
+        let total = match frame_extent(rest) {
+            FrameExtent::Arriving => break None,
+            FrameExtent::Impossible(payload_len) => {
+                break Some(StreamFault::Corrupt(format!("a frame claims {payload_len} bytes")));
+            }
+            FrameExtent::Whole(total) => total,
+        };
         match decode_frame(&rest[..total]) {
             Ok((frame, _)) => apply(frame),
             // Length-prefixed so that a newer sender's frame types cost an
@@ -145,15 +141,40 @@ pub fn drain_frames(
 /// of `bytes`: there is nothing to wait for, and [`drain_frames`] is the one
 /// that says what is wrong with them.
 pub fn whole_frame_len(bytes: &[u8]) -> Option<usize> {
+    match frame_extent(bytes) {
+        FrameExtent::Arriving => None,
+        FrameExtent::Impossible(_) => Some(bytes.len()),
+        FrameExtent::Whole(total) => Some(total),
+    }
+}
+
+/// What the header at the head of some bytes says of its frame.
+enum FrameExtent {
+    /// The header, or the payload it announces, is not all here yet.
+    Arriving,
+    /// The whole frame is here, in this many bytes.
+    Whole(usize),
+    /// A payload of this many bytes, which no frame has.
+    Impossible(usize),
+}
+
+/// The one reading of a frame's header: [`drain_frames`] decodes by it and
+/// [`whole_frame_len`] cuts a file by it, so the two cannot disagree on
+/// where a frame ends.
+fn frame_extent(bytes: &[u8]) -> FrameExtent {
     if bytes.len() < HEADER {
-        return None;
+        return FrameExtent::Arriving;
     }
     let payload_len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
     if payload_len > MAX_FRAME_PAYLOAD {
-        return Some(bytes.len());
+        return FrameExtent::Impossible(payload_len);
     }
     let total = HEADER + payload_len;
-    (bytes.len() >= total).then_some(total)
+    if bytes.len() < total {
+        FrameExtent::Arriving
+    } else {
+        FrameExtent::Whole(total)
+    }
 }
 
 /// The source has no more bytes (a file was read to its end). A frame still

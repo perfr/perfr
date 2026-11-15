@@ -546,9 +546,9 @@ pub fn band_strength(points_per_frame: f32) -> f32 {
 /// process that has been folded, which then shows no bands at all. A track
 /// that was dragged under another process is still its own and is found
 /// where it is; a guest in its section is not.
-pub fn process_spans(rows: &[TrackRow], pid: u32) -> Vec<(f32, f32)> {
+pub fn process_spans<'a>(rows: impl IntoIterator<Item = &'a TrackRow>, pid: u32) -> Vec<(f32, f32)> {
     let mut spans: Vec<(f32, f32)> = rows
-        .iter()
+        .into_iter()
         .filter(|row| match row.id {
             RowId::Thread(t) | RowId::Async(t) => t.pid == pid,
             // A scheduler lane's key has pid 0 and belongs to no process.

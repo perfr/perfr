@@ -1107,6 +1107,14 @@ fn the_ring_and_spill_boxes_follow_the_service_until_they_are_edited_and_again_a
 
 /// A connected page showing a finished capture of one process, three threads.
 fn three_thread_page() -> Page {
+    three_thread_page_with(Vec::new())
+}
+
+/// The same, with `more` events in the capture besides a scope a thread.
+fn three_thread_page_with(more: Vec<LiveEvent>) -> Page {
+    let mut events: Vec<LiveEvent> =
+        (0..3).map(|t| scope(100, 101 + t, 2_000_000 + t as u64 * 1_000, 5_000_000, 7)).collect();
+    events.extend(more);
     let mut page = Page::with(|app| {
         app.apply_status(service_status(false));
         draw_as_with_a_gpu(app);
@@ -1115,15 +1123,29 @@ fn three_thread_page() -> Page {
             &[
                 hello(),
                 LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000_000 },
-                LiveFrame::EventBatch {
-                    events: (0..3).map(|t| scope(100, 101 + t, 2_000_000 + t as u64 * 1_000, 5_000_000, 7)).collect(),
-                },
+                LiveFrame::EventBatch { events },
                 LiveFrame::CaptureFinished,
             ],
         );
     });
     page.frames(4);
     page
+}
+
+/// Every rectangle a frame filled, with its colour, in the order painted.
+fn filled_rects(out: &egui::FullOutput) -> Vec<(Rect, Color32)> {
+    fn walk(shape: &Shape, into: &mut Vec<(Rect, Color32)>) {
+        match shape {
+            Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, into)),
+            Shape::Rect(r) => into.push((r.rect, r.fill)),
+            _ => {}
+        }
+    }
+    let mut into = Vec::new();
+    for clipped in &out.shapes {
+        walk(&clipped.shape, &mut into);
+    }
+    into
 }
 
 impl Page {
@@ -1241,6 +1263,63 @@ fn a_track_drag_ends_on_release_without_a_gpu_too() {
     page.release(to);
     page.frames(2);
     assert!(!page.app.tracks.any_dragging());
+}
+
+#[test]
+fn a_lifted_track_keeps_its_frame_bands_and_its_sample_bar() {
+    // What was painted is told apart by colour, and the colours are the
+    // scheme's.
+    let _scheme = crate::theme::scheme_lock();
+    // Six frames of a millisecond, marked by the first thread, and a sample
+    // of the thread that will be moved.
+    let frames = (0..6u64).map(|n| LiveEvent {
+        kind: kind::FRAME,
+        extra: n as u8,
+        ..scope(100, 101, 2_000_000 + n * 1_000_000, 1_000_000, 0)
+    });
+    let mut page = three_thread_page_with(frames.chain([sample(100, 102, 3_000_000)]).collect());
+    // Zoomed to the frames: bands too thin to tell apart are not drawn.
+    (page.app.t0, page.app.t1) = (2_000_000.0, 8_000_000.0);
+    let band = Color32::from_black_alpha(46);
+    let bar = page.app.sample_bar_color();
+    // What of `fill` a frame painted inside `within`, from `rects[from..]`.
+    let painted = |rects: &[(Rect, Color32)], from: usize, fill: Color32, within: Rect| -> usize {
+        let inside = |r: &Rect| r.top() >= within.top() - 0.5 && r.bottom() <= within.bottom() + 0.5;
+        rects[from..].iter().filter(|(r, f)| *f == fill && inside(r)).count()
+    };
+
+    let out = page.frame(Vec::new());
+    let row = page.rect_of("row:thread:100:102").expect("the thread's header");
+    let at_rest = filled_rects(&out);
+    // At rest a band runs down every track of the process in one piece.
+    let bands = at_rest
+        .iter()
+        .filter(|(r, fill)| *fill == band && r.top() <= row.top() + 0.5 && r.bottom() >= row.bottom() - 0.5)
+        .count();
+    assert!(bands > 0, "the capture marks frames, and every other one is darker");
+    assert_eq!(painted(&at_rest, 0, bar, row), 1, "the thread has a sample bar");
+
+    let grab = Pos2::new(row.left() + 60.0, row.center().y);
+    let to = grab + Vec2::new(0.0, 30.0);
+    page.drag(grab, to);
+    let out = page.frame(vec![Event::PointerMoved(to)]);
+    assert!(page.app.tracks.dragging(), "the track is lifted");
+    let lifted = page.rect_of("row:thread:100:102").expect("the lifted track");
+    assert!((lifted.top() - row.top() - 30.0).abs() < 1.0, "it follows the pointer");
+
+    // The lifted track's ground is painted over everything at rest. What
+    // matters is what is painted on that ground afterwards.
+    let rects = filled_rects(&out);
+    let ground = row_process_wash(RowId::Thread(crate::tracks::ThreadId { pid: 100, tid: 102 }), true);
+    let over = rects
+        .iter()
+        .rposition(|(r, fill)| *fill == ground && (r.top() - (lifted.top() + LIFT_NUDGE.y)).abs() < 0.5)
+        .expect("the lifted track's ground");
+    let ground = rects[over].0;
+    assert_eq!(painted(&rects, over + 1, band, ground), bands, "the lifted track lost its frame bands");
+    assert_eq!(painted(&rects, over + 1, bar, lifted), 1, "the lifted track lost its sample bar");
+    // And each is painted once: not also under the ground, where it is lost.
+    assert_eq!(painted(&rects, 0, bar, lifted), 1);
 }
 
 /// The three-thread page with a thread selected and a scope search on.

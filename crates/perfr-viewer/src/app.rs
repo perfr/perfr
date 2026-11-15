@@ -208,6 +208,22 @@ enum HeaderPass {
     Dragged,
 }
 
+impl HeaderPass {
+    /// Whether this pass draws a row, given whether the row is on the track
+    /// being dragged.
+    fn draws(self, on_dragged: bool) -> bool {
+        match self {
+            HeaderPass::All => true,
+            HeaderPass::Rest => !on_dragged,
+            HeaderPass::Dragged => on_dragged,
+        }
+    }
+}
+
+/// How far the ground of a lifted track is drawn from where the track is,
+/// which with the shadow under it is what makes it look lifted.
+const LIFT_NUDGE: Vec2 = Vec2::new(1.0, -1.0);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ClipLabelSet {
     All,
@@ -6373,36 +6389,13 @@ impl PerfrLiveApp {
                     view.origin[0] -= self.listing_pan_pts * ppp;
                 }
                 self.last_view = Some(view);
-                // Frame bands: each process that marks frames has its own,
-                // behind its rows and no others, over the rows' own ground,
-                // which the headers painted above, and under what is drawn
-                // on it.
-                if frame_series.is_some() {
-                    let all = crate::frame_marks::series(&self.index, &self.intern, self.selected_pid);
-                    for series in crate::frame_marks::band_series(&all, frame_series) {
-                        let Some(lane) = self.index.lane(series) else { continue };
-                        let spans = crate::frame_marks::process_spans(self.tracks.rows(), series.pid);
-                        if let (Some(first), Some(last)) = (spans.first(), spans.last()) {
-                            note_ui_rect_fmt(
-                                format_args!("frames:bands:{}", series.pid),
-                                Rect::from_min_max(
-                                    Pos2::new(body.left(), body.top() + first.0),
-                                    Pos2::new(body.right(), body.top() + last.1),
-                                ),
-                            );
-                        }
-                        crate::frame_marks::paint_bands(
-                            ui,
-                            body,
-                            self.t0,
-                            self.t1,
-                            lane,
-                            &spans,
-                            perfr_live_event::theme::active().light,
-                        );
-                    }
-                }
-                self.paint_sample_bars(ui, body, Some(y_cull));
+                // What lies on the rows' ground and under what is drawn on
+                // it: the frame bands and the sample bars. The headers
+                // painted that ground above, for every track but a lifted
+                // one, whose turn comes below.
+                let at_rest = if lifting { HeaderPass::Rest } else { HeaderPass::All };
+                self.paint_frame_bands(ui, body, frame_series, at_rest);
+                self.paint_sample_bars(ui, body, Some(y_cull), at_rest);
                 {
                     let _cb = dev.scope(TID_RENDER, NAME_PAINT_CALLBACK);
                     ui.painter().add(paint_callback(body, payload, view, self.gpu_slot));
@@ -6431,6 +6424,12 @@ impl PerfrLiveApp {
                         let _headers = dev.scope(TID_UI, NAME_PAINT_HEADERS);
                         self.paint_headers(ui, head, body, hover_row, HeaderPass::Dragged);
                     }
+                    // The lifted track's ground went over the tracks at rest
+                    // and over their bands. It is still a track of a process
+                    // that marks frames, so it gets its own bands, and its
+                    // sample bar, before its scopes.
+                    self.paint_frame_bands(ui, body, frame_series, HeaderPass::Dragged);
+                    self.paint_sample_bars(ui, body, Some(y_cull), HeaderPass::Dragged);
                     if let Some(fg) = overlay {
                         let _cb = dev.scope(TID_RENDER, NAME_PAINT_CALLBACK);
                         ui.painter()
@@ -6663,11 +6662,8 @@ impl PerfrLiveApp {
             let on_drag = dragged
                 .map(|k| TrackStrip::row_on_track(row.id, k))
                 .unwrap_or(false);
-            match pass {
-                HeaderPass::All => {}
-                HeaderPass::Rest if on_drag => continue,
-                HeaderPass::Dragged if !on_drag => continue,
-                _ => {}
+            if !pass.draws(on_drag) {
+                continue;
             }
             let r = Rect::from_min_size(
                 Pos2::new(head.left(), head.top() + row.y),
@@ -6722,7 +6718,7 @@ impl PerfrLiveApp {
                         0.0,
                         Color32::from_black_alpha(90),
                     );
-                    painter.rect_filled(band.translate(Vec2::new(1.0, -1.0)), 0.0, wash);
+                    painter.rect_filled(band.translate(LIFT_NUDGE), 0.0, wash);
                 } else {
                     painter.rect_filled(band, 0.0, wash);
                 }
@@ -8686,12 +8682,68 @@ impl PerfrLiveApp {
     /// Fills each thread's sample lane with `sample_bar_color`, a strip behind
     /// the white sample ticks. Drawn before the timeline callback so the ticks
     /// sit on top.
-    fn paint_sample_bars(&self, ui: &Ui, body: Rect, y_cull: Option<YCull>) {
+    /// The frame bands behind the tracks `pass` draws: each process that
+    /// marks frames has its own, behind its rows and no others, over the
+    /// rows' own ground, which the headers of the same pass painted, and
+    /// under what is drawn on it.
+    ///
+    /// A lifted track is a pass of its own. Its ground is painted last, over
+    /// the tracks at rest and over their bands, so bands painted once for
+    /// every row left the track that was being moved without any.
+    fn paint_frame_bands(&self, ui: &Ui, body: Rect, showing: Option<LaneKey>, pass: HeaderPass) {
+        if showing.is_none() {
+            return;
+        }
+        let lifted = self.tracks.dragging_track();
+        let all = crate::frame_marks::series(&self.index, &self.intern, self.selected_pid);
+        for series in crate::frame_marks::band_series(&all, showing) {
+            let Some(lane) = self.index.lane(series) else { continue };
+            let rows = self
+                .tracks
+                .rows()
+                .iter()
+                .filter(|row| pass.draws(lifted.is_some_and(|key| TrackStrip::row_on_track(row.id, key))));
+            let mut spans = crate::frame_marks::process_spans(rows, series.pid);
+            let label = if pass == HeaderPass::Dragged {
+                // The lifted ground is drawn a little off the row.
+                for span in &mut spans {
+                    span.0 += LIFT_NUDGE.y;
+                    span.1 += LIFT_NUDGE.y;
+                }
+                "frames:bands:lifted"
+            } else {
+                "frames:bands"
+            };
+            if let (Some(first), Some(last)) = (spans.first(), spans.last()) {
+                note_ui_rect_fmt(
+                    format_args!("{label}:{}", series.pid),
+                    Rect::from_min_max(
+                        Pos2::new(body.left(), body.top() + first.0),
+                        Pos2::new(body.right(), body.top() + last.1),
+                    ),
+                );
+            }
+            crate::frame_marks::paint_bands(
+                ui,
+                body,
+                self.t0,
+                self.t1,
+                lane,
+                &spans,
+                perfr_live_event::theme::active().light,
+            );
+        }
+    }
+
+    /// The sample bars of the tracks `pass` draws, for the reason the frame
+    /// bands go by pass: a lifted track's ground would cover its bar.
+    fn paint_sample_bars(&self, ui: &Ui, body: Rect, y_cull: Option<YCull>, pass: HeaderPass) {
         let scale = self.tracks.scale.max(0.01);
         let color = self.sample_bar_color();
         let painter = ui.painter_at(body);
+        let lifted = self.tracks.dragging_track();
         for (k, y) in self.tracks.layout() {
-            if k.kind != kind::SAMPLE {
+            if k.kind != kind::SAMPLE || !pass.draws(lifted.is_some_and(|key| key.owns_lane(*k))) {
                 continue;
             }
             let h = lane_height(*k) * scale;

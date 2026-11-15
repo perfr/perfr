@@ -823,12 +823,20 @@ pub struct PerfrLiveApp {
     /// `error` cannot carry these: every status answer clears it, four
     /// times a second, and it is drawn only in the Inspector tab.
     notice: Option<String>,
-    /// The Inspector's Ring bytes and Spill path boxes. They show what the
+    /// The Inspector's Ring size and Spill path boxes. They show what the
     /// service reports until one is typed in; from then until Apply they
-    /// are the reader's, and a status answer leaves them alone.
-    ring_bytes: String,
+    /// are the reader's, and a status answer leaves them alone. The size is
+    /// in megabytes, as [`format_ring_mb`] writes it.
+    ring_mb: String,
     spill_path: String,
     config_edited: bool,
+    /// Dropping what the service's ring dropped: see [`Self::tick_eviction`].
+    eviction: Eviction,
+    /// The most events the page holds of the service's capture
+    /// ([`page_event_cap`] of the memory it has), less in a test.
+    page_event_cap: usize,
+    /// The most of them in one lane: [`LANE_EVENT_CAP`], less in a test.
+    lane_event_cap: usize,
     t0: f64,
     t1: f64,
     follow: bool,
@@ -1620,7 +1628,7 @@ impl PerfrLiveApp {
         // Same string `perfr --version` prints. A harness reads it as `build`.
         let build = perfr_build_info::version_line();
         let text = format!(
-            "{{\"thread\":{},\"scope\":{},\"focus\":{},\"measure\":{},\"ranges\":[{}],\"report_open\":{},\"tweaks\":{},\"tab\":\"{}\",\"hellos\":{},\"wire\":{},\"ws_bps\":{:.0},\"report_w\":{:.0},\"report_collapsed\":{},\"scope_menu\":{},\"scope_report\":{},\"view\":[{:.0},{:.0}],\"content\":{},\"events\":{},\"hooks\":[{}],\"capture_start\":{},\"report_filter\":{},\"track_filter\":{},\"prims\":{},\"flame_zoom\":{},\"selected_pid\":{},\"recording\":{},\"capture_elapsed\":{:.3},\"pointer\":{},\"build\":{},\"draw\":{},\"code\":{},\"rect\":{},\"rect_self\":{},\"theme\":{},\"renderer\":{},\"report_copied\":{},\"report_sel\":{}}}",
+            "{{\"thread\":{},\"scope\":{},\"focus\":{},\"measure\":{},\"ranges\":[{}],\"report_open\":{},\"tweaks\":{},\"tab\":\"{}\",\"hellos\":{},\"wire\":{},\"ws_bps\":{:.0},\"report_w\":{:.0},\"report_collapsed\":{},\"scope_menu\":{},\"scope_report\":{},\"view\":[{:.0},{:.0}],\"content\":{},\"events\":{},\"hooks\":[{}],\"capture_start\":{},\"report_filter\":{},\"track_filter\":{},\"prims\":{},\"flame_zoom\":{},\"selected_pid\":{},\"recording\":{},\"capture_elapsed\":{:.3},\"pointer\":{},\"build\":{},\"draw\":{},\"code\":{},\"rect\":{},\"rect_self\":{},\"theme\":{},\"renderer\":{},\"report_copied\":{},\"report_sel\":{},\"stream_bytes\":{},\"ring_bytes\":{},\"evicted_before\":{},\"evicted_done\":{},\"wasm_mem\":{:.0}}}",
             match self.selected_thread {
                 Some((p, t)) => format!("[{p},{t}]"),
                 None => "null".to_string(),
@@ -1700,6 +1708,15 @@ impl PerfrLiveApp {
             json_str(self.gpu_backend),
             self.report_copied_chars,
             self.report_selection.len(),
+            self.status.stream_bytes,
+            self.status.ring_bytes,
+            self.status.evicted_before_ns,
+            self.eviction.done_ns,
+            // The page's memory, for a harness that fills the ring. It
+            // grows a page of 64 KiB at a time and never shrinks, so it
+            // seldom changes the readout; a native build has no such
+            // number and says 0.
+            if cfg!(target_arch = "wasm32") { wasm_mem_bytes().unwrap_or(0.0) } else { 0.0 },
         );
         if text == self.sel_readout {
             return;
@@ -1854,7 +1871,10 @@ impl PerfrLiveApp {
             status: StatusJson::default(),
             error: String::new(),
             notice: None,
-            ring_bytes: "67108864".into(),
+            ring_mb: String::new(),
+            eviction: Eviction::default(),
+            page_event_cap: page_event_cap(page_memory_limit()),
+            lane_event_cap: LANE_EVENT_CAP,
             spill_path: String::new(),
             config_edited: false,
             t0: 0.0,
@@ -2333,6 +2353,7 @@ impl PerfrLiveApp {
         self.clear_file_trace();
         self.notice = None;
         self.index.clear();
+        self.reset_eviction();
         self.log_ui.reset_capture();
         self.live_all.clear();
         self.live_sel.clear();
@@ -2546,6 +2567,68 @@ impl PerfrLiveApp {
         self.trace_name.is_some() && !self.recording && !self.status.demo && !self.status.capturing
     }
 
+    /// What is held is another capture: nothing of the last one's ring
+    /// says what to drop from it, the last status included.
+    fn reset_eviction(&mut self) {
+        self.eviction = Eviction::default();
+        self.status.evicted_before_ns = 0;
+    }
+
+    /// Drops what the service's ring has dropped, once a frame.
+    ///
+    /// A capture that outlasts the ring keeps its newest events there and
+    /// loses its oldest, and the page was sent every one of them: without
+    /// this it holds them all, so its memory grows for as long as the
+    /// capture runs and the timeline shows what a save no longer has. The
+    /// service says what it dropped as a time (`evicted_before_ns`); the
+    /// page drops what ended before it. That is a pass over what is held,
+    /// so it is not done for every status: a pass starts when what would go
+    /// is a share of what is held ([`eviction_due`]), and takes a few lanes
+    /// a frame until it is through.
+    ///
+    /// The page also has limits of its own ([`page_event_cap`],
+    /// [`LANE_EVENT_CAP`]): a ring can hold more events than a page has
+    /// memory for, and past them the page keeps the newest it can and
+    /// drops the rest, though the ring still has them ([`page_cut`]).
+    fn tick_eviction(&mut self) {
+        if !self.has_service() || self.capture_is_local() {
+            return;
+        }
+        if self.eviction.pass.is_none() {
+            let Some((held_from, held_to)) = self.index.time_bounds() else { return };
+            let capturing = self.status.capturing || self.status.demo;
+            let done = self.eviction.done_ns;
+            // The page's own limit comes first: past it the page is not
+            // waiting for a share of the capture to go, it is out of room.
+            let held = self.index.event_count();
+            let own = page_cut(held, self.page_event_cap, done, held_from, held_to);
+            // One lane over its limit, which takes more held than the limit
+            // to be worth looking for. Its events are spread over its own
+            // span, not the capture's.
+            let lane = (held > self.lane_event_cap)
+                .then(|| self.index.largest_lane())
+                .flatten()
+                .and_then(|(len, from, to)| page_cut(len, self.lane_event_cap, done, from, to));
+            let own = own.max(lane);
+            let ring = self.status.evicted_before_ns;
+            let target = match own {
+                Some(own) => own.max(ring),
+                None if eviction_due(done, ring, held_from, held_to, capturing) => ring,
+                None => return,
+            };
+            self.eviction.pass = Some((target, None));
+        }
+        let Some((cut, after)) = self.eviction.pass else { return };
+        match self.index.drop_ended_before(cut, after, EVICTION_EVENTS_PER_FRAME) {
+            Some(lane) => self.eviction.pass = Some((cut, Some(lane))),
+            None => {
+                self.eviction = Eviction { done_ns: cut, pass: None };
+                self.refresh_content_bounds();
+            }
+        }
+        self.needs_repaint = true;
+    }
+
     fn refresh_content_bounds(&mut self) {
         if let Some(load) = self.trace_load.as_ref() {
             if let Some((a, b)) = load.ingestor.content_time_bounds() {
@@ -2699,6 +2782,7 @@ impl PerfrLiveApp {
         self.held_stream.begin_load();
         self.clear_file_trace();
         self.index.clear();
+        self.reset_eviction();
         self.live_all.clear();
         self.intern = InternTable::default();
         self.thread_names.clear();
@@ -3023,6 +3107,7 @@ impl PerfrLiveApp {
 
     fn show_trace_load(&mut self, load: TraceLoad) {
         self.index.clear();
+        self.reset_eviction();
         self.log_ui.reset_capture();
         self.live_all.clear();
         self.intern = InternTable::default();
@@ -3475,7 +3560,7 @@ impl PerfrLiveApp {
         // Every answer rewrote the two boxes, four times a second: what
         // was typed in them was gone before Apply could be reached.
         if !self.config_edited {
-            self.ring_bytes = s.ring_bytes.to_string();
+            self.ring_mb = format_ring_mb(s.ring_bytes);
             if let Some(p) = &s.spill_path {
                 self.spill_path = p.clone();
             }
@@ -3949,6 +4034,7 @@ impl PerfrLiveApp {
                 self.user_set_view = false;
                 self.clear_file_trace();
                 self.index.clear();
+                self.reset_eviction();
                 self.live_all.clear();
                 self.log_ui.reset_capture();
                 self.selected = None;
@@ -3991,6 +4077,9 @@ impl PerfrLiveApp {
                     live_end_ns: 0,
                     capture_start_ns: 0,
                     ring_bytes,
+                    // Not in this frame: what /api/status last said.
+                    stream_bytes: self.status.stream_bytes,
+                    evicted_before_ns: self.status.evicted_before_ns,
                     spill_path: self.status.spill_path.clone(),
                     machine: self.status.machine.clone(),
                     target_pid: self.status.target_pid,
@@ -4072,6 +4161,7 @@ impl PerfrLiveApp {
                 // and stays.
                 if !self.file_trace_active() {
                     self.index.clear();
+                    self.reset_eviction();
                     self.live_all.clear();
                     self.log_ui.reset_capture();
                     self.thread_names.clear();
@@ -4585,7 +4675,25 @@ impl PerfrLiveApp {
     /// it ran, until Clear or the next Record. Its slot is there, empty,
     /// before the first capture, so starting one moves nothing: right of
     /// Record, where it was, its appearing pushed every control after it.
+    ///
+    /// Beside it, on a page with a service, what the capture would weigh
+    /// saved as a stream now: the service's own count, a few times a
+    /// second. It stops growing at the ring's size, where the oldest events
+    /// start to go; from then it is drawn in the accent colour.
     fn paint_capture_timer(&self, ui: &mut Ui) {
+        // The size reads after the timer whichever way the bar is laid out:
+        // a narrow page's runs from the right, where the slot allocated
+        // first is the rightmost.
+        if ui.layout().main_dir() == egui::Direction::RightToLeft {
+            self.paint_capture_size(ui);
+            self.paint_capture_elapsed(ui);
+        } else {
+            self.paint_capture_elapsed(ui);
+            self.paint_capture_size(ui);
+        }
+    }
+
+    fn paint_capture_elapsed(&self, ui: &mut Ui) {
         let font = FontId::monospace(11.5);
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(capture_timer_slot_w(ui, &font), 22.0), Sense::hover());
         let t = self.capture_timer;
@@ -4600,6 +4708,56 @@ impl PerfrLiveApp {
             "How long the last capture ran"
         });
         note_ui_rect("Timer", text);
+    }
+
+    fn paint_capture_size(&self, ui: &mut Ui) {
+        if !self.host.service() {
+            return;
+        }
+        let font = FontId::monospace(11.5);
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(capture_size_slot_w(ui, &font), 22.0), Sense::hover());
+        let Some(size) = self.capture_size() else { return };
+        let color = if size.full {
+            theme::ACCENT()
+        } else if self.capture_timer.running {
+            theme::TEXT()
+        } else {
+            theme::MUTED()
+        };
+        let text = ui.painter().text(rect.right_center(), Align2::RIGHT_CENTER, crate::util::fmt_bytes(size.bytes), font, color);
+        let mut tip = if size.full {
+            format!(
+                "What this capture weighs saved as a stream. The ring is full ({}): the oldest events are dropped as new \
+                 ones arrive. Its size is in the settings.",
+                crate::util::fmt_bytes(size.ring_bytes)
+            )
+        } else {
+            format!(
+                "What this capture weighs saved as a stream. The ring holds {}; past that the oldest events are dropped.",
+                crate::util::fmt_bytes(size.ring_bytes)
+            )
+        };
+        if self.eviction.done_ns > self.status.evicted_before_ns {
+            tip.push_str(&format!(
+                "\nThis page shows the newest {} events of it, which is what it has memory for. A save holds all of it.",
+                fmt_int(self.index.event_count() as u64)
+            ));
+        }
+        resp.on_hover_text(tip);
+        note_ui_rect("Size", text);
+    }
+
+    /// The size shown beside the timer: the service's capture as a stream,
+    /// when there is one and it is what is on screen.
+    fn capture_size(&self) -> Option<CaptureSize> {
+        if !self.has_service() || self.capture_is_local() || self.status.events_live == 0 || self.status.stream_bytes == 0 {
+            return None;
+        }
+        Some(CaptureSize {
+            bytes: self.status.stream_bytes,
+            ring_bytes: self.status.ring_bytes,
+            full: self.status.evicted_before_ns > 0 || self.status.dropped > 0,
+        })
     }
 
     /// Save as a small menu: the whole capture, the selected slice when
@@ -5705,13 +5863,18 @@ impl PerfrLiveApp {
             }
 
             section(ui, "RING / SPILL");
-            ui.label(RichText::new("Ring bytes").size(11.0).color(muted()));
-            let ring = ui.add(
-                egui::TextEdit::singleline(&mut self.ring_bytes)
-                    .desired_width(ui.available_width())
-                    .font(FontId::monospace(12.0))
-                    .background_color(theme::INPUT()),
-            );
+            ui.label(RichText::new("Ring size (MB)").size(11.0).color(muted()));
+            let ring = ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.ring_mb)
+                        .desired_width(ui.available_width())
+                        .font(FontId::monospace(12.0))
+                        .background_color(theme::INPUT()),
+                )
+                .on_hover_text(
+                    "The most a saved capture weighs. A capture can run past it for as long as you like: the ring \
+                     keeps the newest events that fit and drops the oldest.",
+                );
             ui.add_space(4.0);
             ui.label(RichText::new("Spill path").size(11.0).color(muted()));
             let spill = ui.add(
@@ -5726,14 +5889,23 @@ impl PerfrLiveApp {
             }
             ui.add_space(6.0);
             if pill(ui, "Apply", false).clicked() {
-                match self.ring_bytes.trim().parse::<u64>() {
-                    Ok(n) => {
+                match parse_ring_mb(&self.ring_mb) {
+                    Some(bytes) => {
                         self.clear_errors();
-                        self.net.apply_config(n, self.spill_path.trim());
+                        self.net.apply_config(bytes, self.spill_path.trim());
+                        // And for the next start of the service, with the
+                        // other choices it keeps.
+                        if let Some(settings) = self.server_settings.as_mut() {
+                            if settings.get("ring_buffer_bytes").and_then(|v| v.as_u64()) != Some(bytes) {
+                                settings["ring_buffer_bytes"] = serde_json::Value::from(bytes);
+                                let body = settings.clone();
+                                self.net.put_settings(&body);
+                            }
+                        }
                         // Sent: the boxes go back to showing what the service has.
                         self.config_edited = false;
                     }
-                    Err(_) => self.fail("Ring bytes: expected an integer.".into()),
+                    None => self.fail("Ring size: expected a number of megabytes, for example 500.".into()),
                 }
             }
         }
@@ -5784,7 +5956,7 @@ impl PerfrLiveApp {
             status_row(
                 ui,
                 "Ring",
-                &format!("{} B", fmt_int(self.status.ring_bytes)),
+                &format!("{} / {}", crate::util::fmt_bytes(self.status.stream_bytes), crate::util::fmt_bytes(self.status.ring_bytes)),
             );
         }
         status_row(ui, "LOD", self.lod_label);
@@ -11535,6 +11707,7 @@ impl eframe::App for PerfrLiveApp {
                     observed_s,
                     self.now_s,
                 );
+                self.tick_eviction();
                 {
                     let _follow = devf.scope(TID_UI, NAME_TICK_FOLLOW);
                     let steal = ctx.wants_keyboard_input();
@@ -14812,6 +14985,136 @@ fn capture_timer_slot_w(ui: &Ui, font: &FontId) -> f32 {
     ui.fonts(|f| f.glyph_width(font, '0')) * 8.0
 }
 
+/// The slot of the size beside the timer: a gap, and room for the widest it
+/// reads, `999.9 MB`.
+fn capture_size_slot_w(ui: &Ui, font: &FontId) -> f32 {
+    ui.fonts(|f| f.glyph_width(font, '0')) * 9.5
+}
+
+/// What [`PerfrLiveApp::capture_size`] found to show.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CaptureSize {
+    bytes: u64,
+    ring_bytes: u64,
+    /// The ring has started dropping its oldest events.
+    full: bool,
+}
+
+/// Where the page is in dropping what the service's ring dropped
+/// ([`PerfrLiveApp::tick_eviction`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Eviction {
+    /// Everything held that ended before this has been dropped.
+    done_ns: u64,
+    /// The pass in progress: the time it drops before, and the lane it has
+    /// reached (`None` before the first).
+    pass: Option<(u64, Option<LaneKey>)>,
+}
+
+/// A pass starts when it would drop this share of the time held.
+const EVICTION_SHARE: f64 = 0.05;
+
+/// The events of the service's capture the page holds for each GiB its
+/// memory may grow to. An event costs the page about 50 bytes (measured:
+/// 900 MB of WebAssembly memory at 16 million events), and where the
+/// memory ends an allocation that fails is the end of the page. 12 million
+/// is 0.6 GB of each GiB, with room left for lanes to double.
+const PAGE_EVENTS_PER_GIB: usize = 12_000_000;
+
+/// The most events of the service's capture the page holds, for the memory
+/// it may grow to. A ring sized in saved bytes can hold more events than a
+/// page has room for, so past this many the page keeps the newest and
+/// drops the rest, which the ring and a save still hold. With 4 GiB it is
+/// 48 million, which is more than a 500 MB ring of the densest events (45
+/// million); with the 2 GiB a browser may fall back to, 24 million.
+fn page_event_cap(memory_limit_bytes: u64) -> usize {
+    (memory_limit_bytes >> 30).clamp(1, 4) as usize * PAGE_EVENTS_PER_GIB
+}
+
+/// The most of them in one lane, whatever the memory. A lane is one
+/// vector, which doubles when it is full, and on a 32-bit page a vector
+/// ends at 2 GiB: one of more than 33 million events cannot double, and
+/// the attempt is the end of the page.
+const LANE_EVENT_CAP: usize = 24_000_000;
+
+/// How far the page's memory may grow, in bytes. The pack is linked for
+/// 4 GiB. The page that loads it makes the memory, and says in
+/// `window.__perfr_wasm_max_pages` when the browser gave it less.
+fn page_memory_limit() -> u64 {
+    const LINKED: u64 = 4 << 30;
+    #[cfg(target_arch = "wasm32")]
+    {
+        let pages = web_sys::window()
+            .and_then(|w| js_sys::Reflect::get(&w, &wasm_bindgen::JsValue::from_str("__perfr_wasm_max_pages")).ok())
+            .and_then(|v| v.as_f64())
+            .filter(|pages| *pages >= 1.0);
+        pages.map_or(LINKED, |pages| ((pages as u64) << 16).min(LINKED))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        LINKED
+    }
+}
+
+/// When the page holds more events than `cap`: the time to drop before, to
+/// be left with nine tenths of `cap`. `None` while it is inside `cap`.
+///
+/// The events are not counted by time anywhere, so the time is an
+/// estimate: what is held ended between the last cut and `held_to_ns`,
+/// evenly enough that dropping a share of that span drops about that share
+/// of the events. A pass that drops too few is followed by another.
+fn page_cut(held: usize, cap: usize, done_ns: u64, held_from_ns: u64, held_to_ns: u64) -> Option<u64> {
+    if held <= cap {
+        return None;
+    }
+    let from = done_ns.max(held_from_ns);
+    let span = held_to_ns.saturating_sub(from);
+    let keep = cap - cap / 10;
+    let share = (held - keep) as f64 / held as f64;
+    // Past `from` by something, however short the span: a pass has to drop.
+    Some(from + ((span as f64 * share) as u64).max(1))
+}
+
+/// Events in the lanes one frame of a pass visits (it visits one lane at
+/// the least): a few milliseconds of a frame at the most.
+const EVICTION_EVENTS_PER_FRAME: usize = 1 << 20;
+
+/// Whether to start dropping what ended before `target_ns`, the service's
+/// latest word, given that everything before `done_ns` already went and
+/// what is held spans `held_from_ns..held_to_ns`.
+///
+/// While a capture runs the target moves a little with every status, and a
+/// pass costs a walk of the lanes: it is worth one when what goes is
+/// [`EVICTION_SHARE`] of the time held, so the page holds that much more
+/// than the ring at the most. A capture that has ended moves it no more,
+/// and what is on screen should be what a save holds: any difference is
+/// dropped.
+fn eviction_due(done_ns: u64, target_ns: u64, held_from_ns: u64, held_to_ns: u64, capturing: bool) -> bool {
+    // What is held can begin after the last pass's cut, and before it (an
+    // event that began early and ended late is still held).
+    let from = done_ns.max(held_from_ns);
+    if target_ns <= from {
+        return false;
+    }
+    !capturing || (target_ns - from) as f64 >= EVICTION_SHARE * held_to_ns.saturating_sub(from) as f64
+}
+
+/// The ring size in the settings box: megabytes, with no more decimals
+/// than the number of bytes needs (`500`, `67.108864`).
+fn format_ring_mb(bytes: u64) -> String {
+    let text = format!("{}.{:06}", bytes / 1_000_000, bytes % 1_000_000);
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// What was typed in that box, in bytes. A number of megabytes, with or
+/// without `MB` after it.
+fn parse_ring_mb(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let number = text.strip_suffix("MB").or_else(|| text.strip_suffix("mb")).unwrap_or(text).trim();
+    let mb: f64 = number.parse().ok()?;
+    (mb.is_finite() && mb > 0.0 && mb < 1e12).then(|| (mb * 1e6).round() as u64)
+}
+
 /// How many functions auto-profiling currently has armed, from the status
 /// object's `hooked` array. Manual hooks live in the viewer's selection and
 /// are counted separately.
@@ -14889,6 +15192,75 @@ mod state_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ring_size_reads_and_writes_as_megabytes() {
+        assert_eq!(format_ring_mb(500_000_000), "500");
+        assert_eq!(format_ring_mb(1_500_000), "1.5");
+        assert_eq!(format_ring_mb(1 << 26), "67.108864");
+        assert_eq!(format_ring_mb(1), "0.000001");
+        assert_eq!(format_ring_mb(0), "0");
+        assert_eq!(parse_ring_mb("500"), Some(500_000_000));
+        assert_eq!(parse_ring_mb(" 1.5 MB "), Some(1_500_000));
+        assert_eq!(parse_ring_mb("250mb"), Some(250_000_000));
+        // Every size the service can report comes back as it was.
+        for bytes in [1u64 << 20, 1 << 26, 500_000_000, (8 << 30) - 1, 123_456_789] {
+            assert_eq!(parse_ring_mb(&format_ring_mb(bytes)), Some(bytes));
+        }
+        for text in ["", "lots", "-5", "0", "NaN", "inf", "1e30"] {
+            assert_eq!(parse_ring_mb(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_pass_starts_when_it_would_drop_a_share_of_what_is_held() {
+        // 100 s held from 1000 s; nothing dropped yet.
+        let s = 1_000_000_000u64;
+        assert!(!eviction_due(0, 0, 1000 * s, 1100 * s, true), "the ring has dropped nothing");
+        assert!(!eviction_due(0, 1004 * s, 1000 * s, 1100 * s, true), "4% of what is held");
+        assert!(eviction_due(0, 1005 * s, 1000 * s, 1100 * s, true));
+        // After a pass: counted from where it cut, though an event that
+        // began before the cut is still held.
+        assert!(!eviction_due(1005 * s, 1005 * s, 1000 * s, 1100 * s, true), "already dropped");
+        assert!(!eviction_due(1005 * s, 1009 * s, 1000 * s, 1100 * s, true));
+        assert!(eviction_due(1005 * s, 1010 * s, 1000 * s, 1100 * s, true));
+        // The capture ended: whatever is left to drop goes.
+        assert!(eviction_due(1005 * s, 1006 * s, 1000 * s, 1100 * s, false));
+        assert!(!eviction_due(1005 * s, 1005 * s, 1000 * s, 1100 * s, false));
+        // A cut from before what is held (another capture's) drops nothing.
+        assert!(!eviction_due(0, 900 * s, 1000 * s, 1100 * s, false));
+    }
+
+    #[test]
+    fn past_its_limit_the_page_cuts_to_nine_tenths_of_it() {
+        // Inside the limit, and at it: nothing to do.
+        assert_eq!(page_cut(900, 1_000, 0, 100, 200), None);
+        assert_eq!(page_cut(1_000, 1_000, 0, 100, 200), None);
+        // 2000 held over 1000 ns, 1000 allowed: 900 stay, 55% of the span goes.
+        assert_eq!(page_cut(2_000, 1_000, 0, 5_000, 6_000), Some(5_550));
+        // Counted from the last cut when what is held begins before it.
+        assert_eq!(page_cut(2_000, 1_000, 5_500, 5_000, 6_000), Some(5_775));
+        // A span of nothing still moves the cut.
+        assert_eq!(page_cut(2_000, 1_000, 0, 7_000, 7_000), Some(7_001));
+    }
+
+    #[test]
+    fn the_pages_limits_fit_its_memory_and_a_lane_can_always_double() {
+        // An event at its worst is 64 bytes: its lane's vector just doubled.
+        for gib in 1..=4u64 {
+            assert!(page_event_cap(gib << 30) as u64 * 64 < gib << 30, "{gib} GiB");
+        }
+        assert_eq!(page_event_cap(2 << 30), 24_000_000);
+        assert_eq!(page_event_cap(4 << 30), 48_000_000);
+        // More than a full default ring of the densest events.
+        assert!(page_event_cap(4 << 30) > 46_000_000);
+        // Whatever a page says of its memory, there is a limit.
+        assert_eq!(page_event_cap(0), 12_000_000);
+        assert_eq!(page_event_cap(u64::MAX), 48_000_000);
+        // A full lane's vector doubles to less than a 32-bit `isize::MAX`.
+        let event = std::mem::size_of::<perfr_live_event::LiveEvent>() as u64;
+        assert!(LANE_EVENT_CAP as u64 * 2 * event <= i32::MAX as u64);
+    }
 
     #[test]
     fn the_ingest_budget_is_a_share_of_the_frame_period_within_bounds() {

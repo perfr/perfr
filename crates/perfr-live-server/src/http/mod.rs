@@ -134,7 +134,14 @@ struct StatusBody {
     newest_end_ns: u64,
     /// Demo/capture end only. Not ring newest_end (pid 2/3).
     live_end_ns: u64,
+    /// The ring's budget: the most a saved capture can weigh.
     ring_bytes: u64,
+    /// What `GET /api/capture/export?format=stream` would return now, in
+    /// bytes, without building it.
+    stream_bytes: u64,
+    /// The ring has dropped what ended before this, on the capture clock;
+    /// 0 while it has dropped nothing. A viewer drops the same.
+    evicted_before_ns: u64,
     spill_path: Option<String>,
     http_bind: String,
     machine: String,
@@ -167,6 +174,7 @@ struct StatusBody {
 impl StatusBody {
     fn from_service(svc: &LiveService) -> Self {
         let stats = svc.stats();
+        let stream_bytes = stats.encoded_bytes + svc.stream_overhead_bytes();
         let cfg = svc.config.lock();
         Self {
             capturing: svc.capturing.load(std::sync::atomic::Ordering::Relaxed),
@@ -180,6 +188,8 @@ impl StatusBody {
             newest_end_ns: stats.newest_end_ns,
             live_end_ns: svc.live_end_ns(),
             ring_bytes: stats.bytes_capacity,
+            stream_bytes,
+            evicted_before_ns: stats.evicted_before_ns,
             spill_path: cfg.spill_path.as_ref().map(|p| p.display().to_string()),
             http_bind: cfg.bind.to_string(),
             machine: "local".into(),
@@ -1476,15 +1486,17 @@ pub(crate) const MIN_RING_BYTES: u64 = 1 << 20;
 /// The largest, on a machine with memory to spare.
 pub(crate) const MAX_RING_BYTES: u64 = 8 << 30;
 
-/// The largest ring this machine takes: half of its memory, and never over
-/// [`MAX_RING_BYTES`]. The ring is allocated and written in full when it is
-/// created, so a size the machine cannot back is not a slow request but the
-/// end of the process: the allocation fails (or its size overflows) and a
-/// release build aborts. With the memory size unknown the fixed cap alone
-/// applies.
+/// The largest ring this machine takes: an eighth of its memory, and never
+/// over [`MAX_RING_BYTES`]. The budget is the size of the saved capture,
+/// and the ring holds the events unpacked: 32 bytes each, for the 11 or so
+/// a packed event is saved as and the 7 it is at the least. An eighth of
+/// the memory in saved bytes is a third of it held on a usual capture and
+/// just over half at the worst. Past that the ring does not fail a
+/// request, it takes the machine down as it fills. With the memory size
+/// unknown the fixed cap alone applies.
 pub(crate) fn max_ring_bytes(physical_memory: Option<u64>) -> u64 {
     physical_memory
-        .map_or(MAX_RING_BYTES, |total| (total / 2).min(MAX_RING_BYTES))
+        .map_or(MAX_RING_BYTES, |total| (total / 8).min(MAX_RING_BYTES))
         .max(MIN_RING_BYTES)
 }
 
@@ -1493,11 +1505,18 @@ pub(crate) fn check_ring_bytes(bytes: u64, max: u64) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "ring_buffer_bytes must be between {MIN_RING_BYTES} (1 MiB) and {max} ({} MiB: half of this \
+        "ring_buffer_bytes must be between {MIN_RING_BYTES} (1 MiB) and {max} ({} MiB: an eighth of this \
          machine's memory, {} GiB at most); got {bytes}",
         max >> 20,
         MAX_RING_BYTES >> 30,
     ))
+}
+
+/// The ring size a service starts with: what was last chosen
+/// (`ring_buffer_bytes` in the settings file, [`crate::DEFAULT_RING_BYTES`]
+/// until someone chooses), brought inside what this machine takes.
+pub fn startup_ring_bytes(settings: &crate::Settings) -> u64 {
+    settings.ring_buffer_bytes.clamp(MIN_RING_BYTES, max_ring_bytes(physical_memory_bytes()))
 }
 
 /// The machine's physical memory, when the platform says.
@@ -1525,6 +1544,11 @@ fn physical_memory_bytes() -> Option<u64> {
     None
 }
 
+/// `PUT /api/config`: the ring's size and where it spills. A new size alone
+/// keeps the capture, less what no longer fits a smaller ring; a new spill
+/// path starts a new ring. Neither is written to the settings file: the
+/// size a service starts with is `ring_buffer_bytes` there, which the
+/// viewer saves when the size is chosen in it.
 async fn put_config(State(svc): State<Arc<LiveService>>, Json(body): Json<ConfigBody>) -> Response {
     if let Err(error) = check_ring_bytes(body.ring_buffer_bytes, max_ring_bytes(physical_memory_bytes())) {
         return (StatusCode::BAD_REQUEST, error).into_response();
@@ -1533,10 +1557,16 @@ async fn put_config(State(svc): State<Arc<LiveService>>, Json(body): Json<Config
         .spill_path
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from);
-    // A new ring is allocated and written in full: gigabytes, at the top.
-    blocking(move || match svc.replace_ring(body.ring_buffer_bytes, spill) {
-        Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    blocking(move || {
+        let applied = if svc.config.lock().spill_path == spill {
+            svc.resize_ring(body.ring_buffer_bytes)
+        } else {
+            svc.replace_ring(body.ring_buffer_bytes, spill)
+        };
+        match applied {
+            Ok(()) => StatusCode::OK.into_response(),
+            Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        }
     })
     .await
 }

@@ -21,7 +21,7 @@ functions with Frida, and both take manual scopes from Rust, C, C++, and
 Python. This tree also has bindings for C#, Lua, Zig, Swift, Java, Kotlin,
 Julia, and Mojo, exercised on Linux against `libperfr`, and a note on why
 there is no GDScript extension.
-A loaded capture in the viewer is capped at a 2 GiB heap. What else
+A loaded capture in the viewer is capped at a 4 GiB heap. What else
 each system records is in the table below.
 
 ## Quick start

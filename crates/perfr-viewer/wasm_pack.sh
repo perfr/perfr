@@ -50,8 +50,11 @@ fi
 # Atomics + shared memory so SharedArrayBuffer / rayon workers work.
 # +mutable-globals is required by older rustc; harmless on 1.87+.
 # --import-memory lets wasm-bindgen share one SAB across workers.
+# --max-memory is all a 32-bit module can address, 4 GiB. A shared memory's
+# whole range is reserved when it is made, so the page makes the memory
+# itself and settles for 2 GiB where the browser refuses 4 (index.html).
 export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+atomics,+bulk-memory,+mutable-globals \
-  -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 \
+  -C link-arg=--shared-memory -C link-arg=--max-memory=4294967296 \
   -C link-arg=--import-memory \
   -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size \
   -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base"

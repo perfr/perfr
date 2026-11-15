@@ -35,7 +35,7 @@ Processes, threads, nested slices, counters and flows land on the same timeline.
 
 Opening one of these traces during a live capture stops the capture. `begin_trace_load` calls stop before it clears the timeline. A saved `.perfr.zip` is the other path: the service will not open it while a capture is running, and answers `busy: stop the capture before opening one`.
 
-The WebAssembly heap is capped at 2 GiB (`--max-memory=2147483648` in `build_wasm.sh`). A trace that does not fit in that heap cannot load in the browser viewer.
+The WebAssembly heap is capped at 4 GiB (`--max-memory=4294967296` in `wasm_pack.sh`), or 2 GiB in a browser that will not reserve 4. A trace that does not fit in that heap cannot load in the browser viewer.
 
 @clip 14-chrome-trace-import | Chrome trace | Opening a Chrome Trace Event JSON file onto the perfr timeline
 

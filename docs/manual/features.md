@@ -88,6 +88,37 @@ Left to right, in clusters separated by thin rules. A filled pill is on.
   the first capture. `capture_elapsed` in `window.__perfr_sel`, label
   `Timer` in `window.__perfr_ui`; the `capture-scheduling` scenario checks
   that it advances while capturing and freezes after Stop.
+- **Capture size.** Right of the timer: what the capture would weigh
+  saved as a stream (`.perfr.stream`) at this moment, as `12.4 MB`. The
+  service counts it as the ring fills (the size of each batch as it is
+  written, and the names), so it is the number of bytes
+  `/api/capture/export?format=stream` returns, and `/api/status` carries
+  it as `stream_bytes`; the page reads it four times a second. It grows
+  until it reaches the ring's size and stays there, in the accent colour:
+  the ring is full, and the oldest events go as new ones arrive. Shown
+  whenever the service holds a capture, running or not; not for a file on
+  the page. `stream_bytes` in `window.__perfr_sel`, label `Size` in
+  `window.__perfr_ui`.
+- **The ring.** A capture has no length limit. What it holds is bounded
+  by the ring's size, which is the most a saved stream can weigh: 500 MB
+  by default. Past it the service drops the oldest batch of events for
+  each new one (`dropped` in `/api/status`), and the page drops the same
+  from the timeline (what ended before `evicted_before_ns`), a few lanes
+  a frame, so that what is on screen is what a save holds and the page's
+  memory stops growing too. A page has limits of its own besides: 48
+  million events in its 4 GiB of WebAssembly memory (24 million where
+  the browser gives it 2 GiB), and 24 million on one row of a thread. A
+  500 MB ring of the densest events holds 45 million, so they bite when
+  the ring is set larger or one thread wrote nearly all of it; the page
+  then shows the newest it can, the size's hover text says so, and a
+  save still holds everything. The size is **Ring size (MB)** in the
+  Inspector (More, or `I`): Apply changes it for the running service
+  without emptying the capture (a smaller ring drops what no longer
+  fits) and saves it as `ring_buffer_bytes` in the settings file for the
+  next start. `PUT /api/config` with `ring_buffer_bytes` changes the
+  running service only. The service holds the events unpacked, about
+  three bytes of memory for each byte of saved stream, and takes sizes
+  from 1 MiB to an eighth of the machine's memory (8 GiB at most).
 - **Open** opens a saved perfr capture (`.perfr.zip`) or a Chrome trace
   (`.json` / `.json.gz`); dropping the file on the page does the same.
   Screenshot: `17-opened-slice.png` (a slice reopened through the API).

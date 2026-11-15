@@ -1047,18 +1047,18 @@ fn inspector_page() -> Page {
         app.open_right_tab(ReportTab::Inspector);
     });
     page.frames(3);
-    assert_eq!(page.app.ring_bytes, "67108864");
+    assert_eq!(page.app.ring_mb, "67.108864");
     page
 }
 
 #[test]
 fn a_ring_size_being_typed_survives_the_status_polls() {
     let mut page = inspector_page();
-    let ring_box = page.text_rect("67108864").expect("the Inspector shows the ring size in its box");
+    let ring_box = page.text_rect("67.108864").expect("the Inspector shows the ring size in its box");
     page.click(ring_box.center());
     page.type_text("0");
-    assert_eq!(page.app.ring_bytes.len(), 9, "the click put the caret in the box: {:?}", page.app.ring_bytes);
-    let typed = page.app.ring_bytes.clone();
+    assert_eq!(page.app.ring_mb.len(), 10, "the click put the caret in the box: {:?}", page.app.ring_mb);
+    let typed = page.app.ring_mb.clone();
     // The service answers four times a second, and pushes its stats over
     // the socket besides.
     for _ in 0..8 {
@@ -1066,7 +1066,7 @@ fn a_ring_size_being_typed_survives_the_status_polls() {
         page.app.apply_frame(status_frame(false, false));
         page.frames(15);
     }
-    assert_eq!(page.app.ring_bytes, typed, "a status answer put the service's value back over what was typed");
+    assert_eq!(page.app.ring_mb, typed, "a status answer put the service's value back over what was typed");
 }
 
 #[test]
@@ -1087,22 +1087,22 @@ fn the_ring_and_spill_boxes_follow_the_service_until_they_are_edited_and_again_a
     // Untouched, the boxes show what the service reports.
     page.app.apply_status(StatusJson { ring_bytes: 1 << 20, spill_path: Some("/var/spill".into()), ..service_status(false) });
     page.frames(2);
-    assert_eq!((page.app.ring_bytes.as_str(), page.app.spill_path.as_str()), ("1048576", "/var/spill"));
+    assert_eq!((page.app.ring_mb.as_str(), page.app.spill_path.as_str()), ("1.048576", "/var/spill"));
 
-    let ring_box = page.text_rect("1048576").expect("the ring size");
+    let ring_box = page.text_rect("1.048576").expect("the ring size");
     page.click(ring_box.center());
     page.type_text("0");
-    let typed = page.app.ring_bytes.clone();
+    let typed = page.app.ring_mb.clone();
     page.app.apply_status(StatusJson { ring_bytes: 1 << 20, ..service_status(false) });
     page.frames(2);
-    assert_eq!(page.app.ring_bytes, typed);
+    assert_eq!(page.app.ring_mb, typed);
 
     // Apply sends it; from then on the box shows what the service made of it.
     let apply = page.rect_of("Apply").expect("the Inspector has Apply");
     page.click(apply.center());
     page.app.apply_status(StatusJson { ring_bytes: 1 << 24, ..service_status(false) });
     page.frames(2);
-    assert_eq!(page.app.ring_bytes, "16777216");
+    assert_eq!(page.app.ring_mb, "16.777216");
 }
 
 /// A connected page showing a finished capture of one process, three threads.
@@ -2530,4 +2530,230 @@ fn native_open_reports_missing_files_and_unsupported_bundles() {
     viewer.open_path(std::path::Path::new("capture.perfr.zip"));
     assert!(viewer.error.contains("opened by the perfr service"), "{}", viewer.error);
     assert!(!viewer.import_pending);
+}
+
+/// A connected page in the middle of a capture: scopes of 1 ms back to back
+/// on three threads from `1 s`, `per_thread` on each, as the socket brought
+/// them.
+fn capturing_page(per_thread: u64) -> Page {
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(true));
+        feed(app, &[hello(), LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000_000_000 }]);
+        for tid in [101, 102, 103] {
+            let events = (0..per_thread).map(|i| scope(100, tid, 1_000_000_000 + i * 1_000_000, 1_000_000, 7)).collect();
+            feed(app, &[LiveFrame::EventBatch { events }]);
+        }
+        app.apply_status(StatusJson { capture_start_ns: 1_000_000_000, events_live: 3 * per_thread, ..service_status(true) });
+    });
+    page.frames(2);
+    assert_eq!(page.app.index.event_count() as u64, 3 * per_thread);
+    page
+}
+
+/// The status of [`capturing_page`]'s service after its ring dropped what
+/// ended before `cut_ns`.
+fn ring_dropped(cut_ns: u64, capturing: bool) -> StatusJson {
+    StatusJson { capture_start_ns: 1_000_000_000, evicted_before_ns: cut_ns, dropped: 1, events_live: 1, ..service_status(capturing) }
+}
+
+#[test]
+fn the_page_drops_what_the_services_ring_dropped() {
+    let mut page = capturing_page(1_000);
+    let held_end = |page: &Page| page.app.index.lanes().flat_map(|(_, l)| l.events().iter().map(|e| e.end_ns())).min().unwrap();
+    // A second of capture held, and the ring says the first 2% went: not
+    // worth a walk of the lanes while the capture runs.
+    page.app.apply_status(ring_dropped(1_020_000_000, true));
+    page.frames(3);
+    assert_eq!(page.app.index.event_count(), 3_000);
+    // A fifth of it: dropped, on every lane, and the timeline begins
+    // there. The scope that ends at the cut itself did not end before it.
+    page.app.apply_status(ring_dropped(1_200_000_000, true));
+    page.frames(3);
+    assert_eq!(page.app.index.event_count(), 3 * 801);
+    assert_eq!(held_end(&page), 1_200_000_000);
+    assert_eq!(page.app.eviction, Eviction { done_ns: 1_200_000_000, pass: None });
+    assert_eq!(page.app.content_span().map(|(a, _)| a), Some(1_199_000_000.0));
+    // Twenty milliseconds more is again too little, until the capture ends:
+    // what is on screen is then what a save holds.
+    page.app.apply_status(ring_dropped(1_220_000_000, true));
+    page.frames(3);
+    assert_eq!(page.app.index.event_count(), 3 * 801);
+    page.app.apply_status(ring_dropped(1_220_000_000, false));
+    page.frames(3);
+    assert_eq!(page.app.index.event_count(), 3 * 781);
+    assert_eq!(held_end(&page), 1_220_000_000);
+}
+
+#[test]
+fn a_pass_over_many_lanes_is_spread_over_frames_and_ends_where_one_pass_would() {
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(true));
+        feed(app, &[hello(), LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000_000_000 }]);
+        // More events than one frame visits, on lanes of 100 000.
+        for tid in 0..24u32 {
+            let events = (0..100_000u64).map(|i| scope(100, 200 + tid, 1_000_000_000 + i * 10_000, 10_000, 7)).collect();
+            feed(app, &[LiveFrame::EventBatch { events }]);
+        }
+    });
+    page.frames(1);
+    assert_eq!(page.app.index.event_count(), 2_400_000);
+    page.app.apply_status(ring_dropped(1_500_000_000, true));
+    page.frames(1);
+    let after_one = page.app.index.event_count();
+    assert!(page.app.eviction.pass.is_some(), "one frame was enough for {} events", 2_400_000 - after_one);
+    assert!(after_one < 2_400_000 && after_one > 24 * 50_001, "{after_one}");
+    page.frames(4);
+    assert_eq!(page.app.index.event_count(), 24 * 50_001);
+    assert_eq!(page.app.eviction, Eviction { done_ns: 1_500_000_000, pass: None });
+}
+
+#[test]
+fn what_one_ring_dropped_says_nothing_about_the_next_capture_or_a_file() {
+    let mut page = capturing_page(1_000);
+    page.app.apply_status(ring_dropped(1_500_000_000, true));
+    page.frames(3);
+    assert_eq!(page.app.index.event_count(), 3 * 501);
+    // The service opens a capture stored earlier, whose times are before
+    // that cut. The last status is still the old ring's.
+    feed(&mut page.app, &[
+        hello(),
+        LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000_000 },
+        LiveFrame::EventBatch { events: (0..500).map(|i| scope(100, 101, 1_000_000 + i * 1_000, 1_000, 7)).collect() },
+    ]);
+    assert_eq!(page.app.eviction, Eviction::default());
+    assert_eq!(page.app.status.evicted_before_ns, 0);
+    page.frames(5);
+    assert_eq!(page.app.index.event_count(), 500);
+
+    // A file on the page is not the service's capture, whatever its ring says.
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.accept_stream(capture_stream(status_frame(false, false), (0..500).map(|i| scope(100, 101, 5_000 + i * 1_000, 1_000, 7)).collect()));
+    });
+    page.app.apply_status(ring_dropped(u64::MAX, false));
+    page.frames(5);
+    assert_eq!(page.app.index.event_count(), 500);
+}
+
+#[test]
+fn the_size_of_the_capture_as_a_stream_is_beside_the_timer() {
+    let mut page = capturing_page(100);
+    assert!(page.text_rect("12.4 MB").is_none());
+    page.app.apply_status(StatusJson {
+        capture_start_ns: 1_000_000_000,
+        events_live: 300,
+        stream_bytes: 12_440_000,
+        ring_bytes: 500_000_000,
+        ..service_status(true)
+    });
+    page.frames(2);
+    let size = page.text_rect("12.4 MB").expect("the size is on the bar");
+    let timer = page.rect_of("Timer").expect("the timer is on the bar");
+    assert!(size.left() >= timer.right() && size.left() - timer.right() < 60.0, "timer {timer:?}, size {size:?}");
+    assert_eq!(size.center().y.round(), timer.center().y.round());
+    assert_eq!(page.app.capture_size(), Some(CaptureSize { bytes: 12_440_000, ring_bytes: 500_000_000, full: false }));
+    // At the ring's size it stays there, and says the ring is full.
+    page.app.apply_status(StatusJson {
+        capture_start_ns: 1_000_000_000,
+        events_live: 300,
+        stream_bytes: 499_950_000,
+        ring_bytes: 500_000_000,
+        evicted_before_ns: 1_000_000_001,
+        ..service_status(true)
+    });
+    page.frames(2);
+    assert!(page.text_rect("499.9 MB").is_some() || page.text_rect("500.0 MB").is_some());
+    assert!(page.app.capture_size().unwrap().full);
+    // Stopped, it is still what a save would weigh.
+    page.app.apply_status(StatusJson { events_live: 300, stream_bytes: 499_950_000, ring_bytes: 500_000_000, ..service_status(false) });
+    page.frames(2);
+    assert!(page.app.capture_size().is_some());
+    // Nothing captured, nothing to weigh; and a file on screen is not the
+    // service's capture.
+    page.app.apply_status(StatusJson { events_live: 0, stream_bytes: 150, ..service_status(false) });
+    assert_eq!(page.app.capture_size(), None);
+    let mut app = loaded_static_app();
+    app.status = StatusJson { events_live: 300, stream_bytes: 12_440_000, ..service_status(false) };
+    assert_eq!(app.capture_size(), None);
+}
+
+#[test]
+fn the_ring_size_is_typed_in_megabytes_and_kept_for_the_next_start() {
+    let mut page = inspector_page();
+    page.app.server_settings = Some(serde_json::json!({ "auto_unhook": true, "ring_buffer_bytes": 500_000_000u64 }));
+    page.app.apply_status(StatusJson { ring_bytes: 500_000_000, ..service_status(false) });
+    page.frames(2);
+    assert_eq!(page.app.ring_mb, "500");
+    assert!(page.text_rect("500").is_some(), "the ring size in megabytes is in its box");
+    // As typed in the box.
+    page.app.ring_mb = "250".into();
+    page.app.config_edited = true;
+    page.frames(1);
+    let typed_bytes = 250_000_000u64;
+    let apply = page.rect_of("Apply").expect("the Inspector has Apply");
+    page.click(apply.center());
+    let saved = page.app.server_settings.as_ref().unwrap();
+    assert_eq!(saved["ring_buffer_bytes"], typed_bytes, "the size is saved with the other settings");
+    assert_eq!(saved["auto_unhook"], true);
+    assert!(!page.app.config_edited);
+    // Something that is not a size is said, and not sent.
+    page.app.ring_mb = "lots".into();
+    page.app.config_edited = true;
+    page.frames(1);
+    let apply = page.rect_of("Apply").expect("the Inspector has Apply");
+    page.click(apply.center());
+    assert!(page.app.error.contains("megabytes"), "{:?}", page.app.error);
+    assert_eq!(page.app.server_settings.as_ref().unwrap()["ring_buffer_bytes"], typed_bytes);
+}
+
+#[test]
+fn one_lane_holds_no_more_than_its_limit_however_much_room_the_page_has() {
+    let mut page = capturing_page(10_000);
+    // One thread goes on alone: 30 000 events in its lane, 50 000 held.
+    let events = (10_000..30_000u64).map(|i| scope(100, 101, 1_000_000_000 + i * 1_000_000, 1_000_000, 7)).collect();
+    feed(&mut page.app, &[LiveFrame::EventBatch { events }]);
+    page.frames(4);
+    assert_eq!(page.app.index.event_count(), 50_000, "inside the page's limit nothing goes");
+    page.app.lane_event_cap = 20_000;
+    page.frames(4);
+    // Nine tenths of the limit are left in it, the newest.
+    let (largest, first_end, latest_end) = page.app.index.largest_lane().unwrap();
+    assert_eq!(largest, 18_000);
+    assert_eq!(latest_end, 1_000_000_000 + 30_000 * 1_000_000);
+    assert_eq!(first_end, 1_000_000_000 + 12_001 * 1_000_000);
+    // What goes is what ended before a time, on every lane, so the timeline
+    // begins at one time: the threads that stopped at 10 s have nothing left.
+    assert_eq!(page.app.index.event_count(), 18_000);
+    page.frames(6);
+    assert_eq!(page.app.index.event_count(), 18_000);
+}
+
+#[test]
+fn a_page_holds_no_more_events_than_it_has_room_for_whatever_the_ring_holds() {
+    let mut page = capturing_page(10_000);
+    assert_eq!(page.app.index.event_count(), 30_000);
+    // The ring has dropped nothing; the page's own limit is two thirds of
+    // what it was sent.
+    page.app.page_event_cap = 20_000;
+    page.frames(4);
+    let held = page.app.index.event_count();
+    assert!((17_000..=19_000).contains(&held), "nine tenths of the limit, give or take the estimate: {held}");
+    assert!(page.app.eviction.done_ns > page.app.status.evicted_before_ns);
+    // The newest are the ones kept.
+    let last = page.app.index.lanes().flat_map(|(_, l)| l.events().iter().map(|e| e.end_ns())).max().unwrap();
+    assert_eq!(last, 1_000_000_000 + 10_000 * 1_000_000);
+    // Inside the limit nothing more goes, however long it stays there.
+    page.frames(6);
+    assert_eq!(page.app.index.event_count(), held);
+    // More arrives and takes it over again.
+    let events = (10_000..13_000u64).map(|i| scope(100, 101, 1_000_000_000 + i * 1_000_000, 1_000_000, 7)).collect();
+    feed(&mut page.app, &[LiveFrame::EventBatch { events }]);
+    assert!(page.app.index.event_count() > 20_000);
+    page.frames(4);
+    assert!(page.app.index.event_count() <= 20_000);
+    // A ring that drops further than that is followed as before: only the
+    // thread that went on past 12.5 s has anything left.
+    page.app.apply_status(ring_dropped(12_500_000_000, false));
+    page.frames(4);
+    assert_eq!(page.app.index.event_count(), 1_501);
 }

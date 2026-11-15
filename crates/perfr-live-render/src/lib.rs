@@ -329,6 +329,40 @@ impl Lane {
         }
     }
 
+    /// Drops every event that ended before `cut`: what
+    /// `retain(|e| e.end_ns() >= cut)` does, for the case a live capture's
+    /// ring makes of it, where those events are the lane's first ones. They
+    /// are found by a search and removed in one move, with no walk of what
+    /// stays. A lane whose ends are out of order is walked as `retain`
+    /// walks it. Returns how many went.
+    pub fn drop_ended_before(&mut self, cut: u64) -> usize {
+        let before = self.events.len();
+        if !self.ends_sorted {
+            self.retain(|e| e.end_ns() >= cut);
+            return before - self.events.len();
+        }
+        let gone = self.events.partition_point(|e| e.end_ns() < cut);
+        if gone == 0 {
+            return 0;
+        }
+        self.events.drain(..gone);
+        self.version = self.version.wrapping_add(1);
+        self.reshaped = self.reshaped.wrapping_add(1);
+        // The blocks are counted from the lane's first event, which moved.
+        self.rebuild_block_span(0);
+        self.longest_span = self.block_span.iter().copied().max().unwrap_or(0);
+        gone
+    }
+
+    /// The latest end among the lane's events, 0 when it is empty.
+    fn latest_end_ns(&self) -> u64 {
+        match (self.ends_sorted, self.events.last()) {
+            (true, Some(last)) => last.end_ns(),
+            (false, _) => self.latest_end.last().copied().unwrap_or(0),
+            (true, None) => 0,
+        }
+    }
+
     /// First event with `end_ns > t`.
     ///
     /// Non-overlapping start-sorted lanes have non-decreasing `end_ns`
@@ -776,8 +810,95 @@ impl TrackIndex {
         self.rescan_bounds();
     }
 
+    /// Drops the events that ended before `cut`, as
+    /// `retain(|e| e.end_ns() >= cut)` does, a few lanes at a time: the
+    /// lanes after `after` in key order (all of them for `None`), until the
+    /// ones visited hold `budget_events` events between them. Returns the
+    /// lane to go on after, or `None` once every lane has been visited.
+    ///
+    /// A viewer mirroring a ring that drops its oldest events calls this
+    /// once a frame until it returns `None`. Dropping from every lane at
+    /// once is a pass over everything held, and held up a frame for as long
+    /// as that takes; a lane at a time costs each frame what its budget
+    /// allows (one lane at the least, however long it is).
+    ///
+    /// The time bounds are brought up to date when the last lane has been
+    /// visited: until then they are those of before the first call, which
+    /// are never narrower than what is held.
+    pub fn drop_ended_before(&mut self, cut: u64, after: Option<LaneKey>, budget_events: usize) -> Option<LaneKey> {
+        use std::ops::Bound;
+        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut visited = 0usize;
+        let mut gone = 0usize;
+        let mut last = None;
+        let mut more = false;
+        for (key, lane) in self.lanes.range_mut((from, Bound::Unbounded)) {
+            if last.is_some() && visited >= budget_events {
+                more = true;
+                break;
+            }
+            visited += lane.len();
+            gone += lane.drop_ended_before(cut);
+            last = Some(*key);
+        }
+        if gone > 0 {
+            self.events -= gone;
+            self.revision = self.revision.wrapping_add(1);
+        }
+        if more {
+            return last;
+        }
+        let before = self.lanes.len();
+        self.lanes.retain(|_, lane| !lane.is_empty());
+        if self.lanes.len() != before {
+            self.lane_gen = self.lane_gen.wrapping_add(1);
+        }
+        self.bounds_from_lane_ends();
+        None
+    }
+
+    /// The bounds [`Self::rescan_bounds`] finds, read off the two ends of
+    /// each lane and not off every event. A lane is sorted by start, so its
+    /// earliest start is its first event's; its latest end is kept
+    /// ([`Lane::latest_end_ns`]). The events that count as real are all of a
+    /// lane from the first one that does (what comes before it starts ahead
+    /// of the floor or is a mark at zero, and a mark at zero ends before
+    /// anything real does), so the real bounds are that event's start and
+    /// the lane's latest end, with one exception that is walked: a lane
+    /// with ends out of order whose first real event is not its first.
+    fn bounds_from_lane_ends(&mut self) {
+        let mut b = Bounds::default();
+        for lane in self.lanes.values() {
+            let (Some(first), Some(last)) = (lane.events.first(), lane.events.last()) else { continue };
+            b.min_all = b.min_all.min(first.start_ns);
+            b.max_all = b.max_all.max(lane.latest_end_ns());
+            // A lane is one process's: its own rows are never real.
+            if perfr_live_event::dev::is_self_pid(first.pid) || last.start_ns < self.extent_floor {
+                continue;
+            }
+            let is_real = |e: &LiveEvent| e.start_ns >= self.extent_floor && (e.start_ns > 0 || e.duration_ns > 1);
+            let Some(at) = lane.events.iter().position(is_real) else { continue };
+            b.any_real = true;
+            b.min_real = b.min_real.min(lane.events[at].start_ns);
+            let latest = if at == 0 || lane.ends_sorted {
+                lane.latest_end_ns()
+            } else {
+                lane.events[at..].iter().map(|e| e.end_ns()).max().unwrap_or(0)
+            };
+            b.max_real = b.max_real.max(latest);
+        }
+        self.bounds = b;
+    }
+
     pub fn lane_count(&self) -> usize {
         self.lanes.len()
+    }
+
+    /// The lane that holds the most events: how many, and the span they
+    /// ended in (the end of its first event, and its latest end).
+    pub fn largest_lane(&self) -> Option<(usize, u64, u64)> {
+        let lane = self.lanes.values().max_by_key(|lane| lane.len())?;
+        Some((lane.len(), lane.events.first()?.end_ns(), lane.latest_end_ns()))
     }
 
     pub fn event_count(&self) -> usize {
@@ -1279,6 +1400,84 @@ mod tests {
         assert!(lane.ends_are_sorted());
         assert_eq!(lane.first_ending_after(10), 0);
         assert_eq!(lane.overlapping(10, 11).map(|e| e.start_ns), Some(0));
+    }
+
+    /// Everything a caller can ask of an index, for comparing two.
+    fn asked(idx: &TrackIndex) -> (Vec<(LaneKey, Vec<LiveEvent>, bool, u64)>, usize, Option<(u64, u64)>) {
+        let lanes = idx
+            .lanes()
+            .map(|(key, lane)| {
+                // The search structures answer as a lane built from these
+                // events alone does.
+                let mut fresh = Lane::default();
+                fresh.extend(lane.events().iter().copied());
+                assert_eq!(lane.ends_sorted(), lane.ends_are_sorted());
+                assert_eq!(lane.block_span, fresh.block_span, "{key:?}");
+                assert_eq!(lane.latest_end, fresh.latest_end, "{key:?}");
+                assert_eq!(lane.longest_span, fresh.longest_span, "{key:?}");
+                (key, lane.events().to_vec(), lane.ends_sorted(), lane.latest_end_ns())
+            })
+            .collect();
+        (lanes, idx.event_count(), idx.time_bounds())
+    }
+
+    #[test]
+    fn dropping_what_ended_before_a_time_is_a_retain_done_a_few_lanes_at_a_time() {
+        use crate::test_rng::Rng;
+        let mut rng = Rng(0x51AB_1E55);
+        for round in 0..40 {
+            let mut idx = TrackIndex::default();
+            let lanes = 1 + rng.below(9);
+            for lane in 0..lanes {
+                // The viewer's own rows are one lane in three of some rounds.
+                let pid = if round % 4 == 0 && lane % 3 == 0 { perfr_live_event::dev::VIEWER_PID } else { 1 + (lane % 2) as u32 };
+                let mut t = rng.below(500);
+                for _ in 0..rng.below(400) {
+                    let dur = 1 + rng.below(300);
+                    idx.insert(LiveEvent { pid, tid: lane as u32, ..scope(t, dur, 0, lane as u32) });
+                    // Now and then an instant inside the scope before it:
+                    // the lane's ends are then out of order.
+                    if round % 3 == 0 && rng.below(20) == 0 {
+                        idx.insert(LiveEvent { pid, tid: lane as u32, ..scope(t + 1, 1, 0, 99) });
+                    }
+                    t += dur + rng.below(50);
+                }
+            }
+            // A mark at zero, and in some rounds a floor inside the capture.
+            idx.insert(LiveEvent { pid: 1, tid: 0, ..scope(0, 1, 0, 7) });
+            if round % 2 == 0 {
+                idx.set_extent_floor(200 + rng.below(20_000));
+            }
+            let (_, end) = idx.time_bounds().unwrap();
+            let mut retained = idx.clone();
+            let mut cut = 0;
+            // Three cuts, each later, the last past everything on some rounds.
+            for step in 1..=3u64 {
+                cut += rng.below(end / 3 + 2) + if step == 3 && round % 5 == 0 { end } else { 0 };
+                retained.retain(|e| e.end_ns() >= cut);
+                let budget = [0, 1, 300, usize::MAX][(round + step as usize) % 4];
+                let (lane_gen, revision) = (idx.lane_gen(), idx.revision());
+                let (before, lanes_before) = (idx.event_count(), idx.lane_count());
+                let bounds_before = idx.time_bounds();
+                let mut after = None;
+                let mut calls = 0;
+                loop {
+                    calls += 1;
+                    after = idx.drop_ended_before(cut, after, budget);
+                    if after.is_none() {
+                        break;
+                    }
+                    // Between calls the bounds are still those of before.
+                    assert_eq!(idx.time_bounds(), bounds_before);
+                }
+                assert_eq!(asked(&idx), asked(&retained), "round {round}, cut {cut}, budget {budget}");
+                if budget == usize::MAX {
+                    assert_eq!(calls, 1);
+                }
+                assert_eq!(idx.revision() != revision, idx.event_count() != before, "the revision moves with the events");
+                assert_eq!(idx.lane_gen() != lane_gen, idx.lane_count() != lanes_before, "and the lane generation with the lanes");
+            }
+        }
     }
 
     #[test]

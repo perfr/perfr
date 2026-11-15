@@ -27,7 +27,7 @@ Open `http://<host>:44766/`.
 | **Record** | Against PerfrService: real capture of the selected pid (CSW, thread state, API, optional sampling + hooks). Rust-only / missing hooks: Record starts the **Demo** producer and the strip says so. |
 | **Demo** | In-process dummy scopes (no attach). Separate from Record when hooks are present. |
 | **Capture strip** | Sampling (default 1 ms / 1000 Hz, DWARF unwind), user-space vs kernel uprobes, function search (service-side, paged). Symbols load on the machine running PerfrService — the browser never parses ELF/DWARF. |
-| **Ring bytes** | Recreates the in-process ring (oldest live data is dropped) |
+| **Ring size (MB)** | The most a saved capture weighs, 500 MB by default. A capture can run past it: the ring keeps the newest events that fit. Apply resizes the ring in place and saves the size for the next start. |
 | **Spill path** | Directory for serialize-on-overflow (`perfr-live-spill.bin`) |
 
 `--http_port 0` disables the viewer.
@@ -193,8 +193,8 @@ overlap out of order a sleep / runnable slice can be lost, while the
 per-core running slices are exact.
 
 The 64 MB capture ring is not used. Events go into the viewer's `TrackIndex`
-(32 bytes each + interned strings). wasm32 heap is capped at **2 GiB**
-(`build_wasm.sh --max-memory`). gzip is inflated as chunks arrive (not
+(32 bytes each + interned strings). wasm32 heap is capped at **4 GiB**
+(`wasm_pack.sh --max-memory`; 2 GiB where the browser refuses 4). gzip is inflated as chunks arrive (not
 buffered then decoded). A 1–2 GB uncompressed JSON is stream-parsed
 (the file is not kept as `serde_json::Value`). Hover-args intern is capped
 (512 chars, 100k entries) so unique-per-event dumps cannot explode RAM.

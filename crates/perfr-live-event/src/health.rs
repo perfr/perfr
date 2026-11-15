@@ -127,6 +127,31 @@ pub fn lane_by_name(name: &str) -> Option<&'static Lane> {
     LANES.iter().find(|lane| lane.name == name)
 }
 
+/// Meaning and Linux collector source, for the viewer's metric tooltip.
+/// Lookup uses the stable label so linked machines with re-interned ids work too.
+pub fn metric_tooltip(name: &str) -> Option<&'static str> {
+    Some(match lane_by_name(name)?.id {
+        lane::CPU => "CPU time across all cores that is neither idle nor IO-wait, as a percentage of total CPU time between samples. Includes steal time. Source: /proc/stat, aggregate cpu line.",
+        lane::CPU_PRESSURE => "Percentage of the sample interval with at least one runnable task waiting for CPU time. Source: /proc/pressure/cpu, change in the PSI some total counter (not avg10).",
+        lane::CPU_STEAL => "Percentage of CPU time taken by the hypervisor while this virtual machine wanted to run. Source: /proc/stat, change in steal ticks divided by total ticks. Appears after the first stolen tick.",
+        lane::CPU_TEMPERATURE => "CPU package or die temperature in degrees Celsius. Source: /sys/class/hwmon/hwmon*/temp1_input, divided by 1000, from the first available coretemp, k10temp, zenpower or cpu_thermal sensor.",
+        lane::MEMORY_USED => "Percentage of RAM not available for new allocations: (MemTotal - MemAvailable) / MemTotal. Reclaimable memory counted as available is excluded. Source: /proc/meminfo.",
+        lane::MEMORY_PRESSURE => "Percentage of the sample interval with at least one task stalled by memory pressure. Source: /proc/pressure/memory, change in the PSI some total counter (not avg10).",
+        lane::SWAP_USED => "Swap space in use, in MiB: (SwapTotal - SwapFree) / 1024. Source: /proc/meminfo, whose values are in KiB. Omitted when no swap is configured.",
+        lane::MAJOR_FAULTS => "Major page faults per second across the machine: faults requiring a page to be read from storage. Source: /proc/vmstat, change in pgmajfault divided by elapsed time.",
+        lane::OOM_KILLS => "Cumulative number of processes killed by the kernel's out-of-memory killer since the capture's first health sample. Source: /proc/vmstat, oom_kill minus its initial value. Appears after the first kill.",
+        lane::IO_PRESSURE => "Percentage of the sample interval with at least one task stalled waiting for IO. Source: /proc/pressure/io, change in the PSI some total counter (not avg10).",
+        lane::DISK_READ => "Read throughput summed across whole physical disks, in MiB/s. Source: /proc/diskstats, change in sectors read times 512 bytes, divided by elapsed time. Disks are selected by /sys/class/block/<name>/device; partitions and stacked virtual devices are excluded.",
+        lane::DISK_WRITE => "Write throughput summed across whole physical disks, in MiB/s. Source: /proc/diskstats, change in sectors written times 512 bytes, divided by elapsed time. Disks are selected by /sys/class/block/<name>/device; partitions and stacked virtual devices are excluded.",
+        lane::DISK_BUSY => "Percentage of the sample interval spent doing IO on the busiest physical disk (not an average across disks). Source: /proc/diskstats, change in milliseconds doing IO, for disks with /sys/class/block/<name>/device.",
+        lane::NETWORK_RECEIVE => "Received traffic summed across physical network interfaces, in MiB/s. Source: /proc/net/dev, change in receive bytes divided by elapsed time. Interfaces must have /sys/class/net/<name>/device; loopback, bridges and tunnels are excluded.",
+        lane::NETWORK_SEND => "Sent traffic summed across physical network interfaces, in MiB/s. Source: /proc/net/dev, change in transmit bytes divided by elapsed time. Interfaces must have /sys/class/net/<name>/device; loopback, bridges and tunnels are excluded.",
+        lane::GPU => "Utilization of the busiest reporting GPU, in percent. Source: AMD /sys/class/drm/card*/device/gpu_busy_percent, or NVIDIA NVML utilization readings from the GPU helper.",
+        lane::GPU_MEMORY => "Used GPU memory as a percentage of total memory, summed across reporting GPUs. Source: AMD /sys/class/drm/card*/device/mem_info_vram_used and mem_info_vram_total, or NVIDIA NVML memory readings from the GPU helper. This measures memory capacity usage, not memory bandwidth.",
+        _ => return None,
+    })
+}
+
 /// The axis of a health lane whose largest value in view is `observed_max`.
 pub fn axis(lane: &Lane, observed_max: f32) -> (f32, f32) {
     (0.0, observed_max.max(lane.top))
@@ -159,6 +184,7 @@ mod tests {
             assert!(GROUPS.iter().any(|(tid, _)| *tid == lane.group), "{}", lane.name);
             assert_eq!(lane_by_name(lane.name), Some(lane));
             assert_eq!(lane_by_id(lane.id), Some(lane));
+            assert!(metric_tooltip(lane.name).is_some(), "{} needs a tooltip", lane.name);
             keys.push(LiveEvent::from_value(0, PID, lane.group, lane.id, 0.0).lane_key());
         }
         let mut sorted = keys.clone();

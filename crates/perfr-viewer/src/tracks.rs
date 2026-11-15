@@ -70,7 +70,7 @@ use perfr_live_render::{lane_gap, lane_height, sort_thread_leaves, TrackIndex};
 pub const MACHINE_H: f32 = 16.0;
 pub const PROCESS_H: f32 = 18.0;
 pub const SCHEDULER_H: f32 = 18.0;
-pub const THREAD_H: f32 = 20.0;
+pub const THREAD_H: f32 = 32.0;
 
 enum SkelItem {
     Row(RowId, f32),

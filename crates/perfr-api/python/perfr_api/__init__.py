@@ -50,7 +50,7 @@ __all__ = [
     "available", "frame_mark", "init", "instant", "library_path", "link", "log", "now_ns", "scope",
     "scope_async", "shutdown", "span", "span_async", "start", "start_async", "stop", "value",
 ]
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 #: The ABI this package speaks; the library hands out its table only for it.
 ABI_VERSION = 1

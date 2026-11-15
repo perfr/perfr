@@ -220,6 +220,82 @@ impl HeaderPass {
     }
 }
 
+/// A capture file that is coming down (`?capture=`, a story's `capture`),
+/// shown as it arrives. See `PerfrLiveApp::pump_stream_load`.
+struct StreamLoad {
+    /// Every byte so far, in order. Kept whole: once the file is all here
+    /// these are what Share posts.
+    bytes: Vec<u8>,
+    /// How many of them have been handed on as frames.
+    fed: usize,
+    /// The file's size, when the server said.
+    total: Option<u64>,
+    /// The last byte is in `bytes`, or no more are coming.
+    complete: bool,
+    /// Why no more are coming, when the download broke off.
+    failed: Option<String>,
+    /// A frame could not be read: nothing after it is handed on.
+    stopped: bool,
+    /// The replay, while one is running. See [`Replay`].
+    replay: Option<Replay>,
+}
+
+impl StreamLoad {
+    fn new(total: Option<u64>, replay_speed: Option<f64>) -> Self {
+        Self {
+            // The size is the server's word: taken as a hint, up to a point.
+            bytes: Vec::with_capacity(total.unwrap_or(0).min(STREAM_RESERVE_MAX) as usize),
+            fed: 0,
+            total,
+            complete: false,
+            failed: None,
+            stopped: false,
+            replay: replay_speed.map(|speed| Replay { speed, origin: None }),
+        }
+    }
+
+    /// What the status line says while the file is coming in.
+    fn progress_line(&self) -> String {
+        let mb = |bytes: u64| bytes as f64 / 1e6;
+        let got = self.bytes.len() as u64;
+        if self.complete {
+            // All here, and not all shown: a replay holds the rest back.
+            return "Replaying the capture".into();
+        }
+        // A length counted in compressed bytes is passed by what arrives.
+        match self.total.filter(|total| *total >= got) {
+            Some(total) => format!("Loading the capture: {:.1} of {:.1} MB", mb(got), mb(total)),
+            None => format!("Loading the capture: {:.1} MB", mb(got)),
+        }
+    }
+}
+
+/// The most that is set aside for a capture file on the word of its
+/// `Content-Length`, before any of it has arrived.
+const STREAM_RESERVE_MAX: u64 = 256 << 20;
+
+/// Playing a capture file in at a multiple of the speed it was recorded at
+/// (`?replay=`): a frame is shown when the replay's clock reaches the events
+/// before it, so the file's events appear the way a recording's do.
+struct Replay {
+    /// Capture seconds a second.
+    speed: f64,
+    /// The page's time and the capture's time when the first events were
+    /// shown: where the replay's clock starts.
+    origin: Option<(f64, f64)>,
+}
+
+impl Replay {
+    /// Whether the next frame waits. `shown` is the span of the events on
+    /// screen and `now_s` the page's time. Until there are events nothing
+    /// waits: names and the status are not what is being replayed.
+    fn holds_back(&mut self, shown: Option<(f64, f64)>, now_s: f64) -> bool {
+        let Some((first_ns, edge_ns)) = shown else { return false };
+        let (began_s, began_ns) = *self.origin.get_or_insert((now_s, first_ns));
+        edge_ns > began_ns + (now_s - began_s) * self.speed * 1e9
+    }
+}
+
 /// How far the ground of a lifted track is drawn from where the track is,
 /// which with the shadow under it is what makes it look lifted.
 const LIFT_NUDGE: Vec2 = Vec2::new(1.0, -1.0);
@@ -974,6 +1050,11 @@ pub struct PerfrLiveApp {
     /// The `.perfr.stream` behind what is on screen, if it came from a file
     /// or URL: what Share posts, and why socket frames are not mixed in.
     held_stream: crate::share::HeldStream,
+    /// A capture file that is still coming down, shown as it arrives.
+    stream_load: Option<StreamLoad>,
+    /// `?replay=`: the speed a capture file is played in at. None shows it
+    /// as fast as it arrives.
+    replay_speed: Option<f64>,
     share_open: bool,
     /// Bumped when a share starts and when the capture is replaced, so a
     /// reply for an older click is dropped.
@@ -2135,6 +2216,8 @@ impl PerfrLiveApp {
             static_capture: static_capture.clone(),
             story,
             held_stream: crate::share::HeldStream::default(),
+            stream_load: None,
+            replay_speed: crate::dev::query_replay_speed_from_location(),
             share_open: false,
             share_gen: 0,
             share_ui: ShareUi::Idle,
@@ -2364,6 +2447,7 @@ impl PerfrLiveApp {
         if !self.has_service() {
             return;
         }
+        self.drop_stream_load();
         self.clear_file_trace();
         self.clear_errors();
         if self.status.hooks {
@@ -2388,6 +2472,7 @@ impl PerfrLiveApp {
         if !self.has_service() {
             return;
         }
+        self.drop_stream_load();
         self.clear_file_trace();
         self.clear_errors();
         self.begin_recording();
@@ -2402,6 +2487,7 @@ impl PerfrLiveApp {
         if self.recording {
             self.stop_record();
         }
+        self.drop_stream_load();
         self.clear_file_trace();
         self.notice = None;
         self.index.clear();
@@ -2477,6 +2563,7 @@ impl PerfrLiveApp {
         }
         self.clear_errors();
         if !self.recording && !self.status.capturing && !self.status.demo {
+            self.drop_stream_load();
             self.clear_file_trace();
             self.begin_recording();
             self.live_edge_ns = DEMO_ORIGIN_NS;
@@ -2830,7 +2917,23 @@ impl PerfrLiveApp {
         self.recording || self.status.capturing || self.status.demo
     }
 
+    /// A stream file the page has all of: shown in one go.
     fn show_stream(&mut self, bytes: Vec<u8>) {
+        self.begin_stream();
+        let read = self
+            .ingest(&bytes)
+            .and_then(|()| crate::frames::end_of_stream(&mut self.leftover));
+        if let Err(fault) = read {
+            self.fail_stream(fault);
+        }
+        self.finish_stream(Some(bytes), false);
+    }
+
+    /// A stream file is about to be read, whole or as it arrives: what is
+    /// on screen makes way for it.
+    fn begin_stream(&mut self) {
+        // Whatever was arriving is not the file that is shown from here on.
+        self.stream_load = None;
         self.held_stream.begin_load();
         self.clear_file_trace();
         self.index.clear();
@@ -2848,14 +2951,20 @@ impl PerfrLiveApp {
         // frame this one ends in is not completed by the socket's next bytes.
         self.leftover.clear();
         self.notice = None;
-        let read = self
-            .ingest(&bytes)
-            .and_then(|()| crate::frames::end_of_stream(&mut self.leftover));
-        if let Err(fault) = read {
-            let message = fault.file_message();
-            log::warn!(target: "perfr_viewer::net", "{message}");
-            self.fail(message);
-        }
+    }
+
+    /// A stream file cannot be read past this point.
+    fn fail_stream(&mut self, fault: crate::frames::StreamFault) {
+        let message = fault.file_message();
+        log::warn!(target: "perfr_viewer::net", "{message}");
+        self.fail(message);
+    }
+
+    /// The stream file has been read to its end, or as far as it went.
+    /// `bytes` is the file when all of it arrived: what Share posts. With
+    /// `keep_view` the window stays where the reader put it while the file
+    /// was coming in; otherwise the whole capture is shown.
+    fn finish_stream(&mut self, bytes: Option<Vec<u8>>, keep_view: bool) {
         // A stream saved while its capture ran carries the status of that
         // moment, and a file has no later status to correct it: the static
         // page then "captured" for as long as it stayed open (display-rate
@@ -2865,11 +2974,16 @@ impl PerfrLiveApp {
         self.status.capturing = false;
         self.status.demo = false;
         self.was_capturing = false;
-        self.held_stream.loaded(bytes);
+        match bytes {
+            Some(bytes) => self.held_stream.loaded(bytes),
+            None => self.held_stream.loaded_in_part(),
+        }
         self.follow = false;
-        self.user_set_view = false;
-        if self.index.event_count() > 0 {
-            self.fit_to_content();
+        if !keep_view {
+            self.user_set_view = false;
+            if self.index.event_count() > 0 {
+                self.fit_to_content();
+            }
         }
         // The static page computes its report at the file's last frame.
         // With a service the file is only known to be the capture now, and
@@ -2880,6 +2994,149 @@ impl PerfrLiveApp {
         self.needs_repaint = true;
         self.settle_frames = 6;
         self.story.note_capture_replaced();
+    }
+
+    /// What the backend has of a capture file that is coming down (see
+    /// [`crate::net::StreamPiece`]). The address named it, not the reader,
+    /// so as with a file handed over whole it opens when nothing is
+    /// recording and is left alone when something is.
+    fn accept_stream_pieces(&mut self, pieces: Vec<crate::net::StreamPiece>) {
+        use crate::net::StreamPiece;
+        for piece in pieces {
+            match piece {
+                StreamPiece::Begin { total } => {
+                    if self.busy_recording() {
+                        self.fail("A capture is running: the one named in the address was not opened.".into());
+                        continue;
+                    }
+                    self.begin_stream();
+                    // The view is the reader's from the first time they
+                    // move it, and not before.
+                    self.user_set_view = false;
+                    self.live_edge_ns = 0;
+                    self.stream_load = Some(StreamLoad::new(total, self.replay_speed));
+                    self.needs_repaint = true;
+                }
+                // With no load these are the rest of a file that was
+                // refused, or of one that something else took the place of.
+                StreamPiece::Bytes(bytes) => {
+                    if let Some(load) = &mut self.stream_load {
+                        load.bytes.extend_from_slice(&bytes);
+                    }
+                }
+                StreamPiece::End => {
+                    if let Some(load) = &mut self.stream_load {
+                        load.complete = true;
+                    }
+                }
+                StreamPiece::Failed(why) => match &mut self.stream_load {
+                    Some(load) => {
+                        load.complete = true;
+                        load.failed = Some(why);
+                    }
+                    None => self.apply_net_error(why),
+                },
+            }
+        }
+    }
+
+    /// Nothing is being read in any more: the capture on screen is being
+    /// replaced by something that is not a stream file (a recording, a
+    /// trace, Clear).
+    fn drop_stream_load(&mut self) {
+        if self.stream_load.take().is_some() {
+            self.held_stream.load_dropped();
+        }
+    }
+
+    /// The reader did something: a replay is a way of showing a capture
+    /// arrive, not a wait before it can be used, so the rest is shown now.
+    fn end_replay(&mut self) {
+        if let Some(load) = &mut self.stream_load {
+            if load.replay.take().is_some() {
+                self.follow = false;
+            }
+        }
+    }
+
+    /// Hands on what has arrived of a capture file, a frame at a time, for
+    /// as long as this frame can spare, and shows it: the page does not
+    /// wait for the file's last byte to draw its first events.
+    ///
+    /// Without a replay the window is the capture so far, so the file is
+    /// seen filling in and the last frame leaves the view where a file
+    /// read in one go puts it. With one (`?replay=`), frames are held back
+    /// until the replay's clock reaches them and the window follows the
+    /// newest, the way a capture is watched while it records.
+    fn pump_stream_load(&mut self) {
+        // The load steps out while its frames are applied: `ingest` needs
+        // all of `self`.
+        let Some(mut load) = self.stream_load.take() else { return };
+        let now = perfr_live_event::dev::now_ns;
+        let started = now();
+        let budget = ingest_budget_ns(match self.last_ingest_ns {
+            0 => 0,
+            last => started.saturating_sub(last),
+        });
+        let events_before = self.index.event_count();
+        while !load.stopped {
+            if let Some(replay) = &mut load.replay {
+                if replay.holds_back(self.content_span(), self.now_s) {
+                    break;
+                }
+            }
+            let Some(len) = crate::frames::whole_frame_len(&load.bytes[load.fed..]) else { break };
+            let frame = load.fed..load.fed + len;
+            load.fed = frame.end;
+            if let Err(fault) = self.ingest(&load.bytes[frame]) {
+                // Nothing after an unreadable frame starts on a frame.
+                self.fail_stream(fault);
+                load.stopped = true;
+            }
+            if now().saturating_sub(started) >= budget {
+                break;
+            }
+        }
+        self.last_ingest_ns = now();
+        let grew = self.index.event_count() != events_before;
+        let rest = &load.bytes[load.fed..];
+        if load.complete && (load.stopped || crate::frames::whole_frame_len(rest).is_none()) {
+            // Every whole frame is in. Bytes after the last of them are a
+            // frame the file ends inside.
+            if !load.stopped && !rest.is_empty() {
+                let read = self
+                    .ingest(rest)
+                    .and_then(|()| crate::frames::end_of_stream(&mut self.leftover));
+                if let Err(fault) = read {
+                    self.fail_stream(fault);
+                }
+            }
+            let keep_view = self.user_set_view || self.story.doc.is_some();
+            match load.failed {
+                None => self.finish_stream(Some(load.bytes), keep_view),
+                Some(why) => {
+                    // Part of a file is not the capture: nothing to share.
+                    self.finish_stream(None, keep_view);
+                    self.fail(format!("The capture stopped arriving ({why}). Only what was read before that is shown."));
+                }
+            }
+            return;
+        }
+        // The view, unless the reader or a story has it.
+        if !self.user_set_view && self.story.doc.is_none() {
+            if let Some((_, edge)) = self.content_span() {
+                if load.replay.is_some() {
+                    self.live_edge_ns = self.live_edge_ns.max(edge as u64);
+                    self.follow = true;
+                } else if grew {
+                    self.fit_to_content();
+                }
+            }
+        }
+        // There is more to hand on, or more to come: another frame, whether
+        // or not anything else asks for one.
+        self.needs_repaint = true;
+        self.stream_load = Some(load);
     }
 
     fn can_share(&self) -> bool {
@@ -3158,6 +3415,7 @@ impl PerfrLiveApp {
     }
 
     fn show_trace_load(&mut self, load: TraceLoad) {
+        self.drop_stream_load();
         self.index.clear();
         self.reset_eviction();
         self.log_ui.reset_capture();
@@ -3709,6 +3967,8 @@ impl PerfrLiveApp {
                 self.accept_stream(bytes);
             }
         }
+        self.accept_stream_pieces(inbox.stream_pieces);
+        self.pump_stream_load();
         if let Some(text) = inbox.loaded_story {
             if let Err(message) = self.story.load_text(&text) {
                 self.story.error = message;
@@ -3896,9 +4156,9 @@ impl PerfrLiveApp {
         if let Some(e) = inbox.error {
             self.apply_net_error(e);
         }
-        if self.held_stream.is_local() {
-            // The file is the capture. Frames still arriving from a service
-            // would draw on top of it.
+        if self.held_stream.is_local() || self.stream_load.is_some() {
+            // The file is the capture, or is becoming it. Frames still
+            // arriving from a service would draw on top of it.
             self.ws_queue.clear();
         } else {
             // The queue steps out while its messages are applied: `ingest`
@@ -4115,6 +4375,12 @@ impl PerfrLiveApp {
                 newest_end_ns,
                 ring_bytes,
             } => {
+                // A file's status is of the moment it was saved, and a file
+                // is a finished capture (see `finish_stream`). One that
+                // takes a while to arrive must not have the page record
+                // for as long as it does.
+                let in_file = self.held_stream.is_loading();
+                let (capturing, demo) = (capturing && !in_file, demo && !in_file);
                 self.apply_status(StatusJson {
                     log_path: None,
                     capturing,
@@ -5262,6 +5528,7 @@ impl PerfrLiveApp {
 
     fn symbol_status_line(&self) -> String {
         if let Some(load) = &self.trace_load { return load.progress_line(); }
+        if let Some(load) = &self.stream_load { return load.progress_line(); }
         if self.static_capture.is_some() { return "Saved capture".into(); }
         if !self.host.service() {
             // No service, so no process and no symbols to load: the line
@@ -11780,6 +12047,9 @@ impl eframe::App for PerfrLiveApp {
                     }),
                 )
             });
+            if interaction {
+                self.end_replay();
+            }
             let search_sel_changed = self.last_dirty.is_none_or(|d| {
                 d.selected != pick_key(self.selected)
                     || d.hover != pick_key(self.hover)

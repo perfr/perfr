@@ -136,6 +136,26 @@ pub fn drain_frames(
     }
 }
 
+/// How many bytes the frame at the head of `bytes` takes, when all of it is
+/// there. `None` when it is still arriving. Read off the header alone, so a
+/// file that comes in a piece at a time can be handed on a frame at a time
+/// without decoding anything twice.
+///
+/// A header that no frame has (see [`MAX_FRAME_PAYLOAD`]) answers with all
+/// of `bytes`: there is nothing to wait for, and [`drain_frames`] is the one
+/// that says what is wrong with them.
+pub fn whole_frame_len(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() < HEADER {
+        return None;
+    }
+    let payload_len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    if payload_len > MAX_FRAME_PAYLOAD {
+        return Some(bytes.len());
+    }
+    let total = HEADER + payload_len;
+    (bytes.len() >= total).then_some(total)
+}
+
 /// The source has no more bytes (a file was read to its end). A frame still
 /// waiting for its tail will never get it, and must not be completed by the
 /// first bytes of whatever is read next.
@@ -187,6 +207,25 @@ mod tests {
         out.push(typ);
         out.extend_from_slice(payload);
         out
+    }
+
+    #[test]
+    fn a_whole_frame_is_measured_off_its_header_and_a_partial_one_waits() {
+        let (first, second) = (hello(), batch(7));
+        let both = [first.clone(), second.clone()].concat();
+        assert_eq!(whole_frame_len(&both), Some(first.len()));
+        assert_eq!(whole_frame_len(&both[first.len()..]), Some(second.len()));
+        // Any shorter and the frame is still arriving, header included.
+        for cut in 0..second.len() {
+            assert_eq!(whole_frame_len(&second[..cut]), None, "{cut} bytes of {}", second.len());
+        }
+        assert_eq!(whole_frame_len(&[]), None);
+        // A length no frame has is not waited for: the bytes go on to
+        // `drain_frames`, which says they are not a frame.
+        let absurd = unknown_frame(9, &[]).into_iter().enumerate().map(|(i, b)| if i < 4 { 0xFF } else { b }).collect::<Vec<u8>>();
+        assert_eq!(whole_frame_len(&absurd), Some(absurd.len()));
+        let mut leftover = Vec::new();
+        assert!(matches!(drain_frames(&mut leftover, &absurd, |_| {}), Err(StreamFault::Corrupt(_))));
     }
 
     /// The start time of each batch, or `u64::MAX` for any other frame.

@@ -506,7 +506,11 @@ in the URL opens a tab on load.
   no service the viewer folds the sampled frames it holds into the Flat
   report, the call trees, the flame graph and the scope-scoped report
   itself (modules and hooking stay the service's). This is how the web
-  site embeds a capture.
+  site embeds a capture. The file is drawn as it downloads: the timeline
+  fills in from the first events, and Share and the whole-capture report
+  wait for the last byte. With `&replay=1` it is played in at the speed it
+  was recorded at, the view following it as in a live capture, until it is
+  all in or the reader clicks, types or scrolls.
   Screenshot: `23-static-viewer.png`.
 - **Python.** `crates/perfr-capture/python/open_capture.py <unzipped dir>`
   reads the tables with pyarrow and prints the columns and counts; its

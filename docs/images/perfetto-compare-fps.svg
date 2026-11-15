@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 488" role="img">
+<title>Frame rate during the scripted zoom and pan, median</title>
+<rect width="100%" height="100%" fill="#fafbf9"/>
+<text x="16" y="22" fill="#3c4741" font-family="Archivo, Helvetica, sans-serif" font-size="14" font-weight="600">Frame rate during the scripted zoom and pan, median</text>
+<text x="744" y="22" text-anchor="end" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="11">frames/s · teal perfr, grey Perfetto UI</text>
+<text x="12" y="56" fill="#3c4741" font-family="IBM Plex Mono, monospace" font-size="11">android-example</text>
+<rect x="168" y="40" width="40.7" height="12" fill="#1F7B95"/>
+<text x="212.7" y="50" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">4.3</text>
+<rect x="168" y="54" width="36.9" height="12" fill="#b7c3ba"/>
+<text x="208.9" y="64" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">3.9</text>
+<text x="12" y="92" fill="#3c4741" font-family="IBM Plex Mono, monospace" font-size="11">android-example-15s</text>
+<rect x="168" y="76" width="44.5" height="12" fill="#1F7B95"/>
+<text x="216.5" y="86" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">4.7</text>
+<rect x="168" y="90" width="18.9" height="12" fill="#b7c3ba"/>
+<text x="190.9" y="100" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">2</text>
+<text x="12" y="128" fill="#3c4741" font-family="IBM Plex Mono, monospace" font-size="11">android-example-30s</text>
+<rect x="168" y="112" width="50.2" height="12" fill="#1F7B95"/>
+<text x="222.2" y="122" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">5.3</text>
+<rect x="168" y="126" width="26.5" height="12" fill="#b7c3ba"/>
+<text x="198.5" y="136" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">2.8</text>
+<text x="12" y="164" fill="#3c4741" font-family="IBM Plex Mono, monospace" font-size="11">chrome-example</text>
+<rect x="168" y="148" width="37.9" height="12" fill="#1F7B95"/>
+<text x="209.9" y="158" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">4</text>
+<rect x="168" y="162" width="132.5" height="12" fill="#b7c3ba"/>
+<text x="304.5" y="172" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">14</text>
+<text x="12" y="200" fill="#3c4741" font-family="IBM Plex Mono, monospace" font-size="11">chrome-json-example</text>
+<rect x="168" y="184" width="141.1" height="12" fill="#1F7B95"/>
+<text x="313.1" y="194" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">14.9</text>
+<rect x="168" y="198" width="567.1" height="12" fill="#b7c3ba"/>
+<text x="739.1" y="208" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">59.9</text>
+<text x="12" y="236" fill="#3c4741" font-family="IBM Plex Mono, monospace" font-size="11">chrome-rendering</text>
+<rect x="168" y="220" width="79.5" height="12" fill="#1F7B95"/>
+<text x="251.5" y="230" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">8.4</text>
+<rect x="168" y="234" width="88.0" height="12" fill="#b7c3ba"/>
+<text x="260.0" y="244" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">9.3</text>
+<text x="12" y="272" fill="#3c4741" font-family="IBM Plex Mono, monospace" font-size="11">chrome-scroll</text>
+<rect x="168" y="256" width="69.1" height="12" fill="#1F7B95"/>
+<text x="241.1" y="266" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">7.3</text>
+<rect x="168" y="270" width="255.6" height="12" fill="#b7c3ba"/>
+<text x="427.6" y="280" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">27</text>
+<text x="12" y="308" fill="#3c4741" font-family="IBM Plex Mono, monospace" font-size="11">chrome-histograms</text>
+<rect x="168" y="292" width="142.9" height="12" fill="#1F7B95"/>
+<text x="314.9" y="302" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">15.1</text>
+<rect x="168" y="306" width="107.0" height="12" fill="#b7c3ba"/>
+<text x="279.0" y="316" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">11.3</text>
+<text x="12" y="344" fill="#3c4741" font-family="IBM Plex Mono, monospace" font-size="11">async-json</text>
+<rect x="168" y="328" width="165.7" height="12" fill="#1F7B95"/>
+<text x="337.7" y="338" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">17.5</text>
+<rect x="168" y="342" width="568.0" height="12" fill="#b7c3ba"/>
+<text x="740.0" y="352" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">60</text>
+<text x="12" y="380" fill="#3c4741" font-family="IBM Plex Mono, monospace" font-size="11">counters-json</text>
+<rect x="168" y="364" width="178.9" height="12" fill="#1F7B95"/>
+<text x="350.9" y="374" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">18.9</text>
+<rect x="168" y="378" width="568.0" height="12" fill="#b7c3ba"/>
+<text x="740.0" y="388" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">60</text>
+<text x="12" y="416" fill="#3c4741" font-family="IBM Plex Mono, monospace" font-size="11">sched-compact</text>
+<rect x="168" y="400" width="174.2" height="12" fill="#1F7B95"/>
+<text x="346.2" y="410" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">18.4</text>
+<rect x="168" y="414" width="496.1" height="12" fill="#b7c3ba"/>
+<text x="668.1" y="424" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">52.4</text>
+<text x="12" y="452" fill="#3c4741" font-family="IBM Plex Mono, monospace" font-size="11">atrace</text>
+<rect x="168" y="450" width="419.4" height="12" fill="#b7c3ba"/>
+<text x="591.4" y="460" fill="#62716a" font-family="IBM Plex Mono, monospace" font-size="10">44.3</text>
+</svg>

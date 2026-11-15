@@ -1,0 +1,125 @@
+{
+  "note": "bytes are the Content-Length of the published object, checked again after download. format is sniffed from the first bytes, not the name.",
+  "ui_stable": {
+    "channel": "stable",
+    "label": "v59.1-79997ada9",
+    "commit": "79997ada96b2587556cfc3851434407fbed289b1",
+    "commit_date": "2026-10-29T15:28:52Z",
+    "examples_source": "ui/src/core_plugins/dev.perfetto.ExampleTraces/index.ts"
+  },
+  "testdata_commit": {
+    "commit": "6fffac7ff1049fe42dd61c5b25141c237af22b38",
+    "commit_date": "2026-11-13T14:42:13-08:00",
+    "note": "main at the time the sha256 catalog was read. The stable UI is an older commit; test/data is not part of the UI bundle."
+  },
+  "timed": [
+    {
+      "id": "android-example",
+      "file": "example_android_trace",
+      "url": "https://storage.googleapis.com/perfetto-misc/example_android_trace",
+      "bytes": 58215373,
+      "format": "perfetto protobuf",
+      "role": "ui",
+      "where": "ui.perfetto.dev stable, command Open Android example"
+    },
+    {
+      "id": "android-example-15s",
+      "file": "example_android_trace_15s",
+      "url": "https://storage.googleapis.com/perfetto-misc/example_android_trace_15s",
+      "bytes": 57202082,
+      "format": "perfetto protobuf",
+      "role": "docs",
+      "where": "docs/visualization/deep-linking-to-perfetto-ui.md and embedding-the-ui.md"
+    },
+    {
+      "id": "android-example-30s",
+      "file": "example_android_trace_30s_1",
+      "url": "https://storage.googleapis.com/perfetto-misc/example_android_trace_30s_1",
+      "bytes": 26692953,
+      "format": "perfetto protobuf",
+      "role": "docs",
+      "where": "docs/analysis/metrics.md, the Android example used for the startup metric"
+    },
+    {
+      "id": "chrome-example",
+      "file": "chrome_example_wikipedia.perfetto_trace.gz",
+      "url": "https://storage.googleapis.com/perfetto-misc/chrome_example_wikipedia.perfetto_trace.gz",
+      "bytes": 21537072,
+      "format": "perfetto protobuf (the bytes are not gzip, despite the name)",
+      "role": "ui",
+      "where": "ui.perfetto.dev stable, command Open Chrome example. The same object is test/data/chrome_example_wikipedia.perfetto_trace.gz"
+    },
+    {
+      "id": "chrome-json-example",
+      "file": "example_chrome_trace_4s_1.json",
+      "url": "https://storage.googleapis.com/perfetto-misc/example_chrome_trace_4s_1.json",
+      "bytes": 7756966,
+      "format": "chrome json",
+      "role": "legacy-ui",
+      "where": "older Perfetto UI sidebar (example_chrome_trace_4s_1.json). Still published. Not in the v59.1 example list."
+    },
+    {
+      "id": "chrome-rendering",
+      "file": "chrome_rendering_desktop.pftrace",
+      "url": "https://storage.googleapis.com/perfetto/test_data/chrome_rendering_desktop.pftrace-f61971e42ea0ce0f6da71c87a0ab19da0e13deca0fa90c6bdc98782af01ae702",
+      "bytes": 8305513,
+      "format": "perfetto protobuf",
+      "role": "test-data",
+      "where": "test/data/chrome_rendering_desktop.pftrace"
+    },
+    {
+      "id": "chrome-scroll",
+      "file": "chrome_scroll_without_vsync.pftrace",
+      "url": "https://storage.googleapis.com/perfetto/test_data/chrome_scroll_without_vsync.pftrace-74890239a1042cb93a87b8b5b5d9942f821ed3cc0c1236e7734d45a550e3cde4",
+      "bytes": 1359814,
+      "format": "perfetto protobuf",
+      "role": "test-data",
+      "where": "test/data/chrome_scroll_without_vsync.pftrace"
+    },
+    {
+      "id": "chrome-histograms",
+      "file": "chrome_5672_histograms.pftrace.gz",
+      "url": "https://storage.googleapis.com/perfetto/test_data/chrome_5672_histograms.pftrace.gz-a09bd44078ac71bcfbc901b0544750e8344d0d0f6f96e220f700a5a53fa932ee",
+      "bytes": 1127472,
+      "format": "gzip of perfetto protobuf",
+      "role": "test-data",
+      "where": "test/data/chrome_5672_histograms.pftrace.gz"
+    },
+    {
+      "id": "async-json",
+      "file": "async-trace-1.json",
+      "url": "https://storage.googleapis.com/perfetto/test_data/async-trace-1.json-758ad1ffc85d002ec1168b40bc3733793799d4ff6719341ef4f92d469c6e4d01",
+      "bytes": 5591,
+      "format": "chrome json",
+      "role": "test-data",
+      "where": "test/data/async-trace-1.json"
+    },
+    {
+      "id": "counters-json",
+      "file": "counters.json",
+      "url": "https://storage.googleapis.com/perfetto/test_data/counters.json-5c8a3e8bd3c5e0fb2eec5acd5e11ddb0ab129727f288c35fac3f545708904c35",
+      "bytes": 241,
+      "format": "chrome json (a leading newline, then an array)",
+      "role": "test-data",
+      "where": "test/data/counters.json"
+    },
+    {
+      "id": "sched-compact",
+      "file": "sched_switch_compact.pb",
+      "url": "https://storage.googleapis.com/perfetto/test_data/sched_switch_compact.pb-ff9077ba16b689405b8a3678c7ce9129a91700a079a1d98f356cf0439e3b9931",
+      "bytes": 4816,
+      "format": "perfetto protobuf",
+      "role": "test-data",
+      "where": "test/data/sched_switch_compact.pb"
+    },
+    {
+      "id": "atrace",
+      "file": "atrace_b_193721088.atr",
+      "url": "https://storage.googleapis.com/perfetto/test_data/atrace_b_193721088.atr-e875c7dc4e3923ad3752bcb97f141aa83a7e69aecc8dbcae1047853e087541b9",
+      "bytes": 1283,
+      "format": "systrace text",
+      "role": "test-data",
+      "where": "test/data/atrace_b_193721088.atr"
+    }
+  ]
+}

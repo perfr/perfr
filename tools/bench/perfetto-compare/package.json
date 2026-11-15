@@ -1,0 +1,9 @@
+{
+  "name": "perfetto-compare",
+  "private": true,
+  "type": "module",
+  "description": "Headless comparison of ui.perfetto.dev and the perfr viewer on the same traces.",
+  "dependencies": {
+    "puppeteer-core": "24.43.1"
+  }
+}

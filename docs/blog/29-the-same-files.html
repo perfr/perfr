@@ -1,0 +1,971 @@
+<!--
+Copyright (c) 2026 The Orbit Authors. All rights reserved.
+Use of this source code is governed by a BSD-style license that can be
+found in the LICENSE file.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+<script>try{var t=localStorage.getItem("perfr-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}</script>
+<meta charset="utf-8">
+<title>The Same Files</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&display=swap">
+
+<style>
+  :root {
+    --ground: #f1f4f0;
+    --surface: #fafbf9;
+    --surface-2: #e7ece6;
+    --ink: #131a17;
+    --ink-soft: #3c4741;
+    --muted: #62716a;
+    --line: #d3dbd3;
+    --line-strong: #b7c3ba;
+    --accent: #1F7B95;
+    --accent-deep: #155E72;
+    --accent-wash: #E1EEF2;
+    --warn: #8a6212;
+    --warn-wash: #f4ecda;
+    --hold: #9c4a28;
+    --hold-wash: #f3e5dd;
+
+    --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --body: "Newsreader", Georgia, "Times New Roman", serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+    --measure: 36rem;
+    --wide: 58rem;
+  }
+
+  :root:not([data-theme="light"]) {
+    color-scheme: light dark;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0f1412;
+      --surface: #161d1a;
+      --surface-2: #1d2622;
+      --ink: #e7ede9;
+      --ink-soft: #c3cdc8;
+      --muted: #8fa098;
+      --line: #29332e;
+      --line-strong: #3b4842;
+      --accent: #58B4CE;
+      --accent-deep: #7CC9DE;
+      --accent-wash: #123039;
+      --warn: #d9ae5a;
+      --warn-wash: #2a2417;
+      --hold: #e0906a;
+      --hold-wash: #2b1c14;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0f1412;
+    --surface: #161d1a;
+    --surface-2: #1d2622;
+    --ink: #e7ede9;
+    --ink-soft: #c3cdc8;
+    --muted: #8fa098;
+    --line: #29332e;
+    --line-strong: #3b4842;
+    --accent: #58B4CE;
+    --accent-deep: #7CC9DE;
+    --accent-wash: #123039;
+    --warn: #d9ae5a;
+    --warn-wash: #2a2417;
+    --hold: #e0906a;
+    --hold-wash: #2b1c14;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 1.0625rem;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---------------------------------------------------------- masthead */
+
+  .masthead {
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  .masthead-inner {
+    max-width: var(--wide);
+    margin: 0 auto;
+    padding: 3.5rem 1.25rem 2.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.1rem;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0;
+  }
+
+  h1 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(2.4rem, 6.5vw, 4rem);
+    line-height: 1.02;
+    letter-spacing: -0.028em;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  .dek {
+    font-size: 1.2rem;
+    line-height: 1.5;
+    color: var(--ink-soft);
+    max-width: 40rem;
+    margin: 0;
+  }
+
+  .byline {
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--muted);
+    margin: 0;
+  }
+
+  /* -------------------------------------------------------- stat strip */
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    margin-top: 0.8rem;
+  }
+
+  .stat {
+    background: var(--surface);
+    padding: 0.9rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .stat b {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 1.32rem;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+  }
+
+  .stat span {
+    font-family: var(--display);
+    font-size: 0.72rem;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  /* ------------------------------------------------------------ layout */
+
+  .doc {
+    display: grid;
+    grid-template-columns:
+      [full-start] minmax(1.25rem, 1fr)
+      [wide-start] minmax(0, 11rem)
+      [text-start] minmax(0, var(--measure))
+      [text-end] minmax(0, 11rem)
+      [wide-end] minmax(1.25rem, 1fr)
+      [full-end];
+    row-gap: 1.25rem;
+    padding: 3rem 0 5rem;
+  }
+
+  .doc > * { grid-column: text; margin: 0; }
+  .doc > .wide { grid-column: wide; }
+
+  /* ---------------------------------------------------------- headings */
+
+  .doc > h2 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: 1.9rem;
+    letter-spacing: -0.022em;
+    line-height: 1.12;
+    text-wrap: balance;
+    margin-top: 3.2rem;
+    padding-top: 1.1rem;
+    border-top: 2px solid var(--ink);
+    grid-column: wide;
+  }
+
+  .doc > h3 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 1.16rem;
+    letter-spacing: -0.012em;
+    line-height: 1.25;
+    margin-top: 1.5rem;
+  }
+
+  .doc > h4 {
+    font-family: var(--mono);
+    font-weight: 500;
+    font-size: 0.78rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 1.1rem;
+  }
+
+  /* --------------------------------------------------------- rich text */
+
+  .doc > p { text-wrap: pretty; }
+
+  .lede {
+    font-size: 1.16rem;
+    color: var(--ink-soft);
+  }
+
+  a {
+    color: var(--accent-deep);
+    text-underline-offset: 0.16em;
+    text-decoration-thickness: 1px;
+  }
+
+  a:focus-visible,
+  .toc a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.855em;
+    background: var(--surface-2);
+    padding: 0.1em 0.34em;
+    border-radius: 2px;
+    word-break: break-word;
+  }
+
+  .doc > ul, .doc > ol { padding-left: 1.15rem; }
+  .doc > ul li, .doc > ol li { margin-bottom: 0.45rem; }
+
+  strong { font-weight: 600; }
+
+  /* ------------------------------------------------------------- table */
+
+  .table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.86rem;
+    font-family: var(--display);
+  }
+
+  th {
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0.7rem 0.85rem;
+    border-bottom: 1px solid var(--line-strong);
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 0.62rem 0.85rem;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+    line-height: 1.45;
+  }
+
+  tr:last-child td { border-bottom: 0; }
+
+  td.v {
+    font-family: var(--mono);
+    font-size: 0.79rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  td.was { color: var(--muted); }
+  td.now { color: var(--ink); }
+  .bump { color: var(--accent-deep); font-weight: 600; }
+  .hold-t { color: var(--hold); font-weight: 600; }
+
+  /* ------------------------------------------------------------ figure */
+
+  figure {
+    margin: 0.5rem 0;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 1.35rem 1.35rem 1rem;
+  }
+
+  .fig-scroll { overflow-x: auto; }
+
+  figure svg {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+    min-width: 30rem;
+    color: var(--ink-soft);
+  }
+
+  figcaption {
+    font-family: var(--display);
+    font-size: 0.8rem;
+    line-height: 1.45;
+    color: var(--muted);
+    margin-top: 0.9rem;
+    padding-top: 0.7rem;
+    border-top: 1px solid var(--line);
+  }
+
+  figcaption b { color: var(--ink-soft); font-weight: 600; }
+
+  /* ------------------------------------------------------------- notes */
+
+  .note {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    padding: 0.95rem 1.1rem;
+    font-size: 0.97rem;
+  }
+
+  .note.warn { border-left-color: var(--warn); background: var(--warn-wash); }
+  .note.hold { border-left-color: var(--hold); background: var(--hold-wash); }
+
+  .note p { margin: 0; }
+  .note p + p { margin-top: 0.6rem; }
+
+  .note-label {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 0.35rem;
+  }
+
+  .note.warn .note-label { color: var(--warn); }
+  .note.hold .note-label { color: var(--hold); }
+
+  /* ----------------------------------------------------------- verdict */
+
+  .verdict {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.65rem 0.9rem;
+    align-items: baseline;
+    background: var(--accent-wash);
+    border: 1px solid var(--line);
+    padding: 0.9rem 1.1rem;
+    font-size: 0.95rem;
+  }
+
+  .verdict dt {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent-deep);
+    white-space: nowrap;
+  }
+
+  .verdict dd { margin: 0; }
+
+  /* ------------------------------------------------------------ ledger */
+
+  .ledger {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+  }
+
+  .ledger section {
+    background: var(--surface);
+    padding: 1.1rem 1.2rem 1.3rem;
+  }
+
+  .ledger h3 {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    margin: 0 0 0.85rem;
+    font-weight: 500;
+  }
+
+  .ledger .for h3 { color: var(--accent); }
+  .ledger .against h3 { color: var(--hold); }
+
+  .ledger ol {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    font-size: 0.94rem;
+    line-height: 1.5;
+  }
+
+  .ledger li b {
+    display: block;
+    font-family: var(--display);
+    font-size: 0.9rem;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    color: var(--ink);
+    margin-bottom: 0.15rem;
+  }
+
+  .ledger li { color: var(--ink-soft); }
+
+  /* ------------------------------------------------------------- tiers */
+
+  .tier {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0 1.1rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--line-strong);
+    padding: 1rem 1.15rem;
+  }
+
+  .tier.go { border-left-color: var(--accent); }
+  .tier.maybe { border-left-color: var(--warn); }
+  .tier.stop { border-left-color: var(--hold); }
+
+  .tier .rank {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-top: 0.28rem;
+    white-space: nowrap;
+  }
+
+  .tier.go .rank { color: var(--accent); }
+  .tier.maybe .rank { color: var(--warn); }
+  .tier.stop .rank { color: var(--hold); }
+
+  .tier h3 {
+    font-family: var(--display);
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin: 0 0 0.35rem;
+    letter-spacing: -0.01em;
+  }
+
+  .tier p { margin: 0; font-size: 0.95rem; }
+  .tier p + p { margin-top: 0.5rem; }
+  .tier .rank + * { grid-column: 2; }
+  .tier > :not(.rank) { grid-column: 2; }
+
+  /* -------------------------------------------------------------- code */
+
+  pre {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    line-height: 1.62;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 0.95rem 1.1rem;
+    overflow-x: auto;
+    margin: 0;
+    tab-size: 2;
+  }
+
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .c { color: var(--muted); }
+  .k { color: var(--accent-deep); }
+
+  /* --------------------------------------------------------------- toc */
+
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 1.1rem 1.25rem;
+  }
+
+  .toc h2 {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 0.7rem;
+    font-weight: 500;
+  }
+
+  .toc ol {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    columns: 2;
+    column-gap: 2rem;
+    font-family: var(--display);
+    font-size: 0.87rem;
+  }
+
+  .toc li { margin-bottom: 0.34rem; break-inside: avoid; }
+  .toc a { color: var(--ink-soft); text-decoration: none; }
+  .toc a:hover { color: var(--accent-deep); text-decoration: underline; }
+
+  @media (max-width: 34rem) {
+    .toc ol { columns: 1; }
+    figure svg { min-width: 26rem; }
+  }
+
+  footer {
+    border-top: 1px solid var(--line);
+    background: var(--surface);
+    padding: 2rem 1.25rem 3rem;
+  }
+
+  .footer-inner {
+    max-width: var(--wide);
+    margin: 0 auto;
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--muted);
+    line-height: 1.7;
+  }
+
+  /* ------------------------------------------------------------ hurdles */
+
+  .hurdle {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0 1rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--warn);
+    padding: 0.9rem 1.1rem;
+  }
+
+  .hurdle .num {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--warn);
+    padding-top: 0.32rem;
+    white-space: nowrap;
+  }
+
+  .hurdle h3 {
+    font-family: var(--display);
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 0 0 0.3rem;
+    letter-spacing: -0.008em;
+  }
+
+  .hurdle p { margin: 0; font-size: 0.94rem; }
+  .hurdle p + p { margin-top: 0.45rem; }
+  .hurdle > :not(.num) { grid-column: 2; }
+  .hurdle.solved { border-left-color: var(--accent); }
+  .hurdle.solved .num { color: var(--accent); }
+
+  /* ------------------------------------------------------------ evidence */
+
+  .evidence td.up { color: var(--hold); }
+  .evidence td.down { color: var(--accent-deep); font-weight: 600; }
+  .evidence td.flat { color: var(--muted); }
+
+  /* ------------------------------------------------------------- index */
+
+  .posts { display: flex; flex-direction: column; gap: 1px; background: var(--line);
+           border: 1px solid var(--line); }
+  .posts a { display: block; background: var(--surface); padding: 1.05rem 1.2rem;
+             text-decoration: none; color: inherit; }
+  .posts a:hover { background: var(--surface-2); }
+  .posts .n { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.1em;
+              color: var(--accent); text-transform: uppercase; }
+  .posts h3 { font-family: var(--display); font-size: 1.12rem; font-weight: 600;
+              margin: 0.25rem 0 0.3rem; letter-spacing: -0.012em; }
+  .posts p { margin: 0; font-size: 0.93rem; color: var(--muted); line-height: 1.5; }
+</style>
+
+<style>
+  figure { margin: 0.5rem 0; background: var(--surface); border: 1px solid var(--line); padding: 1.35rem 1.35rem 1rem; }
+  figcaption { font-family: var(--display); font-size: 0.8rem; line-height: 1.45; color: var(--muted); margin-top: 0.9rem; padding-top: 0.7rem; border-top: 1px solid var(--line); }
+  figcaption b { color: var(--ink-soft); font-weight: 600; }
+  .embed { background: #0b0c0e; border: 1px solid var(--line); }
+  .embed iframe { display: block; width: 100%; height: 640px; border: 0; }
+  .embed-head { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 0.7rem; }
+  .embed-head.off { color: var(--accent-deep); } .embed-head.on { color: var(--hold); }
+  @media (max-width: 720px) { .embed iframe { height: 460px; } }
+</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@700&family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap">
+<style>
+/* Orbit shared look: clean, light by default, dark on demand. Injected after
+   each post's own styles so it re-values the design tokens they use. One
+   accent, the Orbit blue. Light is the default; dark is opt-in via the
+   [data-theme="dark"] the toggle sets (kept at 0,2,0 specificity so it wins
+   over each post's own prefers-color-scheme block). */
+:root{
+  --display:"Roboto","Segoe UI","Helvetica Neue",Arial,sans-serif;
+  --body:"Roboto","Segoe UI","Helvetica Neue",Arial,sans-serif;
+  --mono:"Roboto Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  --measure:38rem; --wide:60rem;
+}
+:root:not([data-theme="dark"]){
+  --ground:#ffffff; --surface:#f4f6f8; --surface-2:#eceef1;
+  --ink:#1f2328; --ink-soft:#3c4149; --muted:#5f6772;
+  --line:#e3e6ea; --line-strong:#cfd4da;
+  --accent:#2f6fb0; --accent-deep:#245488; --accent-bright:#2f6fb0; --accent-wash:#e9f1fa;
+  --warn:#8a6d1a; --warn-wash:#f6efdb; --hold:#a2502c; --hold-wash:#f4e7df; --good:#2e7d4f;
+  --text:#1f2328; --text-dim:#3c4149; --text-faint:#5f6772;
+  --rule:#e3e6ea; --rule-strong:#cfd4da; --code-bg:#f4f6f8; --selected:#e9f1fa;
+  --shadow:0 1px 2px rgba(31,35,40,.06),0 1px 3px rgba(31,35,40,.10);
+  --tok-kw:#8250df; --tok-type:#0b7285; --tok-fn:#1f6feb; --tok-num:#b5330f;
+  --tok-com:#6a737d; --tok-attr:#6f42c1; --tok-str:#0a7a2f;
+  color-scheme:light;
+}
+:root[data-theme="dark"]{
+  --ground:#0e1217; --surface:#171b21; --surface-2:#1e232b;
+  --ink:#e6e9ee; --ink-soft:#c2c8d0; --muted:#8b939e;
+  --line:#262c34; --line-strong:#38404a;
+  --accent:#6aa9e0; --accent-deep:#8fc0ee; --accent-bright:#6aa9e0; --accent-wash:#15263a;
+  --warn:#d6b25e; --warn-wash:#2a2413; --hold:#e0946a; --hold-wash:#2b1d16; --good:#5cba82;
+  --text:#e6e9ee; --text-dim:#c2c8d0; --text-faint:#8b939e;
+  --rule:#262c34; --rule-strong:#38404a; --code-bg:#171b21; --selected:#15263a;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 2px 8px rgba(0,0,0,.3);
+  --tok-kw:#c58fff; --tok-type:#5ec8d8; --tok-fn:#79b8ff; --tok-num:#ff9e64;
+  --tok-com:#8b939e; --tok-attr:#c58fff; --tok-str:#7ee0a0;
+  color-scheme:dark;
+}
+/* Unify typography even where a post hard-codes its fonts (post 16). */
+body{font-family:var(--body);}
+h1,h2,h3,h4,h5,h6{font-family:var(--display);}
+code,pre,kbd,samp,tt{font-family:var(--mono);}
+.perfr-theme-toggle{position:fixed;bottom:1rem;right:1rem;z-index:50;
+  display:inline-flex;align-items:center;gap:.4rem;
+  font-family:var(--mono);font-size:.72rem;letter-spacing:.02em;
+  color:var(--muted);background:var(--surface);border:1px solid var(--line);
+  border-radius:999px;padding:.35rem .7rem;cursor:pointer;line-height:1;box-shadow:var(--shadow);}
+.perfr-theme-toggle:hover{color:var(--ink);border-color:var(--line-strong);}
+span.brand{font-family:Inter,"Helvetica Neue",Arial,sans-serif;font-weight:700;letter-spacing:-0.02em;}
+</style>
+
+<style>
+  .diagram { overflow-x:auto; padding:16px 8px; background:var(--surface); border:1px solid var(--line); border-radius:10px; }
+  .diagram svg { display:block; width:100%; min-width:700px; height:auto; }
+  .diagram rect { fill:var(--ground); stroke:var(--line); stroke-width:1.5; }
+  .diagram rect.accent { fill:var(--accent-wash); stroke:var(--accent); }
+  .diagram rect.soft { fill:var(--surface-2); stroke:var(--line-strong); }
+  .diagram rect.warn { fill:var(--warn-wash); stroke:var(--warn); }
+  .diagram rect.hold { fill:var(--hold-wash); stroke:var(--hold); }
+  .diagram rect.bar { fill:var(--accent); stroke:none; }
+  .diagram rect.bar.dim { fill:var(--line-strong); }
+  .diagram rect.bar.hold { fill:var(--hold); stroke:none; }
+  .diagram circle.dot { fill:var(--accent); stroke:none; }
+  .diagram circle.dim { fill:var(--line-strong); stroke:none; }
+  .diagram text { fill:var(--ink); font:16px Roboto,sans-serif; text-anchor:middle; }
+  .diagram text.small { font-size:13px; fill:var(--ink-soft); }
+  .diagram text.label { font-size:12px; letter-spacing:1px; fill:var(--muted); }
+  .diagram text.mono { font-family:'Roboto Mono',monospace; font-size:14px; }
+  .diagram text.left { text-anchor:start; }
+  .diagram text.right { text-anchor:end; }
+  .diagram path.arrow { fill:none; stroke:var(--accent); stroke-width:2; marker-end:url(#ah); }
+  .diagram path.arrow.both { marker-start:url(#ah); }
+  .diagram path.arrow.hold { stroke:var(--hold); marker-end:url(#ah-hold); }
+  .diagram path.line { fill:none; stroke:var(--line-strong); stroke-width:2; }
+  .diagram path.dash { fill:none; stroke:var(--muted); stroke-width:1.5; stroke-dasharray:5 5; }
+  .diagram path.fit { fill:none; stroke:var(--accent); stroke-width:2.5; }
+  .diagram marker path { fill:var(--accent); stroke:none; }
+  .diagram marker.hold path { fill:var(--hold); }
+  .callout { background:var(--accent-wash); border:1px solid var(--accent); border-radius:10px; padding:1rem 1.25rem; font-size:.98rem; }
+  .callout.hold { background:var(--hold-wash); border-color:var(--hold); }
+  .table-wrap { overflow-x:auto; border:1px solid var(--line); background:var(--surface); }
+  .table-wrap table { border-collapse:collapse; width:100%; font-size:.93rem; }
+  .table-wrap th, .table-wrap td { text-align:left; padding:.55rem .8rem; border-bottom:1px solid var(--line); vertical-align:top; }
+  .table-wrap th { font-family:var(--display); font-size:.74rem; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); }
+  .doc > .wide { grid-column: wide; }
+  .wide { max-width:100%; margin-left:0; margin-right:0; }
+  @media(max-width:760px) { .diagram::after { content:"Scroll horizontally to see the full diagram \2192"; display:block; padding-top:12px; color:var(--muted); font-size:12px; } }
+</style>
+<link rel="stylesheet" href="../site-nav.css?v=92ce1c76">
+<script src="../site-nav.js" defer></script>
+<link rel="stylesheet" href="blog-responsive.css">
+<script src="../coi-serviceworker.js"></script>
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link rel="icon" type="image/png" href="../favicon.png">
+</head><body>
+<nav class="site" aria-label="Site">
+  <a class="brand" href="../index.html"><img class="light" src="../logo.svg" alt="perfr"><img class="dark" src="../logo-dark.svg" alt="" aria-hidden="true"></a>
+  <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-menu" aria-label="Open menu"><span class="nav-toggle-bars" aria-hidden="true"></span></button>
+  <div class="nav-menu" id="site-menu">
+  <a href="../features.html">Features</a>
+  <a href="../manual/index.html">Manual</a>
+  <a class="nav-more" href="index.html" aria-current="page">Blog</a>
+  <a class="nav-more" href="https://github.com/perfr/perfr" rel="noopener noreferrer">GitHub</a>
+  <span class="spacer"></span>
+  <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to dark theme" title="Switch to dark theme"><svg class="icon-moon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="icon-sun" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path></svg></button>
+  <a class="cta" href="../index.html#start">Get started</a>
+  </div>
+  <div class="nav-account" data-nav-account><a class="nav-signin" href="/login">Sign in</a></div>
+</nav>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <p class="eyebrow"><span class="brand">perfr</span>, from Orbit &middot; Post 29</p>
+    <h1>The Same Files</h1>
+    <p class="dek">The Perfetto UI and the perfr viewer, on Perfetto's own example traces, in one headless Chrome. The table includes the places perfr is slower.</p>
+    <p class="byline">15 November 2026, 08:10&ndash;08:53 UTC. perfr <code>0.1.4</code> (<code>fd8ba5aaf61c</code>), the build <code>https://perfr.dev/viewer/</code> reported in <code>window.__perfr_sel.build</code> on every run. Perfetto UI stable <code>v59.1-79997ada9</code> (<code>79997ada96b2587556cfc3851434407fbed289b1</code>). Chrome 157.0.8103.50, headless, SwiftShader. Medians of five runs are in <code>docs/blog/metrics/perfetto-compare.json</code>. The script is <code>tools/bench/perfetto-compare/</code>.</p>
+    <div class="stats">
+      <div class="stat"><b>4.42 s / 3.63 s</b><span>Android example, perfr / Perfetto, to a loaded timeline</span></div>
+      <div class="stat"><b>4.0 / 14</b><span>frames/s on the Chrome example, same zoom and pan</span></div>
+      <div class="stat"><b>3,551 MB</b><span>perfr peak RSS on that Chrome example; Perfetto was 1,772 MB</span></div>
+      <div class="stat"><b>0 / 5</b><span>times perfr opened the systrace text file</span></div>
+    </div>
+  </div>
+</header>
+
+<article class="doc">
+
+  <p>This is a comparison of two pages that open a trace in the browser. One is the <a href="https://ui.perfetto.dev/">Perfetto UI</a>. The other is the viewer <a href="https://perfr.dev/viewer/">perfr.dev</a> embeds, which on this day was the <code>perfr 0.1.4</code> release, not a dev build. Both were given the same bytes, from disk, after the page shell was already up. The clock does not include downloading the viewer.</p>
+
+  <p>perfr does read Perfetto protobuf. A <code>.pftrace</code> is a stream of length-delimited <code>TracePacket</code>s, walked in <code>crates/perfr-live-chrome</code> without protoc, and the same ingestor the Chrome JSON path uses. The Android example below is 58&nbsp;MB of that format and came out as 643,775 events, with the scheduler and SurfaceFlinger on the timeline. The gap is not &ldquo;protobuf versus JSON&rdquo;. It is everything the walker does not map, and the places the picture is slower once it is up.</p>
+
+  <h2 id="traces">The traces</h2>
+
+  <p>The stable UI's example list is two commands, in <code>ui/src/core_plugins/dev.perfetto.ExampleTraces/index.ts</code> at <code>79997ada9</code>:</p>
+
+  <div class="table-wrap wide"><table>
+    <thead><tr><th>Where</th><th>Name</th><th>URL</th><th>Bytes</th><th>Format, from the first bytes</th></tr></thead>
+    <tbody>
+      <tr><td>UI, Open Android example</td><td class="v">example_android_trace</td><td><a href="https://storage.googleapis.com/perfetto-misc/example_android_trace">perfetto-misc/example_android_trace</a></td><td class="v">58,215,373</td><td>Perfetto protobuf. No extension.</td></tr>
+      <tr><td>UI, Open Chrome example</td><td class="v">chrome_example_wikipedia.perfetto_trace.gz</td><td><a href="https://storage.googleapis.com/perfetto-misc/chrome_example_wikipedia.perfetto_trace.gz">perfetto-misc/&hellip;wikipedia&hellip;gz</a></td><td class="v">21,537,072</td><td>Perfetto protobuf. The name says gzip. The bytes start with <code>0x0a</code>, a packet tag, not <code>1f 8b</code>.</td></tr>
+      <tr><td>Docs, deep link and embedding</td><td class="v">example_android_trace_15s</td><td><a href="https://storage.googleapis.com/perfetto-misc/example_android_trace_15s">perfetto-misc/example_android_trace_15s</a></td><td class="v">57,202,082</td><td>Perfetto protobuf. A different file from the current UI example.</td></tr>
+      <tr><td>Docs, startup metric</td><td class="v">example_android_trace_30s_1</td><td><a href="https://storage.googleapis.com/perfetto-misc/example_android_trace_30s_1">perfetto-misc/example_android_trace_30s_1</a></td><td class="v">26,692,953</td><td>Perfetto protobuf. <code>example_android_trace_30s</code> without the <code>_1</code> returns 403.</td></tr>
+      <tr><td>Older UI, still hosted</td><td class="v">example_chrome_trace_4s_1.json</td><td><a href="https://storage.googleapis.com/perfetto-misc/example_chrome_trace_4s_1.json">perfetto-misc/example_chrome_trace_4s_1.json</a></td><td class="v">7,756,966</td><td>Chrome JSON. Not in the v59.1 example list.</td></tr>
+    </tbody>
+  </table></div>
+
+  <p><code>test/data</code> in google/perfetto at <code>6fffac7ff</code> (13 November 2026, main; the stable UI is an older commit) does not contain the traces. It contains 438 <code>.sha256</code> sidecars. The bytes are at <code>https://storage.googleapis.com/perfetto/test_data/&lt;basename&gt;-&lt;sha256&gt;</code>, which is what <code>tools/test_data</code> downloads. <code>HEAD</code> on all of them summed to 1.46&nbsp;GiB. 159 of the 438 are <code>.png</code> screenshot fixtures. The rest are protobuf, JSON, systrace text, heap dumps, simpleperf, Fuchsia, pprof, and fuzz inputs. The list, with sizes and URLs, is <code>tools/bench/perfetto-compare/catalog.json</code>. Opening all of them five times in two browsers was not the comparison. The timed set adds six of them, chosen because the format or the size is different from the examples above:</p>
+
+  <div class="table-wrap wide"><table>
+    <thead><tr><th>File</th><th>Bytes</th><th>Format</th></tr></thead>
+    <tbody>
+      <tr><td class="v">chrome_rendering_desktop.pftrace</td><td class="v">8,305,513</td><td>Perfetto protobuf</td></tr>
+      <tr><td class="v">chrome_scroll_without_vsync.pftrace</td><td class="v">1,359,814</td><td>Perfetto protobuf</td></tr>
+      <tr><td class="v">chrome_5672_histograms.pftrace.gz</td><td class="v">1,127,472</td><td>gzip of Perfetto protobuf. This one really is gzip.</td></tr>
+      <tr><td class="v">async-trace-1.json</td><td class="v">5,591</td><td>Chrome JSON, async slices</td></tr>
+      <tr><td class="v">counters.json</td><td class="v">241</td><td>Chrome JSON. A leading newline, then an array of <code>ph:"C"</code>.</td></tr>
+      <tr><td class="v">sched_switch_compact.pb</td><td class="v">4,816</td><td>Perfetto protobuf, compact scheduling</td></tr>
+      <tr><td class="v">atrace_b_193721088.atr</td><td class="v">1,283</td><td>systrace text. It begins with a space and <code>done</code>, then <code>TRACE:</code>.</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>Nothing was converted. Perfetto's own issue tracker records that JSON conversion of a Perfetto trace drops data, including parent pids, so a converted file would have made the comparison worse, not fairer. Both pages sniffed the bytes. The Wikipedia file's <code>.gz</code> suffix was ignored by both.</p>
+
+  <h2 id="method">How the numbers were taken</h2>
+
+  <p>One machine: Linux 6.12, four Xeon cores, 16&nbsp;GB. Chrome was started with <code>--headless=new --use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader --ignore-gpu-blocklist --window-size=1600,1000</code>. SwiftShader is software GL. perfr's readout said <code>WebGL</code>, which is the viewer's default. <code>?webgpu</code> was not set. There is no display vsync. A frame time here is the gap between <code>requestAnimationFrame</code> callbacks while the script is also injecting the next input. It is not a 60&nbsp;Hz panel, and a number near 60&nbsp;fps is this Chrome's idle rate, not a measured redraw of a dense timeline.</p>
+
+  <p>Fetching <code>http://127.0.0.1</code> from <code>https://ui.perfetto.dev</code> is refused. Chrome's local-network check blocks it before the request is sent, even with <code>Access-Control-Allow-Private-Network</code>. The files were downloaded once and opened through each page's file control: perfr's Open pill, whose rectangle is <code>window.__perfr_ui</code>, and Perfetto's <code>input.trace_file</code>. The clock starts when the file is handed over, and stops when that viewer's own &ldquo;the trace is up&rdquo; signal fires. For perfr that signal is the status line leaving <code>Loading name  N / N</code> (published as <code>symbols-status:</code> in <code>__perfr_ui</code>) with a non-zero event count and a content span, stable across two 50&nbsp;ms polls. Event count alone is not enough: on the 58&nbsp;MB file it sat still for a frame at 485 events while the status line still said 18.9&nbsp;MB of 58.2. For Perfetto the signal is the sidebar switching to <code>CURRENT TRACE</code> with an overview canvas, stable across two polls. <code>Duration:</code> is painted into a canvas and is not in the DOM text. The 50&nbsp;ms poll is the resolution of both clocks.</p>
+
+  <p>A second clock, interaction, is the open time plus the wait until a held <code>W</code> actually moves the view. perfr publishes the window in <code>__perfr_sel.view</code>. Perfetto does not, so the check hashes a PNG clip of the timeline, which adds one screenshot to Perfetto's interaction time and not to perfr's. Puppeteer's <code>keyboard.press</code> is delivered, and a listener on the page sees the keydown, and the perfr build does not zoom. A CDP <code>rawKeyDown</code> held for 220&nbsp;ms does, because the viewer samples keys once a frame and a frame on these traces is often longer than a tap. Both pages were driven that way. The sequence after the first zoom is ten <code>W</code>, ten <code>S</code>, twelve <code>A</code>, twelve <code>D</code>, each held 220&nbsp;ms, then eight Ctrl+wheel steps in and eight out, then a 240&nbsp;px pan. perfr pans on a left drag. Perfetto's left drag is an area selection and its pan is Shift+left. Same distance, the gesture each UI documents.</p>
+
+  <p>The two pages do not open on the same framing. perfr fits the timed events and, on the Android example, draws the scheduler and SurfaceFlinger across the window. Perfetto opens on the whole trace, with the overview strip coloured and the track area zoomed out far enough that individual slices are easy to miss, and on this file it also opened an Android logs panel of 1,851 lines. The frame rates below start from those defaults and then zoom. They are not a comparison of the same picture.</p>
+
+  <p>Memory is the sum of <code>ps</code> RSS for the Chrome process and its children, sampled every 100&nbsp;ms. Before the file is opened that sum is already about 1.18&nbsp;GB for perfr and 1.22&nbsp;GB for Perfetto: the browser, the GPU process, and the Wasm heap. <code>performance.memory</code> does not include the shared Wasm memory and is not used below. The peak is the high point from the open through the gesture. The trace's own cost is the difference, and the table gives both.</p>
+
+  <p>Five runs, a fresh browser each time, one profile so the second navigation is not a cold download of the viewer. The summary is the median of the runs that succeeded. Perfetto's frame rate on the Android files is bimodal: most runs are a few frames a second, and one or two sit near 60, which is the idle rate. The median falls on the slow cluster. The range is in the notes under the table. perfr's frame rate on those files does not do that. It sits in a band of a few tenths of a frame per second across the five runs.</p>
+
+  <h2 id="results">What the runs said</h2>
+
+  <p>Open time is seconds from the file being handed over to the timeline signal above. Interaction adds the wait until <code>W</code> moves the view. RSS is the peak of the Chrome tree, in MB.</p>
+
+  <div class="table-wrap wide"><table>
+    <thead><tr><th>Trace</th><th>perfr open</th><th>Perfetto open</th><th>perfr interact</th><th>Perfetto interact</th><th>perfr events</th></tr></thead>
+    <tbody>
+      <tr><td>Android example, 58&nbsp;MB</td><td class="v">4.42 s</td><td class="v">3.63 s</td><td class="v">4.86 s</td><td class="v">4.77 s</td><td class="v">643,775</td></tr>
+      <tr><td>Android 15&nbsp;s, docs</td><td class="v">4.09 s</td><td class="v">2.42 s</td><td class="v">4.47 s</td><td class="v">2.77 s</td><td class="v">904,751</td></tr>
+      <tr><td>Android 30&nbsp;s, docs</td><td class="v">2.04 s</td><td class="v">1.95 s</td><td class="v">2.50 s</td><td class="v">2.19 s</td><td class="v">839,279</td></tr>
+      <tr><td>Chrome Wikipedia example</td><td class="v">2.26 s</td><td class="v">1.68 s</td><td class="v">3.88 s</td><td class="v">2.16 s</td><td class="v">298,037</td></tr>
+      <tr><td>Chrome JSON, legacy example</td><td class="v">0.52 s</td><td class="v">0.76 s</td><td class="v">0.73 s</td><td class="v">0.97 s</td><td class="v">27,622</td></tr>
+      <tr><td>chrome_rendering_desktop</td><td class="v">0.72 s</td><td class="v">1.00 s</td><td class="v">1.11 s</td><td class="v">1.59 s</td><td class="v">111,475</td></tr>
+      <tr><td>chrome_scroll_without_vsync</td><td class="v">0.34 s</td><td class="v">0.72 s</td><td class="v">0.80 s</td><td class="v">1.04 s</td><td class="v">20,690</td></tr>
+      <tr><td>chrome_5672_histograms.gz</td><td class="v">0.69 s</td><td class="v">1.06 s</td><td class="v">0.89 s</td><td class="v">1.51 s</td><td class="v">145,368</td></tr>
+      <tr><td>async-trace-1.json</td><td class="v">0.26 s</td><td class="v">0.51 s</td><td class="v">0.47 s</td><td class="v">0.72 s</td><td class="v">16</td></tr>
+      <tr><td>counters.json</td><td class="v">0.26 s</td><td class="v">0.51 s</td><td class="v">0.41 s</td><td class="v">0.71 s</td><td class="v">3</td></tr>
+      <tr><td>sched_switch_compact.pb</td><td class="v">0.27 s</td><td class="v">0.46 s</td><td class="v">0.41 s</td><td class="v">0.69 s</td><td class="v">127</td></tr>
+      <tr><td>atrace text</td><td class="v">did not open</td><td class="v">0.51 s</td><td class="v">&mdash;</td><td class="v">0.72 s</td><td class="v">0</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>Perfetto is faster to open the two large Android protobufs and the Wikipedia Chrome trace. perfr is faster to open the Chrome JSON example, the rendering trace, the scroll trace, the histogram gzip, and the four small files. On the 30&nbsp;s Android file the two open times are 2.04&nbsp;s and 1.95&nbsp;s. The event counts are a check that perfr finished the file: 111,475, 20,690, 145,368 and 298,037 match an earlier native ingest of those four Chrome files, recorded in <code>crates/perfr-client/README.md</code>. 839,279 matches that ingest of <code>example_android_trace_30s.pb.gz</code>. The file opened here is the same length as <code>test/data/example_android_trace_30s.pb</code>.</p>
+
+  <figure class="wide">
+    <img src="https://github.com/perfr/perfr/raw/cursor/perfetto-compare-2e29/docs/images/perfetto-compare-render.svg" alt="Bar chart of median seconds to a loaded timeline. Teal is perfr, grey is the Perfetto UI.">
+    <figcaption>Median seconds to a loaded timeline. Teal is perfr, grey is the Perfetto UI. The systrace bar is Perfetto only.</figcaption>
+  </figure>
+
+  <div class="table-wrap wide"><table>
+    <thead><tr><th>Trace</th><th>perfr fps</th><th>p50 / p95 / p99 ms</th><th>Perfetto fps</th><th>p50 / p95 / p99 ms</th><th>perfr peak MB</th><th>Perfetto peak MB</th></tr></thead>
+    <tbody>
+      <tr><td>Android example</td><td class="v">4.3</td><td class="v">233 / 447 / 532</td><td class="v">3.9</td><td class="v">317 / 586 / 632</td><td class="v">1,362</td><td class="v">1,975</td></tr>
+      <tr><td>Android 15&nbsp;s</td><td class="v">4.7</td><td class="v">200 / 546 / 583</td><td class="v">2.0</td><td class="v">633 / 888 / 1,462</td><td class="v">1,355</td><td class="v">1,836</td></tr>
+      <tr><td>Android 30&nbsp;s</td><td class="v">5.3</td><td class="v">183 / 382 / 400</td><td class="v">2.8</td><td class="v">367 / 838 / 1,089</td><td class="v">1,339</td><td class="v">1,814</td></tr>
+      <tr><td>Chrome Wikipedia</td><td class="v">4.0</td><td class="v">233 / 450 / 456</td><td class="v">14.0</td><td class="v">83 / 150 / 183</td><td class="v">3,551</td><td class="v">1,772</td></tr>
+      <tr><td>Chrome JSON example</td><td class="v">14.9</td><td class="v">67 / 133 / 133</td><td class="v">59.9</td><td class="v">17 / 17 / 17</td><td class="v">1,336</td><td class="v">1,581</td></tr>
+      <tr><td>rendering desktop</td><td class="v">8.4</td><td class="v">117 / 183 / 350</td><td class="v">9.3</td><td class="v">117 / 233 / 294</td><td class="v">1,359</td><td class="v">1,586</td></tr>
+      <tr><td>scroll, no vsync</td><td class="v">7.3</td><td class="v">150 / 284 / 317</td><td class="v">27.0</td><td class="v">33 / 83 / 117</td><td class="v">1,327</td><td class="v">1,552</td></tr>
+      <tr><td>histograms gzip</td><td class="v">15.1</td><td class="v">67 / 117 / 133</td><td class="v">11.3</td><td class="v">83 / 178 / 228</td><td class="v">1,276</td><td class="v">1,827</td></tr>
+      <tr><td>async JSON</td><td class="v">17.5</td><td class="v">50 / 100 / 117</td><td class="v">60.0</td><td class="v">17 / 17 / 17</td><td class="v">1,278</td><td class="v">1,525</td></tr>
+      <tr><td>counters JSON</td><td class="v">18.9</td><td class="v">50 / 100 / 100</td><td class="v">60.0</td><td class="v">17 / 17 / 17</td><td class="v">1,250</td><td class="v">1,495</td></tr>
+      <tr><td>compact sched</td><td class="v">18.4</td><td class="v">50 / 100 / 117</td><td class="v">52.4</td><td class="v">17 / 33 / 33</td><td class="v">1,254</td><td class="v">1,717</td></tr>
+      <tr><td>atrace text</td><td class="v">&mdash;</td><td class="v">&mdash;</td><td class="v">44.3</td><td class="v">17 / 17 / 133</td><td class="v">&mdash;</td><td class="v">1,592</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>On the three Android traces both viewers are at a few frames a second while the keys are held. perfr's median is the higher one (4.3, 4.7, 5.3 against 3.9, 2.0, 2.8), and Perfetto's is the less stable one: the five frame rates on the 15&nbsp;s file were 1.8 to 57.4, and on the 30&nbsp;s file 2.2 to 59.7. A 57&nbsp;fps run is a run that did not keep the renderer busy. I would not rank the two on that median alone.</p>
+
+  <p>On the Chrome traces perfr is slower, and the gap is not subtle. The Wikipedia example is 4.0&nbsp;fps against 14, with p50 frame times of 233&nbsp;ms against 83&nbsp;ms, and the five perfr runs sit between 3.4 and 4.3. The scroll trace is 7.3 against 27. The legacy JSON example is 14.9 against 59.9, and 60 is the idle rate, so Perfetto was not struggling with 27,622 events. The rendering trace is the close one, 8.4 against 9.3. The histogram gzip goes the other way, 15.1 against 11.3, with one Perfetto run at 34.9 and the other four near 11.</p>
+
+  <p>The small files say something the large ones hide. A 16-event async trace and a 3-event counter trace still cost perfr about 18&nbsp;fps, p50 50&nbsp;ms. That is the floor of this viewer in headless SwiftShader, not the cost of the trace. Perfetto on the same files sits on the 60&nbsp;fps idle rate. Any comparison that only used a toy JSON would have reported that floor and called it the trace.</p>
+
+  <figure class="wide">
+    <img src="https://github.com/perfr/perfr/raw/cursor/perfetto-compare-2e29/docs/images/perfetto-compare-fps.svg" alt="Bar chart of median frame rate during the scripted zoom and pan.">
+    <figcaption>Median frame rate during the scripted zoom and pan. Near 60 is this Chrome's idle rate. perfr does not reach it on any of these files.</figcaption>
+  </figure>
+
+  <p>Memory, read as the peak minus the ~1.2&nbsp;GB the browser already held: perfr adds 72&ndash;185&nbsp;MB on every file except the Wikipedia trace, where it adds 2,372&nbsp;MB and the peak is 3,551&nbsp;MB. Perfetto adds 592&ndash;759&nbsp;MB on the Android files and 556&nbsp;MB on Wikipedia, and its peak there is 1,772&nbsp;MB. The one Chrome trace the UI offers as the example is the one place perfr's heap runs away. 298,037 events is not, by itself, an explanation: the 15&nbsp;s Android file produced 904,751 events and added 178&nbsp;MB.</p>
+
+  <figure class="wide">
+    <img src="https://github.com/perfr/perfr/raw/cursor/perfetto-compare-2e29/docs/images/perfetto-compare-rss.svg" alt="Bar chart of peak Chrome process-tree RSS.">
+    <figcaption>Peak RSS of the Chrome process tree, median. Most of the first 1.2&nbsp;GB is the browser before the file is opened.</figcaption>
+  </figure>
+
+  <figure class="wide">
+    <img src="https://github.com/perfr/perfr/raw/cursor/perfetto-compare-2e29/docs/images/perfr-android-example.png" alt="perfr showing the Android example: eight CPU cores and SurfaceFlinger slices.">
+    <figcaption>perfr 0.1.4, Android example, the fitted view before the zoom script. Scheduler on eight cores, SurfaceFlinger under it. 643,775 events, 4.42&nbsp;s to this picture.</figcaption>
+  </figure>
+
+  <figure class="wide">
+    <img src="https://github.com/perfr/perfr/raw/cursor/perfetto-compare-2e29/docs/images/perfetto-android-example.png" alt="Perfetto UI on the same Android example, zoomed out, with the overview strip and an Android logs panel.">
+    <figcaption>Perfetto UI v59.1 on the same file, its own default. The overview strip carries the colour. The track area is the whole trace, and an Android logs panel is open. 3.63&nbsp;s to this picture.</figcaption>
+  </figure>
+
+  <h2 id="parity">What each one has</h2>
+
+  <p>The feature list is the stable UI as it stood in that sidebar and in the Perfetto UI docs, against perfr on main at the time of writing (<code>c3e39b4</code> plus this post). &ldquo;Has&rdquo; means the viewer draws or does the thing. &ldquo;Partial&rdquo; means some of it, and the cell says which.</p>
+
+  <div class="table-wrap wide"><table>
+    <thead><tr><th>Perfetto</th><th>perfr</th><th></th></tr></thead>
+    <tbody>
+      <tr><td>Perfetto protobuf (<code>.pftrace</code>, <code>.pb</code>, <code>.perfetto_trace</code>), sniffed from the bytes</td><td>has</td><td>Loaded every protobuf in the timed set, including the misnamed Wikipedia file.</td></tr>
+      <tr><td>Chrome JSON, including a leading newline and async slices</td><td>has</td><td><code>counters.json</code> drew a counter. <code>async-trace-1.json</code> drew the async lanes.</td></tr>
+      <tr><td>gzip of either</td><td>has</td><td>The histogram file is real gzip. 145,368 events.</td></tr>
+      <tr><td>Slices, nested, on a thread</td><td>has</td><td></td></tr>
+      <tr><td>Counters</td><td>has</td><td>Track-event counters and Chrome <code>ph:"C"</code>.</td></tr>
+      <tr><td>Async slices</td><td>has</td><td>One lane per track name.</td></tr>
+      <tr><td>Flows</td><td>partial</td><td>The first flow id of an event. Not drawn on async lanes. An event with several ids keeps one.</td></tr>
+      <tr><td>CPU scheduling</td><td>has</td><td><code>sched_switch</code> and compact sched, per core. Visible on the Android example.</td></tr>
+      <tr><td>Thread state</td><td>has</td><td>From <code>sched_switch</code> / <code>sched_waking</code>.</td></tr>
+      <tr><td>Process and thread grouping</td><td>has</td><td></td></tr>
+      <tr><td>atrace <code>B|pid|name</code> marks inside ftrace</td><td>has</td><td>The SurfaceFlinger names on the Android example are these.</td></tr>
+      <tr><td>Systrace text as its own file</td><td>missing</td><td>The <code>.atr</code> file failed five times out of five. The page said <code>chrome trace: expected [ or {, got d</code>.</td></tr>
+      <tr><td>Find tracks, omnibox, Ctrl+P</td><td>partial</td><td>A tracks box filters names. A scope box greys non-matching scope names. There is no search across event arguments.</td></tr>
+      <tr><td>SQL and Trace Processor</td><td>missing</td><td>The proto reader is schema-less. There is no query box.</td></tr>
+      <tr><td>Pinning tracks</td><td>missing</td><td>Tracks can be reordered, hidden and collapsed. They cannot be pinned.</td></tr>
+      <tr><td>Area selection with aggregation tables</td><td>partial</td><td>A sample-bar drag builds the sampling report. A Ctrl-drag marquees scopes and copies a summary. Not Perfetto's slice aggregation.</td></tr>
+      <tr><td>Flame graph</td><td>partial</td><td>The sampling report has a flame. A heap profile does not.</td></tr>
+      <tr><td>Heap profiles, java heap, memory-infra dumps</td><td>missing</td><td>Chrome <code>ph:"v"</code> keeps a marker and drops the payload. GPU and memory snapshot packets are counted and dropped.</td></tr>
+      <tr><td>Metrics page, Perfetto standard library</td><td>missing</td><td>perfr has per-scope stats and, on a perfr capture, machine-health graphs. Those are not trace metrics.</td></tr>
+      <tr><td>Android logs, binder, frame timeline, battery, cpu frequency</td><td>missing</td><td>The Perfetto page on the Android example opened an Android logs table. perfr has no logcat track, no binder track, no cpu-freq track. <code>sys_stats</code>, <code>process_stats</code> and cpu frequency are in the skipped set.</td></tr>
+      <tr><td>GPU tracks and memory snapshots</td><td>missing</td><td>Skipped packets. A perfr capture can show a machine-health GPU percent. That is not a GPU queue.</td></tr>
+      <tr><td>Callstacks on track events</td><td>missing</td><td><code>callstack_iid</code> is not mapped. <code>perf_sample</code> callstacks are.</td></tr>
+      <tr><td>Per-slice thread time (<code>extra_counter_values</code>)</td><td>missing</td><td></td></tr>
+      <tr><td>ETW</td><td>missing</td><td>Dropped. perfr records ETW on Windows through its own service, which is a different path and not this viewer importing a Perfetto file.</td></tr>
+      <tr><td>Record an Android or Linux Perfetto trace</td><td>missing</td><td>The embedded page has a Record button. It talks to a perfr service. On perfr.dev that service is not there. It does not record a Perfetto trace.</td></tr>
+      <tr><td>Share / permalink of the open trace</td><td>missing for these files</td><td>The viewer says &ldquo;An imported Chrome or Perfetto trace cannot be shared yet.&rdquo; Share is for a perfr capture.</td></tr>
+      <tr><td>Convert or download the trace as another format</td><td>missing</td><td></td></tr>
+      <tr><td>Open several traces onto one timeline</td><td>missing</td><td></td></tr>
+      <tr><td>Plugins, command palette, data explorer, memscope</td><td>missing</td><td>All four are in the stable UI's sidebar. Memscope is marked preview.</td></tr>
+      <tr><td>Overview minimap</td><td>missing</td><td>perfr fits the content and has a frame strip when a capture has frame marks. It has no overview of an imported trace.</td></tr>
+      <tr><td>WASD, wheel zoom</td><td>has</td><td><code>W</code>/<code>S</code> zoom, <code>A</code>/<code>D</code> pan, Ctrl+wheel zooms. perfr pans on a left drag. Perfetto pans on Shift+left drag.</td></tr>
+      <tr><td>Selection details with full arguments</td><td>partial</td><td>Hover args are one string, capped at 512 characters and 100,000 distinct strings (<code>MAX_ARG_CHARS</code>, <code>MAX_ARG_ENTRIES</code> in <code>ingest.rs</code>).</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2 id="missing">What perfr is missing</h2>
+
+  <p>Every gap above, in one place, against main as it is. Partial means the row is not the Perfetto feature.</p>
+
+  <ul>
+    <li><b>Systrace text.</b> A standalone <code>.atr</code> / <code>TRACE:</code> file is rejected. Five runs, zero opens, the message <code>chrome trace: expected [ or {, got d</code>. Embedded <code>systemTraceEvents</code> and ftrace <code>print</code> inside a protobuf are a different path and do load.</li>
+    <li><b>SQL, Trace Processor, and the metrics page.</b> No query box, no PerfettoSQL, no standard-library metrics.</li>
+    <li><b>Pinning tracks, an overview minimap, and opening several traces at once.</b></li>
+    <li><b>Area-selection aggregation of slices.</b> Sample ranges and a scope marquee exist. The aggregation tables do not.</li>
+    <li><b>Heap profiles, java heaps, and Chrome memory dumps.</b> The flame graph is the sampling report's flame only.</li>
+    <li><b>GPU queues, cpu frequency, <code>process_stats</code>, <code>sys_stats</code>, memory snapshots, and ETW packets.</b> Counted in <code>skipped_packets</code> and dropped. The module comment in <code>perfetto.rs</code> is the list.</li>
+    <li><b>Android logs, binder, frame timelines, and battery.</b> The Perfetto page showed the logs. perfr did not.</li>
+    <li><b>Callstacks attached to track events, and per-slice thread time.</b> Sampled <code>perf_sample</code> stacks are drawn. <code>callstack_iid</code> and <code>extra_counter_values</code> are not.</li>
+    <li><b>Flows, incompletely.</b> First id only, and not on async lanes.</li>
+    <li><b>Argument detail.</b> A hover string, 512 characters, 100,000 entries, then later strings are dropped.</li>
+    <li><b>Search.</b> Scope names and track names. Not arguments, not SQL, not the track finder.</li>
+    <li><b>Recording a Perfetto or Android trace from the page.</b></li>
+    <li><b>Sharing an imported trace, or a permalink to one.</b> The viewer refuses, in those words.</li>
+    <li><b>Converting the trace, or handing it back as JSON or systrace.</b></li>
+    <li><b>Plugins, the command palette, data explorer, and memscope.</b></li>
+  </ul>
+
+  <p>None of that is a claim about a future patch. It is what <code>main</code> and perfr 0.1.4 did with these files on this day.</p>
+
+  <figure class="wide">
+    <img src="https://github.com/perfr/perfr/raw/cursor/perfetto-compare-2e29/docs/images/perfr-atrace-failed.png" alt="perfr rejecting a systrace text file with the message chrome trace: expected [ or {, got d.">
+    <figcaption>The systrace file, all five runs. The bytes are text. The parser wanted <code>[</code> or <code>{</code>.</figcaption>
+  </figure>
+
+  <div class="callout"><p><b>The short version.</b> perfr 0.1.4 opens Perfetto protobuf, Chrome JSON, and gzip of either, and on the Android example it draws scheduling and SurfaceFlinger. It does not open systrace text. Against the Perfetto UI in headless Chrome with SwiftShader, perfr was faster to open the smaller Chrome traces and slower to open the two big Android traces and the Wikipedia example. Navigation on that Wikipedia trace was 4.0&nbsp;fps against 14.0, and the Chrome process peaked at 3,551&nbsp;MB against 1,772&nbsp;MB. On a 16-event trace perfr still only reached 18&nbsp;fps, which is the viewer's floor in this setup, while Perfetto sat at the idle 60. The frame rates are not a desktop measurement. SQL, metrics, pinning, heap profiles, Android logs, sharing an imported trace, and a systrace file are not in the viewer.</p></div>
+
+</article>
+
+<footer>
+  <div class="footer-inner">
+    Post 29 of the perfr engineering log, draft, not on the index &middot; <a href="https://perfr.dev/blog/">Published posts</a> &middot; <a href="https://perfr.dev/blog/28-the-hooks-were-already-there.html">&larr; Post 28</a><br>
+    The runs: <code>docs/blog/metrics/perfetto-compare.json</code> &middot; The script: <code>tools/bench/perfetto-compare/</code> &middot; The trace list: <code>tools/bench/perfetto-compare/catalog.json</code>
+  </div>
+</footer>
+<script>(function(){var b=document.getElementById("theme-toggle");if(!b)return;function cur(){var t=document.documentElement.getAttribute("data-theme");return t||"light";}function lab(){var next=cur()==="dark"?"Switch to light theme":"Switch to dark theme";b.setAttribute("aria-label",next);b.title=next;}lab();b.addEventListener("click",function(){var n=cur()==="dark"?"light":"dark";document.documentElement.setAttribute("data-theme",n);try{localStorage.setItem("perfr-theme",n);}catch(e){}lab();});})();</script>
+
+</body>
+</html>

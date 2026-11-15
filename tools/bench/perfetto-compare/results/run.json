@@ -1,0 +1,4002 @@
+{
+  "started": "2026-11-15T08:10:02.484Z",
+  "chrome": "Google Chrome 157.0.8103.50",
+  "host": {
+    "uname": "Linux 6.12.113+",
+    "cores": 4,
+    "model": "Intel(R) Xeon(R) Processor",
+    "memGb": 16
+  },
+  "flags": [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--use-gl=angle",
+    "--use-angle=swiftshader",
+    "--enable-unsafe-swiftshader",
+    "--ignore-gpu-blocklist",
+    "--enable-precise-memory-info",
+    "--disable-extensions",
+    "--window-size=1600,1000",
+    "--no-first-run",
+    "--disable-background-networking"
+  ],
+  "viewers": {
+    "perfr": "https://perfr.dev/viewer/",
+    "perfetto": "https://ui.perfetto.dev/"
+  },
+  "method": {
+    "pollMs": 50,
+    "runs": 5,
+    "note": "Clock starts when the file is handed to the page (file-chooser accept, or input.uploadFile) after the shell is already up. Page load and wasm download are not included. Assets stay in one Chrome profile so the second run is not a cold download."
+  },
+  "traces": [
+    {
+      "id": "android-example",
+      "file": "example_android_trace",
+      "url": "https://storage.googleapis.com/perfetto-misc/example_android_trace",
+      "bytes": 58215373,
+      "format": "perfetto protobuf",
+      "role": "ui",
+      "where": "ui.perfetto.dev stable, command Open Android example",
+      "summary": {
+        "perfr": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 4425,
+          "interactMs": 4856,
+          "peakRssMb": 1362.33203125,
+          "baselineRssMb": 1177.23828125,
+          "peakJsHeapMb": 55.55283832550049,
+          "fps": 4.256028217467082,
+          "frameP50": 233.32500000000073,
+          "frameP95": 446.64800000000173,
+          "frameP99": 532.4767499999996,
+          "events": 643775,
+          "prims": 16369
+        },
+        "perfetto": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 3635,
+          "interactMs": 4774,
+          "peakRssMb": 1974.90234375,
+          "baselineRssMb": 1215.96875,
+          "peakJsHeapMb": 176.82861328125,
+          "fps": 3.852992290001886,
+          "frameP50": 316.60000000000036,
+          "frameP95": 585.8050000000023,
+          "frameP99": 631.694999999999,
+          "events": null,
+          "prims": null
+        }
+      },
+      "runs": {
+        "perfr": [
+          {
+            "viewer": "perfr",
+            "id": "android-example",
+            "file": "example_android_trace",
+            "ok": true,
+            "baselineRssKb": 1226796,
+            "baselineJsHeap": 2576547,
+            "renderMs": 4395,
+            "events": 643775,
+            "prims": 16369,
+            "content": [
+              3424607663252,
+              3434211930876
+            ],
+            "view": [
+              3424607663252,
+              3434211930876
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_android_trace",
+            "shot": "docs/images/perfr-android-example.png",
+            "viewChanged": true,
+            "interactMs": 4856,
+            "frames": {
+              "frames": 109,
+              "spanMs": 24882.340000000004,
+              "fps": 4.340427789347785,
+              "p50": 233.3249999999971,
+              "p95": 427.4855000000001,
+              "p99": 515.4830999999995,
+              "max": 549.9799999999996
+            },
+            "peakRssKb": 1401764,
+            "peakJsHeap": 62604891
+          },
+          {
+            "viewer": "perfr",
+            "id": "android-example",
+            "file": "example_android_trace",
+            "ok": true,
+            "baselineRssKb": 1205492,
+            "baselineJsHeap": 2550908,
+            "renderMs": 4398,
+            "events": 643775,
+            "prims": 16369,
+            "content": [
+              3424607663252,
+              3434211930876
+            ],
+            "view": [
+              3424607663252,
+              3434211930876
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_android_trace",
+            "viewChanged": true,
+            "interactMs": 4863,
+            "frames": {
+              "frames": 107,
+              "spanMs": 25315.655,
+              "fps": 4.187132428530884,
+              "p50": 233.32500000000073,
+              "p95": 483.31375000000025,
+              "p99": 532.4767499999996,
+              "max": 533.3149999999987
+            },
+            "peakRssKb": 1390160,
+            "peakJsHeap": 43117901
+          },
+          {
+            "viewer": "perfr",
+            "id": "android-example",
+            "file": "example_android_trace",
+            "ok": true,
+            "baselineRssKb": 1205732,
+            "baselineJsHeap": 2524092,
+            "renderMs": 4436,
+            "events": 643775,
+            "prims": 16369,
+            "content": [
+              3424607663252,
+              3434211930876
+            ],
+            "view": [
+              3424607663252,
+              3434211930876
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_android_trace",
+            "viewChanged": true,
+            "interactMs": 5107,
+            "frames": {
+              "frames": 113,
+              "spanMs": 26315.614999999998,
+              "fps": 4.256028217467082,
+              "p50": 233.32500000000073,
+              "p95": 416.64999999999907,
+              "p99": 531.481300000002,
+              "max": 549.9750000000004
+            },
+            "peakRssKb": 1397584,
+            "peakJsHeap": 58251373
+          },
+          {
+            "viewer": "perfr",
+            "id": "android-example",
+            "file": "example_android_trace",
+            "ok": true,
+            "baselineRssKb": 1204980,
+            "baselineJsHeap": 2475172,
+            "renderMs": 4425,
+            "events": 643775,
+            "prims": 16369,
+            "content": [
+              3424607663252,
+              3434211930876
+            ],
+            "view": [
+              3424607663252,
+              3434211930876
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_android_trace",
+            "viewChanged": true,
+            "interactMs": 4681,
+            "frames": {
+              "frames": 105,
+              "spanMs": 23915.71,
+              "fps": 4.348605999989129,
+              "p50": 233.32500000000073,
+              "p95": 449.98425000000066,
+              "p99": 566.1401999999994,
+              "max": 566.6399999999994
+            },
+            "peakRssKb": 1389416,
+            "peakJsHeap": 50923819
+          },
+          {
+            "viewer": "perfr",
+            "id": "android-example",
+            "file": "example_android_trace",
+            "ok": true,
+            "baselineRssKb": 1203820,
+            "baselineJsHeap": 2532042,
+            "renderMs": 4483,
+            "events": 643775,
+            "prims": 16369,
+            "content": [
+              3424607663252,
+              3434211930876
+            ],
+            "view": [
+              3424607663252,
+              3434211930876
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_android_trace",
+            "viewChanged": true,
+            "interactMs": 4654,
+            "frames": {
+              "frames": 106,
+              "spanMs": 24899.004999999997,
+              "fps": 4.217035981959922,
+              "p50": 233.33000000000175,
+              "p95": 446.64800000000173,
+              "p99": 532.6435999999993,
+              "max": 533.3099999999995
+            },
+            "peakRssKb": 1395028,
+            "peakJsHeap": 58335864
+          }
+        ],
+        "perfetto": [
+          {
+            "viewer": "perfetto",
+            "id": "android-example",
+            "file": "example_android_trace",
+            "ok": true,
+            "baselineRssKb": 1224460,
+            "baselineJsHeap": 32127184,
+            "renderMs": 4462,
+            "version": "v59.1-79997ada9",
+            "shot": "docs/images/perfetto-android-example.png",
+            "viewChanged": true,
+            "interactMs": 4907,
+            "frames": {
+              "frames": 458,
+              "spanMs": 15932.699999999999,
+              "fps": 28.683148493350156,
+              "p50": 16.699999999999818,
+              "p95": 199.9,
+              "p99": 373.9480000000009,
+              "max": 516.7000000000007
+            },
+            "peakRssKb": 2257604,
+            "peakJsHeap": 157990377
+          },
+          {
+            "viewer": "perfetto",
+            "id": "android-example",
+            "file": "example_android_trace",
+            "ok": true,
+            "baselineRssKb": 1252092,
+            "baselineJsHeap": 42018020,
+            "renderMs": 3800,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 4774,
+            "frames": {
+              "frames": 89,
+              "spanMs": 25265.646,
+              "fps": 3.4829903023259328,
+              "p50": 316.69999999999936,
+              "p95": 600,
+              "p99": 635.5449999999998,
+              "max": 649.9000000000015
+            },
+            "peakRssKb": 2022300,
+            "peakJsHeap": 185418240
+          },
+          {
+            "viewer": "perfetto",
+            "id": "android-example",
+            "file": "example_android_trace",
+            "ok": true,
+            "baselineRssKb": 1245152,
+            "baselineJsHeap": 44818805,
+            "renderMs": 3635,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 4934,
+            "frames": {
+              "frames": 97,
+              "spanMs": 24915.7,
+              "fps": 3.852992290001886,
+              "p50": 316.60000000000036,
+              "p95": 483.3249999999998,
+              "p99": 631.694999999999,
+              "max": 916.6000000000004
+            },
+            "peakRssKb": 2022412,
+            "peakJsHeap": 207551083
+          },
+          {
+            "viewer": "perfetto",
+            "id": "android-example",
+            "file": "example_android_trace",
+            "ok": true,
+            "baselineRssKb": 1249412,
+            "baselineJsHeap": 45596262,
+            "renderMs": 3582,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 3971,
+            "frames": {
+              "frames": 94,
+              "spanMs": 25265.6,
+              "fps": 3.6808941802292447,
+              "p50": 316.60000000000036,
+              "p95": 599.9399999999998,
+              "p99": 638.628,
+              "max": 699.8999999999996
+            },
+            "peakRssKb": 2014472,
+            "peakJsHeap": 187456636
+          },
+          {
+            "viewer": "perfetto",
+            "id": "android-example",
+            "file": "example_android_trace",
+            "ok": true,
+            "baselineRssKb": 1241356,
+            "baselineJsHeap": 44456129,
+            "renderMs": 3458,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 4130,
+            "frames": {
+              "frames": 99,
+              "spanMs": 25215.6,
+              "fps": 3.8864829708593094,
+              "p50": 316.59999999999854,
+              "p95": 585.8050000000023,
+              "p99": 624.1970000000009,
+              "max": 866.5999999999985
+            },
+            "peakRssKb": 2017620,
+            "peakJsHeap": 185301691
+          }
+        ]
+      }
+    },
+    {
+      "id": "android-example-15s",
+      "file": "example_android_trace_15s",
+      "url": "https://storage.googleapis.com/perfetto-misc/example_android_trace_15s",
+      "bytes": 57202082,
+      "format": "perfetto protobuf",
+      "role": "docs",
+      "where": "docs/visualization/deep-linking-to-perfetto-ui.md and embedding-the-ui.md",
+      "summary": {
+        "perfr": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 4091,
+          "interactMs": 4473,
+          "peakRssMb": 1354.51953125,
+          "baselineRssMb": 1176.52734375,
+          "peakJsHeapMb": 49.48228931427002,
+          "fps": 4.720245707925229,
+          "frameP50": 199.9925000000003,
+          "frameP95": 545.8099999999986,
+          "frameP99": 583.3100000000012,
+          "events": 904751,
+          "prims": 20077
+        },
+        "perfetto": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 2423,
+          "interactMs": 2765,
+          "peakRssMb": 1835.625,
+          "baselineRssMb": 1217.11328125,
+          "peakJsHeapMb": 188.8121156692505,
+          "fps": 1.9595991377763793,
+          "frameP50": 633.4000000000015,
+          "frameP95": 888.2799999999988,
+          "frameP99": 1461.9420000000005,
+          "events": null,
+          "prims": null
+        }
+      },
+      "runs": {
+        "perfr": [
+          {
+            "viewer": "perfr",
+            "id": "android-example-15s",
+            "file": "example_android_trace_15s",
+            "ok": true,
+            "baselineRssKb": 1204900,
+            "baselineJsHeap": 2534050,
+            "renderMs": 4221,
+            "events": 904751,
+            "prims": 20077,
+            "content": [
+              261187012129224,
+              261201738290119
+            ],
+            "view": [
+              261187012129224,
+              261201738290119
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_android_trace_15s",
+            "shot": "docs/images/perfr-android-example-15s.png",
+            "viewChanged": true,
+            "interactMs": 5035,
+            "frames": {
+              "frames": 107,
+              "spanMs": 23132.405,
+              "fps": 4.5823164517481,
+              "p50": 199.9900000000016,
+              "p95": 545.8099999999986,
+              "p99": 583.3100000000012,
+              "max": 599.9799999999996
+            },
+            "peakRssKb": 1387028,
+            "peakJsHeap": 69316932
+          },
+          {
+            "viewer": "perfr",
+            "id": "android-example-15s",
+            "file": "example_android_trace_15s",
+            "ok": true,
+            "baselineRssKb": 1204244,
+            "baselineJsHeap": 2479602,
+            "renderMs": 4091,
+            "events": 904751,
+            "prims": 7745,
+            "content": [
+              261187012129224,
+              261201738290119
+            ],
+            "view": [
+              261187012129224,
+              261201738290119
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_android_trace_15s",
+            "viewChanged": true,
+            "interactMs": 4159,
+            "frames": {
+              "frames": 113,
+              "spanMs": 23532.39,
+              "fps": 4.759397579251407,
+              "p50": 199.9925000000003,
+              "p95": 524.1469999999994,
+              "p99": 564.8118500000003,
+              "max": 566.6450000000004
+            },
+            "peakRssKb": 1420896,
+            "peakJsHeap": 51975370
+          },
+          {
+            "viewer": "perfr",
+            "id": "android-example-15s",
+            "file": "example_android_trace_15s",
+            "ok": true,
+            "baselineRssKb": 1209256,
+            "baselineJsHeap": 2482978,
+            "renderMs": 4116,
+            "events": 904751,
+            "prims": 20077,
+            "content": [
+              261187012129224,
+              261201738290119
+            ],
+            "view": [
+              261187012129224,
+              261201738290119
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_android_trace_15s",
+            "viewChanged": true,
+            "interactMs": 4473,
+            "frames": {
+              "frames": 109,
+              "spanMs": 24132.370000000003,
+              "fps": 4.47531676333489,
+              "p50": 199.99499999999898,
+              "p95": 560.8105000000003,
+              "p99": 598.8087999999985,
+              "max": 599.9750000000004
+            },
+            "peakRssKb": 1420724,
+            "peakJsHeap": 49793388
+          },
+          {
+            "viewer": "perfr",
+            "id": "android-example-15s",
+            "file": "example_android_trace_15s",
+            "ok": true,
+            "baselineRssKb": 1204084,
+            "baselineJsHeap": 2479602,
+            "renderMs": 4066,
+            "events": 904751,
+            "prims": 7745,
+            "content": [
+              261187012129224,
+              261201738290119
+            ],
+            "view": [
+              261187012129224,
+              261201738290119
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_android_trace_15s",
+            "viewChanged": true,
+            "interactMs": 4173,
+            "frames": {
+              "frames": 112,
+              "spanMs": 23515.725,
+              "fps": 4.720245707925229,
+              "p50": 199.98999999999978,
+              "p95": 549.9775,
+              "p99": 583.3100000000013,
+              "max": 599.9749999999985
+            },
+            "peakRssKb": 1383952,
+            "peakJsHeap": 51885941
+          },
+          {
+            "viewer": "perfr",
+            "id": "android-example-15s",
+            "file": "example_android_trace_15s",
+            "ok": true,
+            "baselineRssKb": 1204764,
+            "baselineJsHeap": 2473854,
+            "renderMs": 4051,
+            "events": 904751,
+            "prims": 20077,
+            "content": [
+              261187012129224,
+              261201738290119
+            ],
+            "view": [
+              261187012129224,
+              261201738290119
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_android_trace_15s",
+            "viewChanged": true,
+            "interactMs": 4721,
+            "frames": {
+              "frames": 107,
+              "spanMs": 21982.455,
+              "fps": 4.822027385021372,
+              "p50": 199.9925000000003,
+              "p95": 383.3150000000003,
+              "p99": 549.1464999999997,
+              "max": 549.9800000000014
+            },
+            "peakRssKb": 1379724,
+            "peakJsHeap": 45624860
+          }
+        ],
+        "perfetto": [
+          {
+            "viewer": "perfetto",
+            "id": "android-example-15s",
+            "file": "example_android_trace_15s",
+            "ok": true,
+            "baselineRssKb": 1246324,
+            "baselineJsHeap": 46676678,
+            "renderMs": 2471,
+            "version": "v59.1-79997ada9",
+            "shot": "docs/images/perfetto-android-example-15s.png",
+            "viewChanged": true,
+            "interactMs": 2810,
+            "frames": {
+              "frames": 71,
+              "spanMs": 37965.3,
+              "fps": 1.8437889335788205,
+              "p50": 716.7000000000021,
+              "p95": 1368.2599999999984,
+              "p99": 1483.7080000000003,
+              "max": 1633.2999999999993
+            },
+            "peakRssKb": 1878460,
+            "peakJsHeap": 191575361
+          },
+          {
+            "viewer": "perfetto",
+            "id": "android-example-15s",
+            "file": "example_android_trace_15s",
+            "ok": true,
+            "baselineRssKb": 1252188,
+            "baselineJsHeap": 46626236,
+            "renderMs": 2464,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 2810,
+            "frames": {
+              "frames": 76,
+              "spanMs": 36531.9,
+              "fps": 2.0530002545720314,
+              "p50": 533.3000000000002,
+              "p95": 871.6800000000003,
+              "p99": 1461.9420000000005,
+              "max": 1733.2999999999993
+            },
+            "peakRssKb": 1885944,
+            "peakJsHeap": 207304948
+          },
+          {
+            "viewer": "perfetto",
+            "id": "android-example-15s",
+            "file": "example_android_trace_15s",
+            "ok": true,
+            "baselineRssKb": 1255868,
+            "baselineJsHeap": 45528863,
+            "renderMs": 2393,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 2683,
+            "frames": {
+              "frames": 72,
+              "spanMs": 36231.9,
+              "fps": 1.9595991377763793,
+              "p50": 633.4000000000015,
+              "p95": 1083.2499999999982,
+              "p99": 1619.9099999999999,
+              "max": 1666.6000000000004
+            },
+            "peakRssKb": 1883580,
+            "peakJsHeap": 200009814
+          },
+          {
+            "viewer": "perfetto",
+            "id": "android-example-15s",
+            "file": "example_android_trace_15s",
+            "ok": true,
+            "baselineRssKb": 1246064,
+            "baselineJsHeap": 45514819,
+            "renderMs": 2423,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 2765,
+            "frames": {
+              "frames": 69,
+              "spanMs": 36098.5,
+              "fps": 1.8837347812235965,
+              "p50": 674.9999999999964,
+              "p95": 888.2799999999988,
+              "p99": 1154.2779999999993,
+              "max": 1399.9000000000015
+            },
+            "peakRssKb": 1879680,
+            "peakJsHeap": 197983853
+          },
+          {
+            "viewer": "perfetto",
+            "id": "android-example-15s",
+            "file": "example_android_trace_15s",
+            "ok": true,
+            "baselineRssKb": 1244660,
+            "baselineJsHeap": 44520213,
+            "renderMs": 2418,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 2629,
+            "frames": {
+              "frames": 762,
+              "spanMs": 13249.500000000002,
+              "fps": 57.43612966527038,
+              "p50": 16.699999999999818,
+              "p95": 16.80000000000109,
+              "p99": 33.399999999999636,
+              "max": 66.70000000000073
+            },
+            "peakRssKb": 1802368,
+            "peakJsHeap": 195787861
+          }
+        ]
+      }
+    },
+    {
+      "id": "android-example-30s",
+      "file": "example_android_trace_30s_1",
+      "url": "https://storage.googleapis.com/perfetto-misc/example_android_trace_30s_1",
+      "bytes": 26692953,
+      "format": "perfetto protobuf",
+      "role": "docs",
+      "where": "docs/analysis/metrics.md, the Android example used for the startup metric",
+      "summary": {
+        "perfr": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 2041,
+          "interactMs": 2501,
+          "peakRssMb": 1339.0390625,
+          "baselineRssMb": 1179.76171875,
+          "peakJsHeapMb": 45.62966346740723,
+          "fps": 5.2693330341712,
+          "frameP50": 183.3299999999981,
+          "frameP95": 382.4819999999987,
+          "frameP99": 399.9850000000006,
+          "events": 839279,
+          "prims": 8982
+        },
+        "perfetto": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 1947,
+          "interactMs": 2187,
+          "peakRssMb": 1813.95703125,
+          "baselineRssMb": 1221.55859375,
+          "peakJsHeapMb": 138.91773319244385,
+          "fps": 2.8484206745803227,
+          "frameP50": 366.7000000000007,
+          "frameP95": 838.3050000000026,
+          "frameP99": 1089.2939999999958,
+          "events": null,
+          "prims": null
+        }
+      },
+      "runs": {
+        "perfr": [
+          {
+            "viewer": "perfr",
+            "id": "android-example-30s",
+            "file": "example_android_trace_30s_1",
+            "ok": true,
+            "baselineRssKb": 1206664,
+            "baselineJsHeap": 2534102,
+            "renderMs": 2066,
+            "events": 839279,
+            "prims": 8982,
+            "content": [
+              70730062200,
+              100380109320
+            ],
+            "view": [
+              70730062200,
+              100380109320
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_android_trace_30s_1",
+            "shot": "docs/images/perfr-android-example-30s.png",
+            "viewChanged": true,
+            "interactMs": 2725,
+            "frames": {
+              "frames": 124,
+              "spanMs": 22265.775,
+              "fps": 5.524173310832432,
+              "p50": 183.32500000000073,
+              "p95": 366.6499999999978,
+              "p99": 409.32129999999904,
+              "max": 433.3199999999997
+            },
+            "peakRssKb": 1378644,
+            "peakJsHeap": 47757124
+          },
+          {
+            "viewer": "perfr",
+            "id": "android-example-30s",
+            "file": "example_android_trace_30s_1",
+            "ok": true,
+            "baselineRssKb": 1213960,
+            "baselineJsHeap": 2479602,
+            "renderMs": 2048,
+            "events": 839279,
+            "prims": 8982,
+            "content": [
+              70730062200,
+              100380109320
+            ],
+            "view": [
+              70730062200,
+              100380109320
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_android_trace_30s_1",
+            "viewChanged": true,
+            "interactMs": 2661,
+            "frames": {
+              "frames": 125,
+              "spanMs": 23532.39,
+              "fps": 5.2693330341712,
+              "p50": 183.3299999999981,
+              "p95": 383.31425000000036,
+              "p99": 399.9850000000006,
+              "max": 416.6499999999978
+            },
+            "peakRssKb": 1371176,
+            "peakJsHeap": 47846170
+          },
+          {
+            "viewer": "perfr",
+            "id": "android-example-30s",
+            "file": "example_android_trace_30s_1",
+            "ok": true,
+            "baselineRssKb": 1210904,
+            "baselineJsHeap": 2481862,
+            "renderMs": 2023,
+            "events": 839279,
+            "prims": 8982,
+            "content": [
+              70730062200,
+              100380109320
+            ],
+            "view": [
+              70730062200,
+              100380109320
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_android_trace_30s_1",
+            "viewChanged": true,
+            "interactMs": 2437,
+            "frames": {
+              "frames": 123,
+              "spanMs": 23182.405,
+              "fps": 5.262611881726681,
+              "p50": 183.3299999999981,
+              "p95": 382.4819999999987,
+              "p99": 383.3199999999997,
+              "max": 399.9850000000006
+            },
+            "peakRssKb": 1366096,
+            "peakJsHeap": 51934780
+          },
+          {
+            "viewer": "perfr",
+            "id": "android-example-30s",
+            "file": "example_android_trace_30s_1",
+            "ok": true,
+            "baselineRssKb": 1207688,
+            "baselineJsHeap": 2531150,
+            "renderMs": 2024,
+            "events": 839279,
+            "prims": 8982,
+            "content": [
+              70730062200,
+              100380109320
+            ],
+            "view": [
+              70730062200,
+              100380109320
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_android_trace_30s_1",
+            "viewChanged": true,
+            "interactMs": 2501,
+            "frames": {
+              "frames": 120,
+              "spanMs": 22832.415,
+              "fps": 5.211888448944188,
+              "p50": 183.32999999999993,
+              "p95": 383.3199999999997,
+              "p99": 413.6493999999995,
+              "max": 416.65000000000146
+            },
+            "peakRssKb": 1379304,
+            "peakJsHeap": 50363988
+          },
+          {
+            "viewer": "perfr",
+            "id": "android-example-30s",
+            "file": "example_android_trace_30s_1",
+            "ok": true,
+            "baselineRssKb": 1208076,
+            "baselineJsHeap": 2512878,
+            "renderMs": 2041,
+            "events": 839279,
+            "prims": 8982,
+            "content": [
+              70730062200,
+              100380109320
+            ],
+            "view": [
+              70730062200,
+              100380109320
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_android_trace_30s_1",
+            "viewChanged": true,
+            "interactMs": 2466,
+            "frames": {
+              "frames": 124,
+              "spanMs": 22399.105,
+              "fps": 5.491290835057919,
+              "p50": 183.32500000000073,
+              "p95": 364.98349999999795,
+              "p99": 383.3199999999997,
+              "max": 383.32000000000335
+            },
+            "peakRssKb": 1361548,
+            "peakJsHeap": 22511822
+          }
+        ],
+        "perfetto": [
+          {
+            "viewer": "perfetto",
+            "id": "android-example-30s",
+            "file": "example_android_trace_30s_1",
+            "ok": true,
+            "baselineRssKb": 1250564,
+            "baselineJsHeap": 44495602,
+            "renderMs": 2014,
+            "version": "v59.1-79997ada9",
+            "shot": "docs/images/perfetto-android-example-30s.png",
+            "viewChanged": true,
+            "interactMs": 2277,
+            "frames": {
+              "frames": 93,
+              "spanMs": 32298.6,
+              "fps": 2.8484206745803227,
+              "p50": 366.7000000000007,
+              "p95": 857.4699999999993,
+              "p99": 1089.2939999999958,
+              "max": 1149.8999999999942
+            },
+            "peakRssKb": 1870232,
+            "peakJsHeap": 145665801
+          },
+          {
+            "viewer": "perfetto",
+            "id": "android-example-30s",
+            "file": "example_android_trace_30s_1",
+            "ok": true,
+            "baselineRssKb": 1251800,
+            "baselineJsHeap": 45653118,
+            "renderMs": 1947,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 2187,
+            "frames": {
+              "frames": 75,
+              "spanMs": 32898.700000000004,
+              "fps": 2.2493290008419784,
+              "p50": 550,
+              "p95": 1099.9349999999963,
+              "p99": 1164.8089999999988,
+              "max": 1250
+            },
+            "peakRssKb": 1857492,
+            "peakJsHeap": 144489423
+          },
+          {
+            "viewer": "perfetto",
+            "id": "android-example-30s",
+            "file": "example_android_trace_30s_1",
+            "ok": true,
+            "baselineRssKb": 1246140,
+            "baselineJsHeap": 44565182,
+            "renderMs": 1912,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 2149,
+            "frames": {
+              "frames": 776,
+              "spanMs": 12982.900000000001,
+              "fps": 59.69390505973241,
+              "p50": 16.69999999999891,
+              "p95": 16.799999999999272,
+              "p99": 16.800000000000182,
+              "max": 83.40000000000146
+            },
+            "peakRssKb": 1844352,
+            "peakJsHeap": 182868187
+          },
+          {
+            "viewer": "perfetto",
+            "id": "android-example-30s",
+            "file": "example_android_trace_30s_1",
+            "ok": true,
+            "baselineRssKb": 1250876,
+            "baselineJsHeap": 45148637,
+            "renderMs": 1907,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 2158,
+            "frames": {
+              "frames": 81,
+              "spanMs": 34531.9,
+              "fps": 2.316698473006119,
+              "p50": 550,
+              "p95": 838.3050000000026,
+              "p99": 1741.1069999999993,
+              "max": 1833.2999999999993
+            },
+            "peakRssKb": 1863660,
+            "peakJsHeap": 145137553
+          },
+          {
+            "viewer": "perfetto",
+            "id": "android-example-30s",
+            "file": "example_android_trace_30s_1",
+            "ok": true,
+            "baselineRssKb": 1253504,
+            "baselineJsHeap": 45503363,
+            "renderMs": 1950,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 2188,
+            "frames": {
+              "frames": 775,
+              "spanMs": 12966.199999999999,
+              "fps": 59.6936650676374,
+              "p50": 16.69999999999891,
+              "p95": 16.799999999999272,
+              "p99": 16.800000000000427,
+              "max": 83.39999999999964
+            },
+            "peakRssKb": 1805372,
+            "peakJsHeap": 204293639
+          }
+        ]
+      }
+    },
+    {
+      "id": "chrome-example",
+      "file": "chrome_example_wikipedia.perfetto_trace.gz",
+      "url": "https://storage.googleapis.com/perfetto-misc/chrome_example_wikipedia.perfetto_trace.gz",
+      "bytes": 21537072,
+      "format": "perfetto protobuf (the bytes are not gzip, despite the name)",
+      "role": "ui",
+      "where": "ui.perfetto.dev stable, command Open Chrome example. The same object is test/data/chrome_example_wikipedia.perfetto_trace.gz",
+      "summary": {
+        "perfr": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 2263,
+          "interactMs": 3884,
+          "peakRssMb": 3550.68359375,
+          "baselineRssMb": 1178.578125,
+          "peakJsHeapMb": 16.68153476715088,
+          "fps": 3.9937826131510956,
+          "frameP50": 233.3249999999971,
+          "frameP95": 449.9850000000006,
+          "frameP99": 455.98439999999937,
+          "events": 298037,
+          "prims": 7019
+        },
+        "perfetto": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 1684,
+          "interactMs": 2163,
+          "peakRssMb": 1772.08984375,
+          "baselineRssMb": 1216.53125,
+          "peakJsHeapMb": 117.3455171585083,
+          "fps": 13.952465393761942,
+          "frameP50": 83.29999999999927,
+          "frameP95": 150.04499999999933,
+          "frameP99": 183.30000000000018,
+          "events": null,
+          "prims": null
+        }
+      },
+      "runs": {
+        "perfr": [
+          {
+            "viewer": "perfr",
+            "id": "chrome-example",
+            "file": "chrome_example_wikipedia.perfetto_trace.gz",
+            "ok": true,
+            "baselineRssKb": 1208800,
+            "baselineJsHeap": 2484174,
+            "renderMs": 2265,
+            "events": 298037,
+            "prims": 7019,
+            "content": [
+              3959555665796,
+              3986107894797
+            ],
+            "view": [
+              3959555665796,
+              3986107894797
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_example_wikipedia.perfetto_trace.gz",
+            "shot": "docs/images/perfr-chrome-example.png",
+            "viewChanged": true,
+            "interactMs": 3476,
+            "frames": {
+              "frames": 161,
+              "spanMs": 47498.104999999996,
+              "fps": 3.3685554402644065,
+              "p50": 399.9825000000001,
+              "p95": 449.9850000000006,
+              "p99": 449.9850000000006,
+              "max": 466.65000000000146
+            },
+            "peakRssKb": 3657040,
+            "peakJsHeap": 23694867
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-example",
+            "file": "chrome_example_wikipedia.perfetto_trace.gz",
+            "ok": true,
+            "baselineRssKb": 1209056,
+            "baselineJsHeap": 2479602,
+            "renderMs": 2187,
+            "events": 298037,
+            "prims": 7019,
+            "content": [
+              3959555665796,
+              3986107894797
+            ],
+            "view": [
+              3959555665796,
+              3986107894797
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_example_wikipedia.perfetto_trace.gz",
+            "viewChanged": true,
+            "interactMs": 3817,
+            "frames": {
+              "frames": 168,
+              "spanMs": 41814.995,
+              "fps": 3.9937826131510956,
+              "p50": 233.32500000000437,
+              "p95": 449.9800000000032,
+              "p99": 466.6499999999967,
+              "max": 466.65000000000146
+            },
+            "peakRssKb": 3665088,
+            "peakJsHeap": 41665947
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-example",
+            "file": "chrome_example_wikipedia.perfetto_trace.gz",
+            "ok": true,
+            "baselineRssKb": 1205236,
+            "baselineJsHeap": 2520250,
+            "renderMs": 2263,
+            "events": 298037,
+            "prims": 7019,
+            "content": [
+              3959555665796,
+              3986107894797
+            ],
+            "view": [
+              3959555665796,
+              3986107894797
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_example_wikipedia.perfetto_trace.gz",
+            "viewChanged": true,
+            "interactMs": 3914,
+            "frames": {
+              "frames": 167,
+              "spanMs": 41598.335,
+              "fps": 3.990544333084485,
+              "p50": 216.65999999999804,
+              "p95": 449.9850000000006,
+              "p99": 466.65000000000146,
+              "max": 466.65000000000146
+            },
+            "peakRssKb": 3635900,
+            "peakJsHeap": 17096161
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-example",
+            "file": "chrome_example_wikipedia.perfetto_trace.gz",
+            "ok": true,
+            "baselineRssKb": 1206864,
+            "baselineJsHeap": 2475164,
+            "renderMs": 2268,
+            "events": 298037,
+            "prims": 7019,
+            "content": [
+              3959555665796,
+              3986107894797
+            ],
+            "view": [
+              3959555665796,
+              3986107894797
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_example_wikipedia.perfetto_trace.gz",
+            "viewChanged": true,
+            "interactMs": 3884,
+            "frames": {
+              "frames": 166,
+              "spanMs": 40465.049999999996,
+              "fps": 4.077592885712486,
+              "p50": 216.6600000000035,
+              "p95": 449.98399999999526,
+              "p99": 455.98439999999937,
+              "max": 466.65000000000146
+            },
+            "peakRssKb": 3407780,
+            "peakJsHeap": 17491857
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-example",
+            "file": "chrome_example_wikipedia.perfetto_trace.gz",
+            "ok": true,
+            "baselineRssKb": 1206712,
+            "baselineJsHeap": 2532484,
+            "renderMs": 2252,
+            "events": 298037,
+            "prims": 7019,
+            "content": [
+              3959555665796,
+              3986107894797
+            ],
+            "view": [
+              3959555665796,
+              3986107894797
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_example_wikipedia.perfetto_trace.gz",
+            "viewChanged": true,
+            "interactMs": 3891,
+            "frames": {
+              "frames": 172,
+              "spanMs": 40081.725000000006,
+              "fps": 4.266283449626981,
+              "p50": 233.3249999999971,
+              "p95": 449.9850000000006,
+              "p99": 449.9850000000006,
+              "max": 449.9850000000006
+            },
+            "peakRssKb": 3452480,
+            "peakJsHeap": 10806825
+          }
+        ],
+        "perfetto": [
+          {
+            "viewer": "perfetto",
+            "id": "chrome-example",
+            "file": "chrome_example_wikipedia.perfetto_trace.gz",
+            "ok": true,
+            "baselineRssKb": 1229832,
+            "baselineJsHeap": 41196963,
+            "renderMs": 1720,
+            "version": "v59.1-79997ada9",
+            "shot": "docs/images/perfetto-chrome-example.png",
+            "viewChanged": true,
+            "interactMs": 2207,
+            "frames": {
+              "frames": 205,
+              "spanMs": 14549.400000000001,
+              "fps": 14.021196750381458,
+              "p50": 83.29999999999927,
+              "p95": 150.10000000000036,
+              "p99": 216.10200000000034,
+              "max": 266.60000000000036
+            },
+            "peakRssKb": 1799280,
+            "peakJsHeap": 121034775
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-example",
+            "file": "chrome_example_wikipedia.perfetto_trace.gz",
+            "ok": true,
+            "baselineRssKb": 1255708,
+            "baselineJsHeap": 42075485,
+            "renderMs": 1684,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 2100,
+            "frames": {
+              "frames": 204,
+              "spanMs": 14549.4,
+              "fps": 13.952465393761942,
+              "p50": 83.29999999999927,
+              "p95": 150,
+              "p99": 183.30000000000018,
+              "max": 200
+            },
+            "peakRssKb": 1814620,
+            "peakJsHeap": 123550403
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-example",
+            "file": "chrome_example_wikipedia.perfetto_trace.gz",
+            "ok": true,
+            "baselineRssKb": 1248144,
+            "baselineJsHeap": 44516112,
+            "renderMs": 1685,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 2163,
+            "frames": {
+              "frames": 200,
+              "spanMs": 14682.7,
+              "fps": 13.553365525414263,
+              "p50": 83.29999999999927,
+              "p95": 151.75000000000009,
+              "p99": 200,
+              "max": 266.60000000000036
+            },
+            "peakRssKb": 1804988,
+            "peakJsHeap": 122276879
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-example",
+            "file": "chrome_example_wikipedia.perfetto_trace.gz",
+            "ok": true,
+            "baselineRssKb": 1245728,
+            "baselineJsHeap": 44503217,
+            "renderMs": 1670,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 2117,
+            "frames": {
+              "frames": 213,
+              "spanMs": 15216,
+              "fps": 13.932702418506835,
+              "p50": 66.70000000000073,
+              "p95": 150.04499999999933,
+              "p99": 166.70000000000073,
+              "max": 183.30000000000018
+            },
+            "peakRssKb": 1814732,
+            "peakJsHeap": 123049305
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-example",
+            "file": "chrome_example_wikipedia.perfetto_trace.gz",
+            "ok": true,
+            "baselineRssKb": 1244196,
+            "baselineJsHeap": 44494948,
+            "renderMs": 1649,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 2305,
+            "frames": {
+              "frames": 227,
+              "spanMs": 14782.800000000001,
+              "fps": 15.288037448927131,
+              "p50": 66.69999999999891,
+              "p95": 133.375,
+              "p99": 179.1500000000001,
+              "max": 183.3000000000011
+            },
+            "peakRssKb": 1817316,
+            "peakJsHeap": 123045693
+          }
+        ]
+      }
+    },
+    {
+      "id": "chrome-json-example",
+      "file": "example_chrome_trace_4s_1.json",
+      "url": "https://storage.googleapis.com/perfetto-misc/example_chrome_trace_4s_1.json",
+      "bytes": 7756966,
+      "format": "chrome json",
+      "role": "legacy-ui",
+      "where": "older Perfetto UI sidebar (example_chrome_trace_4s_1.json). Still published. Not in the v59.1 example list.",
+      "summary": {
+        "perfr": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 520,
+          "interactMs": 728,
+          "peakRssMb": 1336.26953125,
+          "baselineRssMb": 1178.6640625,
+          "peakJsHeapMb": 9.746051788330078,
+          "fps": 14.90505669972744,
+          "frameP50": 66.66499999999996,
+          "frameP95": 133.3249999999989,
+          "frameP99": 133.3331999999994,
+          "events": 27622,
+          "prims": 421
+        },
+        "perfetto": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 756,
+          "interactMs": 968,
+          "peakRssMb": 1581.1328125,
+          "baselineRssMb": 1215.6640625,
+          "peakJsHeapMb": 68.15243434906006,
+          "fps": 59.92635005832527,
+          "frameP50": 16.69999999999891,
+          "frameP95": 16.799999999999272,
+          "frameP99": 16.80000000000109,
+          "events": null,
+          "prims": null
+        }
+      },
+      "runs": {
+        "perfr": [
+          {
+            "viewer": "perfr",
+            "id": "chrome-json-example",
+            "file": "example_chrome_trace_4s_1.json",
+            "ok": true,
+            "baselineRssKb": 1206952,
+            "baselineJsHeap": 2535062,
+            "renderMs": 558,
+            "events": 27622,
+            "prims": 421,
+            "content": [
+              8887722964000,
+              9028127142000
+            ],
+            "view": [
+              8887722964000,
+              9028127142000
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_chrome_trace_4s_1.json",
+            "shot": "docs/images/perfr-chrome-json-example.png",
+            "viewChanged": true,
+            "interactMs": 680,
+            "frames": {
+              "frames": 237,
+              "spanMs": 15749.365,
+              "fps": 14.984731130429703,
+              "p50": 66.66499999999996,
+              "p95": 133.3249999999989,
+              "p99": 144.16225,
+              "max": 166.65999999999985
+            },
+            "peakRssKb": 1368340,
+            "peakJsHeap": 13117631
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-json-example",
+            "file": "example_chrome_trace_4s_1.json",
+            "ok": true,
+            "baselineRssKb": 1208128,
+            "baselineJsHeap": 2485134,
+            "renderMs": 520,
+            "events": 27622,
+            "prims": 421,
+            "content": [
+              8887722964000,
+              9028127142000
+            ],
+            "view": [
+              8887722964000,
+              9028127142000
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_chrome_trace_4s_1.json",
+            "viewChanged": true,
+            "interactMs": 728,
+            "frames": {
+              "frames": 238,
+              "spanMs": 15799.369999999999,
+              "fps": 15.000598125115117,
+              "p50": 66.66499999999905,
+              "p95": 119.9969999999992,
+              "p99": 133.3331999999994,
+              "max": 149.9949999999999
+            },
+            "peakRssKb": 1371156,
+            "peakJsHeap": 14421689
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-json-example",
+            "file": "example_chrome_trace_4s_1.json",
+            "ok": true,
+            "baselineRssKb": 1207816,
+            "baselineJsHeap": 2530230,
+            "renderMs": 518,
+            "events": 27622,
+            "prims": 421,
+            "content": [
+              8887722964000,
+              9028127142000
+            ],
+            "view": [
+              8887722964000,
+              9028127142000
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_chrome_trace_4s_1.json",
+            "viewChanged": true,
+            "interactMs": 730,
+            "frames": {
+              "frames": 235,
+              "spanMs": 15866.029999999999,
+              "fps": 14.748490958355683,
+              "p50": 66.66499999999996,
+              "p95": 133.32499999999922,
+              "p99": 133.32999999999993,
+              "max": 133.33500000000095
+            },
+            "peakRssKb": 1357960,
+            "peakJsHeap": 10219476
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-json-example",
+            "file": "example_chrome_trace_4s_1.json",
+            "ok": true,
+            "baselineRssKb": 1205880,
+            "baselineJsHeap": 2486210,
+            "renderMs": 568,
+            "events": 27622,
+            "prims": 421,
+            "content": [
+              8887722964000,
+              9028127142000
+            ],
+            "view": [
+              8887722964000,
+              9028127142000
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_chrome_trace_4s_1.json",
+            "viewChanged": true,
+            "interactMs": 784,
+            "frames": {
+              "frames": 237,
+              "spanMs": 16066.020000000002,
+              "fps": 14.689387913123472,
+              "p50": 66.66499999999996,
+              "p95": 116.66125000000056,
+              "p99": 133.32999999999993,
+              "max": 183.3249999999989
+            },
+            "peakRssKb": 1357876,
+            "peakJsHeap": 9726765
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-json-example",
+            "file": "example_chrome_trace_4s_1.json",
+            "ok": true,
+            "baselineRssKb": 1206644,
+            "baselineJsHeap": 2479266,
+            "renderMs": 499,
+            "events": 27622,
+            "prims": 421,
+            "content": [
+              8887722964000,
+              9028127142000
+            ],
+            "view": [
+              8887722964000,
+              9028127142000
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "example_chrome_trace_4s_1.json",
+            "viewChanged": true,
+            "interactMs": 704,
+            "frames": {
+              "frames": 235,
+              "spanMs": 15699.37,
+              "fps": 14.90505669972744,
+              "p50": 66.66499999999996,
+              "p95": 133.32500000000073,
+              "p99": 161.16054999999966,
+              "max": 166.66000000000167
+            },
+            "peakRssKb": 1368344,
+            "peakJsHeap": 10169396
+          }
+        ],
+        "perfetto": [
+          {
+            "viewer": "perfetto",
+            "id": "chrome-json-example",
+            "file": "example_chrome_trace_4s_1.json",
+            "ok": true,
+            "baselineRssKb": 1244840,
+            "baselineJsHeap": 44723403,
+            "renderMs": 802,
+            "version": "v59.1-79997ada9",
+            "shot": "docs/images/perfetto-chrome-json-example.png",
+            "viewChanged": true,
+            "interactMs": 968,
+            "frames": {
+              "frames": 785,
+              "spanMs": 13066.099999999999,
+              "fps": 60.00260215366483,
+              "p50": 16.69999999999891,
+              "p95": 16.799999999999272,
+              "p99": 16.80000000000109,
+              "max": 16.80000000000109
+            },
+            "peakRssKb": 1619080,
+            "peakJsHeap": 71463007
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-json-example",
+            "file": "example_chrome_trace_4s_1.json",
+            "ok": true,
+            "baselineRssKb": 1247536,
+            "baselineJsHeap": 44612633,
+            "renderMs": 709,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 882,
+            "frames": {
+              "frames": 787,
+              "spanMs": 13116.099999999999,
+              "fps": 59.92635005832527,
+              "p50": 16.69999999999891,
+              "p95": 16.799999999999272,
+              "p99": 16.800000000000182,
+              "max": 33.30000000000018
+            },
+            "peakRssKb": 1585756,
+            "peakJsHeap": 70580519
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-json-example",
+            "file": "example_chrome_trace_4s_1.json",
+            "ok": true,
+            "baselineRssKb": 1239712,
+            "baselineJsHeap": 44479088,
+            "renderMs": 699,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 859,
+            "frames": {
+              "frames": 787,
+              "spanMs": 13099.4,
+              "fps": 60.00274821747561,
+              "p50": 16.69999999999891,
+              "p95": 16.799999999999613,
+              "p99": 16.80000000000109,
+              "max": 16.80000000000109
+            },
+            "peakRssKb": 1595580,
+            "peakJsHeap": 70617373
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-json-example",
+            "file": "example_chrome_trace_4s_1.json",
+            "ok": true,
+            "baselineRssKb": 1248660,
+            "baselineJsHeap": 45677324,
+            "renderMs": 756,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 994,
+            "frames": {
+              "frames": 772,
+              "spanMs": 13716.1,
+              "fps": 56.21131371162357,
+              "p50": 16.699999999999818,
+              "p95": 16.799999999999272,
+              "p99": 16.80000000000109,
+              "max": 216.60000000000036
+            },
+            "peakRssKb": 1684868,
+            "peakJsHeap": 115891267
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-json-example",
+            "file": "example_chrome_trace_4s_1.json",
+            "ok": true,
+            "baselineRssKb": 1241168,
+            "baselineJsHeap": 44487573,
+            "renderMs": 769,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 1004,
+            "frames": {
+              "frames": 772,
+              "spanMs": 13732.8,
+              "fps": 56.14295700803915,
+              "p50": 16.69999999999891,
+              "p95": 16.799999999999272,
+              "p99": 16.80000000000109,
+              "max": 216.60000000000036
+            },
+            "peakRssKb": 1690420,
+            "peakJsHeap": 116257686
+          }
+        ]
+      }
+    },
+    {
+      "id": "chrome-rendering",
+      "file": "chrome_rendering_desktop.pftrace",
+      "url": "https://storage.googleapis.com/perfetto/test_data/chrome_rendering_desktop.pftrace-f61971e42ea0ce0f6da71c87a0ab19da0e13deca0fa90c6bdc98782af01ae702",
+      "bytes": 8305513,
+      "format": "perfetto protobuf",
+      "role": "test-data",
+      "where": "test/data/chrome_rendering_desktop.pftrace",
+      "summary": {
+        "perfr": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 723,
+          "interactMs": 1107,
+          "peakRssMb": 1358.5234375,
+          "baselineRssMb": 1176.90625,
+          "peakJsHeapMb": 14.860546112060547,
+          "fps": 8.37896777865129,
+          "frameP50": 116.65999999999985,
+          "frameP95": 183.32999999999993,
+          "frameP99": 349.9850000000006,
+          "events": 111475,
+          "prims": 2075
+        },
+        "perfetto": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 999,
+          "interactMs": 1592,
+          "peakRssMb": 1586.125,
+          "baselineRssMb": 1218.04296875,
+          "peakJsHeapMb": 71.4925184249878,
+          "fps": 9.32380233539049,
+          "frameP50": 116.60000000000036,
+          "frameP95": 233.39999999999995,
+          "frameP99": 293.64600000000013,
+          "events": null,
+          "prims": null
+        }
+      },
+      "runs": {
+        "perfr": [
+          {
+            "viewer": "perfr",
+            "id": "chrome-rendering",
+            "file": "chrome_rendering_desktop.pftrace",
+            "ok": true,
+            "baselineRssKb": 1205156,
+            "baselineJsHeap": 2479666,
+            "renderMs": 697,
+            "events": 111475,
+            "prims": 3675,
+            "content": [
+              166438255116000,
+              166492140826001
+            ],
+            "view": [
+              166438255116000,
+              166492140826001
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_rendering_desktop.pftrace",
+            "shot": "docs/images/perfr-chrome-rendering.png",
+            "viewChanged": true,
+            "interactMs": 1162,
+            "frames": {
+              "frames": 157,
+              "spanMs": 17449.295000000002,
+              "fps": 8.940189274122535,
+              "p50": 116.65999999999985,
+              "p95": 183.32999999999993,
+              "p99": 231.6557499999994,
+              "max": 349.98499999999876
+            },
+            "peakRssKb": 1391196,
+            "peakJsHeap": 12406379
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-rendering",
+            "file": "chrome_rendering_desktop.pftrace",
+            "ok": true,
+            "baselineRssKb": 1205076,
+            "baselineJsHeap": 2531286,
+            "renderMs": 693,
+            "events": 111475,
+            "prims": 2075,
+            "content": [
+              166438255116000,
+              166492140826001
+            ],
+            "view": [
+              166438255116000,
+              166492140826001
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_rendering_desktop.pftrace",
+            "viewChanged": true,
+            "interactMs": 954,
+            "frames": {
+              "frames": 145,
+              "spanMs": 18132.605000000003,
+              "fps": 7.941495444256353,
+              "p50": 133.32999999999993,
+              "p95": 197.4909999999997,
+              "p99": 349.9878500000001,
+              "max": 349.9899999999998
+            },
+            "peakRssKb": 1387488,
+            "peakJsHeap": 15679214
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-rendering",
+            "file": "chrome_rendering_desktop.pftrace",
+            "ok": true,
+            "baselineRssKb": 1209788,
+            "baselineJsHeap": 2539346,
+            "renderMs": 849,
+            "events": 111475,
+            "prims": 2075,
+            "content": [
+              166438255116000,
+              166492140826001
+            ],
+            "view": [
+              166438255116000,
+              166492140826001
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_rendering_desktop.pftrace",
+            "viewChanged": true,
+            "interactMs": 1116,
+            "frames": {
+              "frames": 150,
+              "spanMs": 17782.62,
+              "fps": 8.37896777865129,
+              "p50": 116.65999999999985,
+              "p95": 283.3199999999997,
+              "p99": 349.9850000000006,
+              "max": 349.9899999999998
+            },
+            "peakRssKb": 1384492,
+            "peakJsHeap": 14016424
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-rendering",
+            "file": "chrome_rendering_desktop.pftrace",
+            "ok": true,
+            "baselineRssKb": 1205152,
+            "baselineJsHeap": 2533982,
+            "renderMs": 723,
+            "events": 111475,
+            "prims": 2075,
+            "content": [
+              166438255116000,
+              166492140826001
+            ],
+            "view": [
+              166438255116000,
+              166492140826001
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_rendering_desktop.pftrace",
+            "viewChanged": true,
+            "interactMs": 983,
+            "frames": {
+              "frames": 163,
+              "spanMs": 18265.935,
+              "fps": 8.868968382948914,
+              "p50": 99.9950000000008,
+              "p95": 183.32999999999993,
+              "p99": 349.98499999999876,
+              "max": 349.9850000000006
+            },
+            "peakRssKb": 1391128,
+            "peakJsHeap": 15676628
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-rendering",
+            "file": "chrome_rendering_desktop.pftrace",
+            "ok": true,
+            "baselineRssKb": 1204536,
+            "baselineJsHeap": 2470114,
+            "renderMs": 878,
+            "events": 111475,
+            "prims": 2075,
+            "content": [
+              166438255116000,
+              166492140826001
+            ],
+            "view": [
+              166438255116000,
+              166492140826001
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_rendering_desktop.pftrace",
+            "viewChanged": true,
+            "interactMs": 1107,
+            "frames": {
+              "frames": 147,
+              "spanMs": 18099.28,
+              "fps": 8.06661922463214,
+              "p50": 133.3250000000005,
+              "p95": 183.32999999999993,
+              "p99": 349.98774999999915,
+              "max": 349.9899999999998
+            },
+            "peakRssKb": 1395208,
+            "peakJsHeap": 15582412
+          }
+        ],
+        "perfetto": [
+          {
+            "viewer": "perfetto",
+            "id": "chrome-rendering",
+            "file": "chrome_rendering_desktop.pftrace",
+            "ok": true,
+            "baselineRssKb": 1249536,
+            "baselineJsHeap": 44480196,
+            "renderMs": 937,
+            "version": "v59.1-79997ada9",
+            "shot": "docs/images/perfetto-chrome-rendering.png",
+            "viewChanged": true,
+            "interactMs": 1592,
+            "frames": {
+              "frames": 148,
+              "spanMs": 15916,
+              "fps": 9.235988941945212,
+              "p50": 116.60000000000036,
+              "p95": 233.3699999999998,
+              "p99": 259.01800000000026,
+              "max": 366.6999999999998
+            },
+            "peakRssKb": 1627400,
+            "peakJsHeap": 74821377
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-rendering",
+            "file": "chrome_rendering_desktop.pftrace",
+            "ok": true,
+            "baselineRssKb": 1229692,
+            "baselineJsHeap": 44717112,
+            "renderMs": 999,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 1523,
+            "frames": {
+              "frames": 148,
+              "spanMs": 15766.1,
+              "fps": 9.32380233539049,
+              "p50": 116.60000000000036,
+              "p95": 261.6899999999997,
+              "p99": 325.66399999999896,
+              "max": 333.3000000000002
+            },
+            "peakRssKb": 1620608,
+            "peakJsHeap": 74983764
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-rendering",
+            "file": "chrome_rendering_desktop.pftrace",
+            "ok": true,
+            "baselineRssKb": 1246528,
+            "baselineJsHeap": 44582435,
+            "renderMs": 1162,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 1690,
+            "frames": {
+              "frames": 148,
+              "spanMs": 15682.699999999999,
+              "fps": 9.37338596032571,
+              "p50": 116.60000000000036,
+              "p95": 233.39999999999995,
+              "p99": 293.64600000000013,
+              "max": 333.39999999999964
+            },
+            "peakRssKb": 1623280,
+            "peakJsHeap": 74965339
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-rendering",
+            "file": "chrome_rendering_desktop.pftrace",
+            "ok": true,
+            "baselineRssKb": 1247448,
+            "baselineJsHeap": 44867535,
+            "renderMs": 967,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 1505,
+            "frames": {
+              "frames": 147,
+              "spanMs": 15816,
+              "fps": 9.23115832068791,
+              "p50": 116.60000000000036,
+              "p95": 250,
+              "p99": 325.84000000000015,
+              "max": 383.40000000000055
+            },
+            "peakRssKb": 1624192,
+            "peakJsHeap": 74839749
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-rendering",
+            "file": "chrome_rendering_desktop.pftrace",
+            "ok": true,
+            "baselineRssKb": 1247276,
+            "baselineJsHeap": 45470107,
+            "renderMs": 1006,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 1739,
+            "frames": {
+              "frames": 149,
+              "spanMs": 15649.400000000001,
+              "fps": 9.457231587153501,
+              "p50": 116.60000000000036,
+              "p95": 216.70000000000073,
+              "p99": 266.6999999999998,
+              "max": 283.3000000000002
+            },
+            "peakRssKb": 1625880,
+            "peakJsHeap": 75071351
+          }
+        ]
+      }
+    },
+    {
+      "id": "chrome-scroll",
+      "file": "chrome_scroll_without_vsync.pftrace",
+      "url": "https://storage.googleapis.com/perfetto/test_data/chrome_scroll_without_vsync.pftrace-74890239a1042cb93a87b8b5b5d9942f821ed3cc0c1236e7734d45a550e3cde4",
+      "bytes": 1359814,
+      "format": "perfetto protobuf",
+      "role": "test-data",
+      "where": "test/data/chrome_scroll_without_vsync.pftrace",
+      "summary": {
+        "perfr": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 345,
+          "interactMs": 803,
+          "peakRssMb": 1327.390625,
+          "baselineRssMb": 1176.9609375,
+          "peakJsHeapMb": 5.282766342163086,
+          "fps": 7.26209305882965,
+          "frameP50": 149.99000000000046,
+          "frameP95": 284.15800000000024,
+          "frameP99": 316.6550000000018,
+          "events": 20690,
+          "prims": 5332
+        },
+        "perfetto": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 722,
+          "interactMs": 1036,
+          "peakRssMb": 1551.5703125,
+          "baselineRssMb": 1217.140625,
+          "peakJsHeapMb": 55.98569869995117,
+          "fps": 27.030639675632322,
+          "frameP50": 33.30000000000018,
+          "frameP95": 83.30000000000109,
+          "frameP99": 116.59999999999854,
+          "events": null,
+          "prims": null
+        }
+      },
+      "runs": {
+        "perfr": [
+          {
+            "viewer": "perfr",
+            "id": "chrome-scroll",
+            "file": "chrome_scroll_without_vsync.pftrace",
+            "ok": true,
+            "baselineRssKb": 1204256,
+            "baselineJsHeap": 2529206,
+            "renderMs": 403,
+            "events": 20690,
+            "prims": 5332,
+            "content": [
+              543793305611,
+              548821239403
+            ],
+            "view": [
+              543793305611,
+              548821239403
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_scroll_without_vsync.pftrace",
+            "shot": "docs/images/perfr-chrome-scroll.png",
+            "viewChanged": true,
+            "interactMs": 872,
+            "frames": {
+              "frames": 140,
+              "spanMs": 18665.920000000002,
+              "fps": 7.44672644048619,
+              "p50": 133.33000000000084,
+              "p95": 283.3204999999998,
+              "p99": 316.65500000000065,
+              "max": 316.65500000000065
+            },
+            "peakRssKb": 1364532,
+            "peakJsHeap": 5631264
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-scroll",
+            "file": "chrome_scroll_without_vsync.pftrace",
+            "ok": true,
+            "baselineRssKb": 1205208,
+            "baselineJsHeap": 2531666,
+            "renderMs": 345,
+            "events": 20690,
+            "prims": 5332,
+            "content": [
+              543793305611,
+              548821239403
+            ],
+            "view": [
+              543793305611,
+              548821239403
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_scroll_without_vsync.pftrace",
+            "viewChanged": true,
+            "interactMs": 780,
+            "frames": {
+              "frames": 142,
+              "spanMs": 19415.89,
+              "fps": 7.26209305882965,
+              "p50": 149.98999999999978,
+              "p95": 299.9949999999999,
+              "p99": 326.654,
+              "max": 333.3199999999997
+            },
+            "peakRssKb": 1351728,
+            "peakJsHeap": 5231934
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-scroll",
+            "file": "chrome_scroll_without_vsync.pftrace",
+            "ok": true,
+            "baselineRssKb": 1202760,
+            "baselineJsHeap": 2480522,
+            "renderMs": 340,
+            "events": 20690,
+            "prims": 5332,
+            "content": [
+              543793305611,
+              548821239403
+            ],
+            "view": [
+              543793305611,
+              548821239403
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_scroll_without_vsync.pftrace",
+            "viewChanged": true,
+            "interactMs": 802,
+            "frames": {
+              "frames": 140,
+              "spanMs": 19365.890000000003,
+              "fps": 7.177568394739409,
+              "p50": 149.9949999999999,
+              "p95": 301.6559999999995,
+              "p99": 326.9873000000001,
+              "max": 333.3250000000007
+            },
+            "peakRssKb": 1356040,
+            "peakJsHeap": 5546910
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-scroll",
+            "file": "chrome_scroll_without_vsync.pftrace",
+            "ok": true,
+            "baselineRssKb": 1206192,
+            "baselineJsHeap": 2519422,
+            "renderMs": 345,
+            "events": 20690,
+            "prims": 5332,
+            "content": [
+              543793305611,
+              548821239403
+            ],
+            "view": [
+              543793305611,
+              548821239403
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_scroll_without_vsync.pftrace",
+            "viewChanged": true,
+            "interactMs": 813,
+            "frames": {
+              "frames": 141,
+              "spanMs": 19115.9,
+              "fps": 7.323746200806657,
+              "p50": 149.99000000000046,
+              "p95": 284.15800000000024,
+              "p99": 316.6530500000003,
+              "max": 316.65500000000065
+            },
+            "peakRssKb": 1360504,
+            "peakJsHeap": 5234242
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-scroll",
+            "file": "chrome_scroll_without_vsync.pftrace",
+            "ok": true,
+            "baselineRssKb": 1207256,
+            "baselineJsHeap": 2529142,
+            "renderMs": 339,
+            "events": 20690,
+            "prims": 5332,
+            "content": [
+              543793305611,
+              548821239403
+            ],
+            "view": [
+              543793305611,
+              548821239403
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_scroll_without_vsync.pftrace",
+            "viewChanged": true,
+            "interactMs": 803,
+            "frames": {
+              "frames": 141,
+              "spanMs": 19499.215,
+              "fps": 7.179776211503899,
+              "p50": 149.99499999999944,
+              "p95": 266.65524999999974,
+              "p99": 316.6550000000018,
+              "max": 333.3149999999987
+            },
+            "peakRssKb": 1359248,
+            "peakJsHeap": 5539382
+          }
+        ],
+        "perfetto": [
+          {
+            "viewer": "perfetto",
+            "id": "chrome-scroll",
+            "file": "chrome_scroll_without_vsync.pftrace",
+            "ok": true,
+            "baselineRssKb": 1246268,
+            "baselineJsHeap": 44575848,
+            "renderMs": 738,
+            "version": "v59.1-79997ada9",
+            "shot": "docs/images/perfetto-chrome-scroll.png",
+            "viewChanged": true,
+            "interactMs": 1051,
+            "frames": {
+              "frames": 367,
+              "spanMs": 13432.8,
+              "fps": 27.2467393246382,
+              "p50": 33.30000000000018,
+              "p95": 83.375,
+              "p99": 105.87500000000074,
+              "max": 133.40000000000055
+            },
+            "peakRssKb": 1590392,
+            "peakJsHeap": 58540472
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-scroll",
+            "file": "chrome_scroll_without_vsync.pftrace",
+            "ok": true,
+            "baselineRssKb": 1246352,
+            "baselineJsHeap": 46628440,
+            "renderMs": 696,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 1015,
+            "frames": {
+              "frames": 358,
+              "spanMs": 13599.4,
+              "fps": 26.25115813932968,
+              "p50": 33.30000000000109,
+              "p95": 83.30000000000109,
+              "p99": 99.90000000000094,
+              "max": 116.70000000000073
+            },
+            "peakRssKb": 1589636,
+            "peakJsHeap": 59201274
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-scroll",
+            "file": "chrome_scroll_without_vsync.pftrace",
+            "ok": true,
+            "baselineRssKb": 1247252,
+            "baselineJsHeap": 44536869,
+            "renderMs": 686,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 1047,
+            "frames": {
+              "frames": 371,
+              "spanMs": 13516.1,
+              "fps": 27.374760470845878,
+              "p50": 33.30000000000018,
+              "p95": 83.30000000000109,
+              "p99": 116.59999999999854,
+              "max": 116.69999999999891
+            },
+            "peakRssKb": 1588244,
+            "peakJsHeap": 58705260
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-scroll",
+            "file": "chrome_scroll_without_vsync.pftrace",
+            "ok": true,
+            "baselineRssKb": 1240172,
+            "baselineJsHeap": 46613831,
+            "renderMs": 724,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 1000,
+            "frames": {
+              "frames": 344,
+              "spanMs": 13532.800000000001,
+              "fps": 25.34582643650981,
+              "p50": 33.399999999999636,
+              "p95": 83.30000000000109,
+              "p99": 116.70000000000033,
+              "max": 133.4000000000001
+            },
+            "peakRssKb": 1583556,
+            "peakJsHeap": 59082261
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-scroll",
+            "file": "chrome_scroll_without_vsync.pftrace",
+            "ok": true,
+            "baselineRssKb": 1249140,
+            "baselineJsHeap": 46657137,
+            "renderMs": 722,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 1036,
+            "frames": {
+              "frames": 365,
+              "spanMs": 13466.2,
+              "fps": 27.030639675632322,
+              "p50": 33.30000000000018,
+              "p95": 83.30000000000018,
+              "p99": 116.59999999999904,
+              "max": 133.4000000000001
+            },
+            "peakRssKb": 1588808,
+            "peakJsHeap": 58623952
+          }
+        ]
+      }
+    },
+    {
+      "id": "chrome-histograms",
+      "file": "chrome_5672_histograms.pftrace.gz",
+      "url": "https://storage.googleapis.com/perfetto/test_data/chrome_5672_histograms.pftrace.gz-a09bd44078ac71bcfbc901b0544750e8344d0d0f6f96e220f700a5a53fa932ee",
+      "bytes": 1127472,
+      "format": "gzip of perfetto protobuf",
+      "role": "test-data",
+      "where": "test/data/chrome_5672_histograms.pftrace.gz",
+      "summary": {
+        "perfr": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 686,
+          "interactMs": 888,
+          "peakRssMb": 1276.00390625,
+          "baselineRssMb": 1179.83984375,
+          "peakJsHeapMb": 6.414274215698242,
+          "fps": 15.136832424063812,
+          "frameP50": 66.66499999999996,
+          "frameP95": 116.65999999999985,
+          "frameP99": 133.32779999999926,
+          "events": 145368,
+          "prims": 0
+        },
+        "perfetto": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 1056,
+          "interactMs": 1509,
+          "peakRssMb": 1827.15625,
+          "baselineRssMb": 1215.2421875,
+          "peakJsHeapMb": 63.15547847747803,
+          "fps": 11.299957707760626,
+          "frameP50": 83.40000000000055,
+          "frameP95": 178.31999999999954,
+          "frameP99": 227.95600000000036,
+          "events": null,
+          "prims": null
+        }
+      },
+      "runs": {
+        "perfr": [
+          {
+            "viewer": "perfr",
+            "id": "chrome-histograms",
+            "file": "chrome_5672_histograms.pftrace.gz",
+            "ok": true,
+            "baselineRssKb": 1204500,
+            "baselineJsHeap": 2514908,
+            "renderMs": 727,
+            "events": 145368,
+            "prims": 0,
+            "content": [
+              351128562991000,
+              351150111068001
+            ],
+            "view": [
+              351128562991000,
+              351150111068001
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_5672_histograms.pftrace.gz",
+            "shot": "docs/images/perfr-chrome-histograms.png",
+            "viewChanged": true,
+            "interactMs": 972,
+            "frames": {
+              "frames": 248,
+              "spanMs": 16266.015,
+              "fps": 15.185034564396997,
+              "p50": 66.66499999999996,
+              "p95": 111.658499999999,
+              "p99": 133.3276999999993,
+              "max": 133.33000000000175
+            },
+            "peakRssKb": 1308692,
+            "peakJsHeap": 7363652
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-histograms",
+            "file": "chrome_5672_histograms.pftrace.gz",
+            "ok": true,
+            "baselineRssKb": 1209472,
+            "baselineJsHeap": 2534494,
+            "renderMs": 673,
+            "events": 145368,
+            "prims": 0,
+            "content": [
+              351128562991000,
+              351150111068001
+            ],
+            "view": [
+              351128562991000,
+              351150111068001
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_5672_histograms.pftrace.gz",
+            "viewChanged": true,
+            "interactMs": 827,
+            "frames": {
+              "frames": 251,
+              "spanMs": 16516.004999999997,
+              "fps": 15.136832424063812,
+              "p50": 66.66499999999951,
+              "p95": 116.65999999999985,
+              "p99": 133.32999999999993,
+              "max": 133.32999999999993
+            },
+            "peakRssKb": 1306628,
+            "peakJsHeap": 6343270
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-histograms",
+            "file": "chrome_5672_histograms.pftrace.gz",
+            "ok": true,
+            "baselineRssKb": 1205500,
+            "baselineJsHeap": 2544974,
+            "renderMs": 745,
+            "events": 145368,
+            "prims": 0,
+            "content": [
+              351128562991000,
+              351150111068001
+            ],
+            "view": [
+              351128562991000,
+              351150111068001
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_5672_histograms.pftrace.gz",
+            "viewChanged": true,
+            "interactMs": 945,
+            "frames": {
+              "frames": 246,
+              "spanMs": 16249.349999999999,
+              "fps": 15.077526177970197,
+              "p50": 66.66499999999905,
+              "p95": 100,
+              "p99": 125.99459999999993,
+              "max": 133.33000000000084
+            },
+            "peakRssKb": 1301580,
+            "peakJsHeap": 7355172
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-histograms",
+            "file": "chrome_5672_histograms.pftrace.gz",
+            "ok": true,
+            "baselineRssKb": 1208156,
+            "baselineJsHeap": 2474126,
+            "renderMs": 686,
+            "events": 145368,
+            "prims": 0,
+            "content": [
+              351128562991000,
+              351150111068001
+            ],
+            "view": [
+              351128562991000,
+              351150111068001
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_5672_histograms.pftrace.gz",
+            "viewChanged": true,
+            "interactMs": 841,
+            "frames": {
+              "frames": 250,
+              "spanMs": 16449.344999999998,
+              "fps": 15.137380850118959,
+              "p50": 66.66499999999996,
+              "p95": 116.6630000000001,
+              "p99": 133.32999999999993,
+              "max": 133.33000000000175
+            },
+            "peakRssKb": 1312116,
+            "peakJsHeap": 6214828
+          },
+          {
+            "viewer": "perfr",
+            "id": "chrome-histograms",
+            "file": "chrome_5672_histograms.pftrace.gz",
+            "ok": true,
+            "baselineRssKb": 1208392,
+            "baselineJsHeap": 2480522,
+            "renderMs": 679,
+            "events": 145368,
+            "prims": 0,
+            "content": [
+              351128562991000,
+              351150111068001
+            ],
+            "view": [
+              351128562991000,
+              351150111068001
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "chrome_5672_histograms.pftrace.gz",
+            "viewChanged": true,
+            "interactMs": 888,
+            "frames": {
+              "frames": 246,
+              "spanMs": 16282.689999999999,
+              "fps": 15.046653839138374,
+              "p50": 66.66499999999996,
+              "p95": 116.65999999999985,
+              "p99": 133.32779999999926,
+              "max": 133.32999999999993
+            },
+            "peakRssKb": 1303412,
+            "peakJsHeap": 6725854
+          }
+        ],
+        "perfetto": [
+          {
+            "viewer": "perfetto",
+            "id": "chrome-histograms",
+            "file": "chrome_5672_histograms.pftrace.gz",
+            "ok": true,
+            "baselineRssKb": 1244124,
+            "baselineJsHeap": 46584125,
+            "renderMs": 1109,
+            "version": "v59.1-79997ada9",
+            "shot": "docs/images/perfetto-chrome-histograms.png",
+            "viewChanged": true,
+            "interactMs": 1408,
+            "frames": {
+              "frames": 505,
+              "spanMs": 14449.500000000002,
+              "fps": 34.880099657427586,
+              "p50": 16.699999999999818,
+              "p95": 83.30000000000109,
+              "p99": 133.4000000000014,
+              "max": 383.40000000000146
+            },
+            "peakRssKb": 1986168,
+            "peakJsHeap": 119582347
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-histograms",
+            "file": "chrome_5672_histograms.pftrace.gz",
+            "ok": true,
+            "baselineRssKb": 1244104,
+            "baselineJsHeap": 46618965,
+            "renderMs": 1034,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 1414,
+            "frames": {
+              "frames": 172,
+              "spanMs": 15132.8,
+              "fps": 11.299957707760626,
+              "p50": 83.39999999999964,
+              "p95": 183.35000000000127,
+              "p99": 238.3099999999997,
+              "max": 300
+            },
+            "peakRssKb": 1864040,
+            "peakJsHeap": 65239207
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-histograms",
+            "file": "chrome_5672_histograms.pftrace.gz",
+            "ok": true,
+            "baselineRssKb": 1244408,
+            "baselineJsHeap": 44540821,
+            "renderMs": 1071,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 1559,
+            "frames": {
+              "frames": 169,
+              "spanMs": 15099.400000000001,
+              "fps": 11.126269918009987,
+              "p50": 83.40000000000055,
+              "p95": 183.39999999999964,
+              "p99": 233.3329999999994,
+              "max": 299.89999999999964
+            },
+            "peakRssKb": 1871008,
+            "peakJsHeap": 66426112
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-histograms",
+            "file": "chrome_5672_histograms.pftrace.gz",
+            "ok": true,
+            "baselineRssKb": 1246920,
+            "baselineJsHeap": 45190060,
+            "renderMs": 1051,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 1509,
+            "frames": {
+              "frames": 174,
+              "spanMs": 15049.399999999998,
+              "fps": 11.495474902653928,
+              "p50": 83.40000000000055,
+              "p95": 173.39999999999935,
+              "p99": 204.64799999999985,
+              "max": 216.60000000000036
+            },
+            "peakRssKb": 1865840,
+            "peakJsHeap": 63582160
+          },
+          {
+            "viewer": "perfetto",
+            "id": "chrome-histograms",
+            "file": "chrome_5672_histograms.pftrace.gz",
+            "ok": true,
+            "baselineRssKb": 1251988,
+            "baselineJsHeap": 42691033,
+            "renderMs": 1056,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 1526,
+            "frames": {
+              "frames": 168,
+              "spanMs": 15132.800000000001,
+              "fps": 11.035631211672657,
+              "p50": 99.89999999999964,
+              "p95": 178.31999999999954,
+              "p99": 227.95600000000036,
+              "max": 299.89999999999964
+            },
+            "peakRssKb": 1873008,
+            "peakJsHeap": 66223319
+          }
+        ]
+      }
+    },
+    {
+      "id": "async-json",
+      "file": "async-trace-1.json",
+      "url": "https://storage.googleapis.com/perfetto/test_data/async-trace-1.json-758ad1ffc85d002ec1168b40bc3733793799d4ff6719341ef4f92d469c6e4d01",
+      "bytes": 5591,
+      "format": "chrome json",
+      "role": "test-data",
+      "where": "test/data/async-trace-1.json",
+      "summary": {
+        "perfr": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 259,
+          "interactMs": 469,
+          "peakRssMb": 1278.19921875,
+          "baselineRssMb": 1177.91796875,
+          "peakJsHeapMb": 4.278776168823242,
+          "fps": 17.536145398201366,
+          "frameP50": 50,
+          "frameP95": 99.9950000000008,
+          "frameP99": 116.66499999999996,
+          "events": 16,
+          "prims": 14
+        },
+        "perfetto": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 512,
+          "interactMs": 722,
+          "peakRssMb": 1524.82421875,
+          "baselineRssMb": 1217.1484375,
+          "peakJsHeapMb": 58.88695049285889,
+          "fps": 60.00244595958052,
+          "frameP50": 16.69999999999891,
+          "frameP95": 16.700000000000728,
+          "frameP99": 16.80000000000109,
+          "events": null,
+          "prims": null
+        }
+      },
+      "runs": {
+        "perfr": [
+          {
+            "viewer": "perfr",
+            "id": "async-json",
+            "file": "async-trace-1.json",
+            "ok": true,
+            "baselineRssKb": 1207256,
+            "baselineJsHeap": 2465496,
+            "renderMs": 315,
+            "events": 16,
+            "prims": 14,
+            "content": [
+              724095664621000,
+              724098061723000
+            ],
+            "view": [
+              724095664621000,
+              724098061723000
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "async-trace-1.json",
+            "shot": "docs/images/perfr-async-json.png",
+            "viewChanged": true,
+            "interactMs": 420,
+            "frames": {
+              "frames": 272,
+              "spanMs": 15449.384999999998,
+              "fps": 17.54115131443744,
+              "p50": 50,
+              "p95": 99.9950000000008,
+              "p99": 121.66300000000038,
+              "max": 149.9950000000008
+            },
+            "peakRssKb": 1307312,
+            "peakJsHeap": 4441270
+          },
+          {
+            "viewer": "perfr",
+            "id": "async-json",
+            "file": "async-trace-1.json",
+            "ok": true,
+            "baselineRssKb": 1203812,
+            "baselineJsHeap": 2462146,
+            "renderMs": 260,
+            "events": 16,
+            "prims": 14,
+            "content": [
+              724095664621000,
+              724098061723000
+            ],
+            "view": [
+              724095664621000,
+              724098061723000
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "async-trace-1.json",
+            "viewChanged": true,
+            "interactMs": 469,
+            "frames": {
+              "frames": 266,
+              "spanMs": 15166.06,
+              "fps": 17.473226401583535,
+              "p50": 50,
+              "p95": 99.9950000000008,
+              "p99": 116.66500000000087,
+              "max": 133.32499999999982
+            },
+            "peakRssKb": 1303204,
+            "peakJsHeap": 4486622
+          },
+          {
+            "viewer": "perfr",
+            "id": "async-json",
+            "file": "async-trace-1.json",
+            "ok": true,
+            "baselineRssKb": 1205108,
+            "baselineJsHeap": 2484490,
+            "renderMs": 259,
+            "events": 16,
+            "prims": 14,
+            "content": [
+              724095664621000,
+              724098061723000
+            ],
+            "view": [
+              724095664621000,
+              724098061723000
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "async-trace-1.json",
+            "viewChanged": true,
+            "interactMs": 474,
+            "frames": {
+              "frames": 272,
+              "spanMs": 15432.715,
+              "fps": 17.56009879013511,
+              "p50": 50,
+              "p95": 99.9950000000008,
+              "p99": 116.66499999999996,
+              "max": 133.32500000000073
+            },
+            "peakRssKb": 1308876,
+            "peakJsHeap": 4489825
+          },
+          {
+            "viewer": "perfr",
+            "id": "async-json",
+            "file": "async-trace-1.json",
+            "ok": true,
+            "baselineRssKb": 1206628,
+            "baselineJsHeap": 2540694,
+            "renderMs": 257,
+            "events": 16,
+            "prims": 14,
+            "content": [
+              724095664621000,
+              724098061723000
+            ],
+            "view": [
+              724095664621000,
+              724098061723000
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "async-trace-1.json",
+            "viewChanged": true,
+            "interactMs": 412,
+            "frames": {
+              "frames": 269,
+              "spanMs": 15282.72,
+              "fps": 17.536145398201366,
+              "p50": 50,
+              "p95": 99.9950000000008,
+              "p99": 116.6616500000005,
+              "max": 149.99500000000035
+            },
+            "peakRssKb": 1311400,
+            "peakJsHeap": 4464492
+          },
+          {
+            "viewer": "perfr",
+            "id": "async-json",
+            "file": "async-trace-1.json",
+            "ok": true,
+            "baselineRssKb": 1206188,
+            "baselineJsHeap": 2529118,
+            "renderMs": 258,
+            "events": 16,
+            "prims": 14,
+            "content": [
+              724095664621000,
+              724098061723000
+            ],
+            "view": [
+              724095664621000,
+              724098061723000
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "async-trace-1.json",
+            "viewChanged": true,
+            "interactMs": 471,
+            "frames": {
+              "frames": 266,
+              "spanMs": 15116.065,
+              "fps": 17.531017496947783,
+              "p50": 50,
+              "p95": 99.99500000000066,
+              "p99": 116.66000000000109,
+              "max": 116.66499999999996
+            },
+            "peakRssKb": 1309480,
+            "peakJsHeap": 4490498
+          }
+        ],
+        "perfetto": [
+          {
+            "viewer": "perfetto",
+            "id": "async-json",
+            "file": "async-trace-1.json",
+            "ok": true,
+            "baselineRssKb": 1245656,
+            "baselineJsHeap": 41330415,
+            "renderMs": 550,
+            "version": "v59.1-79997ada9",
+            "shot": "docs/images/perfetto-async-json.png",
+            "viewChanged": true,
+            "interactMs": 773,
+            "frames": {
+              "frames": 773,
+              "spanMs": 13699.5,
+              "fps": 56.35242162122705,
+              "p50": 16.699999999999818,
+              "p95": 16.799999999999272,
+              "p99": 16.80000000000109,
+              "max": 216.60000000000036
+            },
+            "peakRssKb": 1641848,
+            "peakJsHeap": 116442786
+          },
+          {
+            "viewer": "perfetto",
+            "id": "async-json",
+            "file": "async-trace-1.json",
+            "ok": true,
+            "baselineRssKb": 1246892,
+            "baselineJsHeap": 41082582,
+            "renderMs": 504,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 643,
+            "frames": {
+              "frames": 786,
+              "spanMs": 13082.8,
+              "fps": 60.00244595958052,
+              "p50": 16.69999999999891,
+              "p95": 16.700000000000728,
+              "p99": 16.800000000000182,
+              "max": 16.80000000000109
+            },
+            "peakRssKb": 1552856,
+            "peakJsHeap": 61049547
+          },
+          {
+            "viewer": "perfetto",
+            "id": "async-json",
+            "file": "async-trace-1.json",
+            "ok": true,
+            "baselineRssKb": 1231468,
+            "baselineJsHeap": 44478574,
+            "renderMs": 490,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 722,
+            "frames": {
+              "frames": 774,
+              "spanMs": 13716.099999999999,
+              "fps": 56.35712775497409,
+              "p50": 16.699999999999818,
+              "p95": 16.700000000000728,
+              "p99": 16.80000000000109,
+              "max": 216.6999999999989
+            },
+            "peakRssKb": 1629112,
+            "peakJsHeap": 116307681
+          },
+          {
+            "viewer": "perfetto",
+            "id": "async-json",
+            "file": "async-trace-1.json",
+            "ok": true,
+            "baselineRssKb": 1251588,
+            "baselineJsHeap": 46623826,
+            "renderMs": 512,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 652,
+            "frames": {
+              "frames": 788,
+              "spanMs": 13116.1,
+              "fps": 60.00259223397199,
+              "p50": 16.69999999999891,
+              "p95": 16.700000000000728,
+              "p99": 16.800000000000182,
+              "max": 16.80000000000109
+            },
+            "peakRssKb": 1558244,
+            "peakJsHeap": 61747443
+          },
+          {
+            "viewer": "perfetto",
+            "id": "async-json",
+            "file": "async-trace-1.json",
+            "ok": true,
+            "baselineRssKb": 1246360,
+            "baselineJsHeap": 46673599,
+            "renderMs": 7873,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 8043,
+            "frames": {
+              "frames": 785,
+              "spanMs": 13066.099999999999,
+              "fps": 60.00260215366483,
+              "p50": 16.69999999999891,
+              "p95": 16.799999999999272,
+              "p99": 16.80000000000109,
+              "max": 16.80000000000109
+            },
+            "peakRssKb": 1561420,
+            "peakJsHeap": 60380730
+          }
+        ]
+      }
+    },
+    {
+      "id": "counters-json",
+      "file": "counters.json",
+      "url": "https://storage.googleapis.com/perfetto/test_data/counters.json-5c8a3e8bd3c5e0fb2eec5acd5e11ddb0ab129727f288c35fac3f545708904c35",
+      "bytes": 241,
+      "format": "chrome json (a leading newline, then an array)",
+      "role": "test-data",
+      "where": "test/data/counters.json",
+      "summary": {
+        "perfr": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 262,
+          "interactMs": 414,
+          "peakRssMb": 1249.71484375,
+          "baselineRssMb": 1177.7265625,
+          "peakJsHeapMb": 4.379367828369141,
+          "fps": 18.888413526773824,
+          "frameP50": 50,
+          "frameP95": 99.99499999999989,
+          "frameP99": 100,
+          "events": 3,
+          "prims": 0
+        },
+        "perfetto": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 505,
+          "interactMs": 712,
+          "peakRssMb": 1494.69921875,
+          "baselineRssMb": 1216.61328125,
+          "peakJsHeapMb": 52.34235191345215,
+          "fps": 60.00245534344117,
+          "frameP50": 16.69999999999891,
+          "frameP95": 16.700000000000728,
+          "frameP99": 16.800000000000338,
+          "events": null,
+          "prims": null
+        }
+      },
+      "runs": {
+        "perfr": [
+          {
+            "viewer": "perfr",
+            "id": "counters-json",
+            "file": "counters.json",
+            "ok": true,
+            "baselineRssKb": 1214004,
+            "baselineJsHeap": 2474482,
+            "renderMs": 362,
+            "events": 3,
+            "prims": 0,
+            "content": [
+              0,
+              20001
+            ],
+            "view": [
+              0,
+              20001
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "counters.json",
+            "shot": "docs/images/perfr-counters-json.png",
+            "viewChanged": true,
+            "interactMs": 473,
+            "frames": {
+              "frames": 284,
+              "spanMs": 14982.73,
+              "fps": 18.888413526773824,
+              "p50": 50,
+              "p95": 99.99499999999989,
+              "p99": 102.9997000000001,
+              "max": 149.9950000000008
+            },
+            "peakRssKb": 1284232,
+            "peakJsHeap": 4592351
+          },
+          {
+            "viewer": "perfr",
+            "id": "counters-json",
+            "file": "counters.json",
+            "ok": true,
+            "baselineRssKb": 1203088,
+            "baselineJsHeap": 2522190,
+            "renderMs": 259,
+            "events": 3,
+            "prims": 0,
+            "content": [
+              0,
+              20001
+            ],
+            "view": [
+              0,
+              20001
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "counters.json",
+            "viewChanged": true,
+            "interactMs": 363,
+            "frames": {
+              "frames": 284,
+              "spanMs": 15066.070000000002,
+              "fps": 18.783929717570672,
+              "p50": 50,
+              "p95": 99.9950000000008,
+              "p99": 100,
+              "max": 116.66000000000076
+            },
+            "peakRssKb": 1276088,
+            "peakJsHeap": 4608482
+          },
+          {
+            "viewer": "perfr",
+            "id": "counters-json",
+            "file": "counters.json",
+            "ok": true,
+            "baselineRssKb": 1204444,
+            "baselineJsHeap": 2520206,
+            "renderMs": 262,
+            "events": 3,
+            "prims": 0,
+            "content": [
+              0,
+              20001
+            ],
+            "view": [
+              0,
+              20001
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "counters.json",
+            "viewChanged": true,
+            "interactMs": 367,
+            "frames": {
+              "frames": 287,
+              "spanMs": 15116.06,
+              "fps": 18.920274198435308,
+              "p50": 50,
+              "p95": 99.99500000000023,
+              "p99": 100,
+              "max": 133.33500000000004
+            },
+            "peakRssKb": 1279600,
+            "peakJsHeap": 4578898
+          },
+          {
+            "viewer": "perfr",
+            "id": "counters-json",
+            "file": "counters.json",
+            "ok": true,
+            "baselineRssKb": 1206884,
+            "baselineJsHeap": 2473808,
+            "renderMs": 316,
+            "events": 3,
+            "prims": 0,
+            "content": [
+              0,
+              20001
+            ],
+            "view": [
+              0,
+              20001
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "counters.json",
+            "viewChanged": true,
+            "interactMs": 421,
+            "frames": {
+              "frames": 284,
+              "spanMs": 15016.07,
+              "fps": 18.846475808916715,
+              "p50": 50,
+              "p95": 83.33500000000086,
+              "p99": 99.9950000000008,
+              "max": 116.66000000000008
+            },
+            "peakRssKb": 1283192,
+            "peakJsHeap": 4547670
+          },
+          {
+            "viewer": "perfr",
+            "id": "counters-json",
+            "file": "counters.json",
+            "ok": true,
+            "baselineRssKb": 1205992,
+            "baselineJsHeap": 2482050,
+            "renderMs": 259,
+            "events": 3,
+            "prims": 0,
+            "content": [
+              0,
+              20001
+            ],
+            "view": [
+              0,
+              20001
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "counters.json",
+            "viewChanged": true,
+            "interactMs": 414,
+            "frames": {
+              "frames": 285,
+              "spanMs": 14899.404999999999,
+              "fps": 19.06116385184509,
+              "p50": 50,
+              "p95": 99.99499999999989,
+              "p99": 119.49390000000014,
+              "max": 149.99500000000012
+            },
+            "peakRssKb": 1279708,
+            "peakJsHeap": 4592100
+          }
+        ],
+        "perfetto": [
+          {
+            "viewer": "perfetto",
+            "id": "counters-json",
+            "file": "counters.json",
+            "ok": true,
+            "baselineRssKb": 1243780,
+            "baselineJsHeap": 44557730,
+            "renderMs": 678,
+            "version": "v59.1-79997ada9",
+            "shot": "docs/images/perfetto-counters-json.png",
+            "viewChanged": true,
+            "interactMs": 893,
+            "frames": {
+              "frames": 785,
+              "spanMs": 13066.199999999999,
+              "fps": 60.00214293367621,
+              "p50": 16.69999999999891,
+              "p95": 16.78499999999948,
+              "p99": 16.800000000000338,
+              "max": 16.80000000000109
+            },
+            "peakRssKb": 1546832,
+            "peakJsHeap": 55377534
+          },
+          {
+            "viewer": "perfetto",
+            "id": "counters-json",
+            "file": "counters.json",
+            "ok": true,
+            "baselineRssKb": 1243988,
+            "baselineJsHeap": 44480252,
+            "renderMs": 494,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 712,
+            "frames": {
+              "frames": 785,
+              "spanMs": 13066,
+              "fps": 60.00306138068269,
+              "p50": 16.699999999999818,
+              "p95": 16.799999999999272,
+              "p99": 16.80000000000109,
+              "max": 16.80000000000109
+            },
+            "peakRssKb": 1530572,
+            "peakJsHeap": 54794119
+          },
+          {
+            "viewer": "perfetto",
+            "id": "counters-json",
+            "file": "counters.json",
+            "ok": true,
+            "baselineRssKb": 1245812,
+            "baselineJsHeap": 46599196,
+            "renderMs": 505,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 701,
+            "frames": {
+              "frames": 783,
+              "spanMs": 13032.8,
+              "fps": 60.00245534344117,
+              "p50": 16.69999999999891,
+              "p95": 16.700000000000728,
+              "p99": 16.800000000000182,
+              "max": 16.80000000000109
+            },
+            "peakRssKb": 1526904,
+            "peakJsHeap": 54884934
+          },
+          {
+            "viewer": "perfetto",
+            "id": "counters-json",
+            "file": "counters.json",
+            "ok": true,
+            "baselineRssKb": 1248016,
+            "baselineJsHeap": 46957867,
+            "renderMs": 494,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 690,
+            "frames": {
+              "frames": 787,
+              "spanMs": 13099.4,
+              "fps": 60.00274821747561,
+              "p50": 16.69999999999891,
+              "p95": 16.700000000000728,
+              "p99": 16.80000000000109,
+              "max": 16.80000000000109
+            },
+            "peakRssKb": 1530708,
+            "peakJsHeap": 54555281
+          },
+          {
+            "viewer": "perfetto",
+            "id": "counters-json",
+            "file": "counters.json",
+            "ok": true,
+            "baselineRssKb": 1252868,
+            "baselineJsHeap": 46622914,
+            "renderMs": 634,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 852,
+            "frames": {
+              "frames": 785,
+              "spanMs": 13066.2,
+              "fps": 60.0021429336762,
+              "p50": 16.699999999999818,
+              "p95": 16.700000000000728,
+              "p99": 16.799999999999994,
+              "max": 16.80000000000109
+            },
+            "peakRssKb": 1529176,
+            "peakJsHeap": 55038605
+          }
+        ]
+      }
+    },
+    {
+      "id": "sched-compact",
+      "file": "sched_switch_compact.pb",
+      "url": "https://storage.googleapis.com/perfetto/test_data/sched_switch_compact.pb-ff9077ba16b689405b8a3678c7ce9129a91700a079a1d98f356cf0439e3b9931",
+      "bytes": 4816,
+      "format": "perfetto protobuf",
+      "role": "test-data",
+      "where": "test/data/sched_switch_compact.pb",
+      "summary": {
+        "perfr": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 265,
+          "interactMs": 415,
+          "peakRssMb": 1254.30078125,
+          "baselineRssMb": 1177.02734375,
+          "peakJsHeapMb": 4.338396072387695,
+          "fps": 18.447132225892684,
+          "frameP50": 50,
+          "frameP95": 99.99499999999898,
+          "frameP99": 116.65999999999994,
+          "events": 127,
+          "prims": 46
+        },
+        "perfetto": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 459,
+          "interactMs": 693,
+          "peakRssMb": 1716.74609375,
+          "baselineRssMb": 1217.0390625,
+          "peakJsHeapMb": 108.21623229980469,
+          "fps": 52.41203814150527,
+          "frameP50": 16.699999999999818,
+          "frameP95": 33.30000000000091,
+          "frameP99": 33.400000000001455,
+          "events": null,
+          "prims": null
+        }
+      },
+      "runs": {
+        "perfr": [
+          {
+            "viewer": "perfr",
+            "id": "sched-compact",
+            "file": "sched_switch_compact.pb",
+            "ok": true,
+            "baselineRssKb": 1205276,
+            "baselineJsHeap": 2485364,
+            "renderMs": 310,
+            "events": 127,
+            "prims": 46,
+            "content": [
+              807082862918652,
+              807083033080596
+            ],
+            "view": [
+              807082862918652,
+              807083033080596
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "sched_switch_compact.pb",
+            "shot": "docs/images/perfr-sched-compact.png",
+            "viewChanged": true,
+            "interactMs": 414,
+            "frames": {
+              "frames": 283,
+              "spanMs": 15232.72,
+              "fps": 18.5127803832802,
+              "p50": 50,
+              "p95": 99.16199999999888,
+              "p99": 116.65999999999985,
+              "max": 133.32500000000073
+            },
+            "peakRssKb": 1286844,
+            "peakJsHeap": 4521084
+          },
+          {
+            "viewer": "perfr",
+            "id": "sched-compact",
+            "file": "sched_switch_compact.pb",
+            "ok": true,
+            "baselineRssKb": 1210736,
+            "baselineJsHeap": 2529978,
+            "renderMs": 262,
+            "events": 127,
+            "prims": 46,
+            "content": [
+              807082862918652,
+              807083033080596
+            ],
+            "view": [
+              807082862918652,
+              807083033080596
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "sched_switch_compact.pb",
+            "viewChanged": true,
+            "interactMs": 419,
+            "frames": {
+              "frames": 278,
+              "spanMs": 15016.07,
+              "fps": 18.44690388363933,
+              "p50": 50,
+              "p95": 99.98999999999987,
+              "p99": 103.99840000000067,
+              "max": 133.32999999999993
+            },
+            "peakRssKb": 1285636,
+            "peakJsHeap": 4525277
+          },
+          {
+            "viewer": "perfr",
+            "id": "sched-compact",
+            "file": "sched_switch_compact.pb",
+            "ok": true,
+            "baselineRssKb": 1205084,
+            "baselineJsHeap": 2482990,
+            "renderMs": 265,
+            "events": 127,
+            "prims": 46,
+            "content": [
+              807082862918652,
+              807083033080596
+            ],
+            "view": [
+              807082862918652,
+              807083033080596
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "sched_switch_compact.pb",
+            "viewChanged": true,
+            "interactMs": 372,
+            "frames": {
+              "frames": 282,
+              "spanMs": 15232.72,
+              "fps": 18.447132225892684,
+              "p50": 50,
+              "p95": 99.99499999999989,
+              "p99": 116.65999999999994,
+              "max": 149.9950000000008
+            },
+            "peakRssKb": 1280132,
+            "peakJsHeap": 4549138
+          },
+          {
+            "viewer": "perfr",
+            "id": "sched-compact",
+            "file": "sched_switch_compact.pb",
+            "ok": true,
+            "baselineRssKb": 1204816,
+            "baselineJsHeap": 2520142,
+            "renderMs": 258,
+            "events": 127,
+            "prims": 46,
+            "content": [
+              807082862918652,
+              807083033080596
+            ],
+            "view": [
+              807082862918652,
+              807083033080596
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "sched_switch_compact.pb",
+            "viewChanged": true,
+            "interactMs": 415,
+            "frames": {
+              "frames": 280,
+              "spanMs": 15032.725,
+              "fps": 18.559509337129494,
+              "p50": 50,
+              "p95": 99.99499999999898,
+              "p99": 133.3261000000002,
+              "max": 150
+            },
+            "peakRssKb": 1276960,
+            "peakJsHeap": 4582293
+          },
+          {
+            "viewer": "perfr",
+            "id": "sched-compact",
+            "file": "sched_switch_compact.pb",
+            "ok": true,
+            "baselineRssKb": 1208428,
+            "baselineJsHeap": 2476280,
+            "renderMs": 306,
+            "events": 127,
+            "prims": 46,
+            "content": [
+              807082862918652,
+              807083033080596
+            ],
+            "view": [
+              807082862918652,
+              807083033080596
+            ],
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "status": "sched_switch_compact.pb",
+            "viewChanged": true,
+            "interactMs": 515,
+            "frames": {
+              "frames": 278,
+              "spanMs": 15082.73,
+              "fps": 18.36537549899786,
+              "p50": 50,
+              "p95": 99.99500000000016,
+              "p99": 116.66500000000018,
+              "max": 149.98999999999978
+            },
+            "peakRssKb": 1284404,
+            "peakJsHeap": 4602918
+          }
+        ],
+        "perfetto": [
+          {
+            "viewer": "perfetto",
+            "id": "sched-compact",
+            "file": "sched_switch_compact.pb",
+            "ok": true,
+            "baselineRssKb": 1246248,
+            "baselineJsHeap": 44501106,
+            "renderMs": 720,
+            "version": "v59.1-79997ada9",
+            "shot": "docs/images/perfetto-sched-compact.png",
+            "viewChanged": true,
+            "interactMs": 927,
+            "frames": {
+              "frames": 715,
+              "spanMs": 13082.8,
+              "fps": 54.57547314030636,
+              "p50": 16.699999999999818,
+              "p95": 33.30000000000109,
+              "p99": 33.40000000000009,
+              "max": 33.400000000001455
+            },
+            "peakRssKb": 1746888,
+            "peakJsHeap": 65453472
+          },
+          {
+            "viewer": "perfetto",
+            "id": "sched-compact",
+            "file": "sched_switch_compact.pb",
+            "ok": true,
+            "baselineRssKb": 1243644,
+            "baselineJsHeap": 44514480,
+            "renderMs": 572,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 807,
+            "frames": {
+              "frames": 570,
+              "spanMs": 13366.099999999999,
+              "fps": 42.57038328308183,
+              "p50": 16.699999999999818,
+              "p95": 106.56000000000174,
+              "p99": 155.3800000000012,
+              "max": 233.40000000000055
+            },
+            "peakRssKb": 1757948,
+            "peakJsHeap": 115658773
+          },
+          {
+            "viewer": "perfetto",
+            "id": "sched-compact",
+            "file": "sched_switch_compact.pb",
+            "ok": true,
+            "baselineRssKb": 1244932,
+            "baselineJsHeap": 45201468,
+            "renderMs": 459,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 693,
+            "frames": {
+              "frames": 726,
+              "spanMs": 14116,
+              "fps": 51.36015868517994,
+              "p50": 16.699999999999818,
+              "p95": 33.300000000000004,
+              "p99": 125.30799999999914,
+              "max": 233.29999999999927
+            },
+            "peakRssKb": 1781404,
+            "peakJsHeap": 115355646
+          },
+          {
+            "viewer": "perfetto",
+            "id": "sched-compact",
+            "file": "sched_switch_compact.pb",
+            "ok": true,
+            "baselineRssKb": 1246604,
+            "baselineJsHeap": 46603546,
+            "renderMs": 458,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 656,
+            "frames": {
+              "frames": 718,
+              "spanMs": 13099.4,
+              "fps": 54.73533138922394,
+              "p50": 16.699999999999818,
+              "p95": 33.30000000000018,
+              "p99": 33.399999999999636,
+              "max": 33.5
+            },
+            "peakRssKb": 1742892,
+            "peakJsHeap": 66550224
+          },
+          {
+            "viewer": "perfetto",
+            "id": "sched-compact",
+            "file": "sched_switch_compact.pb",
+            "ok": true,
+            "baselineRssKb": 1247636,
+            "baselineJsHeap": 46594713,
+            "renderMs": 451,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 685,
+            "frames": {
+              "frames": 726,
+              "spanMs": 13832.7,
+              "fps": 52.41203814150527,
+              "p50": 16.699999999999818,
+              "p95": 33.30000000000091,
+              "p99": 33.400000000001455,
+              "max": 233.40000000000146
+            },
+            "peakRssKb": 1771880,
+            "peakJsHeap": 113472944
+          }
+        ]
+      }
+    },
+    {
+      "id": "atrace",
+      "file": "atrace_b_193721088.atr",
+      "url": "https://storage.googleapis.com/perfetto/test_data/atrace_b_193721088.atr-e875c7dc4e3923ad3752bcb97f141aa83a7e69aecc8dbcae1047853e087541b9",
+      "bytes": 1283,
+      "format": "systrace text",
+      "role": "test-data",
+      "where": "test/data/atrace_b_193721088.atr",
+      "summary": {
+        "perfr": {
+          "runs": 5,
+          "ok": 0,
+          "renderMs": null,
+          "interactMs": null,
+          "peakRssMb": null,
+          "baselineRssMb": null,
+          "peakJsHeapMb": null,
+          "fps": null,
+          "frameP50": null,
+          "frameP95": null,
+          "frameP99": null,
+          "events": null,
+          "prims": null
+        },
+        "perfetto": {
+          "runs": 5,
+          "ok": 5,
+          "renderMs": 507,
+          "interactMs": 721,
+          "peakRssMb": 1592.19921875,
+          "baselineRssMb": 1218.046875,
+          "peakJsHeapMb": 99.08527088165283,
+          "fps": 44.327105537513035,
+          "frameP50": 16.699999999999818,
+          "frameP95": 16.80000000000109,
+          "frameP99": 133.3999999999998,
+          "events": null,
+          "prims": null
+        }
+      },
+      "runs": {
+        "perfr": [
+          {
+            "viewer": "perfr",
+            "id": "atrace",
+            "file": "atrace_b_193721088.atr",
+            "ok": false,
+            "baselineRssKb": 1203640,
+            "baselineJsHeap": 2541048,
+            "renderMs": 8042,
+            "events": 0,
+            "prims": 0,
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "peakRssKb": 1287012,
+            "peakJsHeap": 3726685
+          },
+          {
+            "viewer": "perfr",
+            "id": "atrace",
+            "file": "atrace_b_193721088.atr",
+            "ok": false,
+            "baselineRssKb": 1205336,
+            "baselineJsHeap": 2512390,
+            "renderMs": 8034,
+            "events": 0,
+            "prims": 0,
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "peakRssKb": 1281928,
+            "peakJsHeap": 3715896
+          },
+          {
+            "viewer": "perfr",
+            "id": "atrace",
+            "file": "atrace_b_193721088.atr",
+            "ok": false,
+            "baselineRssKb": 1197968,
+            "baselineJsHeap": 2480398,
+            "renderMs": 8023,
+            "events": 0,
+            "prims": 0,
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "peakRssKb": 1264836,
+            "peakJsHeap": 3719320
+          },
+          {
+            "viewer": "perfr",
+            "id": "atrace",
+            "file": "atrace_b_193721088.atr",
+            "ok": false,
+            "baselineRssKb": 1206852,
+            "baselineJsHeap": 2488574,
+            "renderMs": 8021,
+            "events": 0,
+            "prims": 0,
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "peakRssKb": 1281724,
+            "peakJsHeap": 3717908
+          },
+          {
+            "viewer": "perfr",
+            "id": "atrace",
+            "file": "atrace_b_193721088.atr",
+            "ok": false,
+            "baselineRssKb": 1204100,
+            "baselineJsHeap": 2531276,
+            "renderMs": 8015,
+            "events": 0,
+            "prims": 0,
+            "build": "perfr 0.1.4 (fd8ba5aaf61c, 2026-11-15, perfr-v0.1.4)",
+            "renderer": "WebGL",
+            "peakRssKb": 1271660,
+            "peakJsHeap": 3713121
+          }
+        ],
+        "perfetto": [
+          {
+            "viewer": "perfetto",
+            "id": "atrace",
+            "file": "atrace_b_193721088.atr",
+            "ok": true,
+            "baselineRssKb": 1247280,
+            "baselineJsHeap": 46620565,
+            "renderMs": 493,
+            "version": "v59.1-79997ada9",
+            "shot": "docs/images/perfetto-atrace.png",
+            "viewChanged": true,
+            "interactMs": 721,
+            "frames": {
+              "frames": 592,
+              "spanMs": 13332.699999999999,
+              "fps": 44.327105537513035,
+              "p50": 16.699999999999818,
+              "p95": 16.80000000000109,
+              "p99": 133.3999999999998,
+              "max": 216.70000000000073
+            },
+            "peakRssKb": 1631096,
+            "peakJsHeap": 103898437
+          },
+          {
+            "viewer": "perfetto",
+            "id": "atrace",
+            "file": "atrace_b_193721088.atr",
+            "ok": true,
+            "baselineRssKb": 1249080,
+            "baselineJsHeap": 46606037,
+            "renderMs": 543,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 698,
+            "frames": {
+              "frames": 788,
+              "spanMs": 13116.199999999999,
+              "fps": 60.0021347646422,
+              "p50": 16.69999999999891,
+              "p95": 16.799999999999272,
+              "p99": 16.80000000000031,
+              "max": 16.80000000000109
+            },
+            "peakRssKb": 1529944,
+            "peakJsHeap": 55261648
+          },
+          {
+            "viewer": "perfetto",
+            "id": "atrace",
+            "file": "atrace_b_193721088.atr",
+            "ok": true,
+            "baselineRssKb": 1243744,
+            "baselineJsHeap": 44995955,
+            "renderMs": 653,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 888,
+            "frames": {
+              "frames": 572,
+              "spanMs": 13366.1,
+              "fps": 42.72001556175698,
+              "p50": 16.699999999999818,
+              "p95": 133.19999999999982,
+              "p99": 150,
+              "max": 233.30000000000018
+            },
+            "peakRssKb": 1630412,
+            "peakJsHeap": 104386056
+          },
+          {
+            "viewer": "perfetto",
+            "id": "atrace",
+            "file": "atrace_b_193721088.atr",
+            "ok": true,
+            "baselineRssKb": 1253168,
+            "baselineJsHeap": 46643711,
+            "renderMs": 498,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 733,
+            "frames": {
+              "frames": 573,
+              "spanMs": 13316.1,
+              "fps": 42.95552000961242,
+              "p50": 16.699999999999818,
+              "p95": 133.24499999999907,
+              "p99": 150,
+              "max": 216.60000000000036
+            },
+            "peakRssKb": 1632988,
+            "peakJsHeap": 104365682
+          },
+          {
+            "viewer": "perfetto",
+            "id": "atrace",
+            "file": "atrace_b_193721088.atr",
+            "ok": true,
+            "baselineRssKb": 1242500,
+            "baselineJsHeap": 43579318,
+            "renderMs": 507,
+            "version": "v59.1-79997ada9",
+            "viewChanged": true,
+            "interactMs": 648,
+            "frames": {
+              "frames": 787,
+              "spanMs": 13099.5,
+              "fps": 60.00229016374671,
+              "p50": 16.699999999999363,
+              "p95": 16.700000000000728,
+              "p99": 16.800000000000317,
+              "max": 16.80000000000109
+            },
+            "peakRssKb": 1567552,
+            "peakJsHeap": 56711955
+          }
+        ]
+      }
+    }
+  ],
+  "finished": "2026-11-15T08:53:33.568Z"
+}

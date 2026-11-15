@@ -1,0 +1,3075 @@
+{
+ "source": "google/perfetto test/data sha256 sidecars",
+ "commit": "6fffac7ff1049fe42dd61c5b25141c237af22b38",
+ "bucket": "https://storage.googleapis.com/perfetto/test_data/<basename>-<sha256>",
+ "count": 438,
+ "bytes": 1570845154,
+ "files": [
+  {
+   "path": "test/data/README.md",
+   "bytes": 184,
+   "url": "https://storage.googleapis.com/perfetto/test_data/README.md-12f0487d0c76689562b52e25e5c879c4ff2ab2b214b45556638644dfaef1750c",
+   "sha256": "12f0487d0c76689562b52e25e5c879c4ff2ab2b214b45556638644dfaef1750c",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_anr.pftrace.gz",
+   "bytes": 17589306,
+   "url": "https://storage.googleapis.com/perfetto/test_data/android_anr.pftrace.gz-e97f030d330179bb48b6756437c96e6575145b1e9dcc6b2fcfba4ec7710c7a1d",
+   "sha256": "e97f030d330179bb48b6756437c96e6575145b1e9dcc6b2fcfba4ec7710c7a1d",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_binder_metric_trace.atr",
+   "bytes": 5993839,
+   "url": "https://storage.googleapis.com/perfetto/test_data/android_binder_metric_trace.atr-64f323d9561628a1de87372504ffa900b53d6d214319e3c00b083d0ba8a2bfa5",
+   "sha256": "64f323d9561628a1de87372504ffa900b53d6d214319e3c00b083d0ba8a2bfa5",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_boot.pftrace",
+   "bytes": 12445981,
+   "url": "https://storage.googleapis.com/perfetto/test_data/android_boot.pftrace-660231895e7c1816bcbd02771fdf825917ba0540124c3fdd174c1a91470b9448",
+   "sha256": "660231895e7c1816bcbd02771fdf825917ba0540124c3fdd174c1a91470b9448",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_calculator_startup.pb",
+   "bytes": 14748421,
+   "url": "https://storage.googleapis.com/perfetto/test_data/android_calculator_startup.pb-c71765f5ea1588fa2ba63db86d04652b5feb3647923f85bad951163157c95718",
+   "sha256": "c71765f5ea1588fa2ba63db86d04652b5feb3647923f85bad951163157c95718",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_cpu_eos.pb",
+   "bytes": 803212,
+   "url": "https://storage.googleapis.com/perfetto/test_data/android_cpu_eos.pb-68377df0bb4fc55a26e2da4285aa441b6d1d3c4e99a192a7bc80876834954c2b",
+   "sha256": "68377df0bb4fc55a26e2da4285aa441b6d1d3c4e99a192a7bc80876834954c2b",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_desktop_mode/multiple_window_only_update.pb",
+   "bytes": 1074,
+   "url": "https://storage.googleapis.com/perfetto/test_data/multiple_window_only_update.pb-de2c99d57ebec6ab843bc56047eb12dbedc3d08a8a1d989d9b3302ed30057286",
+   "sha256": "de2c99d57ebec6ab843bc56047eb12dbedc3d08a8a1d989d9b3302ed30057286",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_desktop_mode/multiple_windows_add_update_remove.pb",
+   "bytes": 1121,
+   "url": "https://storage.googleapis.com/perfetto/test_data/multiple_windows_add_update_remove.pb-0967fdf494167fe47e5ddf4c540fcc7cc0b22e36ddafa4b4c1172fe3c171b3d6",
+   "sha256": "0967fdf494167fe47e5ddf4c540fcc7cc0b22e36ddafa4b4c1172fe3c171b3d6",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_desktop_mode/session_with_same_instance_id.pb",
+   "bytes": 384,
+   "url": "https://storage.googleapis.com/perfetto/test_data/session_with_same_instance_id.pb-bc81316b9dbfefa7a998f94750594c1eb7b07e070006f335b80815349f09ad96",
+   "sha256": "bc81316b9dbfefa7a998f94750594c1eb7b07e070006f335b80815349f09ad96",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_desktop_mode/single_window_add_update_no_remove.pb",
+   "bytes": 973,
+   "url": "https://storage.googleapis.com/perfetto/test_data/single_window_add_update_no_remove.pb-0bb09b4c68a125a09b6856879af92cd47dd980c2dcaa1513c370b9b6a7b575d1",
+   "sha256": "0bb09b4c68a125a09b6856879af92cd47dd980c2dcaa1513c370b9b6a7b575d1",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_desktop_mode/single_window_add_update_remove.pb",
+   "bytes": 999,
+   "url": "https://storage.googleapis.com/perfetto/test_data/single_window_add_update_remove.pb-bab0c50523ac903872cd11f3fdd4a9ecda98e937573d17011eb877636e82c3c3",
+   "sha256": "bab0c50523ac903872cd11f3fdd4a9ecda98e937573d17011eb877636e82c3c3",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_desktop_mode/single_window_no_add_update_remove.pb",
+   "bytes": 954,
+   "url": "https://storage.googleapis.com/perfetto/test_data/single_window_no_add_update_remove.pb-7f63f17b65a0fca4bc5ccd75c9a7eb854779585b20cb91fcf371e7892642327e",
+   "sha256": "7f63f17b65a0fca4bc5ccd75c9a7eb854779585b20cb91fcf371e7892642327e",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_desktop_mode/single_window_only_update.pb",
+   "bytes": 1058,
+   "url": "https://storage.googleapis.com/perfetto/test_data/single_window_only_update.pb-ee1172b8ad0eaf856e2776575b861f44663bb98f1d40d7d4e66ee0f532220568",
+   "sha256": "ee1172b8ad0eaf856e2776575b861f44663bb98f1d40d7d4e66ee0f532220568",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_desktop_mode/task_update_reset_events.pb",
+   "bytes": 4025,
+   "url": "https://storage.googleapis.com/perfetto/test_data/task_update_reset_events.pb-1aca7da3154a8893d214444d10559d88e689d090e6d39206e30959aa2a2cd306",
+   "sha256": "1aca7da3154a8893d214444d10559d88e689d090e6d39206e30959aa2a2cd306",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_input_tracing_e2e_latency.pb.gz",
+   "bytes": 50197,
+   "url": "https://storage.googleapis.com/perfetto/test_data/android_input_tracing_e2e_latency.pb.gz-64dd6dbf77f707e755efc0d9a32feecb44a0bfe6c05432bb3932ea5126587e3c",
+   "sha256": "64dd6dbf77f707e755efc0d9a32feecb44a0bfe6c05432bb3932ea5126587e3c",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_job_scheduler.perfetto-trace",
+   "bytes": 7779,
+   "url": "https://storage.googleapis.com/perfetto/test_data/android_job_scheduler.perfetto-trace-9941708f26c9dddfb250f8fdbef94a160302e3020c677f86287a3c061a430738",
+   "sha256": "9941708f26c9dddfb250f8fdbef94a160302e3020c677f86287a3c061a430738",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_log.pb",
+   "bytes": 258971,
+   "url": "https://storage.googleapis.com/perfetto/test_data/android_log.pb-841512535c2a95f024443455719adefdbed96073eb48a1ba950ed117d615e4d9",
+   "sha256": "841512535c2a95f024443455719adefdbed96073eb48a1ba950ed117d615e4d9",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_log_ring_buffer_mode.pb",
+   "bytes": 3670,
+   "url": "https://storage.googleapis.com/perfetto/test_data/android_log_ring_buffer_mode.pb-130113fd0efb6ca6a7de1c36cb7c27a5e06f2dea5cf1183f39594b6882d0a6f9",
+   "sha256": "130113fd0efb6ca6a7de1c36cb7c27a5e06f2dea5cf1183f39594b6882d0a6f9",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_memory/java_alloc_profile_after.perfetto-trace",
+   "bytes": 40935,
+   "url": "https://storage.googleapis.com/perfetto/test_data/java_alloc_profile_after.perfetto-trace-f8d88f43c3266b81192dee9492550895cac2fa2096ac50f4c265d59fb3a9a301",
+   "sha256": "f8d88f43c3266b81192dee9492550895cac2fa2096ac50f4c265d59fb3a9a301",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_memory/java_alloc_profile_before.perfetto-trace",
+   "bytes": 35777,
+   "url": "https://storage.googleapis.com/perfetto/test_data/java_alloc_profile_before.perfetto-trace-aab1f1cd4e42d0a9e946b61f054ee1b1b2b6e89fc2865ca4325c1c2409f1f234",
+   "sha256": "aab1f1cd4e42d0a9e946b61f054ee1b1b2b6e89fc2865ca4325c1c2409f1f234",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_memory/java_heap_dump_after.hprof",
+   "bytes": 48164781,
+   "url": "https://storage.googleapis.com/perfetto/test_data/java_heap_dump_after.hprof-2fa321acb36a71d8accf6330c2e9995c9b7cea7820ff9862c973ea41c3eb718f",
+   "sha256": "2fa321acb36a71d8accf6330c2e9995c9b7cea7820ff9862c973ea41c3eb718f",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_memory/java_heap_dump_before.hprof",
+   "bytes": 44939713,
+   "url": "https://storage.googleapis.com/perfetto/test_data/java_heap_dump_before.hprof-a855bffb71703d950068c54661088e14799c5fff0cce3b970904ab5bcbd76d7e",
+   "sha256": "a855bffb71703d950068c54661088e14799c5fff0cce3b970904ab5bcbd76d7e",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_memory/native_alloc_profile_after.perfetto-trace",
+   "bytes": 35728,
+   "url": "https://storage.googleapis.com/perfetto/test_data/native_alloc_profile_after.perfetto-trace-32025f6cde6e17267fc093bf1df633deb12b6658c77e823ecb11fcb51d0bca87",
+   "sha256": "32025f6cde6e17267fc093bf1df633deb12b6658c77e823ecb11fcb51d0bca87",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_memory/native_alloc_profile_before.perfetto-trace",
+   "bytes": 35520,
+   "url": "https://storage.googleapis.com/perfetto/test_data/native_alloc_profile_before.perfetto-trace-6cfca32fdb4dab511ccfe648ecb9a32e442d3c5c6ac93e0aa0f333bdcb9abbf3",
+   "sha256": "6cfca32fdb4dab511ccfe648ecb9a32e442d3c5c6ac93e0aa0f333bdcb9abbf3",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_memory/perfetto_java_heap_dump_after.perfetto-trace",
+   "bytes": 18647949,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perfetto_java_heap_dump_after.perfetto-trace-951e0f33a41ec6c14ef2d73fbb02a91f3e78208dea28740699300a618e82f8e5",
+   "sha256": "951e0f33a41ec6c14ef2d73fbb02a91f3e78208dea28740699300a618e82f8e5",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_memory/perfetto_java_heap_dump_before.perfetto-trace",
+   "bytes": 18642284,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perfetto_java_heap_dump_before.perfetto-trace-b9261ce34da5c2c23a5a6462cf643b1c069868a9b117f984174927ef28fd72d4",
+   "sha256": "b9261ce34da5c2c23a5a6462cf643b1c069868a9b117f984174927ef28fd72d4",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_monitor_contention_trace.atr",
+   "bytes": 5115737,
+   "url": "https://storage.googleapis.com/perfetto/test_data/android_monitor_contention_trace.atr-ae61181ded60bf214859c2072b90dca49226338901d368e6aea329681bff30db",
+   "sha256": "ae61181ded60bf214859c2072b90dca49226338901d368e6aea329681bff30db",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_postboot_unlock.pftrace",
+   "bytes": 17809578,
+   "url": "https://storage.googleapis.com/perfetto/test_data/android_postboot_unlock.pftrace-445cd34686c12847640c26dee271069383d2e25c8a8c0e36f0b1ed8d94514488",
+   "sha256": "445cd34686c12847640c26dee271069383d2e25c8a8c0e36f0b1ed8d94514488",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_process_oom_score.pftrace",
+   "bytes": 177,
+   "url": "https://storage.googleapis.com/perfetto/test_data/android_process_oom_score.pftrace-50e642e1266c43ad9f3048f0232821304e67850306658374209054a4a79e2ae0",
+   "sha256": "50e642e1266c43ad9f3048f0232821304e67850306658374209054a4a79e2ae0",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_sched_and_ps.pb",
+   "bytes": 18761615,
+   "url": "https://storage.googleapis.com/perfetto/test_data/android_sched_and_ps.pb-0f0d482576280e159de5b57b2847cae2ca751ab9d523d77ef8d32fe422464714",
+   "sha256": "0f0d482576280e159de5b57b2847cae2ca751ab9d523d77ef8d32fe422464714",
+   "status": 200
+  },
+  {
+   "path": "test/data/android_startup_real.perfetto_trace",
+   "bytes": 45206620,
+   "url": "https://storage.googleapis.com/perfetto/test_data/android_startup_real.perfetto_trace-e5dcbdf8b87cea287268648d89262e8eeafd975e195d9ef9b14e574ce176ede3",
+   "sha256": "e5dcbdf8b87cea287268648d89262e8eeafd975e195d9ef9b14e574ce176ede3",
+   "status": 200
+  },
+  {
+   "path": "test/data/api24_startup_cold.perfetto-trace",
+   "bytes": 2681371,
+   "url": "https://storage.googleapis.com/perfetto/test_data/api24_startup_cold.perfetto-trace-ac006a3ec74fac70feb58c2cfad840c552af0ebd25f03bdfbf14d5f77148764b",
+   "sha256": "ac006a3ec74fac70feb58c2cfad840c552af0ebd25f03bdfbf14d5f77148764b",
+   "status": 200
+  },
+  {
+   "path": "test/data/api24_startup_hot.perfetto-trace",
+   "bytes": 1558219,
+   "url": "https://storage.googleapis.com/perfetto/test_data/api24_startup_hot.perfetto-trace-0ec527c6392adf16e8580ba0fa3eaccf69eccba36c863377eca5c5618f00f3ea",
+   "sha256": "0ec527c6392adf16e8580ba0fa3eaccf69eccba36c863377eca5c5618f00f3ea",
+   "status": 200
+  },
+  {
+   "path": "test/data/api24_startup_warm.perfetto-trace",
+   "bytes": 1637137,
+   "url": "https://storage.googleapis.com/perfetto/test_data/api24_startup_warm.perfetto-trace-59d1e84ddf6a492c10d7b6ecebf7b80813e6a0a2b3bef7d854d5ef3cf7210137",
+   "sha256": "59d1e84ddf6a492c10d7b6ecebf7b80813e6a0a2b3bef7d854d5ef3cf7210137",
+   "status": 200
+  },
+  {
+   "path": "test/data/api31_startup_cold.perfetto-trace",
+   "bytes": 4277601,
+   "url": "https://storage.googleapis.com/perfetto/test_data/api31_startup_cold.perfetto-trace-aadf4a141dc0249abd4d7080a7d94bd614949eb0e7398fa6f3c75b503c70dade",
+   "sha256": "aadf4a141dc0249abd4d7080a7d94bd614949eb0e7398fa6f3c75b503c70dade",
+   "status": 200
+  },
+  {
+   "path": "test/data/api31_startup_hot.perfetto-trace",
+   "bytes": 3023107,
+   "url": "https://storage.googleapis.com/perfetto/test_data/api31_startup_hot.perfetto-trace-072802c0adf6968d0eb9c56fa13b33cad32f583398d019dc8a798981164333c5",
+   "sha256": "072802c0adf6968d0eb9c56fa13b33cad32f583398d019dc8a798981164333c5",
+   "status": 200
+  },
+  {
+   "path": "test/data/api31_startup_warm.perfetto-trace",
+   "bytes": 3267605,
+   "url": "https://storage.googleapis.com/perfetto/test_data/api31_startup_warm.perfetto-trace-4655c161656bf0eb66e8bc046ff899813e08bcf73f5e253ca88e8b3be231cb0e",
+   "sha256": "4655c161656bf0eb66e8bc046ff899813e08bcf73f5e253ca88e8b3be231cb0e",
+   "status": 200
+  },
+  {
+   "path": "test/data/api32_startup_warm.perfetto-trace",
+   "bytes": 2037208,
+   "url": "https://storage.googleapis.com/perfetto/test_data/api32_startup_warm.perfetto-trace-776122b5660c5d6e738950031fdb4992a64e3224e9e82bbaed474a0a281ed7e3",
+   "sha256": "776122b5660c5d6e738950031fdb4992a64e3224e9e82bbaed474a0a281ed7e3",
+   "status": 200
+  },
+  {
+   "path": "test/data/api34_startup_cold.perfetto-trace",
+   "bytes": 4697144,
+   "url": "https://storage.googleapis.com/perfetto/test_data/api34_startup_cold.perfetto-trace-1958521dc5128cd4eadd1df281e19987aded718750e6883f82ffd3b5eb529bd6",
+   "sha256": "1958521dc5128cd4eadd1df281e19987aded718750e6883f82ffd3b5eb529bd6",
+   "status": 200
+  },
+  {
+   "path": "test/data/arcvm_trace.pb.gz",
+   "bytes": 274664,
+   "url": "https://storage.googleapis.com/perfetto/test_data/arcvm_trace.pb.gz-7b901d3e01d67a4b114badd560746b9c5b0b8cdba012128b13d42019d6faa79d",
+   "sha256": "7b901d3e01d67a4b114badd560746b9c5b0b8cdba012128b13d42019d6faa79d",
+   "status": 200
+  },
+  {
+   "path": "test/data/art-method-tracing-streaming.trace",
+   "bytes": 863106,
+   "url": "https://storage.googleapis.com/perfetto/test_data/art-method-tracing-streaming.trace-8444001ac344e3f2da2def058e4c6622db424b377a456237d94e47dc85321d7f",
+   "sha256": "8444001ac344e3f2da2def058e4c6622db424b377a456237d94e47dc85321d7f",
+   "status": 200
+  },
+  {
+   "path": "test/data/art-method-tracing.trace",
+   "bytes": 7670,
+   "url": "https://storage.googleapis.com/perfetto/test_data/art-method-tracing.trace-ebd46d41eaa4656ad06535dacc1d3c6f6018a180f89c546515fed4f7e1df2337",
+   "sha256": "ebd46d41eaa4656ad06535dacc1d3c6f6018a180f89c546515fed4f7e1df2337",
+   "status": 200
+  },
+  {
+   "path": "test/data/art-method-v2.trace",
+   "bytes": 475,
+   "url": "https://storage.googleapis.com/perfetto/test_data/art-method-v2.trace-ecd42b2b317b33add55c7d1baafb2c5e7243b5a700d5afa681a5ac850931aaf0",
+   "sha256": "ecd42b2b317b33add55c7d1baafb2c5e7243b5a700d5afa681a5ac850931aaf0",
+   "status": 200
+  },
+  {
+   "path": "test/data/async-trace-1.json",
+   "bytes": 5591,
+   "url": "https://storage.googleapis.com/perfetto/test_data/async-trace-1.json-758ad1ffc85d002ec1168b40bc3733793799d4ff6719341ef4f92d469c6e4d01",
+   "sha256": "758ad1ffc85d002ec1168b40bc3733793799d4ff6719341ef4f92d469c6e4d01",
+   "status": 200
+  },
+  {
+   "path": "test/data/async-trace-2.json",
+   "bytes": 11749,
+   "url": "https://storage.googleapis.com/perfetto/test_data/async-trace-2.json-2da7fa65cce487d602e2ccfb333c9ecab298ef6e45b745c95240cebed150b577",
+   "sha256": "2da7fa65cce487d602e2ccfb333c9ecab298ef6e45b745c95240cebed150b577",
+   "status": 200
+  },
+  {
+   "path": "test/data/atrace_b_193721088.atr",
+   "bytes": 1283,
+   "url": "https://storage.googleapis.com/perfetto/test_data/atrace_b_193721088.atr-e875c7dc4e3923ad3752bcb97f141aa83a7e69aecc8dbcae1047853e087541b9",
+   "sha256": "e875c7dc4e3923ad3752bcb97f141aa83a7e69aecc8dbcae1047853e087541b9",
+   "status": 200
+  },
+  {
+   "path": "test/data/atrace_compressed.ctrace",
+   "bytes": 31665,
+   "url": "https://storage.googleapis.com/perfetto/test_data/atrace_compressed.ctrace-db92be3d78ab0619af5068240b88bad78a655f3e403c5f7c7876956eb5b260b0",
+   "sha256": "db92be3d78ab0619af5068240b88bad78a655f3e403c5f7c7876956eb5b260b0",
+   "status": 200
+  },
+  {
+   "path": "test/data/atrace_uncompressed_b_208691037",
+   "bytes": 4520,
+   "url": "https://storage.googleapis.com/perfetto/test_data/atrace_uncompressed_b_208691037-9872b827df72895a98af2977c117ad3bc31f8c62be79d211bdf254170db4e1de",
+   "sha256": "9872b827df72895a98af2977c117ad3bc31f8c62be79d211bdf254170db4e1de",
+   "status": 200
+  },
+  {
+   "path": "test/data/bugreport-crosshatch-SPB5.zip",
+   "bytes": 6220586,
+   "url": "https://storage.googleapis.com/perfetto/test_data/bugreport-crosshatch-SPB5.zip-7b852c4d7ba0258d64f5e6ebd8e79bc4cf4dc3b27389a3f58a34b354e14bc910",
+   "sha256": "7b852c4d7ba0258d64f5e6ebd8e79bc4cf4dc3b27389a3f58a34b354e14bc910",
+   "status": 200
+  },
+  {
+   "path": "test/data/callstack_sampling.pftrace",
+   "bytes": 4282766,
+   "url": "https://storage.googleapis.com/perfetto/test_data/callstack_sampling.pftrace-0ef35902380a75c52cd83afdb4165b545a5810bde16bad954872994ca21c5ae7",
+   "sha256": "0ef35902380a75c52cd83afdb4165b545a5810bde16bad954872994ca21c5ae7",
+   "status": 200
+  },
+  {
+   "path": "test/data/camera-ion-mem-trace",
+   "bytes": 12198910,
+   "url": "https://storage.googleapis.com/perfetto/test_data/camera-ion-mem-trace-49997763271536ab947ada3125b03f5d441226725789022d326b43dc24486c8b",
+   "sha256": "49997763271536ab947ada3125b03f5d441226725789022d326b43dc24486c8b",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/chrome_5672_histograms.pftrace.gz",
+   "bytes": 1127472,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_5672_histograms.pftrace.gz-a09bd44078ac71bcfbc901b0544750e8344d0d0f6f96e220f700a5a53fa932ee",
+   "sha256": "a09bd44078ac71bcfbc901b0544750e8344d0d0f6f96e220f700a5a53fa932ee",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/chrome_custom_navigation_trace.gz",
+   "bytes": 7572484,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_custom_navigation_trace.gz-ff68279e3cec94076b69259d756eed181a63eaf834d8b956a7f4ba665fabf939",
+   "sha256": "ff68279e3cec94076b69259d756eed181a63eaf834d8b956a7f4ba665fabf939",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/chrome_fcp_lcp_navigations.pftrace",
+   "bytes": 2398645,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_fcp_lcp_navigations.pftrace-ae01d849fbd75a98be1b7ddd5a8873217c377b393a1d5bbd788ed3364f7fefc3",
+   "sha256": "ae01d849fbd75a98be1b7ddd5a8873217c377b393a1d5bbd788ed3364f7fefc3",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/chrome_input_with_frame_view.pftrace",
+   "bytes": 6392331,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_input_with_frame_view.pftrace-a93548822e481508c728ccc5da3ad34afcd0aec02ca7a7a4dad84ff340ee5975",
+   "sha256": "a93548822e481508c728ccc5da3ad34afcd0aec02ca7a7a4dad84ff340ee5975",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/chrome_input_with_frame_view_new.pftrace",
+   "bytes": 1967821,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_input_with_frame_view_new.pftrace-e901ad9577088e62c921dd8bfcb43d652ecf49fa69b5b57f81bb3d27dbe94e12",
+   "sha256": "e901ad9577088e62c921dd8bfcb43d652ecf49fa69b5b57f81bb3d27dbe94e12",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/chrome_page_load_all_categories_not_extended.pftrace.gz",
+   "bytes": 1277750,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_page_load_all_categories_not_extended.pftrace.gz-6586e9e2bbc0c996caddb321a0374328654983733e6ffd7f4635ac07db32a493",
+   "sha256": "6586e9e2bbc0c996caddb321a0374328654983733e6ffd7f4635ac07db32a493",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/cpu_powerups_1.pb",
+   "bytes": 2033064,
+   "url": "https://storage.googleapis.com/perfetto/test_data/cpu_powerups_1.pb-70f5511ba0cd6ce1359e3cadb4d1d9301fb6e26be85158e3384b06f41418d386",
+   "sha256": "70f5511ba0cd6ce1359e3cadb4d1d9301fb6e26be85158e3384b06f41418d386",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/jetstream_3.pftrace.gz",
+   "bytes": 78162,
+   "url": "https://storage.googleapis.com/perfetto/test_data/jetstream_3.pftrace.gz-8b5915cdf7f4182a74345cc080c34ce190835e5b46c30e921ce81433119acfda",
+   "sha256": "8b5915cdf7f4182a74345cc080c34ce190835e5b46c30e921ce81433119acfda",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/loadline2_phone_perfetto_trace.pb.gz",
+   "bytes": 1214995,
+   "url": "https://storage.googleapis.com/perfetto/test_data/loadline2_phone_perfetto_trace.pb.gz-446e12518282e078360cb1ab55ebb3e3788c3863b269601d2392c9e5d058a92c",
+   "sha256": "446e12518282e078360cb1ab55ebb3e3788c3863b269601d2392c9e5d058a92c",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/scroll_jank_with_pinch.pftrace",
+   "bytes": 3914720,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scroll_jank_with_pinch.pftrace-8587d2016fdb5d39b5f852704b6e3925e9e6527af01696396be767bed04d4a45",
+   "sha256": "8587d2016fdb5d39b5f852704b6e3925e9e6527af01696396be767bed04d4a45",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/scroll_m131.pftrace",
+   "bytes": 1247290,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scroll_m131.pftrace-14171c9e502a65a454f39fe14fce8b313c7012a2c14394bed496fc93b1644b0d",
+   "sha256": "14171c9e502a65a454f39fe14fce8b313c7012a2c14394bed496fc93b1644b0d",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/scroll_m132.pftrace",
+   "bytes": 1854184,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scroll_m132.pftrace-779e1fa6cab1abc0ab2dcafa4bbbf826ea8fc052878886ab168c783ca32f3bbe",
+   "sha256": "779e1fa6cab1abc0ab2dcafa4bbbf826ea8fc052878886ab168c783ca32f3bbe",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/scroll_m132_with_atrace.pftrace",
+   "bytes": 18887098,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scroll_m132_with_atrace.pftrace-b1fe189738a4a714cef7dd13b12318c89d6c4345fbe65096b4680ffa79f2872a",
+   "sha256": "b1fe189738a4a714cef7dd13b12318c89d6c4345fbe65096b4680ffa79f2872a",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/scroll_m133beta.pftrace",
+   "bytes": 1448694,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scroll_m133beta.pftrace-2acc70545be1caeb3fb43218ab52872c2c749b49577b973cb8400057c680fc19",
+   "sha256": "2acc70545be1caeb3fb43218ab52872c2c749b49577b973cb8400057c680fc19",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/scroll_m144.pftrace",
+   "bytes": 4384532,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scroll_m144.pftrace-6a3426ee6a441cf71ec8b634b662fe800700b8c3d2d1e9f247feaba890315843",
+   "sha256": "6a3426ee6a441cf71ec8b634b662fe800700b8c3d2d1e9f247feaba890315843",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/scroll_offsets.pftrace",
+   "bytes": 769741,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scroll_offsets.pftrace-62101edb5204fec8bea30124f65d4e49bda0808d7b036e95f89445aaad6d8d98",
+   "sha256": "62101edb5204fec8bea30124f65d4e49bda0808d7b036e95f89445aaad6d8d98",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/scroll_offsets_trace_2.pftrace",
+   "bytes": 1496388,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scroll_offsets_trace_2.pftrace-2ddd9f78d91d51e39c72c520bb54fdc9dbf1333ae722e87633fc345159296289",
+   "sha256": "2ddd9f78d91d51e39c72c520bb54fdc9dbf1333ae722e87633fc345159296289",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/scroll_with_input_not_forwarded_to_renderer.pftrace",
+   "bytes": 729606,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scroll_with_input_not_forwarded_to_renderer.pftrace-ceb2ff3cb64c99ddb28a29867bc82f1491c4b413bfacd8638551b80936240faf",
+   "sha256": "ceb2ff3cb64c99ddb28a29867bc82f1491c4b413bfacd8638551b80936240faf",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/speedometer_21.perfetto_trace.gz",
+   "bytes": 891088,
+   "url": "https://storage.googleapis.com/perfetto/test_data/speedometer_21.perfetto_trace.gz-8a159b354d74a3ca0d38ce9cd071ef47de322db4261ee266bfafe04d70310529",
+   "sha256": "8a159b354d74a3ca0d38ce9cd071ef47de322db4261ee266bfafe04d70310529",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/speedometer_3.perfetto_trace.gz",
+   "bytes": 1301036,
+   "url": "https://storage.googleapis.com/perfetto/test_data/speedometer_3.perfetto_trace.gz-b2c77fbe2c17363432a1ad0c05c1c1c20d3ebc62bda92c041d39918011af6f02",
+   "sha256": "b2c77fbe2c17363432a1ad0c05c1c1c20d3ebc62bda92c041d39918011af6f02",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome/top_level_java_choreographer_slices",
+   "bytes": 5323017,
+   "url": "https://storage.googleapis.com/perfetto/test_data/top_level_java_choreographer_slices-8001e73b2458e94f65a606bb558a645ba5bca553b57fe416001f6c2175675a8a",
+   "sha256": "8001e73b2458e94f65a606bb558a645ba5bca553b57fe416001f6c2175675a8a",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome_5672_histograms.pftrace.gz",
+   "bytes": 1127472,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_5672_histograms.pftrace.gz-a09bd44078ac71bcfbc901b0544750e8344d0d0f6f96e220f700a5a53fa932ee",
+   "sha256": "a09bd44078ac71bcfbc901b0544750e8344d0d0f6f96e220f700a5a53fa932ee",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome_android_systrace.pftrace",
+   "bytes": 44870418,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_android_systrace.pftrace-a96005e5ee9059b89347573f7a7ca53097244fb3532956e0a62897ad77be2ddf",
+   "sha256": "a96005e5ee9059b89347573f7a7ca53097244fb3532956e0a62897ad77be2ddf",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome_custom_navigation_trace.gz",
+   "bytes": 7572484,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_custom_navigation_trace.gz-ff68279e3cec94076b69259d756eed181a63eaf834d8b956a7f4ba665fabf939",
+   "sha256": "ff68279e3cec94076b69259d756eed181a63eaf834d8b956a7f4ba665fabf939",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome_example_wikipedia.perfetto_trace.gz",
+   "bytes": 21537072,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_example_wikipedia.perfetto_trace.gz-7401f67e30cb025b113cef1db53d7e154705e688e33142f65fd7875df26f2cf0",
+   "sha256": "7401f67e30cb025b113cef1db53d7e154705e688e33142f65fd7875df26f2cf0",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome_fcp_lcp_navigations.pftrace",
+   "bytes": 2398645,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_fcp_lcp_navigations.pftrace-ae01d849fbd75a98be1b7ddd5a8873217c377b393a1d5bbd788ed3364f7fefc3",
+   "sha256": "ae01d849fbd75a98be1b7ddd5a8873217c377b393a1d5bbd788ed3364f7fefc3",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome_input_with_frame_view.pftrace",
+   "bytes": 6392331,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_input_with_frame_view.pftrace-a93548822e481508c728ccc5da3ad34afcd0aec02ca7a7a4dad84ff340ee5975",
+   "sha256": "a93548822e481508c728ccc5da3ad34afcd0aec02ca7a7a4dad84ff340ee5975",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome_memory_snapshot.pftrace",
+   "bytes": 3153227,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_memory_snapshot.pftrace-4a06b393bf14147b25296797756a4185abf31510aca2db22ddb3c5dbd21123e4",
+   "sha256": "4a06b393bf14147b25296797756a4185abf31510aca2db22ddb3c5dbd21123e4",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome_missing_track_names.pb.gz",
+   "bytes": 889652,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_missing_track_names.pb.gz-9e4bfdf42a7e180599ab9fe7872333e4ae37f5a58bd228896724fdf3c7df7d67",
+   "sha256": "9e4bfdf42a7e180599ab9fe7872333e4ae37f5a58bd228896724fdf3c7df7d67",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome_page_load_all_categories_not_extended.pftrace.gz",
+   "bytes": 1277750,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_page_load_all_categories_not_extended.pftrace.gz-6586e9e2bbc0c996caddb321a0374328654983733e6ffd7f4635ac07db32a493",
+   "sha256": "6586e9e2bbc0c996caddb321a0374328654983733e6ffd7f4635ac07db32a493",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome_rendering_desktop.pftrace",
+   "bytes": 8305513,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_rendering_desktop.pftrace-f61971e42ea0ce0f6da71c87a0ab19da0e13deca0fa90c6bdc98782af01ae702",
+   "sha256": "f61971e42ea0ce0f6da71c87a0ab19da0e13deca0fa90c6bdc98782af01ae702",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome_scroll_without_vsync.pftrace",
+   "bytes": 1359814,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_scroll_without_vsync.pftrace-74890239a1042cb93a87b8b5b5d9942f821ed3cc0c1236e7734d45a550e3cde4",
+   "sha256": "74890239a1042cb93a87b8b5b5d9942f821ed3cc0c1236e7734d45a550e3cde4",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome_stack_traces_symbolized_trace.pftrace",
+   "bytes": 1834146,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_stack_traces_symbolized_trace.pftrace-a3cb32a2faaef29b0b16c0f8242073beffdc6d0454e7a07a5e5466349f3c3125",
+   "sha256": "a3cb32a2faaef29b0b16c0f8242073beffdc6d0454e7a07a5e5466349f3c3125",
+   "status": 200
+  },
+  {
+   "path": "test/data/chrome_touch_gesture_scroll.pftrace",
+   "bytes": 1128011,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chrome_touch_gesture_scroll.pftrace-2fe40090c41ebeb5dc6ce0bea5bc9aef4d7f4cf7fd625209641e0c5ea2210fb7",
+   "sha256": "2fe40090c41ebeb5dc6ce0bea5bc9aef4d7f4cf7fd625209641e0c5ea2210fb7",
+   "status": 200
+  },
+  {
+   "path": "test/data/clusterfuzz_14357",
+   "bytes": 8418,
+   "url": "https://storage.googleapis.com/perfetto/test_data/clusterfuzz_14357-d9bbe8837573821ff3b505e68b0ed18c3193b8096f786e4b7632b160e44e91ca",
+   "sha256": "d9bbe8837573821ff3b505e68b0ed18c3193b8096f786e4b7632b160e44e91ca",
+   "status": 200
+  },
+  {
+   "path": "test/data/clusterfuzz_14730",
+   "bytes": 4664,
+   "url": "https://storage.googleapis.com/perfetto/test_data/clusterfuzz_14730-bdf674c136a88137664d22bf366ea3a15ef6c7925a535b1a97b04fdd8b325517",
+   "sha256": "bdf674c136a88137664d22bf366ea3a15ef6c7925a535b1a97b04fdd8b325517",
+   "status": 200
+  },
+  {
+   "path": "test/data/clusterfuzz_14753",
+   "bytes": 13192,
+   "url": "https://storage.googleapis.com/perfetto/test_data/clusterfuzz_14753-e992a4a487aea71875a80fa0577aa2bb1324e14383a70022e81d606396a2fcee",
+   "sha256": "e992a4a487aea71875a80fa0577aa2bb1324e14383a70022e81d606396a2fcee",
+   "status": 200
+  },
+  {
+   "path": "test/data/clusterfuzz_14762",
+   "bytes": 104790,
+   "url": "https://storage.googleapis.com/perfetto/test_data/clusterfuzz_14762-cbeec86e06fefc086b9531a9bdb2b35533710627b9e49aeaa53651090fe11d06",
+   "sha256": "cbeec86e06fefc086b9531a9bdb2b35533710627b9e49aeaa53651090fe11d06",
+   "status": 200
+  },
+  {
+   "path": "test/data/clusterfuzz_14767",
+   "bytes": 19984,
+   "url": "https://storage.googleapis.com/perfetto/test_data/clusterfuzz_14767-52aac563f69535cee168ae85804e2a67dc2bbcca52f5c3f8018c7f2e40f4867c",
+   "sha256": "52aac563f69535cee168ae85804e2a67dc2bbcca52f5c3f8018c7f2e40f4867c",
+   "status": 200
+  },
+  {
+   "path": "test/data/clusterfuzz_14799",
+   "bytes": 33122,
+   "url": "https://storage.googleapis.com/perfetto/test_data/clusterfuzz_14799-edec5220388bee58ce9827c16676c0285c4b4779ecc1bd9957ca0791fd98315f",
+   "sha256": "edec5220388bee58ce9827c16676c0285c4b4779ecc1bd9957ca0791fd98315f",
+   "status": 200
+  },
+  {
+   "path": "test/data/clusterfuzz_15252",
+   "bytes": 21928,
+   "url": "https://storage.googleapis.com/perfetto/test_data/clusterfuzz_15252-3d6047483cddadbcbedfc828d42135ca25c51ec09bf55be4f7aae7844e24ba32",
+   "sha256": "3d6047483cddadbcbedfc828d42135ca25c51ec09bf55be4f7aae7844e24ba32",
+   "status": 200
+  },
+  {
+   "path": "test/data/clusterfuzz_17805",
+   "bytes": 33,
+   "url": "https://storage.googleapis.com/perfetto/test_data/clusterfuzz_17805-f9eb862fec5ef13ecaf2c90c61bb7c88bc1184682f31383a34a2edcc416e5eaa",
+   "sha256": "f9eb862fec5ef13ecaf2c90c61bb7c88bc1184682f31383a34a2edcc416e5eaa",
+   "status": 200
+  },
+  {
+   "path": "test/data/clusterfuzz_20215",
+   "bytes": 92,
+   "url": "https://storage.googleapis.com/perfetto/test_data/clusterfuzz_20215-f5478862ec1a4e006a70bc15283ba9c2d769a5dc4c513ad43aab678b61a4b43a",
+   "sha256": "f5478862ec1a4e006a70bc15283ba9c2d769a5dc4c513ad43aab678b61a4b43a",
+   "status": 200
+  },
+  {
+   "path": "test/data/clusterfuzz_20292",
+   "bytes": 585,
+   "url": "https://storage.googleapis.com/perfetto/test_data/clusterfuzz_20292-cf2219b9a92fba90ba48e9ec1747e3f8b0d283afda7f56bc4a17fae002ff036c",
+   "sha256": "cf2219b9a92fba90ba48e9ec1747e3f8b0d283afda7f56bc4a17fae002ff036c",
+   "status": 200
+  },
+  {
+   "path": "test/data/clusterfuzz_21178",
+   "bytes": 92,
+   "url": "https://storage.googleapis.com/perfetto/test_data/clusterfuzz_21178-c32f8fab41eeb4928091d9633f6e7b9cb42678ec1f0f1c27239f89e1ba5860ea",
+   "sha256": "c32f8fab41eeb4928091d9633f6e7b9cb42678ec1f0f1c27239f89e1ba5860ea",
+   "status": 200
+  },
+  {
+   "path": "test/data/clusterfuzz_21890",
+   "bytes": 1804,
+   "url": "https://storage.googleapis.com/perfetto/test_data/clusterfuzz_21890-469f2c24d560fda648d51f803eed28ef0b686fc11bd7801c808f98367dafd090",
+   "sha256": "469f2c24d560fda648d51f803eed28ef0b686fc11bd7801c808f98367dafd090",
+   "status": 200
+  },
+  {
+   "path": "test/data/clusterfuzz_23053",
+   "bytes": 232,
+   "url": "https://storage.googleapis.com/perfetto/test_data/clusterfuzz_23053-e424e3b4296939ad07465f937981011927869f6d050e7d5ba2af5dd783e2b48f",
+   "sha256": "e424e3b4296939ad07465f937981011927869f6d050e7d5ba2af5dd783e2b48f",
+   "status": 200
+  },
+  {
+   "path": "test/data/clusterfuzz_28338",
+   "bytes": 70,
+   "url": "https://storage.googleapis.com/perfetto/test_data/clusterfuzz_28338-dee9f2a655a163892299479cb2cb9327b686d8ff2f672a6b9b4f44139e901152",
+   "sha256": "dee9f2a655a163892299479cb2cb9327b686d8ff2f672a6b9b4f44139e901152",
+   "status": 200
+  },
+  {
+   "path": "test/data/clusterfuzz_28766",
+   "bytes": 140,
+   "url": "https://storage.googleapis.com/perfetto/test_data/clusterfuzz_28766-69f872a397a02e7f50e02b334a23e8346850db0a37c017c2076b7be7cc182c2d",
+   "sha256": "69f872a397a02e7f50e02b334a23e8346850db0a37c017c2076b7be7cc182c2d",
+   "status": 200
+  },
+  {
+   "path": "test/data/codec-framedecoder-trace.pftrace",
+   "bytes": 6562472,
+   "url": "https://storage.googleapis.com/perfetto/test_data/codec-framedecoder-trace.pftrace-4b5b272aee9527e57c7cc369e0471eff8616ad2c8e40ce30f870f697640b0be2",
+   "sha256": "4b5b272aee9527e57c7cc369e0471eff8616ad2c8e40ce30f870f697640b0be2",
+   "status": 200
+  },
+  {
+   "path": "test/data/collapsed_stack_simple.txt",
+   "bytes": 45,
+   "url": "https://storage.googleapis.com/perfetto/test_data/collapsed_stack_simple.txt-3467b1a6c4051a4f3787ae678cb2bbd436212a0ed56574dbe5d28e8b5ece1af7",
+   "sha256": "3467b1a6c4051a4f3787ae678cb2bbd436212a0ed56574dbe5d28e8b5ece1af7",
+   "status": 200
+  },
+  {
+   "path": "test/data/collapsed_stack_with_comments.txt",
+   "bytes": 118,
+   "url": "https://storage.googleapis.com/perfetto/test_data/collapsed_stack_with_comments.txt-a175838b15446dc1545c416ccbbfdcea8ff78e34a79249637407a26eb1f26750",
+   "sha256": "a175838b15446dc1545c416ccbbfdcea8ff78e34a79249637407a26eb1f26750",
+   "status": 200
+  },
+  {
+   "path": "test/data/compact_sched.pb",
+   "bytes": 4025,
+   "url": "https://storage.googleapis.com/perfetto/test_data/compact_sched.pb-1fd2a81ae4354a38f3b433b516f083c9a8c378fe7043450ba7fee84d7fb2f5d8",
+   "sha256": "1fd2a81ae4354a38f3b433b516f083c9a8c378fe7043450ba7fee84d7fb2f5d8",
+   "status": 200
+  },
+  {
+   "path": "test/data/compressed.pb",
+   "bytes": 1511347,
+   "url": "https://storage.googleapis.com/perfetto/test_data/compressed.pb-33d25b9d884f18f04b1f9ded6aadd75e630d5605e5b157e9d1da8f15bea52d96",
+   "sha256": "33d25b9d884f18f04b1f9ded6aadd75e630d5605e5b157e9d1da8f15bea52d96",
+   "status": 200
+  },
+  {
+   "path": "test/data/compressed.pb.gz",
+   "bytes": 1511541,
+   "url": "https://storage.googleapis.com/perfetto/test_data/compressed.pb.gz-20a762af59c421dea4211e371299016b47ce7e520f69fc981bd7d43dd9b23be1",
+   "sha256": "20a762af59c421dea4211e371299016b47ce7e520f69fc981bd7d43dd9b23be1",
+   "status": 200
+  },
+  {
+   "path": "test/data/counter_precision.pftrace",
+   "bytes": 346,
+   "url": "https://storage.googleapis.com/perfetto/test_data/counter_precision.pftrace-aefa7d23f0b4f893b01b80e4d19b2f5dd1dc45aa1551cb06a023a660d7c491e3",
+   "sha256": "aefa7d23f0b4f893b01b80e4d19b2f5dd1dc45aa1551cb06a023a660d7c491e3",
+   "status": 200
+  },
+  {
+   "path": "test/data/counters.json",
+   "bytes": 241,
+   "url": "https://storage.googleapis.com/perfetto/test_data/counters.json-5c8a3e8bd3c5e0fb2eec5acd5e11ddb0ab129727f288c35fac3f545708904c35",
+   "sha256": "5c8a3e8bd3c5e0fb2eec5acd5e11ddb0ab129727f288c35fac3f545708904c35",
+   "status": 200
+  },
+  {
+   "path": "test/data/cpu_counters.pb",
+   "bytes": 9989086,
+   "url": "https://storage.googleapis.com/perfetto/test_data/cpu_counters.pb-e566d656f369d988e42b9792ac14cc6e82ce5928066bbf26210ffe5bbda3384b",
+   "sha256": "e566d656f369d988e42b9792ac14cc6e82ce5928066bbf26210ffe5bbda3384b",
+   "status": 200
+  },
+  {
+   "path": "test/data/cpu_powerups_1.pb",
+   "bytes": 2033064,
+   "url": "https://storage.googleapis.com/perfetto/test_data/cpu_powerups_1.pb-70f5511ba0cd6ce1359e3cadb4d1d9301fb6e26be85158e3384b06f41418d386",
+   "sha256": "70f5511ba0cd6ce1359e3cadb4d1d9301fb6e26be85158e3384b06f41418d386",
+   "status": 200
+  },
+  {
+   "path": "test/data/decimal_timestamp.json",
+   "bytes": 154,
+   "url": "https://storage.googleapis.com/perfetto/test_data/decimal_timestamp.json-698d7493fe7441e491ad5037587fc38269c878b6f76203fe63dda0e7daad54a4",
+   "sha256": "698d7493fe7441e491ad5037587fc38269c878b6f76203fe63dda0e7daad54a4",
+   "status": 200
+  },
+  {
+   "path": "test/data/display_time_unit.json",
+   "bytes": 388,
+   "url": "https://storage.googleapis.com/perfetto/test_data/display_time_unit.json-208a66ae15b873b6a04ed3e0e67aeb8827e13b8d6e175514991df5d361d11162",
+   "sha256": "208a66ae15b873b6a04ed3e0e67aeb8827e13b8d6e175514991df5d361d11162",
+   "status": 200
+  },
+  {
+   "path": "test/data/dpu_state.textproto",
+   "bytes": 13725948,
+   "url": "https://storage.googleapis.com/perfetto/test_data/dpu_state.textproto-0e87fca84404a02b394d4cf48432318c33a15d4aa6890562861ab72a527cf59d",
+   "sha256": "0e87fca84404a02b394d4cf48432318c33a15d4aa6890562861ab72a527cf59d",
+   "status": 200
+  },
+  {
+   "path": "test/data/event_latency_with_args.perfetto-trace",
+   "bytes": 10128525,
+   "url": "https://storage.googleapis.com/perfetto/test_data/event_latency_with_args.perfetto-trace-c3d28fa97b1fcb515cacccdcddcda8981f5f2c6d20df682c59bcfdd8762954c2",
+   "sha256": "c3d28fa97b1fcb515cacccdcddcda8981f5f2c6d20df682c59bcfdd8762954c2",
+   "status": 200
+  },
+  {
+   "path": "test/data/example_android_trace_30s.csv",
+   "bytes": 3560418,
+   "url": "https://storage.googleapis.com/perfetto/test_data/example_android_trace_30s.csv-6208a86bcdb056878cb0eb13253c578006c29a0f4c93cae25849173cb0e2b109",
+   "sha256": "6208a86bcdb056878cb0eb13253c578006c29a0f4c93cae25849173cb0e2b109",
+   "status": 200
+  },
+  {
+   "path": "test/data/example_android_trace_30s.pb",
+   "bytes": 26692953,
+   "url": "https://storage.googleapis.com/perfetto/test_data/example_android_trace_30s.pb-62656cc8ea2a624db95087850245d16453f0723f723ed2e329080e771bc1f82c",
+   "sha256": "62656cc8ea2a624db95087850245d16453f0723f723ed2e329080e771bc1f82c",
+   "status": 200
+  },
+  {
+   "path": "test/data/example_android_trace_30s.pb.gz",
+   "bytes": 4744143,
+   "url": "https://storage.googleapis.com/perfetto/test_data/example_android_trace_30s.pb.gz-6716542d89bb2d1d9bd7c43d696111184a274bcecf0b3a468388b0d95b3c5336",
+   "sha256": "6716542d89bb2d1d9bd7c43d696111184a274bcecf0b3a468388b0d95b3c5336",
+   "status": 200
+  },
+  {
+   "path": "test/data/example_android_trace_30s_atrace_strings.txt",
+   "bytes": 2338654,
+   "url": "https://storage.googleapis.com/perfetto/test_data/example_android_trace_30s_atrace_strings.txt-4a7f0fa961d2272241e21666d3e6cdec0476eba5be961e338fb7b7c132c56a16",
+   "sha256": "4a7f0fa961d2272241e21666d3e6cdec0476eba5be961e338fb7b7c132c56a16",
+   "status": 200
+  },
+  {
+   "path": "test/data/example_android_trace_30s_thread_track.csv",
+   "bytes": 121896960,
+   "url": "https://storage.googleapis.com/perfetto/test_data/example_android_trace_30s_thread_track.csv-98e888cc31e95cf237b413cf3684833be68285425815e8be51a4b27b40efa36e",
+   "sha256": "98e888cc31e95cf237b413cf3684833be68285425815e8be51a4b27b40efa36e",
+   "status": 200
+  },
+  {
+   "path": "test/data/expected_frame_timeline_for_benchmarks.csv",
+   "bytes": 5761,
+   "url": "https://storage.googleapis.com/perfetto/test_data/expected_frame_timeline_for_benchmarks.csv-cbac2ef881f8c64df3aac7c2787412f3b84232fd96536b5bf4a0af071b7e42a1",
+   "sha256": "cbac2ef881f8c64df3aac7c2787412f3b84232fd96536b5bf4a0af071b7e42a1",
+   "status": 200
+  },
+  {
+   "path": "test/data/fling_with_input_delay.pftrace",
+   "bytes": 3727228,
+   "url": "https://storage.googleapis.com/perfetto/test_data/fling_with_input_delay.pftrace-8c968b20e71481475a429399b4366bd796c527293218fe80789f9ed6ab9db5b4",
+   "sha256": "8c968b20e71481475a429399b4366bd796c527293218fe80789f9ed6ab9db5b4",
+   "status": 200
+  },
+  {
+   "path": "test/data/fling_with_input_delay_new.pftrace",
+   "bytes": 9705332,
+   "url": "https://storage.googleapis.com/perfetto/test_data/fling_with_input_delay_new.pftrace-b2ce8946845aa1c3f2b2b2a2997fd4f2b14cfa0cdc9c8967f2fc8e7e4446224d",
+   "sha256": "b2ce8946845aa1c3f2b2b2a2997fd4f2b14cfa0cdc9c8967f2fc8e7e4446224d",
+   "status": 200
+  },
+  {
+   "path": "test/data/freezer_trace.atr",
+   "bytes": 14149725,
+   "url": "https://storage.googleapis.com/perfetto/test_data/freezer_trace.atr-abbffc92db09d1b7fd3452e9d5e91aebd5a13151660125c6e25776331efccc53",
+   "sha256": "abbffc92db09d1b7fd3452e9d5e91aebd5a13151660125c6e25776331efccc53",
+   "status": 200
+  },
+  {
+   "path": "test/data/ftrace_dense_generic.pftrace",
+   "bytes": 2718,
+   "url": "https://storage.googleapis.com/perfetto/test_data/ftrace_dense_generic.pftrace-d7308a3a509722d2785fe42e12e810b99667b25da7f2368ee64a8fbbea27ce1e",
+   "sha256": "d7308a3a509722d2785fe42e12e810b99667b25da7f2368ee64a8fbbea27ce1e",
+   "status": 200
+  },
+  {
+   "path": "test/data/ftrace_error_stats.pftrace",
+   "bytes": 1730,
+   "url": "https://storage.googleapis.com/perfetto/test_data/ftrace_error_stats.pftrace-f2c4c42a10cb6c4bc341640f89dd714b6b63c06a93db79ea0b83cdd68ea239f0",
+   "sha256": "f2c4c42a10cb6c4bc341640f89dd714b6b63c06a93db79ea0b83cdd68ea239f0",
+   "status": 200
+  },
+  {
+   "path": "test/data/ftrace_event_cpu_for_benchmarks.csv",
+   "bytes": 3225123,
+   "url": "https://storage.googleapis.com/perfetto/test_data/ftrace_event_cpu_for_benchmarks.csv-aeb7c882c8e4c96d0edc694052c63c747cbbc40e5e755451d91e037fbe0bed69",
+   "sha256": "aeb7c882c8e4c96d0edc694052c63c747cbbc40e5e755451d91e037fbe0bed69",
+   "status": 200
+  },
+  {
+   "path": "test/data/ftrace_kernel_trackevent.pftrace",
+   "bytes": 5344,
+   "url": "https://storage.googleapis.com/perfetto/test_data/ftrace_kernel_trackevent.pftrace-9f28782f2f52b3bacef7ae4edf790393fb406cc1468417c7111c5abb307f5936",
+   "sha256": "9f28782f2f52b3bacef7ae4edf790393fb406cc1468417c7111c5abb307f5936",
+   "status": 200
+  },
+  {
+   "path": "test/data/fuchsia_events_and_args.fxt",
+   "bytes": 54824,
+   "url": "https://storage.googleapis.com/perfetto/test_data/fuchsia_events_and_args.fxt-1597b8fd935caedb1e319e423cff4dbfba68327cad6ec21f985c0378c2c76b20",
+   "sha256": "1597b8fd935caedb1e319e423cff4dbfba68327cad6ec21f985c0378c2c76b20",
+   "status": 200
+  },
+  {
+   "path": "test/data/fuchsia_trace.fxt",
+   "bytes": 644808,
+   "url": "https://storage.googleapis.com/perfetto/test_data/fuchsia_trace.fxt-b555e6d1346c8189f0d8b1427c1f2f716b2b15dfb9b7c6a2b978e8207ceaad7f",
+   "sha256": "b555e6d1346c8189f0d8b1427c1f2f716b2b15dfb9b7c6a2b978e8207ceaad7f",
+   "status": 200
+  },
+  {
+   "path": "test/data/fuchsia_trace_sched.fxt",
+   "bytes": 360608,
+   "url": "https://storage.googleapis.com/perfetto/test_data/fuchsia_trace_sched.fxt-e796127dd16d1f4676dc33016f133010fcf138aa68fb5b85443167527f8a8602",
+   "sha256": "e796127dd16d1f4676dc33016f133010fcf138aa68fb5b85443167527f8a8602",
+   "status": 200
+  },
+  {
+   "path": "test/data/fuchsia_trace_sched_with_waker.fxt",
+   "bytes": 391152,
+   "url": "https://storage.googleapis.com/perfetto/test_data/fuchsia_trace_sched_with_waker.fxt-d3a1e25ec0c66880742adccb6b881f77affde13ed9e9577f0f5a2e0152930c38",
+   "sha256": "d3a1e25ec0c66880742adccb6b881f77affde13ed9e9577f0f5a2e0152930c38",
+   "status": 200
+  },
+  {
+   "path": "test/data/fuchsia_workstation.fxt",
+   "bytes": 3923488,
+   "url": "https://storage.googleapis.com/perfetto/test_data/fuchsia_workstation.fxt-7fb7e1568313d02f495ddc8063fa9ef209a346f0322d105fac3462ffb60fe1fb",
+   "sha256": "7fb7e1568313d02f495ddc8063fa9ef209a346f0322d105fac3462ffb60fe1fb",
+   "status": 200
+  },
+  {
+   "path": "test/data/full_trace_filter.bytecode",
+   "bytes": 2056,
+   "url": "https://storage.googleapis.com/perfetto/test_data/full_trace_filter.bytecode-c394ad3e15cef817bc3f37ed02b3b3808a5bb8de5bcc8a3cfe83e455bfdad9d5",
+   "sha256": "c394ad3e15cef817bc3f37ed02b3b3808a5bb8de5bcc8a3cfe83e455bfdad9d5",
+   "status": 200
+  },
+  {
+   "path": "test/data/gecko_preprocessed_dav1d.json",
+   "bytes": 3035717,
+   "url": "https://storage.googleapis.com/perfetto/test_data/gecko_preprocessed_dav1d.json-c62ee179535f384d219c4e3518f72d0350170dee5e45b455b06903c427dc06b6",
+   "sha256": "c62ee179535f384d219c4e3518f72d0350170dee5e45b455b06903c427dc06b6",
+   "status": 200
+  },
+  {
+   "path": "test/data/gecko_shared_resources.json.gz",
+   "bytes": 26055,
+   "url": "https://storage.googleapis.com/perfetto/test_data/gecko_shared_resources.json.gz-8beadd3b7d20612893753f330c02f96c3a469b0e7cc9ec2f932b3acbfd2d59bd",
+   "sha256": "8beadd3b7d20612893753f330c02f96c3a469b0e7cc9ec2f932b3acbfd2d59bd",
+   "status": 200
+  },
+  {
+   "path": "test/data/gpu_counters.pb",
+   "bytes": 1061,
+   "url": "https://storage.googleapis.com/perfetto/test_data/gpu_counters.pb-33d59d659b9278fef11afa2ca3bd92c2cd41f46a1e8291babef9f2e256e08fee",
+   "sha256": "33d59d659b9278fef11afa2ca3bd92c2cd41f46a1e8291babef9f2e256e08fee",
+   "status": 200
+  },
+  {
+   "path": "test/data/gpu_render_stages.pftrace",
+   "bytes": 18652831,
+   "url": "https://storage.googleapis.com/perfetto/test_data/gpu_render_stages.pftrace-9bde094387222bf3e3ceba59e7c3fc6506e768d211410ca0c3e175109e173563",
+   "sha256": "9bde094387222bf3e3ceba59e7c3fc6506e768d211410ca0c3e175109e173563",
+   "status": 200
+  },
+  {
+   "path": "test/data/gpu_trace.pb",
+   "bytes": 1700,
+   "url": "https://storage.googleapis.com/perfetto/test_data/gpu_trace.pb-19596f1c578f78ef05bfc8e045eed53ce141585703ce8aee0d2fdb1127871812",
+   "sha256": "19596f1c578f78ef05bfc8e045eed53ce141585703ce8aee0d2fdb1127871812",
+   "status": 200
+  },
+  {
+   "path": "test/data/heap_graph/heap_graph.pb",
+   "bytes": 671,
+   "url": "https://storage.googleapis.com/perfetto/test_data/heap_graph.pb-f6ef879ad1b0506c378426fe1178d1c7d413b4b7dd83ef5b9ba06b55ec0fbdf8",
+   "sha256": "f6ef879ad1b0506c378426fe1178d1c7d413b4b7dd83ef5b9ba06b55ec0fbdf8",
+   "status": 200
+  },
+  {
+   "path": "test/data/heap_graph/heap_graph.textproto",
+   "bytes": 3090,
+   "url": "https://storage.googleapis.com/perfetto/test_data/heap_graph.textproto-0f17b814c6b338295b99985204b0cd22971b7b8f93203ece22b2157a344f8873",
+   "sha256": "0f17b814c6b338295b99985204b0cd22971b7b8f93203ece22b2157a344f8873",
+   "status": 200
+  },
+  {
+   "path": "test/data/heap_graph/heap_graph_branching.pb",
+   "bytes": 238,
+   "url": "https://storage.googleapis.com/perfetto/test_data/heap_graph_branching.pb-98114c80ec97c179a39be699f4253e3f8b0a13af0901372e5a0f25233b5e06d1",
+   "sha256": "98114c80ec97c179a39be699f4253e3f8b0a13af0901372e5a0f25233b5e06d1",
+   "status": 200
+  },
+  {
+   "path": "test/data/heap_graph/heap_graph_branching.textproto",
+   "bytes": 1491,
+   "url": "https://storage.googleapis.com/perfetto/test_data/heap_graph_branching.textproto-eaa24454f5bee06b235679e775d5bac2d8c332296e495e460260f1ac7a366c60",
+   "sha256": "eaa24454f5bee06b235679e775d5bac2d8c332296e495e460260f1ac7a366c60",
+   "status": 200
+  },
+  {
+   "path": "test/data/heap_graph/heap_graph_huge_size.pb",
+   "bytes": 384,
+   "url": "https://storage.googleapis.com/perfetto/test_data/heap_graph_huge_size.pb-dad614f622d36f4511025aa8e9f2df86b540e24c1c0a2eb7d23d9632149aa299",
+   "sha256": "dad614f622d36f4511025aa8e9f2df86b540e24c1c0a2eb7d23d9632149aa299",
+   "status": 200
+  },
+  {
+   "path": "test/data/heap_graph/heap_graph_huge_size.textproto",
+   "bytes": 1697,
+   "url": "https://storage.googleapis.com/perfetto/test_data/heap_graph_huge_size.textproto-6154874718fe8774bd9bf687a89730e102b5cd8225bd23c81cb181234f21d853",
+   "sha256": "6154874718fe8774bd9bf687a89730e102b5cd8225bd23c81cb181234f21d853",
+   "status": 200
+  },
+  {
+   "path": "test/data/heap_graph_object_for_benchmarks.pftrace",
+   "bytes": 25718963,
+   "url": "https://storage.googleapis.com/perfetto/test_data/heap_graph_object_for_benchmarks.pftrace-d0ee1affa7afdb325620a251f20ff16d5e19a5dae76508bb6db746d55dabd1cb",
+   "sha256": "d0ee1affa7afdb325620a251f20ff16d5e19a5dae76508bb6db746d55dabd1cb",
+   "status": 200
+  },
+  {
+   "path": "test/data/heap_pgraph_object_for_benchmarks_query.csv",
+   "bytes": 9367750,
+   "url": "https://storage.googleapis.com/perfetto/test_data/heap_pgraph_object_for_benchmarks_query.csv-62d757e7de34b466929f0444f2e097123b857c675fbe160f300f998a9309a3ae",
+   "sha256": "62d757e7de34b466929f0444f2e097123b857c675fbe160f300f998a9309a3ae",
+   "status": 200
+  },
+  {
+   "path": "test/data/heap_profile_intervals.pftrace",
+   "bytes": 387,
+   "url": "https://storage.googleapis.com/perfetto/test_data/heap_profile_intervals.pftrace-83164fa99efb2c9534843c747bd29f8856d13b53448c6198d512d885adffa7db",
+   "sha256": "83164fa99efb2c9534843c747bd29f8856d13b53448c6198d512d885adffa7db",
+   "status": 200
+  },
+  {
+   "path": "test/data/heapprofd_standalone_client_example",
+   "bytes": 5155984,
+   "url": "https://storage.googleapis.com/perfetto/test_data/heapprofd_standalone_client_example-7b95231beb9e7087d6e51564df95a5702635a7b4b880e1c88a4488e620eb8a94",
+   "sha256": "7b95231beb9e7087d6e51564df95a5702635a7b4b880e1c88a4488e620eb8a94",
+   "status": 200
+  },
+  {
+   "path": "test/data/heapprofd_standalone_client_example-trace",
+   "bytes": 2900,
+   "url": "https://storage.googleapis.com/perfetto/test_data/heapprofd_standalone_client_example-trace-4f10e47ae1259d1a3aac6d6225a437e313882cf9d7b267c3e7d589d57a92d497",
+   "sha256": "4f10e47ae1259d1a3aac6d6225a437e313882cf9d7b267c3e7d589d57a92d497",
+   "status": 200
+  },
+  {
+   "path": "test/data/instants.json",
+   "bytes": 487,
+   "url": "https://storage.googleapis.com/perfetto/test_data/instants.json-c0b0a3e1da04657ca7bdc00ed6905b3856930e82293c90f4ce3eb5caa5c024f3",
+   "sha256": "c0b0a3e1da04657ca7bdc00ed6905b3856930e82293c90f4ce3eb5caa5c024f3",
+   "status": 200
+  },
+  {
+   "path": "test/data/instruments_trace.xml",
+   "bytes": 11573,
+   "url": "https://storage.googleapis.com/perfetto/test_data/instruments_trace.xml-1f87b2e3f5617f947c3c22fe2282e3341ed4d3b4f37ad2e6752c6dd54836db8a",
+   "sha256": "1f87b2e3f5617f947c3c22fe2282e3341ed4d3b4f37ad2e6752c6dd54836db8a",
+   "status": 200
+  },
+  {
+   "path": "test/data/instruments_trace_symbols.pb",
+   "bytes": 250,
+   "url": "https://storage.googleapis.com/perfetto/test_data/instruments_trace_symbols.pb-1f5096a97bd9b7176b1ec52863d02e3e85e19eedbfbbe51cbbecedce8a0248cb",
+   "sha256": "1f5096a97bd9b7176b1ec52863d02e3e85e19eedbfbbe51cbbecedce8a0248cb",
+   "status": 200
+  },
+  {
+   "path": "test/data/instruments_trace_with_symbols.zip",
+   "bytes": 3322,
+   "url": "https://storage.googleapis.com/perfetto/test_data/instruments_trace_with_symbols.zip-70733124cf53b8065512204d9a72c7818ebd04afb10cf3c69cc926a2aa5ee07e",
+   "sha256": "70733124cf53b8065512204d9a72c7818ebd04afb10cf3c69cc926a2aa5ee07e",
+   "status": 200
+  },
+  {
+   "path": "test/data/instruments_xcode27_trace.xml",
+   "bytes": 12515,
+   "url": "https://storage.googleapis.com/perfetto/test_data/instruments_xcode27_trace.xml-5b8af28b5e409e8387f97deb9ac655512bade195bb84f1f7f7b74594021133a0",
+   "sha256": "5b8af28b5e409e8387f97deb9ac655512bade195bb84f1f7f7b74594021133a0",
+   "status": 200
+  },
+  {
+   "path": "test/data/json_sort_index_test.json",
+   "bytes": 2611,
+   "url": "https://storage.googleapis.com/perfetto/test_data/json_sort_index_test.json-61b121ff864240ca3b29f971a51940cf7e0637e42fe64428023978dcac250f79",
+   "sha256": "61b121ff864240ca3b29f971a51940cf7e0637e42fe64428023978dcac250f79",
+   "status": 200
+  },
+  {
+   "path": "test/data/kallsyms.txt",
+   "bytes": 9553001,
+   "url": "https://storage.googleapis.com/perfetto/test_data/kallsyms.txt-79d35d0254881c0c18107a6985c1f1e95794287168a520dfb1934a03dfe58d3c",
+   "sha256": "79d35d0254881c0c18107a6985c1f1e95794287168a520dfb1934a03dfe58d3c",
+   "status": 200
+  },
+  {
+   "path": "test/data/linux_block_io_trace.pb",
+   "bytes": 280024,
+   "url": "https://storage.googleapis.com/perfetto/test_data/linux_block_io_trace.pb-97d8f3c76ea19e5948a058975a2070a1564d198c34661c36bf51962c38ccb3f2",
+   "sha256": "97d8f3c76ea19e5948a058975a2070a1564d198c34661c36bf51962c38ccb3f2",
+   "status": 200
+  },
+  {
+   "path": "test/data/linux_perf/bin/sdk_example.linux.debug",
+   "bytes": 27805048,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sdk_example.linux.debug-0a80e85ff3625df9a8d0ddbd9b97084738439758d488ed4559a7584407afa026",
+   "sha256": "0a80e85ff3625df9a8d0ddbd9b97084738439758d488ed4559a7584407afa026",
+   "status": 200
+  },
+  {
+   "path": "test/data/linux_perf/sdk_example.linux.perf.data",
+   "bytes": 39592,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sdk_example.linux.perf.data-84301f342c5117db2b02f7c684ff40d8056d50429b342aaedee4ef344380c14a",
+   "sha256": "84301f342c5117db2b02f7c684ff40d8056d50429b342aaedee4ef344380c14a",
+   "status": 200
+  },
+  {
+   "path": "test/data/lmk_userspace.pb",
+   "bytes": 1548,
+   "url": "https://storage.googleapis.com/perfetto/test_data/lmk_userspace.pb-9b888ba2c4d724f9f034b7505d06e4266d1ebe8bfb4110b2b8eee44c127b24ed",
+   "sha256": "9b888ba2c4d724f9f034b7505d06e4266d1ebe8bfb4110b2b8eee44c127b24ed",
+   "status": 200
+  },
+  {
+   "path": "test/data/log.proto",
+   "bytes": 3670,
+   "url": "https://storage.googleapis.com/perfetto/test_data/log.proto-130113fd0efb6ca6a7de1c36cb7c27a5e06f2dea5cf1183f39594b6882d0a6f9",
+   "sha256": "130113fd0efb6ca6a7de1c36cb7c27a5e06f2dea5cf1183f39594b6882d0a6f9",
+   "status": 200
+  },
+  {
+   "path": "test/data/long_task_tracking_trace",
+   "bytes": 11123831,
+   "url": "https://storage.googleapis.com/perfetto/test_data/long_task_tracking_trace-fbcd80d3ec7a6312f438ef43b61f09965c0922929061b6846449e913aa5d23f7",
+   "sha256": "fbcd80d3ec7a6312f438ef43b61f09965c0922929061b6846449e913aa5d23f7",
+   "status": 200
+  },
+  {
+   "path": "test/data/memory_counters.pb",
+   "bytes": 6365447,
+   "url": "https://storage.googleapis.com/perfetto/test_data/memory_counters.pb-29fa34f6bcd6ed9663dbe9be4615cc8eafc93c1d78b1e5f7353b56da6fcf82e2",
+   "sha256": "29fa34f6bcd6ed9663dbe9be4615cc8eafc93c1d78b1e5f7353b56da6fcf82e2",
+   "status": 200
+  },
+  {
+   "path": "test/data/missing_track_names.pb",
+   "bytes": 1289,
+   "url": "https://storage.googleapis.com/perfetto/test_data/missing_track_names.pb-40d27f4b6ec2f865f38e25abdd64293f6e5e7cb9dcf0bd3cd2c1964ab9970a70",
+   "sha256": "40d27f4b6ec2f865f38e25abdd64293f6e5e7cb9dcf0bd3cd2c1964ab9970a70",
+   "status": 200
+  },
+  {
+   "path": "test/data/mm_event.pb",
+   "bytes": 5697,
+   "url": "https://storage.googleapis.com/perfetto/test_data/mm_event.pb-14c3405a0904552202f7325fe730fa1e99fa8b876ef08014984ad5b7ec449f1c",
+   "sha256": "14c3405a0904552202f7325fe730fa1e99fa8b876ef08014984ad5b7ec449f1c",
+   "status": 200
+  },
+  {
+   "path": "test/data/multi_machine_trace.pb",
+   "bytes": 735032,
+   "url": "https://storage.googleapis.com/perfetto/test_data/multi_machine_trace.pb-366c817527d84de98bac52943381965425fd959fa1c824dd856237a4cb3c9722",
+   "sha256": "366c817527d84de98bac52943381965425fd959fa1c824dd856237a4cb3c9722",
+   "status": 200
+  },
+  {
+   "path": "test/data/multi_trace_single_machine_clock.zip",
+   "bytes": 158258,
+   "url": "https://storage.googleapis.com/perfetto/test_data/multi_trace_single_machine_clock.zip-b0ea2f7272ec432e64890f291aa48fb0e1204f88b9709d2bd6bfd195510c5d66",
+   "sha256": "b0ea2f7272ec432e64890f291aa48fb0e1204f88b9709d2bd6bfd195510c5d66",
+   "status": 200
+  },
+  {
+   "path": "test/data/ninja_log",
+   "bytes": 92630,
+   "url": "https://storage.googleapis.com/perfetto/test_data/ninja_log-2072bf6bad617bfaf8b453e3b9552db0e73c846122c897d3336b6ce41b4fc42b",
+   "sha256": "2072bf6bad617bfaf8b453e3b9552db0e73c846122c897d3336b6ce41b4fc42b",
+   "status": 200
+  },
+  {
+   "path": "test/data/oom_callstack.pftrace",
+   "bytes": 14051325,
+   "url": "https://storage.googleapis.com/perfetto/test_data/oom_callstack.pftrace-a7179d7ef3b9718f541e334fcdbedd192fcaffb61917b5871fa250514c330c47",
+   "sha256": "a7179d7ef3b9718f541e334fcdbedd192fcaffb61917b5871fa250514c330c47",
+   "status": 200
+  },
+  {
+   "path": "test/data/panel_state.textproto",
+   "bytes": 31340585,
+   "url": "https://storage.googleapis.com/perfetto/test_data/panel_state.textproto-53b4c87c1a635d910bc3ec38620633f1868697829d5adf6a508de787a14b92aa",
+   "sha256": "53b4c87c1a635d910bc3ec38620633f1868697829d5adf6a508de787a14b92aa",
+   "status": 200
+  },
+  {
+   "path": "test/data/parser/v8.code.trace.pb.gz",
+   "bytes": 1620738,
+   "url": "https://storage.googleapis.com/perfetto/test_data/v8.code.trace.pb.gz-cb21932d5a83cc63b4a4bc49059541075bc2da8865f5dfd0dff3f2bea4b21740",
+   "sha256": "cb21932d5a83cc63b4a4bc49059541075bc2da8865f5dfd0dff3f2bea4b21740",
+   "status": 200
+  },
+  {
+   "path": "test/data/perf-data-deobfuscated.zip",
+   "bytes": 1364162,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perf-data-deobfuscated.zip-5af2786d8dfb165dcb901808eb3508d5559c637a179c5fae395d9a73ac0490ef",
+   "sha256": "5af2786d8dfb165dcb901808eb3508d5559c637a179c5fae395d9a73ac0490ef",
+   "status": 200
+  },
+  {
+   "path": "test/data/perf_counter.data",
+   "bytes": 1499444,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perf_counter.data-e4aa7c27c45b1264504b4bdd85d70816a50de2b022f397c53c81aeb7894b1926",
+   "sha256": "e4aa7c27c45b1264504b4bdd85d70816a50de2b022f397c53c81aeb7894b1926",
+   "status": 200
+  },
+  {
+   "path": "test/data/perf_sample.pb",
+   "bytes": 2147,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perf_sample.pb-3e4e31dcbe5e4d924b4e391593f81d065ffac3fc9faa224154d8c9723d6b1b54",
+   "sha256": "3e4e31dcbe5e4d924b4e391593f81d065ffac3fc9faa224154d8c9723d6b1b54",
+   "status": 200
+  },
+  {
+   "path": "test/data/perf_sample_annotations.pftrace",
+   "bytes": 23885,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perf_sample_annotations.pftrace-067957102d4f2c4dbb05e6d1948c76ab426b06d0ba07d0e7237e1442218b700e",
+   "sha256": "067957102d4f2c4dbb05e6d1948c76ab426b06d0ba07d0e7237e1442218b700e",
+   "status": 200
+  },
+  {
+   "path": "test/data/perf_sample_multicallstacks.pftrace",
+   "bytes": 169604,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perf_sample_multicallstacks.pftrace-e1b1b06c8231fef666e3d02fe5acb3aa7d7550fc3bb99031a6bd09ec392872c5",
+   "sha256": "e1b1b06c8231fef666e3d02fe5acb3aa7d7550fc3bb99031a6bd09ec392872c5",
+   "status": 200
+  },
+  {
+   "path": "test/data/perf_sample_no_functions.pb",
+   "bytes": 1322,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perf_sample_no_functions.pb-45e09c54d964d390f92f60b673e3ff8fe83e4d7e904898a4b872ceb2e260af87",
+   "sha256": "45e09c54d964d390f92f60b673e3ff8fe83e4d7e904898a4b872ceb2e260af87",
+   "status": 200
+  },
+  {
+   "path": "test/data/perf_sample_sc.pb",
+   "bytes": 7908,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perf_sample_sc.pb-aa12a4956ec01b2965209c1e4339d583e0797c8908b8fd9dacf239c027c4a769",
+   "sha256": "aa12a4956ec01b2965209c1e4339d583e0797c8908b8fd9dacf239c027c4a769",
+   "status": 200
+  },
+  {
+   "path": "test/data/perf_track_sym.tar.gz",
+   "bytes": 94091,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perf_track_sym.tar.gz-358db7f9628a9bb79d2dffa274c73c2894c3c7108b67bfb9f513bf4bac34acd6",
+   "sha256": "358db7f9628a9bb79d2dffa274c73c2894c3c7108b67bfb9f513bf4bac34acd6",
+   "status": 200
+  },
+  {
+   "path": "test/data/poll_slabinfo.pb",
+   "bytes": 167692,
+   "url": "https://storage.googleapis.com/perfetto/test_data/poll_slabinfo.pb-5e578dbb34dc87baeadc5a950c45fa97b4d09ab0ce140cf6ecedf34721075557",
+   "sha256": "5e578dbb34dc87baeadc5a950c45fa97b4d09ab0ce140cf6ecedf34721075557",
+   "status": 200
+  },
+  {
+   "path": "test/data/post_boot_trace.atr",
+   "bytes": 91722229,
+   "url": "https://storage.googleapis.com/perfetto/test_data/post_boot_trace.atr-ed411bb57c771ecff0f04e9eac8dcec3ccafa8c13c82106a4c8f555fe9617fe6",
+   "sha256": "ed411bb57c771ecff0f04e9eac8dcec3ccafa8c13c82106a4c8f555fe9617fe6",
+   "status": 200
+  },
+  {
+   "path": "test/data/power_rails.pb",
+   "bytes": 7150,
+   "url": "https://storage.googleapis.com/perfetto/test_data/power_rails.pb-a2eabaafee37c407129451f0074c98ee98537b5ccdc485ebcebc98e1848c071a",
+   "sha256": "a2eabaafee37c407129451f0074c98ee98537b5ccdc485ebcebc98e1848c071a",
+   "status": 200
+  },
+  {
+   "path": "test/data/pprof_multi_metric.pprof",
+   "bytes": 191,
+   "url": "https://storage.googleapis.com/perfetto/test_data/pprof_multi_metric.pprof-09f5396161bb050603d421f2c96a233154be067c4d04f4bc611d4de837b02f2d",
+   "sha256": "09f5396161bb050603d421f2c96a233154be067c4d04f4bc611d4de837b02f2d",
+   "status": 200
+  },
+  {
+   "path": "test/data/pprof_simple_cpu.pprof",
+   "bytes": 157,
+   "url": "https://storage.googleapis.com/perfetto/test_data/pprof_simple_cpu.pprof-5df83b7a90b09537c1e9e00e61716dced6a850c1eb4752c21f3f3ab3c8cbb130",
+   "sha256": "5df83b7a90b09537c1e9e00e61716dced6a850c1eb4752c21f3f3ab3c8cbb130",
+   "status": 200
+  },
+  {
+   "path": "test/data/primes_trace_for_test.primestrace",
+   "bytes": 62132,
+   "url": "https://storage.googleapis.com/perfetto/test_data/primes_trace_for_test.primestrace-47ae43077164b45c48b6ba19fbc2425eb154db221f58db254093af07317c1d96",
+   "sha256": "47ae43077164b45c48b6ba19fbc2425eb154db221f58db254093af07317c1d96",
+   "status": 200
+  },
+  {
+   "path": "test/data/process_stats_poll.pb",
+   "bytes": 652566,
+   "url": "https://storage.googleapis.com/perfetto/test_data/process_stats_poll.pb-1e19595eb79493ff9b06ab3411adb082a507ddd55ed1e9dcee776d68b42242c5",
+   "sha256": "1e19595eb79493ff9b06ab3411adb082a507ddd55ed1e9dcee776d68b42242c5",
+   "status": 200
+  },
+  {
+   "path": "test/data/protovm_surfaceflinger.pftrace",
+   "bytes": 818080,
+   "url": "https://storage.googleapis.com/perfetto/test_data/protovm_surfaceflinger.pftrace-4ee740e858ca4b9163ba79d3d68921bc0989b0ec3cf181b3a5aff3ad91c7db81",
+   "sha256": "4ee740e858ca4b9163ba79d3d68921bc0989b0ec3cf181b3a5aff3ad91c7db81",
+   "status": 200
+  },
+  {
+   "path": "test/data/raw_cpu_for_benchmarks.csv",
+   "bytes": 3225885,
+   "url": "https://storage.googleapis.com/perfetto/test_data/raw_cpu_for_benchmarks.csv-e612250ad647d09a8188b187e80d2d00c35faaa2ca5744b957d057ef67169951",
+   "sha256": "e612250ad647d09a8188b187e80d2d00c35faaa2ca5744b957d057ef67169951",
+   "status": 200
+  },
+  {
+   "path": "test/data/redacted-startup.pb",
+   "bytes": 13956280,
+   "url": "https://storage.googleapis.com/perfetto/test_data/redacted-startup.pb-4c0997d6021f94f94fe9dc495b43a047471aff79f8d43a0fe3132998b03c2dc8",
+   "sha256": "4c0997d6021f94f94fe9dc495b43a047471aff79f8d43a0fe3132998b03c2dc8",
+   "status": 200
+  },
+  {
+   "path": "test/data/sched_switch_compact.pb",
+   "bytes": 4816,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sched_switch_compact.pb-ff9077ba16b689405b8a3678c7ce9129a91700a079a1d98f356cf0439e3b9931",
+   "sha256": "ff9077ba16b689405b8a3678c7ce9129a91700a079a1d98f356cf0439e3b9931",
+   "status": 200
+  },
+  {
+   "path": "test/data/sched_switch_original.pb",
+   "bytes": 8295,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sched_switch_original.pb-530a58c740e3ecd8af756c2034c81664a2022981cc944d8b0224181fad2cb19a",
+   "sha256": "530a58c740e3ecd8af756c2034c81664a2022981cc944d8b0224181fad2cb19a",
+   "status": 200
+  },
+  {
+   "path": "test/data/sched_wakeup_trace.atr",
+   "bytes": 5115737,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sched_wakeup_trace.atr-ae61181ded60bf214859c2072b90dca49226338901d368e6aea329681bff30db",
+   "sha256": "ae61181ded60bf214859c2072b90dca49226338901d368e6aea329681bff30db",
+   "status": 200
+  },
+  {
+   "path": "test/data/screenshot_trace.pb",
+   "bytes": 123,
+   "url": "https://storage.googleapis.com/perfetto/test_data/screenshot_trace.pb-114b483f568343c55388c3d291d788cae724231ec3f2f6cdc37c137985739ba0",
+   "sha256": "114b483f568343c55388c3d291d788cae724231ec3f2f6cdc37c137985739ba0",
+   "status": 200
+  },
+  {
+   "path": "test/data/scroll_offsets.pftrace",
+   "bytes": 769741,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scroll_offsets.pftrace-62101edb5204fec8bea30124f65d4e49bda0808d7b036e95f89445aaad6d8d98",
+   "sha256": "62101edb5204fec8bea30124f65d4e49bda0808d7b036e95f89445aaad6d8d98",
+   "status": 200
+  },
+  {
+   "path": "test/data/scrolling_with_blocked_nonblocked_frames.pftrace",
+   "bytes": 2581012,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scrolling_with_blocked_nonblocked_frames.pftrace-25f78adb06ccbff3bc0d5a80993370c22eadc6685d66b005f1a35268752f847f",
+   "sha256": "25f78adb06ccbff3bc0d5a80993370c22eadc6685d66b005f1a35268752f847f",
+   "status": 200
+  },
+  {
+   "path": "test/data/scrolling_with_blocked_nonblocked_frames_new.pftrace",
+   "bytes": 4201007,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scrolling_with_blocked_nonblocked_frames_new.pftrace-900f5e86e24df7bbd266f3f064238288b53551215366600955a6ef41285dd3c8",
+   "sha256": "900f5e86e24df7bbd266f3f064238288b53551215366600955a6ef41285dd3c8",
+   "status": 200
+  },
+  {
+   "path": "test/data/sfgate-gzip-multi-stream.json.gz",
+   "bytes": 656237,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sfgate-gzip-multi-stream.json.gz-c46a162875fd826893daec6f1271f8d98710d7ae9a096c108c4a0635b06f14ac",
+   "sha256": "c46a162875fd826893daec6f1271f8d98710d7ae9a096c108c4a0635b06f14ac",
+   "status": 200
+  },
+  {
+   "path": "test/data/sfgate.json",
+   "bytes": 8336397,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sfgate.json-56fddbeea278ce21eb314206797a81ae6758a8fe1309b5064f8c64f33873410c",
+   "sha256": "56fddbeea278ce21eb314206797a81ae6758a8fe1309b5064f8c64f33873410c",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf/bin/etm",
+   "bytes": 13000,
+   "url": "https://storage.googleapis.com/perfetto/test_data/etm-d275b398bc36bb2165f52a79a57850ad78ab7ee0f06792dd95c45b036fd32ee1",
+   "sha256": "d275b398bc36bb2165f52a79a57850ad78ab7ee0f06792dd95c45b036fd32ee1",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf/bin/libc.so",
+   "bytes": 1157432,
+   "url": "https://storage.googleapis.com/perfetto/test_data/libc.so-0ccf102c36901a0b65729214ffa39f8cdd15df83257637c56c6771c6f47fda80",
+   "sha256": "0ccf102c36901a0b65729214ffa39f8cdd15df83257637c56c6771c6f47fda80",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf/bin/libdummy_test.so.sym",
+   "bytes": 212208,
+   "url": "https://storage.googleapis.com/perfetto/test_data/libdummy_test.so.sym-d171edfd514f435479fdf385f599afd0ee9a6e7b8a9707b042993e492d7ee0aa",
+   "sha256": "d171edfd514f435479fdf385f599afd0ee9a6e7b8a9707b042993e492d7ee0aa",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf/bin/sdk_example.android.debug",
+   "bytes": 32689104,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sdk_example.android.debug-e6ff4bce235dd5f83c3b26fb5b4eec81a18d19606553b63dd9a9b496daf7600f",
+   "sha256": "e6ff4bce235dd5f83c3b26fb5b4eec81a18d19606553b63dd9a9b496daf7600f",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf/cs_etm_cc_ts.perf",
+   "bytes": 288896,
+   "url": "https://storage.googleapis.com/perfetto/test_data/cs_etm_cc_ts.perf-53ca4c49525ef1cb0be09698d962f0b1b0c65b42f4a03225894ff4b202884ea2",
+   "sha256": "53ca4c49525ef1cb0be09698d962f0b1b0c65b42f4a03225894ff4b202884ea2",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf/cs_etm_u.perf",
+   "bytes": 83752,
+   "url": "https://storage.googleapis.com/perfetto/test_data/cs_etm_u.perf-8cacd1745f79bc3bd1725b3d6c308ab2c7f79a589d90eaf3c02fd7c2a1fd2b0e",
+   "sha256": "8cacd1745f79bc3bd1725b3d6c308ab2c7f79a589d90eaf3c02fd7c2a1fd2b0e",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf/etm.perf.data.zip",
+   "bytes": 38648,
+   "url": "https://storage.googleapis.com/perfetto/test_data/etm.perf.data.zip-d199330364a2df97bc1a5aa9bd14d27070943ce2b11980d19b9d903625efb15f",
+   "sha256": "d199330364a2df97bc1a5aa9bd14d27070943ce2b11980d19b9d903625efb15f",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf/linux_perf_with_symbols.zip",
+   "bytes": 105001,
+   "url": "https://storage.googleapis.com/perfetto/test_data/linux_perf_with_symbols.zip-6b11de85a4e95c8f31e5cbc5f12f00ec885a19fd299e5531ea7708263602a1e8",
+   "sha256": "6b11de85a4e95c8f31e5cbc5f12f00ec885a19fd299e5531ea7708263602a1e8",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf/perf.data",
+   "bytes": 136396,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perf.data-cb3066f4050d84d3e204a37ca4c479113b7623b663c17a3ee8cae5a85b8238bf",
+   "sha256": "cb3066f4050d84d3e204a37ca4c479113b7623b663c17a3ee8cae5a85b8238bf",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf/perf_with_add_counter.data",
+   "bytes": 15685,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perf_with_add_counter.data-f3f44439a4add389b13510d9bb9ed2a151dc6d0a1ee8a7f5c52a369d96c9f0eb",
+   "sha256": "f3f44439a4add389b13510d9bb9ed2a151dc6d0a1ee8a7f5c52a369d96c9f0eb",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf/perf_with_jit_and_apk.data",
+   "bytes": 650416,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perf_with_jit_and_apk.data-72f9677de1ad45fe00629a188663f0acc6aa790014230a1e04cbf3859d336982",
+   "sha256": "72f9677de1ad45fe00629a188663f0acc6aa790014230a1e04cbf3859d336982",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf/perf_with_synthetic_events.data",
+   "bytes": 1754616,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perf_with_synthetic_events.data-6e299d6cd3a4d8364b437d80033dcba8ac7064487f58a20d4fef9ffc3fc53185",
+   "sha256": "6e299d6cd3a4d8364b437d80033dcba8ac7064487f58a20d4fef9ffc3fc53185",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf/sdk_example.android.simpleperf.data",
+   "bytes": 60627,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sdk_example.android.simpleperf.data-d5443b0c0c7e1248d51bbacd628db8860ebf295daa4118a4c6b39cf9d6659a0c",
+   "sha256": "d5443b0c0c7e1248d51bbacd628db8860ebf295daa4118a4c6b39cf9d6659a0c",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf/spe.trace.zip",
+   "bytes": 227445,
+   "url": "https://storage.googleapis.com/perfetto/test_data/spe.trace.zip-199e74a411f20e4670c9330e891b371f638bd8745a82dc22bb5f83c0ca8ba5ac",
+   "sha256": "199e74a411f20e4670c9330e891b371f638bd8745a82dc22bb5f83c0ca8ba5ac",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf/unsymbolized_app_profile.data",
+   "bytes": 814258,
+   "url": "https://storage.googleapis.com/perfetto/test_data/unsymbolized_app_profile.data-a401a8d8efe9dc4e342ffee1d9e28583a9a7c96f582e07dab738bc94e6eb9b61",
+   "sha256": "a401a8d8efe9dc4e342ffee1d9e28583a9a7c96f582e07dab738bc94e6eb9b61",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf_as_gecko.json",
+   "bytes": 4639604,
+   "url": "https://storage.googleapis.com/perfetto/test_data/simpleperf_as_gecko.json-225e86a03ada87e586c4cf053a7369516f8f124318495e2109022e72389d0b68",
+   "sha256": "225e86a03ada87e586c4cf053a7369516f8f124318495e2109022e72389d0b68",
+   "status": 200
+  },
+  {
+   "path": "test/data/simpleperf_as_text.txt",
+   "bytes": 30254216,
+   "url": "https://storage.googleapis.com/perfetto/test_data/simpleperf_as_text.txt-40d817e31b5dac6bd745cf2eddb1bc7dc4c78aa3a8c398e718dcb3b650975388",
+   "sha256": "40d817e31b5dac6bd745cf2eddb1bc7dc4c78aa3a8c398e718dcb3b650975388",
+   "status": 200
+  },
+  {
+   "path": "test/data/slice_double_click_zoom.pb",
+   "bytes": 150,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slice_double_click_zoom.pb-344745f6ee9badb183b0b874a3c5201ae6bdd362e08819d19ce347a1200b4c95",
+   "sha256": "344745f6ee9badb183b0b874a3c5201ae6bdd362e08819d19ce347a1200b4c95",
+   "status": 200
+  },
+  {
+   "path": "test/data/slice_mipmap_benchmark.csv",
+   "bytes": 362920,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slice_mipmap_benchmark.csv-e7b1eda88c54e3846f17b1087d5a62f94100416c60739c82ca48432ec1ad8c95",
+   "sha256": "e7b1eda88c54e3846f17b1087d5a62f94100416c60739c82ca48432ec1ad8c95",
+   "status": 200
+  },
+  {
+   "path": "test/data/slice_table_for_benchmarks.csv",
+   "bytes": 6774041,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slice_table_for_benchmarks.csv-1299a0d02e11c927bfba9ef29e4dc0a9887f87892ede5a1a1ffc79e601ba3a2f",
+   "sha256": "1299a0d02e11c927bfba9ef29e4dc0a9887f87892ede5a1a1ffc79e601ba3a2f",
+   "status": 200
+  },
+  {
+   "path": "test/data/smaps_aggregated.pftrace",
+   "bytes": 8427,
+   "url": "https://storage.googleapis.com/perfetto/test_data/smaps_aggregated.pftrace-88e6aa4690a85843701f8f3338de1cb944cc3c52e649416e16b15b2334def287",
+   "sha256": "88e6aa4690a85843701f8f3338de1cb944cc3c52e649416e16b15b2334def287",
+   "status": 200
+  },
+  {
+   "path": "test/data/smaps_unaggregated.pftrace",
+   "bytes": 15932,
+   "url": "https://storage.googleapis.com/perfetto/test_data/smaps_unaggregated.pftrace-b2d081e599eb7b8b30bfc3f97d003cc54097d2ce73162ddadea3136174007205",
+   "sha256": "b2d081e599eb7b8b30bfc3f97d003cc54097d2ce73162ddadea3136174007205",
+   "status": 200
+  },
+  {
+   "path": "test/data/speedometer.perfetto_trace.gz",
+   "bytes": 891088,
+   "url": "https://storage.googleapis.com/perfetto/test_data/speedometer.perfetto_trace.gz-8a159b354d74a3ca0d38ce9cd071ef47de322db4261ee266bfafe04d70310529",
+   "sha256": "8a159b354d74a3ca0d38ce9cd071ef47de322db4261ee266bfafe04d70310529",
+   "status": 200
+  },
+  {
+   "path": "test/data/state_hierarchy.pb",
+   "bytes": 169,
+   "url": "https://storage.googleapis.com/perfetto/test_data/state_hierarchy.pb-a340c094f693a58db98349ea214f2a7359838d2c42666ed22a4f005500eae20d",
+   "sha256": "a340c094f693a58db98349ea214f2a7359838d2c42666ed22a4f005500eae20d",
+   "status": 200
+  },
+  {
+   "path": "test/data/statsd_atoms.pb",
+   "bytes": 1728,
+   "url": "https://storage.googleapis.com/perfetto/test_data/statsd_atoms.pb-d68011231cf87c73baf1b459b3629fb5a8b248a8dde03e90118349b7573b06da",
+   "sha256": "d68011231cf87c73baf1b459b3629fb5a8b248a8dde03e90118349b7573b06da",
+   "status": 200
+  },
+  {
+   "path": "test/data/statsd_atoms_oem.pb",
+   "bytes": 15,
+   "url": "https://storage.googleapis.com/perfetto/test_data/statsd_atoms_oem.pb-5c38eaf8133ca06b1e9ab800c54430ac4807c98aa4684be3da48c56175bca679",
+   "sha256": "5c38eaf8133ca06b1e9ab800c54430ac4807c98aa4684be3da48c56175bca679",
+   "status": 200
+  },
+  {
+   "path": "test/data/structured_query_simple.textproto",
+   "bytes": 87,
+   "url": "https://storage.googleapis.com/perfetto/test_data/structured_query_simple.textproto-b533ba97c01f94e1e89189cd63e59cbb02935089189d5cde1d07d51495471886",
+   "sha256": "b533ba97c01f94e1e89189cd63e59cbb02935089189d5cde1d07d51495471886",
+   "status": 200
+  },
+  {
+   "path": "test/data/structured_query_with_filter.textproto",
+   "bytes": 101,
+   "url": "https://storage.googleapis.com/perfetto/test_data/structured_query_with_filter.textproto-07e3ca77cfe02bf79e1e4123ae09d84bf17e67268f5b117f71a779a6ec1993ac",
+   "sha256": "07e3ca77cfe02bf79e1e4123ae09d84bf17e67268f5b117f71a779a6ec1993ac",
+   "status": 200
+  },
+  {
+   "path": "test/data/synth_1.pb",
+   "bytes": 473,
+   "url": "https://storage.googleapis.com/perfetto/test_data/synth_1.pb-60f6625513a9d37260b08dc655e76b88333ff36012271b2565ddc0b8ec27596b",
+   "sha256": "60f6625513a9d37260b08dc655e76b88333ff36012271b2565ddc0b8ec27596b",
+   "status": 200
+  },
+  {
+   "path": "test/data/sys.pb",
+   "bytes": 1306270,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sys.pb-fe48a7e58c3a06b21079e93da0526f02de8a63b9d08e3468249eebde6967b17f",
+   "sha256": "fe48a7e58c3a06b21079e93da0526f02de8a63b9d08e3468249eebde6967b17f",
+   "status": 200
+  },
+  {
+   "path": "test/data/system-server-heap-graph-new.pftrace",
+   "bytes": 60822547,
+   "url": "https://storage.googleapis.com/perfetto/test_data/system-server-heap-graph-new.pftrace-71dd85d790034895c429272d1dc7d429f05ee6b97ce7a02c1ed06abd3a6ff849",
+   "sha256": "71dd85d790034895c429272d1dc7d429f05ee6b97ce7a02c1ed06abd3a6ff849",
+   "status": 200
+  },
+  {
+   "path": "test/data/system-server-heap-graph.pftrace",
+   "bytes": 15159775,
+   "url": "https://storage.googleapis.com/perfetto/test_data/system-server-heap-graph.pftrace-b887171e5c1b147c832febf7424716fb8462bfd13ff240114e425fd97eb3a6e2",
+   "sha256": "b887171e5c1b147c832febf7424716fb8462bfd13ff240114e425fd97eb3a6e2",
+   "status": 200
+  },
+  {
+   "path": "test/data/system-server-native-profile",
+   "bytes": 68651,
+   "url": "https://storage.googleapis.com/perfetto/test_data/system-server-native-profile-d742984b3d3f556c3d00d82ee9c53de2cd9809a5a5ec342ff83c3b0faf053afc",
+   "sha256": "d742984b3d3f556c3d00d82ee9c53de2cd9809a5a5ec342ff83c3b0faf053afc",
+   "status": 200
+  },
+  {
+   "path": "test/data/systrace.html",
+   "bytes": 4401787,
+   "url": "https://storage.googleapis.com/perfetto/test_data/systrace.html-a87a26703e28981ad62554005a081794cfb68cc35f14149e99b4f1c41964c9c5",
+   "sha256": "a87a26703e28981ad62554005a081794cfb68cc35f14149e99b4f1c41964c9c5",
+   "status": 200
+  },
+  {
+   "path": "test/data/sysui_qsmedia_microbenchmark.pb",
+   "bytes": 30862871,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sysui_qsmedia_microbenchmark.pb-c0bf9515c2d411d57ceb3124c57a946efe0d72b3ac04baaef3d79b0a1d53e6d9",
+   "sha256": "c0bf9515c2d411d57ceb3124c57a946efe0d72b3ac04baaef3d79b0a1d53e6d9",
+   "status": 200
+  },
+  {
+   "path": "test/data/test-dump.hprof",
+   "bytes": 2671386,
+   "url": "https://storage.googleapis.com/perfetto/test_data/test-dump.hprof-ffa3213ac90129ffa63ba33622999695065933f85e0d641be7dbdc91a8d8de3e",
+   "sha256": "ffa3213ac90129ffa63ba33622999695065933f85e0d641be7dbdc91a8d8de3e",
+   "status": 200
+  },
+  {
+   "path": "test/data/test_symbolizer_binary",
+   "bytes": 17344,
+   "url": "https://storage.googleapis.com/perfetto/test_data/test_symbolizer_binary-f9662af8b79e732a47eb445c56683f42ca076860292005fc6fe9808e9d430505",
+   "sha256": "f9662af8b79e732a47eb445c56683f42ca076860292005fc6fe9808e9d430505",
+   "status": 200
+  },
+  {
+   "path": "test/data/top_level_java_choreographer_slices",
+   "bytes": 5323017,
+   "url": "https://storage.googleapis.com/perfetto/test_data/top_level_java_choreographer_slices-8001e73b2458e94f65a606bb558a645ba5bca553b57fe416001f6c2175675a8a",
+   "sha256": "8001e73b2458e94f65a606bb558a645ba5bca553b57fe416001f6c2175675a8a",
+   "status": 200
+  },
+  {
+   "path": "test/data/tpu_jumpnet.pb",
+   "bytes": 1707629,
+   "url": "https://storage.googleapis.com/perfetto/test_data/tpu_jumpnet.pb-f7aeadce2ba495e26df57f05f029aad07d361581eda13a5dcc0aa998c3ec4adf",
+   "sha256": "f7aeadce2ba495e26df57f05f029aad07d361581eda13a5dcc0aa998c3ec4adf",
+   "status": 200
+  },
+  {
+   "path": "test/data/trace-redaction-api-capture.pftrace",
+   "bytes": 1713598,
+   "url": "https://storage.googleapis.com/perfetto/test_data/trace-redaction-api-capture.pftrace-7bc4e8693d87af89af84ce1d39b531c1375f1ce8a6ac523d0d524efca7ac544c",
+   "sha256": "7bc4e8693d87af89af84ce1d39b531c1375f1ce8a6ac523d0d524efca7ac544c",
+   "status": 200
+  },
+  {
+   "path": "test/data/trace-redaction-general.pftrace",
+   "bytes": 5734405,
+   "url": "https://storage.googleapis.com/perfetto/test_data/trace-redaction-general.pftrace-dd5f14e36a23158cf740e146cbdd57816056c70ed73b6038a5f317dab28477fe",
+   "sha256": "dd5f14e36a23158cf740e146cbdd57816056c70ed73b6038a5f317dab28477fe",
+   "status": 200
+  },
+  {
+   "path": "test/data/trace-redaction-perf-sample.pftrace",
+   "bytes": 28756933,
+   "url": "https://storage.googleapis.com/perfetto/test_data/trace-redaction-perf-sample.pftrace-3eb4aa6f18a21f750c46869fa25986205510e2ceac9f506074ab8640c28a540e",
+   "sha256": "3eb4aa6f18a21f750c46869fa25986205510e2ceac9f506074ab8640c28a540e",
+   "status": 200
+  },
+  {
+   "path": "test/data/trace-redaction-smoke.pftrace",
+   "bytes": 4311217,
+   "url": "https://storage.googleapis.com/perfetto/test_data/trace-redaction-smoke.pftrace-8faadc66600895ee142225ea724c149d832e638f11b87cf57dadcdadac77daac",
+   "sha256": "8faadc66600895ee142225ea724c149d832e638f11b87cf57dadcdadac77daac",
+   "status": 200
+  },
+  {
+   "path": "test/data/trace_processor_perf_as_gecko.json",
+   "bytes": 4223821,
+   "url": "https://storage.googleapis.com/perfetto/test_data/trace_processor_perf_as_gecko.json-8e2b7d825d190f12bd87fee90220ec2b91110c056ca9f55c5e00dd0d1f3455c5",
+   "sha256": "8e2b7d825d190f12bd87fee90220ec2b91110c056ca9f55c5e00dd0d1f3455c5",
+   "status": 200
+  },
+  {
+   "path": "test/data/trace_processor_perf_as_text.txt",
+   "bytes": 883779,
+   "url": "https://storage.googleapis.com/perfetto/test_data/trace_processor_perf_as_text.txt-a39b72bf2a6c9355c4dec142814874c7977b071fc4cc1f37bd78167efee12e14",
+   "sha256": "a39b72bf2a6c9355c4dec142814874c7977b071fc4cc1f37bd78167efee12e14",
+   "status": 200
+  },
+  {
+   "path": "test/data/trace_user_list.pftrace",
+   "bytes": 987,
+   "url": "https://storage.googleapis.com/perfetto/test_data/trace_user_list.pftrace-45f9b23de73f32976f4ebd5854bb18d9ec484cef4d4ed676b8a34043825d5b70",
+   "sha256": "45f9b23de73f32976f4ebd5854bb18d9ec484cef4d4ed676b8a34043825d5b70",
+   "status": 200
+  },
+  {
+   "path": "test/data/trace_with_descriptor.pftrace",
+   "bytes": 9187508,
+   "url": "https://storage.googleapis.com/perfetto/test_data/trace_with_descriptor.pftrace-ce3e83427ce4c55dc348daaf6553b1750bd8f874da54337458ed4bffb6a78b46",
+   "sha256": "ce3e83427ce4c55dc348daaf6553b1750bd8f874da54337458ed4bffb6a78b46",
+   "status": 200
+  },
+  {
+   "path": "test/data/trace_with_uuid.pftrace",
+   "bytes": 6830,
+   "url": "https://storage.googleapis.com/perfetto/test_data/trace_with_uuid.pftrace-825f5e43c09e067e68b940094044087cd25c32db1a69d30f781f912a0bf115d2",
+   "sha256": "825f5e43c09e067e68b940094044087cd25c32db1a69d30f781f912a0bf115d2",
+   "status": 200
+  },
+  {
+   "path": "test/data/traced_perf_no_symbols.pb",
+   "bytes": 156400,
+   "url": "https://storage.googleapis.com/perfetto/test_data/traced_perf_no_symbols.pb-ae2efd6d6fb5abf39726c59ae7b5655d13500be98f5c862a9185a2e3eaaae72e",
+   "sha256": "ae2efd6d6fb5abf39726c59ae7b5655d13500be98f5c862a9185a2e3eaaae72e",
+   "status": 200
+  },
+  {
+   "path": "test/data/track_event_callstack_weights.pftrace",
+   "bytes": 26848,
+   "url": "https://storage.googleapis.com/perfetto/test_data/track_event_callstack_weights.pftrace-45e8ae7929c8fd2b57d88522098cf882b366c78b758584e3edd5ccec5bb243ca",
+   "sha256": "45e8ae7929c8fd2b57d88522098cf882b366c78b758584e3edd5ccec5bb243ca",
+   "status": 200
+  },
+  {
+   "path": "test/data/track_event_ordered.pb",
+   "bytes": 497,
+   "url": "https://storage.googleapis.com/perfetto/test_data/track_event_ordered.pb-1bab9bdb32c88b22a0e8f09ddad84338c5c320e416429f92e6d7ff5a671eb06e",
+   "sha256": "1bab9bdb32c88b22a0e8f09ddad84338c5c320e416429f92e6d7ff5a671eb06e",
+   "status": 200
+  },
+  {
+   "path": "test/data/track_event_process_rename.pftrace",
+   "bytes": 190,
+   "url": "https://storage.googleapis.com/perfetto/test_data/track_event_process_rename.pftrace-c683d90e8cc43b0400d50fcfb50af8afea5b2b819cc507fc7d6451b6478beba1",
+   "sha256": "c683d90e8cc43b0400d50fcfb50af8afea5b2b819cc507fc7d6451b6478beba1",
+   "status": 200
+  },
+  {
+   "path": "test/data/track_event_typed_args.pb",
+   "bytes": 139,
+   "url": "https://storage.googleapis.com/perfetto/test_data/track_event_typed_args.pb-cd5c861185ff6cb14d080f07c2d92b137c985df6aa515850e8acf761b044a84f",
+   "sha256": "cd5c861185ff6cb14d080f07c2d92b137c985df6aa515850e8acf761b044a84f",
+   "status": 200
+  },
+  {
+   "path": "test/data/track_event_with_description.perfetto-trace",
+   "bytes": 941,
+   "url": "https://storage.googleapis.com/perfetto/test_data/track_event_with_description.perfetto-trace-60ed4ad8fb3fd79fdcbde6ac0c331c05751c0df6fe1a923c6aa23f09b0dbf275",
+   "sha256": "60ed4ad8fb3fd79fdcbde6ac0c331c05751c0df6fe1a923c6aa23f09b0dbf275",
+   "status": 200
+  },
+  {
+   "path": "test/data/trailing_empty.systrace",
+   "bytes": 798,
+   "url": "https://storage.googleapis.com/perfetto/test_data/trailing_empty.systrace-8921b2433ecfa8c95f2e43074a5b9318b58bfd88a53fb407baa8952a60c6b0c4",
+   "sha256": "8921b2433ecfa8c95f2e43074a5b9318b58bfd88a53fb407baa8952a60c6b0c4",
+   "status": 200
+  },
+  {
+   "path": "test/data/two_procs_two_dumps_and_smaps.pftrace",
+   "bytes": 4745,
+   "url": "https://storage.googleapis.com/perfetto/test_data/two_procs_two_dumps_and_smaps.pftrace-3bc3c50ab7c561b1b17c658527faa786d322f4a920010e8e48584022067221a9",
+   "sha256": "3bc3c50ab7c561b1b17c658527faa786d322f4a920010e8e48584022067221a9",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-funcgraph.pftrace",
+   "bytes": 58391230,
+   "url": "https://storage.googleapis.com/perfetto/test_data/ui-funcgraph.pftrace-4262c95bce220236289f70ec66f7c97b2133eefe6d380d09c6cc7217a41309c4",
+   "sha256": "4262c95bce220236289f70ec66f7c97b2133eefe6d380d09c6cc7217a41309c4",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/aggregation.test.ts/frametimeline/frame-timeline-aggregation.png",
+   "bytes": 5203,
+   "url": "https://storage.googleapis.com/perfetto/test_data/frame-timeline-aggregation.png-518450508a2e463868840ce5906574c48e46a02b6ae1a63bf4fd2782fc330382",
+   "sha256": "518450508a2e463868840ce5906574c48e46a02b6ae1a63bf4fd2782fc330382",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/aggregation.test.ts/gpu-counter/gpu-counter-aggregation.png",
+   "bytes": 20144,
+   "url": "https://storage.googleapis.com/perfetto/test_data/gpu-counter-aggregation.png-8e6a597ca3d1498748c4e515a803ef5aac74b2045998f4c07068c7c789ca5c4a",
+   "sha256": "8e6a597ca3d1498748c4e515a803ef5aac74b2045998f4c07068c7c789ca5c4a",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/aggregation.test.ts/sched/cpu-by-process.png",
+   "bytes": 60993,
+   "url": "https://storage.googleapis.com/perfetto/test_data/cpu-by-process.png-cf22e0c1513c0145b750004a830cb1bfd3a5bda347484a4134d9d51c2c97d27e",
+   "sha256": "cf22e0c1513c0145b750004a830cb1bfd3a5bda347484a4134d9d51c2c97d27e",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/aggregation.test.ts/sched/cpu-by-thread.png",
+   "bytes": 63107,
+   "url": "https://storage.googleapis.com/perfetto/test_data/cpu-by-thread.png-ce49e1f573c4e58ee1e88dec2ca6c7cab74f45527369c2584ffba10e4cb68881",
+   "sha256": "ce49e1f573c4e58ee1e88dec2ca6c7cab74f45527369c2584ffba10e4cb68881",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/aggregation.test.ts/sched/sort-by-occurrences.png",
+   "bytes": 46989,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sort-by-occurrences.png-b6e5290e26b31146ee0e4655304547beaa967d3cc2a428a3fd524ac46977c742",
+   "sha256": "b6e5290e26b31146ee0e4655304547beaa967d3cc2a428a3fd524ac46977c742",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/aggregation.test.ts/sched/sort-by-wall-duration-desc.png",
+   "bytes": 49446,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sort-by-wall-duration-desc.png-b8511a10ba03fc8fd6a4a87451d5d39563574be2e7da4ec4d9af18ae6ab2e5a0",
+   "sha256": "b8511a10ba03fc8fd6a4a87451d5d39563574be2e7da4ec4d9af18ae6ab2e5a0",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/aggregation.test.ts/sched/sort-by-wall-duration.png",
+   "bytes": 55934,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sort-by-wall-duration.png-516bae2f7aa27347563bd349925ef4b0cf7e536bea789cc1ae0018cba4a39b3d",
+   "sha256": "516bae2f7aa27347563bd349925ef4b0cf7e536bea789cc1ae0018cba4a39b3d",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/aggregation.test.ts/slices/slice-aggregation.png",
+   "bytes": 61222,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slice-aggregation.png-41368e07705a720e913560a37a4ba7c8526cc89ab2c1d464553ca71a9617a548",
+   "sha256": "41368e07705a720e913560a37a4ba7c8526cc89ab2c1d464553ca71a9617a548",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/arcvm_trace.test.ts/ftrace-events/ftrace-events.png",
+   "bytes": 229784,
+   "url": "https://storage.googleapis.com/perfetto/test_data/ftrace-events.png-e690eb7689bc76d1685ba933a619f2befc14220580d3fefaa6dede7640c381ad",
+   "sha256": "e690eb7689bc76d1685ba933a619f2befc14220580d3fefaa6dede7640c381ad",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/arcvm_trace.test.ts/sched-tracks/sched-tracks.png",
+   "bytes": 137875,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sched-tracks.png-de657ca742e853673ae89290f2d58341cfafe3351f1f7789dff25deb2406f5b3",
+   "sha256": "de657ca742e853673ae89290f2d58341cfafe3351f1f7789dff25deb2406f5b3",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/canvas_renderer.test.ts/load-trace-with-canvas-renderer/canvas-renderer-loaded.png",
+   "bytes": 52141,
+   "url": "https://storage.googleapis.com/perfetto/test_data/canvas-renderer-loaded.png-1e5718bddc2423ae487ce8810ae10fa36a5f9e7fc16c98d57e9a81de4250f318",
+   "sha256": "1e5718bddc2423ae487ce8810ae10fa36a5f9e7fc16c98d57e9a81de4250f318",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_rendering_desktop.test.ts/expand-browser/browser-expanded.png",
+   "bytes": 69170,
+   "url": "https://storage.googleapis.com/perfetto/test_data/browser-expanded.png-b6da2daf2abf6f1fa17a2cf47d8a6204a0e201a945770a8ae4706c5c1d3683b2",
+   "sha256": "b6da2daf2abf6f1fa17a2cf47d8a6204a0e201a945770a8ae4706c5c1d3683b2",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_rendering_desktop.test.ts/load-trace/loaded.png",
+   "bytes": 38758,
+   "url": "https://storage.googleapis.com/perfetto/test_data/loaded.png-fdfea914823bf889f265f7a80db55e655966cf03420c0811257614c647e6716d",
+   "sha256": "fdfea914823bf889f265f7a80db55e655966cf03420c0811257614c647e6716d",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_rendering_desktop.test.ts/slice-with-flows/slice-with-flows.png",
+   "bytes": 50632,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slice-with-flows.png-b70bf5ae79d59d1ee4a84c5935b2d2819ee54fcd56ec8edc5f3c87a39d3eb8c1",
+   "sha256": "b70bf5ae79d59d1ee4a84c5935b2d2819ee54fcd56ec8edc5f3c87a39d3eb8c1",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/event-latency-track/details-panel-event-latency.png",
+   "bytes": 78723,
+   "url": "https://storage.googleapis.com/perfetto/test_data/details-panel-event-latency.png-444c541abecf3663282a0141d58a670beafc7432076b25907c72f82268488656",
+   "sha256": "444c541abecf3663282a0141d58a670beafc7432076b25907c72f82268488656",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/event-latency-track/details-panel-link-to-scroll-timeline-v4.png",
+   "bytes": 147204,
+   "url": "https://storage.googleapis.com/perfetto/test_data/details-panel-link-to-scroll-timeline-v4.png-342d1ad55a354f3177b3c8058305e29a261131774f0103bc22297ecf1800adb3",
+   "sha256": "342d1ad55a354f3177b3c8058305e29a261131774f0103bc22297ecf1800adb3",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/event-latency-track/details-panel-link-to-scroll-timeline.png",
+   "bytes": 110548,
+   "url": "https://storage.googleapis.com/perfetto/test_data/details-panel-link-to-scroll-timeline.png-79386a5dc63be1a1420267b40c069b004f2b1834cf1a61c5f9d53d0de18a93db",
+   "sha256": "79386a5dc63be1a1420267b40c069b004f2b1834cf1a61c5f9d53d0de18a93db",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/event-latency-track/details-panel-stage.png",
+   "bytes": 78513,
+   "url": "https://storage.googleapis.com/perfetto/test_data/details-panel-stage.png-0ecc9b8eba01e2f116048b2d294f7ccdad909d0e74382919313d6642b025a2e9",
+   "sha256": "0ecc9b8eba01e2f116048b2d294f7ccdad909d0e74382919313d6642b025a2e9",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/event-latency-track/track.png",
+   "bytes": 77514,
+   "url": "https://storage.googleapis.com/perfetto/test_data/track.png-03f104b8961c7ad5418f3285ecc8661870040f529da8830565b1d934a6a27d73",
+   "sha256": "03f104b8961c7ad5418f3285ecc8661870040f529da8830565b1d934a6a27d73",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/scroll-timeline-track/details-panel-event-latency.png",
+   "bytes": 269165,
+   "url": "https://storage.googleapis.com/perfetto/test_data/details-panel-event-latency.png-9544abb8c6492a0312a03a137143ad769540f20bbb5a9d7d47c321fb99b1fd6f",
+   "sha256": "9544abb8c6492a0312a03a137143ad769540f20bbb5a9d7d47c321fb99b1fd6f",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/scroll-timeline-track/details-panel-link-to-event-latency.png",
+   "bytes": 86444,
+   "url": "https://storage.googleapis.com/perfetto/test_data/details-panel-link-to-event-latency.png-96b87f74e17d0dc164e7303660dfba151dafdae07448fffca4f0b828ac76d940",
+   "sha256": "96b87f74e17d0dc164e7303660dfba151dafdae07448fffca4f0b828ac76d940",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/scroll-timeline-track/details-panel-link-to-scroll-timeline-v4.png",
+   "bytes": 147119,
+   "url": "https://storage.googleapis.com/perfetto/test_data/details-panel-link-to-scroll-timeline-v4.png-c24a51fbed69fe8cd253d0515794cfee364fe2b9ee75cca65ac5b41a04178410",
+   "sha256": "c24a51fbed69fe8cd253d0515794cfee364fe2b9ee75cca65ac5b41a04178410",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/scroll-timeline-track/details-panel-scroll-update.png",
+   "bytes": 110419,
+   "url": "https://storage.googleapis.com/perfetto/test_data/details-panel-scroll-update.png-620b3d9dec288160941e8bdc6301447d402509093d7d679b3e7816d18a76dc73",
+   "sha256": "620b3d9dec288160941e8bdc6301447d402509093d7d679b3e7816d18a76dc73",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/scroll-timeline-track/details-panel-stage.png",
+   "bytes": 110201,
+   "url": "https://storage.googleapis.com/perfetto/test_data/details-panel-stage.png-30b162af19087af1c9085b0ac4d0c8246355036180b89ef39462ac3e6de2515d",
+   "sha256": "30b162af19087af1c9085b0ac4d0c8246355036180b89ef39462ac3e6de2515d",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/scroll-timeline-track/track.png",
+   "bytes": 109255,
+   "url": "https://storage.googleapis.com/perfetto/test_data/track.png-d6bcbc9daacf0cc1234ec76b544729974de0a9148a5ff7b03321325ee62bf281",
+   "sha256": "d6bcbc9daacf0cc1234ec76b544729974de0a9148a5ff7b03321325ee62bf281",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/scroll-timeline-v4-track/scroll-timeline-v4-details-panel-frame.png",
+   "bytes": 138430,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scroll-timeline-v4-details-panel-frame.png-47fc4656f91a09709167294e7c0fb34e212181d8353d7b74d1b02ba6054ac276",
+   "sha256": "47fc4656f91a09709167294e7c0fb34e212181d8353d7b74d1b02ba6054ac276",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/scroll-timeline-v4-track/scroll-timeline-v4-details-panel-link-to-event-latency.png",
+   "bytes": 86514,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scroll-timeline-v4-details-panel-link-to-event-latency.png-a3c42c511ffa30348c0202016e85f5a1bda1ec6002d8d06b5ba4a93f364bffb7",
+   "sha256": "a3c42c511ffa30348c0202016e85f5a1bda1ec6002d8d06b5ba4a93f364bffb7",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/scroll-timeline-v4-track/scroll-timeline-v4-details-panel-link-to-scroll-timeline.png",
+   "bytes": 110446,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scroll-timeline-v4-details-panel-link-to-scroll-timeline.png-9a6711c246f9c2c91318b67a27490e786c720f7326a4d66c00f981fcbeb59c1e",
+   "sha256": "9a6711c246f9c2c91318b67a27490e786c720f7326a4d66c00f981fcbeb59c1e",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/scroll-timeline-v4-track/scroll-timeline-v4-details-panel-stage.png",
+   "bytes": 138381,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scroll-timeline-v4-details-panel-stage.png-4af251dbf0c8e2e0354e6b116a118f6bfd55fee5e4999de20199d49d6e37afa1",
+   "sha256": "4af251dbf0c8e2e0354e6b116a118f6bfd55fee5e4999de20199d49d6e37afa1",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/chrome_scroll_jank_plugin.test.ts/scroll-timeline-v4-track/scroll-timeline-v4-track.png",
+   "bytes": 137233,
+   "url": "https://storage.googleapis.com/perfetto/test_data/scroll-timeline-v4-track.png-3b8ee47213471438dd881ce03d9738ffae20131402571fb9435751fc8939b446",
+   "sha256": "3b8ee47213471438dd881ce03d9738ffae20131402571fb9435751fc8939b446",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/debug_tracks.test.ts/debug-tracks-pivot/debug-track-pivot.png",
+   "bytes": 65634,
+   "url": "https://storage.googleapis.com/perfetto/test_data/debug-track-pivot.png-685af99a190846cb4ccfb73580b865f9db83634810bb923cd1948b45e4736da5",
+   "sha256": "685af99a190846cb4ccfb73580b865f9db83634810bb923cd1948b45e4736da5",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/debug_tracks.test.ts/debug-tracks/debug-slice-clicked.png",
+   "bytes": 65379,
+   "url": "https://storage.googleapis.com/perfetto/test_data/debug-slice-clicked.png-30dc4ae086597735a2d23a115b4e180485333cd623a2eb69c887a032cb197172",
+   "sha256": "30dc4ae086597735a2d23a115b4e180485333cd623a2eb69c887a032cb197172",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/debug_tracks.test.ts/debug-tracks/debug-track-added.png",
+   "bytes": 65428,
+   "url": "https://storage.googleapis.com/perfetto/test_data/debug-track-added.png-c9822e52a5e6f5f2a1a450b9bb31e2f2d733fac9eff8a7e2943d5e1837fb9d53",
+   "sha256": "c9822e52a5e6f5f2a1a450b9bb31e2f2d733fac9eff8a7e2943d5e1837fb9d53",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/debug_tracks.test.ts/debug-tracks/debug-track-menu.png",
+   "bytes": 17664,
+   "url": "https://storage.googleapis.com/perfetto/test_data/debug-track-menu.png-73e6d2994712c71124d3358a923c6a3d57f873ca2f53f9d90f0376105b8d8313",
+   "sha256": "73e6d2994712c71124d3358a923c6a3d57f873ca2f53f9d90f0376105b8d8313",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/debug_tracks.test.ts/debug-tracks/debug-track-removed.png",
+   "bytes": 79938,
+   "url": "https://storage.googleapis.com/perfetto/test_data/debug-track-removed.png-bc507df7cded4dbb545ce70f7d41982186856790f0b4f0a5837d48f4b3e1114e",
+   "sha256": "bc507df7cded4dbb545ce70f7d41982186856790f0b4f0a5837d48f4b3e1114e",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/ftrace_tracks_and_tab.test.ts/ftrace-tab/ftrace-tab.png",
+   "bytes": 5203,
+   "url": "https://storage.googleapis.com/perfetto/test_data/ftrace-tab.png-518450508a2e463868840ce5906574c48e46a02b6ae1a63bf4fd2782fc330382",
+   "sha256": "518450508a2e463868840ce5906574c48e46a02b6ae1a63bf4fd2782fc330382",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/ftrace_tracks_and_tab.test.ts/ftrace-tracks/ftrace-events.png",
+   "bytes": 127167,
+   "url": "https://storage.googleapis.com/perfetto/test_data/ftrace-events.png-37bb90501179312e14ef73ee9633319621c6b5546e831f8cb86e8bb83520c739",
+   "sha256": "37bb90501179312e14ef73ee9633319621c6b5546e831f8cb86e8bb83520c739",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/funcgraph_trace.test.ts/cpu-funcgraph/cpu-funcgraph.png",
+   "bytes": 78543,
+   "url": "https://storage.googleapis.com/perfetto/test_data/cpu-funcgraph.png-a8dfda30bb379304480a2b2cc88093533028919d664f4026c0af30979cc68a9f",
+   "sha256": "a8dfda30bb379304480a2b2cc88093533028919d664f4026c0af30979cc68a9f",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/funcgraph_trace.test.ts/thread-funcgraph/thread-funcgraph.png",
+   "bytes": 39533,
+   "url": "https://storage.googleapis.com/perfetto/test_data/thread-funcgraph.png-cef9e217130956fb3fd6c610f3e26695a99c2af5344294c40346dabbb5fad88a",
+   "sha256": "cef9e217130956fb3fd6c610f3e26695a99c2af5344294c40346dabbb5fad88a",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/heap_profile.test.ts/native-heap-profile-interval-track/heap-profile-intervals.png",
+   "bytes": 27283,
+   "url": "https://storage.googleapis.com/perfetto/test_data/heap-profile-intervals.png-fad0a1eacc39e2c73f656e35108200894a428657e01e4ec7f34fdc1f8bee5724",
+   "sha256": "fad0a1eacc39e2c73f656e35108200894a428657e01e4ec7f34fdc1f8bee5724",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/independent_features.test.ts/debuggable-chip/track-with-debuggable-chip-expanded.png",
+   "bytes": 116743,
+   "url": "https://storage.googleapis.com/perfetto/test_data/track-with-debuggable-chip-expanded.png-29c400d3a86e3daaa27d902d3fd57dccd44fbd6887472b84e4493537294310e0",
+   "sha256": "29c400d3a86e3daaa27d902d3fd57dccd44fbd6887472b84e4493537294310e0",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/independent_features.test.ts/debuggable-chip/track-with-debuggable-chip.png",
+   "bytes": 111123,
+   "url": "https://storage.googleapis.com/perfetto/test_data/track-with-debuggable-chip.png-e85c482ecb0b2b39aa22786ccf1b2cf98f44d6123861aa6da05604d90975daad",
+   "sha256": "e85c482ecb0b2b39aa22786ccf1b2cf98f44d6123861aa6da05604d90975daad",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/independent_features.test.ts/trace-error-notification/error-icon.png",
+   "bytes": 3563,
+   "url": "https://storage.googleapis.com/perfetto/test_data/error-icon.png-77fc70a4cf2f3128cc9a7e51ec607e9b05df88563b8bd433e9522c660a2b4ac7",
+   "sha256": "77fc70a4cf2f3128cc9a7e51ec607e9b05df88563b8bd433e9522c660a2b4ac7",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/json_sort_index.test.ts/load-trace-with-sort-index-metadata/loaded.png",
+   "bytes": 23352,
+   "url": "https://storage.googleapis.com/perfetto/test_data/loaded.png-c751f13b625e2c6a5fa97c9b65d535f6af19c2be128e087880b79945e942504b",
+   "sha256": "c751f13b625e2c6a5fa97c9b65d535f6af19c2be128e087880b79945e942504b",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/json_sort_index.test.ts/verify-process-sort-order/process-order.png",
+   "bytes": 23352,
+   "url": "https://storage.googleapis.com/perfetto/test_data/process-order.png-c751f13b625e2c6a5fa97c9b65d535f6af19c2be128e087880b79945e942504b",
+   "sha256": "c751f13b625e2c6a5fa97c9b65d535f6af19c2be128e087880b79945e942504b",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/json_sort_index.test.ts/verify-thread-sort-order-within-process/thread-order.png",
+   "bytes": 30886,
+   "url": "https://storage.googleapis.com/perfetto/test_data/thread-order.png-cf6d7695b481fd89c1140db99a4ac8ac1a58b3e68731e4074050b6728ae9d4a0",
+   "sha256": "cf6d7695b481fd89c1140db99a4ac8ac1a58b3e68731e4074050b6728ae9d4a0",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/kernel_trackevent.test.ts/kernel-trackevent-tracks/ftrace-kernel-trackevent.png",
+   "bytes": 48389,
+   "url": "https://storage.googleapis.com/perfetto/test_data/ftrace-kernel-trackevent.png-02bd001781e9bbb8789eba265b7db3b06c47e2e0ce910ee24c67639b68fd4cbe",
+   "sha256": "02bd001781e9bbb8789eba265b7db3b06c47e2e0ce910ee24c67639b68fd4cbe",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/load_and_tracks.test.ts/info-and-stats/back-to-timeline.png",
+   "bytes": 109715,
+   "url": "https://storage.googleapis.com/perfetto/test_data/back-to-timeline.png-3598c86c1a31e56fcbbe35d50c564537847d36f135de7d60960d1b6d58afecf8",
+   "sha256": "3598c86c1a31e56fcbbe35d50c564537847d36f135de7d60960d1b6d58afecf8",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/load_and_tracks.test.ts/info-and-stats/into-and-stats.png",
+   "bytes": 143560,
+   "url": "https://storage.googleapis.com/perfetto/test_data/into-and-stats.png-617e17a91b8a5e83decced1ba1ae1cc699df60d8587b12ab6772320c5ccbf594",
+   "sha256": "617e17a91b8a5e83decced1ba1ae1cc699df60d8587b12ab6772320c5ccbf594",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/load_and_tracks.test.ts/load-trace/loaded.png",
+   "bytes": 109715,
+   "url": "https://storage.googleapis.com/perfetto/test_data/loaded.png-3598c86c1a31e56fcbbe35d50c564537847d36f135de7d60960d1b6d58afecf8",
+   "sha256": "3598c86c1a31e56fcbbe35d50c564537847d36f135de7d60960d1b6d58afecf8",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/load_and_tracks.test.ts/mark/mark.png",
+   "bytes": 80447,
+   "url": "https://storage.googleapis.com/perfetto/test_data/mark.png-f5e1304a58e6520a130fda8f042b83f72ae48f343d583eba7d0da96d3ad3f5de",
+   "sha256": "f5e1304a58e6520a130fda8f042b83f72ae48f343d583eba7d0da96d3ad3f5de",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/load_and_tracks.test.ts/omnibox-search/process-details.png",
+   "bytes": 23506,
+   "url": "https://storage.googleapis.com/perfetto/test_data/process-details.png-9a8fdc381d95c4ad135c227a4de1e74ed0374140bd69925eb8bbc796998bed7e",
+   "sha256": "9a8fdc381d95c4ad135c227a4de1e74ed0374140bd69925eb8bbc796998bed7e",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/load_and_tracks.test.ts/omnibox-search/search-slice.png",
+   "bytes": 88703,
+   "url": "https://storage.googleapis.com/perfetto/test_data/search-slice.png-419baed112966fdeafa77bcdaf2df4433a9a491cccdd00bddf0838218840cbc2",
+   "sha256": "419baed112966fdeafa77bcdaf2df4433a9a491cccdd00bddf0838218840cbc2",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/load_and_tracks.test.ts/pin-tracks/one-track-pinned.png",
+   "bytes": 54337,
+   "url": "https://storage.googleapis.com/perfetto/test_data/one-track-pinned.png-f2e9ad5157ac6fdda68f4c50035f00699d9b5930bb37200d46e66e2042e35937",
+   "sha256": "f2e9ad5157ac6fdda68f4c50035f00699d9b5930bb37200d46e66e2042e35937",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/load_and_tracks.test.ts/pin-tracks/two-tracks-pinned.png",
+   "bytes": 56961,
+   "url": "https://storage.googleapis.com/perfetto/test_data/two-tracks-pinned.png-53d18dcc8975fcef38298ee620dde2b6d9c66aa10ed4c29ddb07a9d7e732cc2e",
+   "sha256": "53d18dcc8975fcef38298ee620dde2b6d9c66aa10ed4c29ddb07a9d7e732cc2e",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/load_and_tracks.test.ts/track-expand-and-collapse/traced-probes-compressed.png",
+   "bytes": 53663,
+   "url": "https://storage.googleapis.com/perfetto/test_data/traced-probes-compressed.png-4bbf7d825e242c10b363d3dab2e413166b6953539b37c5c8f2c1bd41b1a34430",
+   "sha256": "4bbf7d825e242c10b363d3dab2e413166b6953539b37c5c8f2c1bd41b1a34430",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/load_and_tracks.test.ts/track-expand-and-collapse/traced-probes-expanded.png",
+   "bytes": 62579,
+   "url": "https://storage.googleapis.com/perfetto/test_data/traced-probes-expanded.png-e4172e7481bb386219c4c74bc9019f911d2a62708ddb7120cb37bf2080cd8859",
+   "sha256": "e4172e7481bb386219c4c74bc9019f911d2a62708ddb7120cb37bf2080cd8859",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/local_cache_key.test.ts/multiple-traces-via-url-and-local-cache-key/back-to-trace-1.png",
+   "bytes": 350536,
+   "url": "https://storage.googleapis.com/perfetto/test_data/back-to-trace-1.png-be4f94ce23b048dc7c8fd2d15c472aa56ee8d3fba86f8a24d7e44e62efb43911",
+   "sha256": "be4f94ce23b048dc7c8fd2d15c472aa56ee8d3fba86f8a24d7e44e62efb43911",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/local_cache_key.test.ts/multiple-traces-via-url-and-local-cache-key/confirmation-dialog.png",
+   "bytes": 245253,
+   "url": "https://storage.googleapis.com/perfetto/test_data/confirmation-dialog.png-a6add976fae530e06de2b3c4ceaa37565b52f5683781c06844f4dd564034fec2",
+   "sha256": "a6add976fae530e06de2b3c4ceaa37565b52f5683781c06844f4dd564034fec2",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/local_cache_key.test.ts/multiple-traces-via-url-and-local-cache-key/trace-1.png",
+   "bytes": 276284,
+   "url": "https://storage.googleapis.com/perfetto/test_data/trace-1.png-cddca9558ab2f565bc519b6de68863c4e4f2165c9b11bb25dd8b303f08918235",
+   "sha256": "cddca9558ab2f565bc519b6de68863c4e4f2165c9b11bb25dd8b303f08918235",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/local_cache_key.test.ts/multiple-traces-via-url-and-local-cache-key/trace-2.png",
+   "bytes": 133965,
+   "url": "https://storage.googleapis.com/perfetto/test_data/trace-2.png-1b776fc25c93c38e6bc65e0489a2c8eaefe9c960c664e817dff0d2393791e2c7",
+   "sha256": "1b776fc25c93c38e6bc65e0489a2c8eaefe9c960c664e817dff0d2393791e2c7",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/missing_track_names.test.ts/trace-loaded/trace-loaded.png",
+   "bytes": 26069,
+   "url": "https://storage.googleapis.com/perfetto/test_data/trace-loaded.png-8fe64b201e7384a899f2ed87cd5f1176d2cc7fe10ce35cc8aa95a965733753b9",
+   "sha256": "8fe64b201e7384a899f2ed87cd5f1176d2cc7fe10ce35cc8aa95a965733753b9",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/omnibox.test.ts/command-palette-keyboard-navigation/command-palette-pos-0.png",
+   "bytes": 204115,
+   "url": "https://storage.googleapis.com/perfetto/test_data/command-palette-pos-0.png-ccfc1065f018e68c7294411f875b538a7a68f20e31586d0871c607e46f617bf9",
+   "sha256": "ccfc1065f018e68c7294411f875b538a7a68f20e31586d0871c607e46f617bf9",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/omnibox.test.ts/command-palette-keyboard-navigation/command-palette-pos-1.png",
+   "bytes": 204128,
+   "url": "https://storage.googleapis.com/perfetto/test_data/command-palette-pos-1.png-5e37e4c737ea39c3e79ff814ab78c868b24ce13c17be021af12a26718a67765b",
+   "sha256": "5e37e4c737ea39c3e79ff814ab78c868b24ce13c17be021af12a26718a67765b",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/omnibox.test.ts/command-palette-keyboard-navigation/command-palette-pos-end-1.png",
+   "bytes": 207649,
+   "url": "https://storage.googleapis.com/perfetto/test_data/command-palette-pos-end-1.png-a10f57edaa226fb989ba49aa2a29108796ed5910f0864aa29d8cd877f8f9f68d",
+   "sha256": "a10f57edaa226fb989ba49aa2a29108796ed5910f0864aa29d8cd877f8f9f68d",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/omnibox.test.ts/command-palette-keyboard-navigation/command-palette-pos-end-2.png",
+   "bytes": 207587,
+   "url": "https://storage.googleapis.com/perfetto/test_data/command-palette-pos-end-2.png-eaaaffa6df64a0c9f1e207e157254f78cf379aeb0d75133263b4cede8021a53d",
+   "sha256": "eaaaffa6df64a0c9f1e207e157254f78cf379aeb0d75133263b4cede8021a53d",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/oome_callstack.test.ts/OOME-callstack-track/oome-callstack.png",
+   "bytes": 23412,
+   "url": "https://storage.googleapis.com/perfetto/test_data/oome-callstack.png-3299cc01bc0fb6b9bff3e1988cc6d5dc163e5191fe434f0146af1ac9e6f13346",
+   "sha256": "3299cc01bc0fb6b9bff3e1988cc6d5dc163e5191fe434f0146af1ac9e6f13346",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/perf_event.test.ts/flamechart-mapping-colors/flamechart-mapping-colors.png",
+   "bytes": 133358,
+   "url": "https://storage.googleapis.com/perfetto/test_data/flamechart-mapping-colors.png-96cfa9c8ab7cdbb8bc6bec97e5ee59733b75dfee87f71de81e313cdc0e1c7db3",
+   "sha256": "96cfa9c8ab7cdbb8bc6bec97e5ee59733b75dfee87f71de81e313cdc0e1c7db3",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/perf_event.test.ts/multiple-callstack-tracks/perf-event-sf-expanded.png",
+   "bytes": 137193,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perf-event-sf-expanded.png-a1a0308fd58cc1f9db8a25fc3d1f878fc3dd8b4ac96805f4818be48995998b6e",
+   "sha256": "a1a0308fd58cc1f9db8a25fc3d1f878fc3dd8b4ac96805f4818be48995998b6e",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/perf_event.test.ts/multiple-callstack-tracks/perf-event-sf.png",
+   "bytes": 141706,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perf-event-sf.png-eb541686757982ae3a58d79ae082daf9f807dab02024425f69acd8ff72940b1d",
+   "sha256": "eb541686757982ae3a58d79ae082daf9f807dab02024425f69acd8ff72940b1d",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/pinned_tracks.test.ts/pin-actual-timeline-tracks/pinned-actual-timelines.png",
+   "bytes": 7427,
+   "url": "https://storage.googleapis.com/perfetto/test_data/pinned-actual-timelines.png-5a8dbe8fafcc74247426e24aad92e881c6e34b317b3483cabd71479c00dce35b",
+   "sha256": "5a8dbe8fafcc74247426e24aad92e881c6e34b317b3483cabd71479c00dce35b",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/queries.test.ts/omnibox-query/id-click---current-selection.png",
+   "bytes": 167964,
+   "url": "https://storage.googleapis.com/perfetto/test_data/id-click---current-selection.png-35888a14df33f9f59f40b817c893e1494efa1b42635451be5f7c57de5b94cfdc",
+   "sha256": "35888a14df33f9f59f40b817c893e1494efa1b42635451be5f7c57de5b94cfdc",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/queries.test.ts/omnibox-query/id-click---timeline.png",
+   "bytes": 48657,
+   "url": "https://storage.googleapis.com/perfetto/test_data/id-click---timeline.png-16ea14abb1d3af29a71a6c95eb7d966eb5bc9b6c55d7472ddd4cea90ceebb741",
+   "sha256": "16ea14abb1d3af29a71a6c95eb7d966eb5bc9b6c55d7472ddd4cea90ceebb741",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/queries.test.ts/omnibox-query/omnibox-cleared.png",
+   "bytes": 20414,
+   "url": "https://storage.googleapis.com/perfetto/test_data/omnibox-cleared.png-3a4d6e650cac2e1c482e0038a941445ea7685c7e99e4bfea3c19a1ff16d4e03e",
+   "sha256": "3a4d6e650cac2e1c482e0038a941445ea7685c7e99e4bfea3c19a1ff16d4e03e",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/queries.test.ts/omnibox-query/query-mode.png",
+   "bytes": 48657,
+   "url": "https://storage.googleapis.com/perfetto/test_data/query-mode.png-16ea14abb1d3af29a71a6c95eb7d966eb5bc9b6c55d7472ddd4cea90ceebb741",
+   "sha256": "16ea14abb1d3af29a71a6c95eb7d966eb5bc9b6c55d7472ddd4cea90ceebb741",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/queries.test.ts/query-page-id-link-navigation/query-page-id-click---current-selection.png",
+   "bytes": 169369,
+   "url": "https://storage.googleapis.com/perfetto/test_data/query-page-id-click---current-selection.png-d28d84ce6791f4405a87465521c9f5b441d8199a1ff3f57aeb8a6b26480a665f",
+   "sha256": "d28d84ce6791f4405a87465521c9f5b441d8199a1ff3f57aeb8a6b26480a665f",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/queries.test.ts/query-page-id-link-navigation/query-page-id-click---timeline.png",
+   "bytes": 175746,
+   "url": "https://storage.googleapis.com/perfetto/test_data/query-page-id-click---timeline.png-7f2bd5e38d156fdaa06cb77373c1c3512207ca55ade5806d528005f94f4dd65b",
+   "sha256": "7f2bd5e38d156fdaa06cb77373c1c3512207ca55ade5806d528005f94f4dd65b",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/queries.test.ts/query-page/query-limit-1.png",
+   "bytes": 32796,
+   "url": "https://storage.googleapis.com/perfetto/test_data/query-limit-1.png-0378976dbea8d3583293378c6301060435c8b5450095ea65d503a70f5255a7ea",
+   "sha256": "0378976dbea8d3583293378c6301060435c8b5450095ea65d503a70f5255a7ea",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/queries.test.ts/query-page/query-limit-2.png",
+   "bytes": 38912,
+   "url": "https://storage.googleapis.com/perfetto/test_data/query-limit-2.png-210ddc2baa5ef42fbee4cff57297fb7b8091d8b8549718e0a8bddb8e7e6c800d",
+   "sha256": "210ddc2baa5ef42fbee4cff57297fb7b8091d8b8549718e0a8bddb8e7e6c800d",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/queries.test.ts/query-page/query-limit-3.png",
+   "bytes": 44826,
+   "url": "https://storage.googleapis.com/perfetto/test_data/query-limit-3.png-c718a661fdea4581a488171b1fe97353b6d6c129698bdf2c6715f581131f7f9e",
+   "sha256": "c718a661fdea4581a488171b1fe97353b6d6c129698bdf2c6715f581131f7f9e",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/screenshots_track.test.ts/screenshot-track-hover-preview/screenshots-track-hover.png",
+   "bytes": 200,
+   "url": "https://storage.googleapis.com/perfetto/test_data/screenshots-track-hover.png-49f2588aa2d208ef3fc5f69c590aec550615ca2b312050d95b679556f95d8a1b",
+   "sha256": "49f2588aa2d208ef3fc5f69c590aec550615ca2b312050d95b679556f95d8a1b",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/slice_double_click_zoom.test.ts/double-clicking-a-slice-zooms-into-it/slice-double-click-zoom.png",
+   "bytes": 17885,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slice-double-click-zoom.png-16c639fe7a78503e125f53f44514885369459ed0800203e458fc25784b726f87",
+   "sha256": "16c639fe7a78503e125f53f44514885369459ed0800203e458fc25784b726f87",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/com-android-PinPerfMetrics-command-test/after.png",
+   "bytes": 81783,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-cafcd18c47d5a148ee749db5fb394e33b0fe14b60ef942ae6a42adf8162e0c6a",
+   "sha256": "cafcd18c47d5a148ee749db5fb394e33b0fe14b60ef942ae6a42adf8162e0c6a",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-AddDebugCounterTrack-command-test/after.png",
+   "bytes": 175825,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-7bb0e7ca4a18f7589ddd832361f2bd3dda11b9c5e00514f43e2044676db85652",
+   "sha256": "7bb0e7ca4a18f7589ddd832361f2bd3dda11b9c5e00514f43e2044676db85652",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-AddDebugCounterTrackWithPivot-command-test/after.png",
+   "bytes": 181350,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-822d07bb78082eac4185ac357dfcaffb0f2305c46406e37fd0a9db529a25aee9",
+   "sha256": "822d07bb78082eac4185ac357dfcaffb0f2305c46406e37fd0a9db529a25aee9",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-AddDebugSliceTrack-command-test/after.png",
+   "bytes": 170678,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-fd1963b7a3ab7786921fefe49ad9620026a35a25cf9436aab0530b24d301c3da",
+   "sha256": "fd1963b7a3ab7786921fefe49ad9620026a35a25cf9436aab0530b24d301c3da",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-AddDebugSliceTrackWithPivot-command-test/after.png",
+   "bytes": 170377,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-e383859e51c5004904dbe4467157c494e84c275c97b40c5e43573ef1049b2b89",
+   "sha256": "e383859e51c5004904dbe4467157c494e84c275c97b40c5e43573ef1049b2b89",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-AddNoteAtTimestamp-command-test/after.png",
+   "bytes": 88876,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-a45fb24137f01c76e9df6a9cdacc45d6d15c568561dda2e7583291bd9c5ed7b3",
+   "sha256": "a45fb24137f01c76e9df6a9cdacc45d6d15c568561dda2e7583291bd9c5ed7b3",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-CollapseTracksByRegex-command-test/after.png",
+   "bytes": 167334,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-76bbac6d8a8bad16ef7f3e4d030e7b8325991357182838fbd93dcab5c851f1d4",
+   "sha256": "76bbac6d8a8bad16ef7f3e4d030e7b8325991357182838fbd93dcab5c851f1d4",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-CollapseTracksByRegex-with-explicit-name-filtering/after.png",
+   "bytes": 167334,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-76bbac6d8a8bad16ef7f3e4d030e7b8325991357182838fbd93dcab5c851f1d4",
+   "sha256": "76bbac6d8a8bad16ef7f3e4d030e7b8325991357182838fbd93dcab5c851f1d4",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-CollapseTracksByRegex-with-path-filtering/after.png",
+   "bytes": 157641,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-52f0e4b8fd8f40b5af66f47d613f6473d55d3fe819893c4db5eeb1596598d5c5",
+   "sha256": "52f0e4b8fd8f40b5af66f47d613f6473d55d3fe819893c4db5eeb1596598d5c5",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-CopyTracksToWorkspaceByRegex-command-test/after.png",
+   "bytes": 122890,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-c1a8fcc7a306a405e56b9e25c59592913127a33017355c459852bb6ffca1fe44",
+   "sha256": "c1a8fcc7a306a405e56b9e25c59592913127a33017355c459852bb6ffca1fe44",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-CopyTracksToWorkspaceByRegex-with-path-filtering/after.png",
+   "bytes": 175117,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-871932989fafe63edc4a86a81751bdf9b10b0eadb598fc551e6b40842bc5f8ef",
+   "sha256": "871932989fafe63edc4a86a81751bdf9b10b0eadb598fc551e6b40842bc5f8ef",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-CopyTracksToWorkspaceByRegexWithAncestors-command-test/after.png",
+   "bytes": 105522,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-0d256485874a28faba2cba74e99fb7d187fe5d36c64482ca0460628cf9a5bb45",
+   "sha256": "0d256485874a28faba2cba74e99fb7d187fe5d36c64482ca0460628cf9a5bb45",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-CopyTracksToWorkspaceByRegexWithAncestors-with-path-filtering/after.png",
+   "bytes": 88323,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-6d6cf3d0b249bbf27880fea80b6d8cd3715d94d9e0e5157bfc3636ebe86cc4cb",
+   "sha256": "6d6cf3d0b249bbf27880fea80b6d8cd3715d94d9e0e5157bfc3636ebe86cc4cb",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-CreateWorkspace-command-test/after.png",
+   "bytes": 81783,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-cafcd18c47d5a148ee749db5fb394e33b0fe14b60ef942ae6a42adf8162e0c6a",
+   "sha256": "cafcd18c47d5a148ee749db5fb394e33b0fe14b60ef942ae6a42adf8162e0c6a",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-ExpandTracksByRegex-command-test/after.png",
+   "bytes": 151499,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-7a8eef85034c8b3feda0ea233c6a6243b7bd1f19cc0f28a4ca510536718e9953",
+   "sha256": "7a8eef85034c8b3feda0ea233c6a6243b7bd1f19cc0f28a4ca510536718e9953",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-ExpandTracksByRegex-with-explicit-name-filtering/after.png",
+   "bytes": 151499,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-7a8eef85034c8b3feda0ea233c6a6243b7bd1f19cc0f28a4ca510536718e9953",
+   "sha256": "7a8eef85034c8b3feda0ea233c6a6243b7bd1f19cc0f28a4ca510536718e9953",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-ExpandTracksByRegex-with-path-filtering/after.png",
+   "bytes": 151942,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-3ea3901aa20d4844329115e9cf40803917ee86b40b5edc90b2880547b0a4eead",
+   "sha256": "3ea3901aa20d4844329115e9cf40803917ee86b40b5edc90b2880547b0a4eead",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-PinTracksByRegex-command-test/after.png",
+   "bytes": 203332,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-93649f9ba66b9947a7d03633874fe093d51dfe8fc0fd89349396f4060e807e17",
+   "sha256": "93649f9ba66b9947a7d03633874fe093d51dfe8fc0fd89349396f4060e807e17",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-PinTracksByRegex-with-explicit-name-filtering/after.png",
+   "bytes": 203332,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-93649f9ba66b9947a7d03633874fe093d51dfe8fc0fd89349396f4060e807e17",
+   "sha256": "93649f9ba66b9947a7d03633874fe093d51dfe8fc0fd89349396f4060e807e17",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-PinTracksByRegex-with-path-filtering/after.png",
+   "bytes": 173920,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-6b7bcca105f08a83e00019b6092e09ba68f885ad3a1543f2bd8e52f22ce0a9f8",
+   "sha256": "6b7bcca105f08a83e00019b6092e09ba68f885ad3a1543f2bd8e52f22ce0a9f8",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-RunQuery-command-test/after.png",
+   "bytes": 97004,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-5fdab829c2cdd0990f68fed85230e99bf717c63c6ebbe8a1698710f6c70e0fa2",
+   "sha256": "5fdab829c2cdd0990f68fed85230e99bf717c63c6ebbe8a1698710f6c70e0fa2",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-RunQueryAndShowTab-command-test/after.png",
+   "bytes": 164784,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-ae92bc61b5f7b811b596ccdcfd6cb478de813381d1d4082cd7b81383538fdd5e",
+   "sha256": "ae92bc61b5f7b811b596ccdcfd6cb478de813381d1d4082cd7b81383538fdd5e",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-RunQueryAndShowTab-with-custom-name/after.png",
+   "bytes": 164891,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-e10562e708de3053dd59852e51a4f8793a06e1b9378198040bea16e5bf48119d",
+   "sha256": "e10562e708de3053dd59852e51a4f8793a06e1b9378198040bea16e5bf48119d",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/startup_commands_allowlist.test.ts/dev-perfetto-SwitchWorkspace-command-test/after.png",
+   "bytes": 81783,
+   "url": "https://storage.googleapis.com/perfetto/test_data/after.png-cafcd18c47d5a148ee749db5fb394e33b0fe14b60ef942ae6a42adf8162e0c6a",
+   "sha256": "cafcd18c47d5a148ee749db5fb394e33b0fe14b60ef942ae6a42adf8162e0c6a",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/state_tracks.test.ts/load-trace/loaded.png",
+   "bytes": 20311,
+   "url": "https://storage.googleapis.com/perfetto/test_data/loaded.png-3da72a8207d5bdb7fa38cbeadce4d7a79473dca2ea4eb853d7c65cda9fe9564b",
+   "sha256": "3da72a8207d5bdb7fa38cbeadce4d7a79473dca2ea4eb853d7c65cda9fe9564b",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/state_tracks.test.ts/state-details-panel/state-details-panel.png",
+   "bytes": 36138,
+   "url": "https://storage.googleapis.com/perfetto/test_data/state-details-panel.png-f5d0db3f5182c3cba04ee42ebaabc42f2e9076a36f6914745fcf905ce6cad3be",
+   "sha256": "f5d0db3f5182c3cba04ee42ebaabc42f2e9076a36f6914745fcf905ce6cad3be",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-process/go-to.png",
+   "bytes": 18524,
+   "url": "https://storage.googleapis.com/perfetto/test_data/go-to.png-fa0cdebc83ae7398f68744b636ade4e53f9c43d88977ff6e4057658f7235c960",
+   "sha256": "fa0cdebc83ae7398f68744b636ade4e53f9c43d88977ff6e4057658f7235c960",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-process/open-table.png",
+   "bytes": 27360,
+   "url": "https://storage.googleapis.com/perfetto/test_data/open-table.png-48f0cbaf618fe0f7c81cc51376124b4757ab4a2ee54d44e58d163df6502a67ef",
+   "sha256": "48f0cbaf618fe0f7c81cc51376124b4757ab4a2ee54d44e58d163df6502a67ef",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-process/sorted.png",
+   "bytes": 27366,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sorted.png-95aba09e029623fe54b7dd6e7c5e708859fa0abb3ef98f359b7495adb179c7f5",
+   "sha256": "95aba09e029623fe54b7dd6e7c5e708859fa0abb3ef98f359b7495adb179c7f5",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-sched/current-selection.png",
+   "bytes": 35875,
+   "url": "https://storage.googleapis.com/perfetto/test_data/current-selection.png-632a437b060b936fdcfb1b88ee884d2bfaec16c089d9b80d6b3e115624ed9d4d",
+   "sha256": "632a437b060b936fdcfb1b88ee884d2bfaec16c089d9b80d6b3e115624ed9d4d",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-sched/filtered.png",
+   "bytes": 98843,
+   "url": "https://storage.googleapis.com/perfetto/test_data/filtered.png-444c373f3c05b8062577b866c11c992dc9fba73e6f5c9a9e90689fc643f962af",
+   "sha256": "444c373f3c05b8062577b866c11c992dc9fba73e6f5c9a9e90689fc643f962af",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-sched/go-to.png",
+   "bytes": 249650,
+   "url": "https://storage.googleapis.com/perfetto/test_data/go-to.png-06ac0616199654be149b00cefd288994e4ad6acdfc0425e2bf8a12b3af5e034f",
+   "sha256": "06ac0616199654be149b00cefd288994e4ad6acdfc0425e2bf8a12b3af5e034f",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-sched/open-table.png",
+   "bytes": 86695,
+   "url": "https://storage.googleapis.com/perfetto/test_data/open-table.png-f91caee2ee71c0bec76632cf5084b18b453325e1332e033bddd99e1f4f51862d",
+   "sha256": "f91caee2ee71c0bec76632cf5084b18b453325e1332e033bddd99e1f4f51862d",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-sched/sorted.png",
+   "bytes": 81311,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sorted.png-1ab6279e39a20ced7a556407750bfa163c16f111c0522038caf8070ebc39017e",
+   "sha256": "1ab6279e39a20ced7a556407750bfa163c16f111c0522038caf8070ebc39017e",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-slice/current-selection.png",
+   "bytes": 48009,
+   "url": "https://storage.googleapis.com/perfetto/test_data/current-selection.png-4c4c4810006c6b47a5bdb3456b6dac3df15dd5dc7b6919112e007cd2ecfb7f59",
+   "sha256": "4c4c4810006c6b47a5bdb3456b6dac3df15dd5dc7b6919112e007cd2ecfb7f59",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-slice/go-to.png",
+   "bytes": 291443,
+   "url": "https://storage.googleapis.com/perfetto/test_data/go-to.png-478419383d16a775d6c1b427f94eeca0d93c765e5e291986f00d2ecefd508b26",
+   "sha256": "478419383d16a775d6c1b427f94eeca0d93c765e5e291986f00d2ecefd508b26",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-slice/open-table.png",
+   "bytes": 90049,
+   "url": "https://storage.googleapis.com/perfetto/test_data/open-table.png-9bfa790213e6719bdc3291add67730804050a9484c5191ccd0131b1b01d909c9",
+   "sha256": "9bfa790213e6719bdc3291add67730804050a9484c5191ccd0131b1b01d909c9",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-slice/sorted.png",
+   "bytes": 93759,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sorted.png-b27a2f52141191b3e21a28a910d2cdd01d08b3c818c9d0807a980646a66ad7fb",
+   "sha256": "b27a2f52141191b3e21a28a910d2cdd01d08b3c818c9d0807a980646a66ad7fb",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-thread-state/current-selection.png",
+   "bytes": 37000,
+   "url": "https://storage.googleapis.com/perfetto/test_data/current-selection.png-c6793cb28b0cdad4de4b97fc6ebe9eaadc2987705148ea41660908ce80c70ff9",
+   "sha256": "c6793cb28b0cdad4de4b97fc6ebe9eaadc2987705148ea41660908ce80c70ff9",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-thread-state/filtered.png",
+   "bytes": 85474,
+   "url": "https://storage.googleapis.com/perfetto/test_data/filtered.png-becbec8ca045d9ae6757089c7009fb1015f0f6c48e17d0a39886c364a3efab0c",
+   "sha256": "becbec8ca045d9ae6757089c7009fb1015f0f6c48e17d0a39886c364a3efab0c",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-thread-state/go-to.png",
+   "bytes": 208237,
+   "url": "https://storage.googleapis.com/perfetto/test_data/go-to.png-ca76ba543a191134f8dd663de0fdcdcb893818559f8a45f89dd2a61019b98c24",
+   "sha256": "ca76ba543a191134f8dd663de0fdcdcb893818559f8a45f89dd2a61019b98c24",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-thread-state/open-table.png",
+   "bytes": 96997,
+   "url": "https://storage.googleapis.com/perfetto/test_data/open-table.png-3b5849154dae69d2113e11b55ff1a28f18be3edc36f53902e6f0b31c3de2fd76",
+   "sha256": "3b5849154dae69d2113e11b55ff1a28f18be3edc36f53902e6f0b31c3de2fd76",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-thread-state/sorted.png",
+   "bytes": 106296,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sorted.png-c9c9d15c06995d9a38408c04e50e27c1392d3143aeff9718e0b53000c8d209c1",
+   "sha256": "c9c9d15c06995d9a38408c04e50e27c1392d3143aeff9718e0b53000c8d209c1",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-thread/go-to.png",
+   "bytes": 14040,
+   "url": "https://storage.googleapis.com/perfetto/test_data/go-to.png-bedf5e1ef74b8625a15bd4d6d03bea23a6d99bc02ea008c2c301a3a97c3d4c68",
+   "sha256": "bedf5e1ef74b8625a15bd4d6d03bea23a6d99bc02ea008c2c301a3a97c3d4c68",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-thread/open-table.png",
+   "bytes": 51286,
+   "url": "https://storage.googleapis.com/perfetto/test_data/open-table.png-264459e72a13c5943fc890772f4fb2aa85e1256a4184e2653ac05854e2ac764b",
+   "sha256": "264459e72a13c5943fc890772f4fb2aa85e1256a4184e2653ac05854e2ac764b",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Go-to-thread/sorted.png",
+   "bytes": 66654,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sorted.png-0c5634c6608065b65365dbe9142e1c36d76aa2bcde6850aef1d87fe8d4851726",
+   "sha256": "0c5634c6608065b65365dbe9142e1c36d76aa2bcde6850aef1d87fe8d4851726",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Table-interactions/slices-table-add-argument.png",
+   "bytes": 94876,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slices-table-add-argument.png-ec571ee3c1c0c467e9d846eaf0bc8820955c1d0f9b68763de0fa33235c340b76",
+   "sha256": "ec571ee3c1c0c467e9d846eaf0bc8820955c1d0f9b68763de0fa33235c340b76",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Table-interactions/slices-table-filter-by-argument.png",
+   "bytes": 94864,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slices-table-filter-by-argument.png-907fae480f964756533524064298990054f6d22ff6a0845d83dde960d7226557",
+   "sha256": "907fae480f964756533524064298990054f6d22ff6a0845d83dde960d7226557",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Table-interactions/slices-table-filter1.png",
+   "bytes": 101230,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slices-table-filter1.png-7139730b586516e0351db5c048e0badb9c5dc52e13a389f4ed849b1769e54d5c",
+   "sha256": "7139730b586516e0351db5c048e0badb9c5dc52e13a389f4ed849b1769e54d5c",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Table-interactions/slices-table-filter2.png",
+   "bytes": 105969,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slices-table-filter2.png-73df9e55014cac64cfd9ff2b24612df005e3460d61881dbaac8fe73502077942",
+   "sha256": "73df9e55014cac64cfd9ff2b24612df005e3460d61881dbaac8fe73502077942",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Table-interactions/slices-table-filter3.png",
+   "bytes": 103178,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slices-table-filter3.png-6de3c4abd39a411eef670a0618be51b9a8db4fb23bcd6c23d614fc2661aa1d1f",
+   "sha256": "6de3c4abd39a411eef670a0618be51b9a8db4fb23bcd6c23d614fc2661aa1d1f",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Table-interactions/slices-table-hide-column.png",
+   "bytes": 102267,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slices-table-hide-column.png-5c96c1b7c900a1bff9e33d6b4cd89af8ddf785d8cc02e3b5812e7d09415d3617",
+   "sha256": "5c96c1b7c900a1bff9e33d6b4cd89af8ddf785d8cc02e3b5812e7d09415d3617",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Table-interactions/slices-table-sort-by-argument.png",
+   "bytes": 93419,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slices-table-sort-by-argument.png-e4cacaffb7efaca90d5975805367f38386066721d89f5a62e998e0612c858e45",
+   "sha256": "e4cacaffb7efaca90d5975805367f38386066721d89f5a62e998e0612c858e45",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Table-interactions/slices-table-sorted.png",
+   "bytes": 105361,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slices-table-sorted.png-43fc09d6c58cdc00017b04e8de31da290333bf659dea162f2ebb94268de04a5d",
+   "sha256": "43fc09d6c58cdc00017b04e8de31da290333bf659dea162f2ebb94268de04a5d",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/Table-interactions/slices-table.png",
+   "bytes": 90049,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slices-table.png-9bfa790213e6719bdc3291add67730804050a9484c5191ccd0131b1b01d909c9",
+   "sha256": "9bfa790213e6719bdc3291add67730804050a9484c5191ccd0131b1b01d909c9",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/table_viewer.test.ts/slices-with-same-name/slices-with-same-name.png",
+   "bytes": 42565,
+   "url": "https://storage.googleapis.com/perfetto/test_data/slices-with-same-name.png-a143d1758e0700b9c7a8eab4211de8ca961b703126a80c46eea939576c638d5b",
+   "sha256": "a143d1758e0700b9c7a8eab4211de8ca961b703126a80c46eea939576c638d5b",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_callstacks.test.ts/debug-annotation-measure/objects-flamegraph.png",
+   "bytes": 31383,
+   "url": "https://storage.googleapis.com/perfetto/test_data/objects-flamegraph.png-e9b0835a14cf783488857a5d024fbdec74f34dcbe4067f2af708b4d99e05fb40",
+   "sha256": "e9b0835a14cf783488857a5d024fbdec74f34dcbe4067f2af708b4d99e05fb40",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_callstacks.test.ts/focus-modes-are-filter-chips/pivot-filter.png",
+   "bytes": 28094,
+   "url": "https://storage.googleapis.com/perfetto/test_data/pivot-filter.png-b828bff2be2f9e3cf96247b019f6f85501c062647a0de467256b3e0f32147b72",
+   "sha256": "b828bff2be2f9e3cf96247b019f6f85501c062647a0de467256b3e0f32147b72",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_callstacks.test.ts/highlight-controls-can-be-kept-open-or-hidden/highlight-controls.png",
+   "bytes": 37560,
+   "url": "https://storage.googleapis.com/perfetto/test_data/highlight-controls.png-8ed2cf5888af2c7ffec81a6bd405184e0a84d161dd3fa1887977503ab3549b65",
+   "sha256": "8ed2cf5888af2c7ffec81a6bd405184e0a84d161dd3fa1887977503ab3549b65",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_callstacks.test.ts/measure-picker-menu/measure-picker.png",
+   "bytes": 128551,
+   "url": "https://storage.googleapis.com/perfetto/test_data/measure-picker.png-0af7a3076445e1bbbc31a415d1bb1aec9d148e535945d83e8491dbd42efdf364",
+   "sha256": "0af7a3076445e1bbbc31a415d1bb1aec9d148e535945d83e8491dbd42efdf364",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_callstacks.test.ts/proto-extension-measure/latency-flamegraph.png",
+   "bytes": 33045,
+   "url": "https://storage.googleapis.com/perfetto/test_data/latency-flamegraph.png-df560d96200e1292670d6452e1f91379a4ff6f19583b01d1b1e055fc7f631a8d",
+   "sha256": "df560d96200e1292670d6452e1f91379a4ff6f19583b01d1b1e055fc7f631a8d",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_callstacks.test.ts/samples-measure/samples-flamegraph.png",
+   "bytes": 31832,
+   "url": "https://storage.googleapis.com/perfetto/test_data/samples-flamegraph.png-3e12d455c0396ad12bbbd6712eb7631b18422c21d322db86948fbc1f26900196",
+   "sha256": "3e12d455c0396ad12bbbd6712eb7631b18422c21d322db86948fbc1f26900196",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_callstacks.test.ts/weight-flamegraph/weight-flamegraph.png",
+   "bytes": 31072,
+   "url": "https://storage.googleapis.com/perfetto/test_data/weight-flamegraph.png-25cf1f94286c5c660b5ab132611cc53c21673d9df308735dc4520776a44e73f7",
+   "sha256": "25cf1f94286c5c660b5ab132611cc53c21673d9df308735dc4520776a44e73f7",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_description.test.ts/Android-log-track-description/android-log-description.png",
+   "bytes": 187309,
+   "url": "https://storage.googleapis.com/perfetto/test_data/android-log-description.png-f45fa626c6c6774f8004448129361a77dc2e835de919d599d355ac7e50ee1e24",
+   "sha256": "f45fa626c6c6774f8004448129361a77dc2e835de919d599d355ac7e50ee1e24",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_description.test.ts/Cpu-thread-scheduling-description/cpu-scheduling-description.png",
+   "bytes": 188747,
+   "url": "https://storage.googleapis.com/perfetto/test_data/cpu-scheduling-description.png-977a87930bd3f7e12b6722f6f18fad6b03fb5b7f94da36ffab507edcaad21362",
+   "sha256": "977a87930bd3f7e12b6722f6f18fad6b03fb5b7f94da36ffab507edcaad21362",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_description.test.ts/Ftrace-track-description/ftrace-description.png",
+   "bytes": 281886,
+   "url": "https://storage.googleapis.com/perfetto/test_data/ftrace-description.png-3fdadb9a0387b7c2da9b4ab1d425440671c1dfbf8834748207a9b82ae71fa481",
+   "sha256": "3fdadb9a0387b7c2da9b4ab1d425440671c1dfbf8834748207a9b82ae71fa481",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_description.test.ts/Thread-state-description/thread-state-description.png",
+   "bytes": 151066,
+   "url": "https://storage.googleapis.com/perfetto/test_data/thread-state-description.png-f5949c8750dd31ba1c7b8b584a1581f9b82c3666536813a5cecf5285f4937a72",
+   "sha256": "f5949c8750dd31ba1c7b8b584a1581f9b82c3666536813a5cecf5285f4937a72",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_description.test.ts/TrackDescriptor-description/track-descriptor-description.png",
+   "bytes": 95092,
+   "url": "https://storage.googleapis.com/perfetto/test_data/track-descriptor-description.png-628491128f83f106fac64d86c5178822874ca904156138268ed6722c3ed2c180",
+   "sha256": "628491128f83f106fac64d86c5178822874ca904156138268ed6722c3ed2c180",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_ordered_tracks.test.ts/chronological-order/chronological.png",
+   "bytes": 22055,
+   "url": "https://storage.googleapis.com/perfetto/test_data/chronological.png-c6666bf8508602b5fcbd0c71c1a7412a29f8d5cbf05f615bc4aca0a9a336a4c9",
+   "sha256": "c6666bf8508602b5fcbd0c71c1a7412a29f8d5cbf05f615bc4aca0a9a336a4c9",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_ordered_tracks.test.ts/explicit-order/explicit.png",
+   "bytes": 23342,
+   "url": "https://storage.googleapis.com/perfetto/test_data/explicit.png-a1a9524a9d2e7d602a4579dcf08dd4bc85148fb389510ee6a84435a720243253",
+   "sha256": "a1a9524a9d2e7d602a4579dcf08dd4bc85148fb389510ee6a84435a720243253",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_ordered_tracks.test.ts/lexicographic-tracks/lexicographic.png",
+   "bytes": 24912,
+   "url": "https://storage.googleapis.com/perfetto/test_data/lexicographic.png-7cd99d58146611dc332510747ce272628525f642ca52958478d4192bc74814b2",
+   "sha256": "7cd99d58146611dc332510747ce272628525f642ca52958478d4192bc74814b2",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/track_event_ordered_tracks.test.ts/load-trace/loaded.png",
+   "bytes": 21065,
+   "url": "https://storage.googleapis.com/perfetto/test_data/loaded.png-6ff8c26418bc952a2cb3822ce21304bac9ad8cc4672ee6d207232e8227f32305",
+   "sha256": "6ff8c26418bc952a2cb3822ce21304bac9ad8cc4672ee6d207232e8227f32305",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/wattson.test.ts/sched-aggregations/sched-aggr-process.png",
+   "bytes": 99043,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sched-aggr-process.png-7f0e20cafd405cfe251c85c27b839b7a7e1b159be8343ee92f6d6dc79a9f9b9d",
+   "sha256": "7f0e20cafd405cfe251c85c27b839b7a7e1b159be8343ee92f6d6dc79a9f9b9d",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/wattson.test.ts/sched-aggregations/sched-aggr-thread.png",
+   "bytes": 101384,
+   "url": "https://storage.googleapis.com/perfetto/test_data/sched-aggr-thread.png-cb9d89530ed2d5f1ccda67bb6e1376f0558144e0a9f79a68deecce75f729d079",
+   "sha256": "cb9d89530ed2d5f1ccda67bb6e1376f0558144e0a9f79a68deecce75f729d079",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/wattson.test.ts/wattson-aggregations/wattson-estimate-aggr.png",
+   "bytes": 55974,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson-estimate-aggr.png-8a22bed9b51f7668ce534fb4a26929b2dc4c84e0d0488c6505229923ce25e114",
+   "sha256": "8a22bed9b51f7668ce534fb4a26929b2dc4c84e0d0488c6505229923ce25e114",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/zoom.test.ts/zoom-in/zoomed-in.png",
+   "bytes": 239983,
+   "url": "https://storage.googleapis.com/perfetto/test_data/zoomed-in.png-05c1278adabada5c9b830ab61afbbdef63710683127711f6d0325ce6c3c6d213",
+   "sha256": "05c1278adabada5c9b830ab61afbbdef63710683127711f6d0325ce6c3c6d213",
+   "status": 200
+  },
+  {
+   "path": "test/data/ui-screenshots/zoom.test.ts/zoom-out/zoomed-out.png",
+   "bytes": 138485,
+   "url": "https://storage.googleapis.com/perfetto/test_data/zoomed-out.png-b3caf0a1df9974987468cf77284eb344a14cdc55041df057d9a13f63fc9bf7ec",
+   "sha256": "b3caf0a1df9974987468cf77284eb344a14cdc55041df057d9a13f63fc9bf7ec",
+   "status": 200
+  },
+  {
+   "path": "test/data/unsorted_trace.json",
+   "bytes": 244,
+   "url": "https://storage.googleapis.com/perfetto/test_data/unsorted_trace.json-360b23ca6419ef1ce27de35b9e46fc4202db30f5093596e2dca841e547d13ccd",
+   "sha256": "360b23ca6419ef1ce27de35b9e46fc4202db30f5093596e2dca841e547d13ccd",
+   "status": 200
+  },
+  {
+   "path": "test/data/unsymbolized_app_profile.pb",
+   "bytes": 5353,
+   "url": "https://storage.googleapis.com/perfetto/test_data/unsymbolized_app_profile.pb-a6db0229abe03041e7fe514e7cdf92ecb48633a91b110f727dc028c32e6f1ea4",
+   "sha256": "a6db0229abe03041e7fe514e7cdf92ecb48633a91b110f727dc028c32e6f1ea4",
+   "status": 200
+  },
+  {
+   "path": "test/data/user_package_metadata.pftrace",
+   "bytes": 20703786,
+   "url": "https://storage.googleapis.com/perfetto/test_data/user_package_metadata.pftrace-795e1e3459b699109bd24ef972dece4f3e7390524072217c2bc0550877be4aac",
+   "sha256": "795e1e3459b699109bd24ef972dece4f3e7390524072217c2bc0550877be4aac",
+   "status": 200
+  },
+  {
+   "path": "test/data/v8-samples.json",
+   "bytes": 21094970,
+   "url": "https://storage.googleapis.com/perfetto/test_data/v8-samples.json-b0714096a2112ed161bda0aa4bbd6ab80f0ac195c72ff2be1a1a57272fd14735",
+   "sha256": "b0714096a2112ed161bda0aa4bbd6ab80f0ac195c72ff2be1a1a57272fd14735",
+   "status": 200
+  },
+  {
+   "path": "test/data/v8-samples.pftrace",
+   "bytes": 4348717,
+   "url": "https://storage.googleapis.com/perfetto/test_data/v8-samples.pftrace-564159912db8d8252562f143e6206ae9964759e16193ebd3addd04823d02a6ae",
+   "sha256": "564159912db8d8252562f143e6206ae9964759e16193ebd3addd04823d02a6ae",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_cpuhp_devfreq_suspend.pb",
+   "bytes": 2687973,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_cpuhp_devfreq_suspend.pb-11c5c7eafa503175212b158d06761376b31065049d96f33a262f6c28e961e651",
+   "sha256": "11c5c7eafa503175212b158d06761376b31065049d96f33a262f6c28e961e651",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_dsu_pmu.pb",
+   "bytes": 6883828,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_dsu_pmu.pb-848d01bf930bd5b05a9d13c921a38b0101f6f8ec0b69e74ea2a6f408e118b995",
+   "sha256": "848d01bf930bd5b05a9d13c921a38b0101f6f8ec0b69e74ea2a6f408e118b995",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_eos_suspend.pb",
+   "bytes": 16508864,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_eos_suspend.pb-dcae89e16d14152cd2cd19bcd7c800981041be74d002b3ab99dc469618d84401",
+   "sha256": "dcae89e16d14152cd2cd19bcd7c800981041be74d002b3ab99dc469618d84401",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_freq_dep_static.pb",
+   "bytes": 2459820,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_freq_dep_static.pb-44e04aa27d9584365032ca0c4c19bf34c76e049ad75dfdf988285aaf1e8e9647",
+   "sha256": "44e04aa27d9584365032ca0c4c19bf34c76e049ad75dfdf988285aaf1e8e9647",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_gpu.pb",
+   "bytes": 7999180,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_gpu.pb-88efa9a9f1fcebcf0902a0947eeed6c895cd06137e7473b07ff2b05fdc5fef05",
+   "sha256": "88efa9a9f1fcebcf0902a0947eeed6c895cd06137e7473b07ff2b05fdc5fef05",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_gpu_attribution.pb",
+   "bytes": 3532471,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_gpu_attribution.pb-1c37fea40a2ba6c9d10a42be07336694d8e93cfdcd2d4175b07829fbc1552073",
+   "sha256": "1c37fea40a2ba6c9d10a42be07336694d8e93cfdcd2d4175b07829fbc1552073",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_idle_map.pb",
+   "bytes": 3795888,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_idle_map.pb-b4a916ba0e27addc1257bf370fa90775f7153f3eb3be877af1a2899d86411d43",
+   "sha256": "b4a916ba0e27addc1257bf370fa90775f7153f3eb3be877af1a2899d86411d43",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_irq_gpu_markers.pb",
+   "bytes": 4609389,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_irq_gpu_markers.pb-9569ed00d05a378eaa8ba1ecc7cbe032cf054b832ef4c8a3586b62f52f5423f2",
+   "sha256": "9569ed00d05a378eaa8ba1ecc7cbe032cf054b832ef4c8a3586b62f52f5423f2",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_jank_cuj.pb",
+   "bytes": 13737823,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_jank_cuj.pb-dc1a17d76931b24cf4e07a2f13f6072145e783215321457d31c7e74474b51d1a",
+   "sha256": "dc1a17d76931b24cf4e07a2f13f6072145e783215321457d31c7e74474b51d1a",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_multiple_1d_static.pb",
+   "bytes": 1857087,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_multiple_1d_static.pb-16df9100eee72ebe44c3994e44495bb774dc9a9e6c630084c2bae180e84b64f5",
+   "sha256": "16df9100eee72ebe44c3994e44495bb774dc9a9e6c630084c2bae180e84b64f5",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_sxr_multi_static.pb",
+   "bytes": 4264538,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_sxr_multi_static.pb-c0b234791d14b4b6f856b7a2dd844b570dd3233d473a80fc35f14fd36bc08d88",
+   "sha256": "c0b234791d14b4b6f856b7a2dd844b570dd3233d473a80fc35f14fd36bc08d88",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_syscore_suspend.pb",
+   "bytes": 65399863,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_syscore_suspend.pb-611b1824b4c5a26c7cf9e0bf06c4af32a5e30149ecd07ca2cd10160a0872108d",
+   "sha256": "611b1824b4c5a26c7cf9e0bf06c4af32a5e30149ecd07ca2cd10160a0872108d",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_tk4_pcmark.pb",
+   "bytes": 11946756,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_tk4_pcmark.pb-9f807b520842034eda96b81ef6e6be6d2b395e83d08a3162ad0df2956ca9f947",
+   "sha256": "9f807b520842034eda96b81ef6e6be6d2b395e83d08a3162ad0df2956ca9f947",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_tk4_vm.pb",
+   "bytes": 2420888,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_tk4_vm.pb-12beb14bc06e28ecbdfc618d423aeea2badd449aeb9ccc65a457aa6c05ebf2be",
+   "sha256": "12beb14bc06e28ecbdfc618d423aeea2badd449aeb9ccc65a457aa6c05ebf2be",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_w_packages_Imarkers.pb",
+   "bytes": 1317324,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_w_packages_Imarkers.pb-f3168e8c024ef26103a361e26f9cacadabd6e64047ab26e8042d119f93031628",
+   "sha256": "f3168e8c024ef26103a361e26f9cacadabd6e64047ab26e8042d119f93031628",
+   "status": 200
+  },
+  {
+   "path": "test/data/wattson_wo_device_name.pb",
+   "bytes": 132027,
+   "url": "https://storage.googleapis.com/perfetto/test_data/wattson_wo_device_name.pb-985d6188b3e1cdfc95d584a3668c488fc2787cc30ed914c4cb94bc458d7913bb",
+   "sha256": "985d6188b3e1cdfc95d584a3668c488fc2787cc30ed914c4cb94bc458d7913bb",
+   "status": 200
+  },
+  {
+   "path": "test/data/webview_jank.pb",
+   "bytes": 15836850,
+   "url": "https://storage.googleapis.com/perfetto/test_data/webview_jank.pb-c9c268e09755625d8b5fad404ccca2e657a8b061417d7e10f03984887e942548",
+   "sha256": "c9c268e09755625d8b5fad404ccca2e657a8b061417d7e10f03984887e942548",
+   "status": 200
+  },
+  {
+   "path": "test/data/zip/logcat_and_proto.zip",
+   "bytes": 53766,
+   "url": "https://storage.googleapis.com/perfetto/test_data/logcat_and_proto.zip-031ee425a2a21cf0285ef6826ccc3dddaeaa5593ca18f7992bc65cba5177b302",
+   "sha256": "031ee425a2a21cf0285ef6826ccc3dddaeaa5593ca18f7992bc65cba5177b302",
+   "status": 200
+  },
+  {
+   "path": "test/data/zip/perf_track_sym.zip",
+   "bytes": 94651,
+   "url": "https://storage.googleapis.com/perfetto/test_data/perf_track_sym.zip-146b1d8f48743323e91fd63d6ab5a1f6d8fcca8c5ea8455ebe8f087667a23c3f",
+   "sha256": "146b1d8f48743323e91fd63d6ab5a1f6d8fcca8c5ea8455ebe8f087667a23c3f",
+   "status": 200
+  }
+ ]
+}

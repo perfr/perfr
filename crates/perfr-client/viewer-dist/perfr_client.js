@@ -280,7 +280,7 @@ export function initThreadPool(num_threads) {
 }
 
 function __wbg_adapter_38(arg0, arg1, arg2) {
-    wasm.closure166_externref_shim(arg0, arg1, arg2);
+    wasm.closure118_externref_shim(arg0, arg1, arg2);
 }
 
 function __wbg_adapter_43(arg0, arg1) {
@@ -300,15 +300,15 @@ function __wbg_adapter_46(arg0, arg1) {
 }
 
 function __wbg_adapter_49(arg0, arg1, arg2) {
-    wasm.closure685_externref_shim(arg0, arg1, arg2);
+    wasm.closure691_externref_shim(arg0, arg1, arg2);
 }
 
 function __wbg_adapter_54(arg0, arg1, arg2) {
-    wasm.closure1399_externref_shim(arg0, arg1, arg2);
+    wasm.closure1405_externref_shim(arg0, arg1, arg2);
 }
 
 function __wbg_adapter_1531(arg0, arg1, arg2, arg3) {
-    wasm.closure3110_externref_shim(arg0, arg1, arg2, arg3);
+    wasm.closure3116_externref_shim(arg0, arg1, arg2, arg3);
 }
 
 const __wbindgen_enum_BinaryType = ["blob", "arraybuffer"];
@@ -3308,36 +3308,36 @@ function __wbg_get_imports() {
         const ret = false;
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper1104 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 167, __wbg_adapter_38);
+    imports.wbg.__wbindgen_closure_wrapper1050 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 119, __wbg_adapter_38);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper1106 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 167, __wbg_adapter_38);
+    imports.wbg.__wbindgen_closure_wrapper1052 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 119, __wbg_adapter_38);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper2268 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 349, __wbg_adapter_43);
+    imports.wbg.__wbindgen_closure_wrapper2254 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 348, __wbg_adapter_43);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper4034 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 682, __wbg_adapter_46);
+    imports.wbg.__wbindgen_closure_wrapper4067 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 688, __wbg_adapter_46);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper4036 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 682, __wbg_adapter_49);
+    imports.wbg.__wbindgen_closure_wrapper4069 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 688, __wbg_adapter_49);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper4038 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 682, __wbg_adapter_49);
+    imports.wbg.__wbindgen_closure_wrapper4071 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 688, __wbg_adapter_49);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper5721 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 1400, __wbg_adapter_54);
+    imports.wbg.__wbindgen_closure_wrapper5754 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 1406, __wbg_adapter_54);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper5723 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 1400, __wbg_adapter_54);
+    imports.wbg.__wbindgen_closure_wrapper5756 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 1406, __wbg_adapter_54);
         return ret;
     };
     imports.wbg.__wbindgen_debug_string = function(arg0, arg1) {
@@ -3428,7 +3428,7 @@ function __wbg_get_imports() {
 }
 
 function __wbg_init_memory(imports, memory) {
-    imports.wbg.memory = memory || new WebAssembly.Memory({initial:52,maximum:32768,shared:true});
+    imports.wbg.memory = memory || new WebAssembly.Memory({initial:52,maximum:65536,shared:true});
 }
 
 function __wbg_finalize_init(instance, module, thread_stack_size) {

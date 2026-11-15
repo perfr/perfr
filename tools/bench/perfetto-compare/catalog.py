@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
 """Rebuild catalog.json from a google/perfetto checkout.
 
 test/data stores a .sha256 sidecar per trace. The bytes live at

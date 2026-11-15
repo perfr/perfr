@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
 """Bar charts from results/run.json. Writes SVG next to the blog images.
 
 The numbers are the medians already stored on each trace. Frame-rate bars

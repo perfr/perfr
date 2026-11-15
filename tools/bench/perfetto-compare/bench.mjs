@@ -1,3 +1,7 @@
+// Copyright (c) 2026 The perfr Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 // Headless comparison of https://ui.perfetto.dev and https://perfr.dev/viewer/
 // on the same local files. See README.md for what is and is not measured.
 //

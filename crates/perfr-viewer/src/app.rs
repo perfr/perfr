@@ -3173,9 +3173,24 @@ impl PerfrLiveApp {
         if dropped.is_empty() {
             return;
         }
-        let f = &dropped[0];
+        self.open_dropped_file(&dropped[0]);
+    }
+
+    /// Open a local capture, trace, or story through the same loader as a drop.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_path(&mut self, path: &std::path::Path) {
+        self.open_dropped_file(&egui::DroppedFile {
+            path: Some(path.to_path_buf()),
+            ..Default::default()
+        });
+    }
+
+    fn open_dropped_file(&mut self, f: &egui::DroppedFile) {
         let name = if f.name.is_empty() {
-            "trace.json".into()
+            f.path.as_deref()
+                .and_then(std::path::Path::file_name)
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "trace.json".into())
         } else {
             f.name.clone()
         };
@@ -3223,8 +3238,11 @@ impl PerfrLiveApp {
             return;
         }
         if is_bundle_name(&name) {
+            if !self.has_service() {
+                self.fail(bundle_needs_service(&name));
+                return;
+            }
             match &f.bytes {
-                Some(_) if !self.has_service() => self.fail(bundle_needs_service(&name)),
                 Some(bytes) => {
                     self.import_pending = true;
                     self.net.import_capture(bytes.to_vec());
@@ -4151,11 +4169,8 @@ impl PerfrLiveApp {
         #[cfg(target_arch = "wasm32")]
         chrome_load::start_open_dialog(&self.pending_file);
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(pick) = chrome_load::start_open_dialog() {
-            match pick {
-                chrome_load::OpenPick::Trace(load) => self.begin_trace_load(load),
-                chrome_load::OpenPick::Stream(bytes) => self.accept_stream(bytes),
-            }
+        if let Some(path) = chrome_load::start_open_dialog() {
+            self.open_path(&path);
         }
     }
 

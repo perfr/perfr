@@ -2493,3 +2493,41 @@ fn the_viewer_says_why_it_cannot_open_a_capture_bundle() {
     assert!(page.app.error.is_empty(), "{:?}", page.app.error);
     assert!(page.app.index.event_count() > 0);
 }
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn native_paths_and_path_only_drops_load_the_same_capture() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../web/demo/sample.perfr.stream");
+    let mut viewer = viewer_app();
+    viewer.open_path(&path);
+    assert!(viewer.error.is_empty(), "{}", viewer.error);
+    assert!(viewer.index.event_count() > 0);
+
+    // Winit supplies a path, without the browser's name or bytes.
+    let mut page = Page::viewer();
+    page.run(RawInput {
+        dropped_files: vec![egui::DroppedFile {
+            path: Some(path),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    assert!(page.app.error.is_empty(), "{}", page.app.error);
+    assert_eq!(page.app.index.event_count(), viewer.index.event_count());
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn native_open_reports_missing_files_and_unsupported_bundles() {
+    let mut viewer = viewer_app();
+    let missing = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("does-not-exist.perfr.stream");
+    viewer.open_path(&missing);
+    assert!(viewer.error.contains("does-not-exist.perfr.stream"));
+    assert_eq!(viewer.index.event_count(), 0);
+
+    viewer.open_path(std::path::Path::new("capture.perfr.zip"));
+    assert!(viewer.error.contains("opened by the perfr service"), "{}", viewer.error);
+    assert!(!viewer.import_pending);
+}

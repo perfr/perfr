@@ -31,8 +31,15 @@ workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "perfr-viewer"
+path = "src/main.rs"
+required-features = ["native"]
+
 [features]
 default = ["page"]
+# Opt-in desktop runner; wasm packs continue to build only the library.
+native = []
 # The viewer's own wasm entry point (`start_viewer`). `perfr-client` turns it
 # off: its pack starts from its own entry point, and an entry point compiled
 # in is exported from whatever links it.

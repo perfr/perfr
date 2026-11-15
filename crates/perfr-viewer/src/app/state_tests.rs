@@ -2431,12 +2431,27 @@ fn static_page() -> Page {
     Page::with(|app| *app = static_app())
 }
 
+/// Pieces as the backend deals them: each beside its download's number.
+fn of(download: u64, pieces: Vec<crate::net::StreamPiece>) -> Vec<(u64, crate::net::StreamPiece)> {
+    pieces.into_iter().map(|piece| (download, piece)).collect()
+}
+
 impl Page {
-    /// What the backend delivers of a capture file, and the frame that
-    /// takes it.
+    /// What the backend delivers of the first capture file it was asked
+    /// for, and the frame that takes it.
     fn deliver(&mut self, pieces: Vec<crate::net::StreamPiece>) {
-        self.app.accept_stream_pieces(pieces);
+        self.deliver_of(1, pieces);
+    }
+
+    /// The same of the download numbered `download`.
+    fn deliver_of(&mut self, download: u64, pieces: Vec<crate::net::StreamPiece>) {
+        self.app.accept_stream_pieces(of(download, pieces));
         self.frames(1);
+    }
+
+    /// How long the page said it can go before its next frame.
+    fn next_frame_in(&mut self) -> std::time::Duration {
+        self.frame(Vec::new()).viewport_output[&egui::ViewportId::ROOT].repaint_delay
     }
 }
 
@@ -2464,11 +2479,16 @@ fn a_capture_file_is_shown_as_it_arrives_and_is_whole_at_its_end() {
     assert!(!page.app.can_share(), "half a file is not the capture");
     let line = page.app.symbol_status_line();
     assert!(line.starts_with("Loading the capture: ") && line.ends_with(" MB"), "{line}");
-    // Nothing else asks for frames, and the rest may arrive at any time.
+    // The rest may arrive at any time, and until it does there is nothing
+    // to draw: the page looks in again as an idle page does, and does not
+    // run at the display's rate for as long as the server takes.
     page.frames(3);
-    let out = page.frame(Vec::new());
-    let wait = out.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
-    assert!(page.app.stream_load.is_some() && wait.is_zero(), "the next frame is {wait:?} away");
+    let wait = page.next_frame_in();
+    assert!(page.app.stream_load.is_some());
+    assert!(!wait.is_zero() && wait <= std::time::Duration::from_millis(100), "the next frame is {wait:?} away");
+    // Pieces that have just come may have more right behind them.
+    page.app.accept_stream_pieces(of(1, vec![Bytes(Vec::new())]));
+    assert!(page.next_frame_in().is_zero());
 
     page.deliver(vec![Bytes(file[cut..].to_vec()), End]);
     assert!(page.app.stream_load.is_none());
@@ -2486,12 +2506,12 @@ fn a_capture_file_arriving_a_byte_at_a_time_reads_the_same() {
     use crate::net::StreamPiece::{Begin, Bytes, End};
     let file = batched_stream(3);
     let mut app = static_app();
-    app.accept_stream_pieces(vec![Begin { total: None }]);
+    app.accept_stream_pieces(of(1, vec![Begin { total: None }]));
     for byte in &file {
-        app.accept_stream_pieces(vec![Bytes(vec![*byte])]);
+        app.accept_stream_pieces(of(1, vec![Bytes(vec![*byte])]));
         app.pump_stream_load();
     }
-    app.accept_stream_pieces(vec![End]);
+    app.accept_stream_pieces(of(1, vec![End]));
     app.pump_stream_load();
     assert_eq!(app.index.event_count(), 3);
     assert!(app.notice.is_none(), "{:?}", app.notice);
@@ -2554,6 +2574,15 @@ fn a_replay_shows_a_capture_at_the_speed_it_was_recorded_until_the_reader_acts()
     assert!(page.app.can_share());
     let (first, last) = page.app.content_span().expect("events have a span");
     assert_eq!((page.app.t0, page.app.t1), (first, last), "the whole capture is shown at the end");
+
+    // A hundred times slower, the batches are a second apart. Between two
+    // of them nothing moves, and the page does not draw at the display's
+    // rate for the hundred seconds the replay takes.
+    let mut slow = replay(0.01);
+    slow.frames(90);
+    assert!(slow.app.stream_load.is_some() && slow.app.index.event_count() < 4);
+    let wait = slow.next_frame_in();
+    assert!(!wait.is_zero() && wait <= std::time::Duration::from_millis(100), "the next frame is {wait:?} away");
 
     // Left alone, it ends on its own, a second after it began.
     let mut page = replay(1.0);
@@ -2633,11 +2662,12 @@ fn a_capture_file_named_by_the_address_does_not_arrive_over_a_recording() {
     let file = batched_stream(4);
     let mut busy = app();
     busy.apply_status(service_status(true));
-    busy.accept_stream_pieces(vec![Begin { total: None }, Bytes(file.clone()), End]);
+    busy.accept_stream_pieces(of(1, vec![Begin { total: None }, Bytes(file.clone()), End]));
     busy.pump_stream_load();
     assert!(busy.stream_load.is_none() && !busy.held_stream.is_local(), "the file was opened over a capture");
     assert_eq!(busy.index.event_count(), 0);
     assert_eq!(busy.stop_requests, 0, "no stop was sent");
+    assert_eq!(busy.dropped_capture_fetches, 1, "a file nobody will read went on downloading");
     assert!(busy.notice.as_deref().is_some_and(|n| n.contains("capture is running")), "{:?}", busy.notice);
 
     // A file the reader opens while another is still coming in takes its
@@ -2649,6 +2679,209 @@ fn a_capture_file_named_by_the_address_does_not_arrive_over_a_recording() {
     assert_eq!(page.app.index.event_count(), 2);
     assert!(page.app.notice.is_none(), "{:?}", page.app.notice);
     assert_eq!(page.app.held_stream.bytes(), Some(&batched_stream(2)));
+}
+
+#[test]
+fn the_status_line_says_replaying_only_while_a_replay_runs() {
+    let mut load = StreamLoad::new(1, Some(4_000_000), None);
+    load.bytes = vec![0; 2_500_000];
+    assert_eq!(load.progress_line(), "Loading the capture: 2.5 of 4.0 MB");
+    // All of it down, and more than a frame can read: a file from the
+    // cache. Nothing is being replayed.
+    load.bytes = vec![0; 4_000_000];
+    load.fed = 1_000_000;
+    load.complete = true;
+    assert_eq!(load.progress_line(), "Reading the capture: 1.0 of 4.0 MB");
+    load.replay = Some(Replay { speed: 1.0, origin: None });
+    assert_eq!(load.progress_line(), "Replaying the capture");
+    // A length counted in compressed bytes is passed by what arrives.
+    let mut load = StreamLoad::new(1, Some(1_000_000), None);
+    load.bytes = vec![0; 2_500_000];
+    assert_eq!(load.progress_line(), "Loading the capture: 2.5 MB");
+}
+
+#[test]
+fn a_replay_says_when_the_frame_it_holds_back_is_due() {
+    let mut replay = Replay { speed: 2.0, origin: None };
+    assert_eq!(replay.due_in_s(Some((1e9, 1.5e9)), 10.0), None, "the clock has not started");
+    assert!(replay.holds_back(Some((1e9, 1.5e9)), 10.0));
+    // Half a second of capture at twice the speed: a quarter second.
+    assert_eq!(replay.due_in_s(Some((1e9, 1.5e9)), 10.0), Some(0.25));
+    assert_eq!(replay.due_in_s(Some((1e9, 1.5e9)), 10.2).map(|s| (s * 1000.0).round()), Some(50.0));
+    assert_eq!(replay.due_in_s(Some((1e9, 1.5e9)), 11.0), Some(0.0), "overdue is now, not a time in the past");
+}
+
+#[test]
+fn a_window_the_reader_chose_under_a_story_is_kept_when_the_file_is_all_in() {
+    use crate::net::StreamPiece::{Begin, Bytes, End};
+    let file = batched_stream(40);
+    let cut = file.len() / 2;
+    let mut page = static_page();
+    page.app.story.load_demo();
+    page.frames(2);
+    page.deliver(vec![Begin { total: None }, Bytes(file[..cut].to_vec())]);
+    page.frames(2);
+    assert!(page.app.story.drives_camera());
+    // The reader looks at something of their own choosing.
+    let (first, _) = page.app.content_span().expect("events have a span");
+    page.app.apply_zoom_window(first + 20_000_000.0, first + 30_000_000.0);
+    let view = (page.app.t0, page.app.t1);
+    page.frames(2);
+    assert_eq!((page.app.t0, page.app.t1), view, "the window is the reader's while the file comes in");
+    page.deliver(vec![Bytes(file[cut..].to_vec()), End]);
+    page.frames(40);
+    assert!(page.app.stream_load.is_none());
+    assert_eq!(page.app.index.event_count(), 40);
+    assert_eq!((page.app.t0, page.app.t1), view, "the story took the camera back at the file's last byte");
+
+    // Left alone, the story has the camera to the end: the step is on the
+    // whole capture, as it is over a file read in one go.
+    let mut whole = static_page();
+    whole.app.story.load_demo();
+    whole.app.accept_stream(file.clone());
+    whole.frames(40);
+    let mut page = static_page();
+    page.app.story.load_demo();
+    page.frames(2);
+    page.deliver(vec![Begin { total: None }, Bytes(file[..cut].to_vec())]);
+    page.frames(2);
+    page.deliver(vec![Bytes(file[cut..].to_vec()), End]);
+    page.frames(40);
+    assert_eq!((page.app.t0, page.app.t1), (whole.app.t0, whole.app.t1));
+}
+
+#[test]
+fn a_story_with_no_steps_leaves_the_view_to_the_capture() {
+    use crate::net::StreamPiece::{Begin, Bytes, End};
+    let file = batched_stream(40);
+    let mut page = static_page();
+    page.app.story.load_demo();
+    page.app.story.doc.as_mut().expect("the demo is a story").steps.clear();
+    assert!(!page.app.story.drives_camera());
+    page.deliver(vec![Begin { total: None }, Bytes(file[..file.len() / 2].to_vec())]);
+    let so_far = page.app.content_span().expect("events have a span");
+    assert_eq!((page.app.t0, page.app.t1), so_far, "nothing places the window, so it is the capture so far");
+    page.deliver(vec![Bytes(file[file.len() / 2..].to_vec()), End]);
+    let all = page.app.content_span().expect("events have a span");
+    assert_eq!((page.app.t0, page.app.t1), all, "and the whole capture at its end");
+}
+
+#[test]
+fn share_is_not_offered_a_file_that_is_no_longer_the_one_on_screen() {
+    use crate::net::StreamPiece::{Begin, Bytes, End};
+    let (mine, named) = (batched_stream(2), batched_stream(40));
+    // The reader's own file is on screen, whole.
+    let mut page = static_page();
+    page.app.accept_stream(mine.clone());
+    assert!(page.app.can_share());
+    assert_eq!(page.app.dropped_capture_fetches, 1, "the file the address named can still arrive over it");
+    // Another starts to arrive (a story names one).
+    page.deliver_of(2, vec![Begin { total: None }, Bytes(named[..named.len() / 2].to_vec())]);
+    assert!(page.app.held_stream.bytes().is_none(), "the first file is what Share would post under the second");
+    assert!(!page.app.can_share());
+    assert_eq!(page.app.share_tip(false), "The capture is still loading.");
+    page.deliver_of(2, vec![Bytes(named[named.len() / 2..].to_vec()), End]);
+    assert_eq!(page.app.held_stream.bytes(), Some(&named));
+    assert!(page.app.can_share());
+}
+
+#[test]
+fn a_second_file_that_is_not_there_leaves_the_first_arriving() {
+    use crate::net::StreamPiece::{Begin, Bytes, End, Failed};
+    let file = batched_stream(40);
+    let cut = file.len() / 2;
+    let mut page = static_page();
+    page.deliver(vec![Begin { total: None }, Bytes(file[..cut].to_vec())]);
+    // A second is asked for and its server says no.
+    page.deliver_of(2, vec![Failed("capture file: other.perfr.stream: 404".into())]);
+    assert!(page.app.stream_load.is_some(), "the file that was arriving was given up for one that is not there");
+    assert_eq!(page.app.error, "capture file: other.perfr.stream: 404");
+    page.deliver(vec![Bytes(file[cut..].to_vec()), End]);
+    assert_eq!(page.app.index.event_count(), 40);
+    assert_eq!(page.app.held_stream.bytes(), Some(&file));
+    assert!(page.app.can_share());
+
+    // One that is there takes the first's place when it is answered, and
+    // what was still to come of the first is not dealt into it.
+    let other = batched_stream(3);
+    let mut page = static_page();
+    page.deliver(vec![Begin { total: None }, Bytes(file[..cut].to_vec())]);
+    page.deliver_of(2, vec![Begin { total: None }]);
+    page.deliver(vec![Bytes(file[cut..].to_vec()), End]);
+    assert!(page.app.stream_load.is_some());
+    page.deliver_of(2, vec![Bytes(other.clone()), End]);
+    assert_eq!(page.app.index.event_count(), 3);
+    assert_eq!(page.app.held_stream.bytes(), Some(&other));
+    assert!(page.app.notice.is_none(), "{:?}", page.app.notice);
+}
+
+#[test]
+fn a_capture_file_with_a_frame_that_cannot_be_read_is_not_waited_for() {
+    use crate::net::StreamPiece::{Begin, Bytes, End, Failed};
+    let file = batched_stream(40);
+    let cut = file.len() / 2;
+    let whole_frames = {
+        let mut page = static_page();
+        page.deliver(vec![Begin { total: None }, Bytes(file[..cut].to_vec())]);
+        (page.app.index.event_count(), page.app.stream_load.as_ref().expect("still arriving").fed)
+    };
+    // A header that no frame has, where the next frame should start.
+    let damaged = [&file[..whole_frames.1], &[0xFF; 16][..]].concat();
+    let mut page = static_page();
+    page.deliver(vec![Begin { total: Some(file.len() as u64) }, Bytes(damaged)]);
+    assert!(page.app.stream_load.is_none(), "the page waits for the rest of a file it cannot read");
+    assert_eq!(page.app.dropped_capture_fetches, 1, "and goes on downloading it");
+    assert_eq!(page.app.index.event_count(), whole_frames.0, "what was read before it stays");
+    assert!(page.app.notice.as_deref().is_some_and(|n| n.contains("damaged")), "{:?}", page.app.notice);
+    assert!(!page.app.can_share());
+    assert_eq!(
+        page.app.share_tip(false),
+        "Only part of the capture arrived, so there is nothing to share. Reload the page to fetch it again."
+    );
+    page.frames(8);
+    assert!(!page.next_frame_in().is_zero(), "a page with nothing more to read draws at the display's rate");
+    // What was already on its way is not added, and its end is no news.
+    let notice = page.app.notice.clone();
+    page.app.error.clear();
+    page.deliver(vec![Bytes(file[cut..].to_vec()), Failed("capture file: network error".into())]);
+    assert_eq!(page.app.index.event_count(), whole_frames.0);
+    assert_eq!((page.app.notice.clone(), page.app.error.as_str()), (notice, ""));
+    page.deliver(vec![End]);
+    assert_eq!(page.app.index.event_count(), whole_frames.0);
+}
+
+#[test]
+fn a_download_the_reader_turned_away_from_is_stopped_and_its_end_is_not_an_error() {
+    use crate::net::StreamPiece::{Begin, Bytes, Failed};
+    let file = batched_stream(40);
+    let mut page = static_page();
+    page.deliver(vec![Begin { total: None }, Bytes(file[..file.len() / 2].to_vec())]);
+    page.app.clear_everything();
+    assert!(page.app.stream_load.is_none());
+    assert_eq!(page.app.dropped_capture_fetches, 1, "the file went on downloading behind an empty page");
+    page.deliver(vec![Failed("capture file: network error".into())]);
+    assert_eq!(page.app.index.event_count(), 0);
+    assert!(page.app.error.is_empty() && page.app.notice.is_none(), "{:?} {:?}", page.app.error, page.app.notice);
+    assert_eq!(page.app.share_tip(false), "The capture is still loading.");
+}
+
+#[test]
+fn a_file_is_read_only_for_as_long_as_it_is_the_capture() {
+    use crate::net::StreamPiece::{Begin, Bytes, End};
+    let file = batched_stream(40);
+    let cut = file.len() / 2;
+    let mut app = static_app();
+    app.accept_stream_pieces(of(1, vec![Begin { total: None }, Bytes(file[..cut].to_vec())]));
+    app.pump_stream_load();
+    let events = app.index.event_count();
+    // Something takes the capture's place and says so to the held stream
+    // alone, which is where "a file is being read" is kept.
+    app.held_stream.trace_opened();
+    app.accept_stream_pieces(of(1, vec![Bytes(file[cut..].to_vec()), End]));
+    app.pump_stream_load();
+    assert!(app.stream_load.is_none());
+    assert_eq!(app.index.event_count(), events, "the file's frames were added to what replaced it");
+    assert_eq!(app.dropped_capture_fetches, 1);
 }
 
 /// A view goes instanced for one wide scope, and the scopes far under a

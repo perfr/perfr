@@ -418,6 +418,13 @@ impl Backend for ServiceNet {
         self.file.import_stream_file(file);
     }
 
+    /// The capture file the address named is the file backend's download:
+    /// it is the one that can stop it.
+    #[cfg(target_arch = "wasm32")]
+    fn drop_capture_fetch(&self) {
+        self.file.drop_capture_fetch();
+    }
+
     fn take(&self) -> Inbox {
         self.inbox.lock().unwrap_or_else(|e| e.into_inner()).drain()
     }

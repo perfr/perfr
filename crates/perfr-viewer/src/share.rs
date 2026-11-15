@@ -311,12 +311,19 @@ pub struct HeldStream {
     loading: bool,
     /// The open capture is that file. Later socket frames are not mixed in.
     local: bool,
+    /// The open capture is what arrived of a file that broke off.
+    in_part: bool,
 }
 
 impl HeldStream {
-    /// A stream file is about to be ingested.
+    /// A stream file is about to be ingested. The file that was held is
+    /// not the one on screen from here on, however long the new one takes:
+    /// its bytes are not kept for Share to post under the new one.
     pub fn begin_load(&mut self) {
         self.loading = true;
+        self.bytes = None;
+        self.local = false;
+        self.in_part = false;
     }
 
     /// The file is ingested: it is the capture on screen now.
@@ -324,6 +331,7 @@ impl HeldStream {
         self.loading = false;
         self.bytes = Some(bytes);
         self.local = true;
+        self.in_part = false;
     }
 
     /// The file stopped arriving part way. What was read of it is on
@@ -333,6 +341,13 @@ impl HeldStream {
         self.loading = false;
         self.bytes = None;
         self.local = true;
+        self.in_part = true;
+    }
+
+    /// What is on screen is the part of a file that arrived before it
+    /// broke off, and no more of it is coming.
+    pub fn is_in_part(&self) -> bool {
+        self.in_part
     }
 
     /// The file that was being ingested is not going to be the capture:
@@ -351,6 +366,7 @@ impl HeldStream {
         if !self.loading {
             self.bytes = None;
             self.local = false;
+            self.in_part = false;
         }
     }
 
@@ -361,6 +377,7 @@ impl HeldStream {
         self.loading = false;
         self.bytes = None;
         self.local = false;
+        self.in_part = false;
     }
 
     pub fn bytes(&self) -> Option<&Vec<u8>> {
@@ -383,6 +400,11 @@ impl HeldStream {
         // index back out as a stream. The one other source is the service's
         // export, which is the service's own capture, not the trace shown.
         if imported_trace {
+            return false;
+        }
+        // A file that is still being read is not the capture yet, whatever
+        // of it is on screen.
+        if self.loading {
             return false;
         }
         if self.has_bytes() {
@@ -1091,6 +1113,36 @@ mod tests {
         held.begin_load();
         held.loaded(Vec::new());
         assert!(!held.can_share(false, false, 1));
+    }
+
+    #[test]
+    fn a_file_that_takes_a_while_to_arrive_is_not_shared_as_the_one_before_it() {
+        let mut held = HeldStream::default();
+        held.begin_load();
+        held.loaded(vec![1; 8]);
+        assert!(held.can_share(true, false, 10));
+        // The next file starts to arrive and is on screen as it comes: the
+        // first one's bytes are not what is shown any more.
+        held.begin_load();
+        assert!(held.is_loading() && held.bytes().is_none());
+        assert!(!held.can_share(true, false, 10));
+        // Nor is the page a live one while it reads a file, service or not.
+        assert!(!held.can_share(false, false, 10));
+        // It breaks off: what came is the capture, and is not a file.
+        held.loaded_in_part();
+        assert!(held.is_local() && held.is_in_part() && !held.is_loading());
+        assert!(!held.can_share(true, false, 10) && !held.can_share(false, false, 10));
+        // Whatever comes next is not a part of that file.
+        held.forget();
+        assert!(!held.is_in_part() && !held.is_local());
+        held.loaded_in_part();
+        held.begin_load();
+        held.loaded(vec![2; 8]);
+        assert!(!held.is_in_part() && held.can_share(true, false, 10));
+        // A load that something else took the place of leaves nothing held.
+        held.begin_load();
+        held.load_dropped();
+        assert!(!held.is_loading() && held.bytes().is_none() && !held.is_local());
     }
 
     #[test]

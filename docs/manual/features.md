@@ -508,7 +508,9 @@ in the URL opens a tab on load.
   itself (modules and hooking stay the service's). This is how the web
   site embeds a capture. The file is drawn as it downloads: the timeline
   fills in from the first events, and Share and the whole-capture report
-  wait for the last byte. With `&replay=1` it is played in at the speed it
+  wait for the last byte. A download that breaks off, or a file with a
+  frame that cannot be read, leaves what was read on screen with a notice
+  and nothing to share. With `&replay=1` it is played in at the speed it
   was recorded at, the view following it as in a live capture, until it is
   all in or the reader clicks, types or scrolls.
   Screenshot: `23-static-viewer.png`.

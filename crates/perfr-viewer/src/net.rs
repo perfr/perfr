@@ -319,7 +319,8 @@ pub struct ServiceFrame {
 
 /// One step of a capture file's download, in the order they happen: a
 /// `Begin`, the file's bytes in as many pieces as the network made of them,
-/// then an `End` or a `Failed`.
+/// then an `End` or a `Failed`. In the inbox each one is beside the number
+/// of the download it is of (see [`Downloads`]): two can be under way.
 ///
 /// A file used to be handed over whole (`Inbox::loaded_stream`), so the
 /// page showed nothing until its last byte was down. A stream is frames in
@@ -334,8 +335,55 @@ pub enum StreamPiece {
     Bytes(Vec<u8>),
     /// That was the last byte.
     End,
-    /// The file could not be fetched, or stopped arriving part way.
+    /// The file could not be fetched (no `Begin` came before this), or
+    /// stopped arriving part way.
     Failed(String),
+}
+
+/// The capture downloads a backend has started, and which of them the page
+/// still wants. Each takes a number, and its pieces are dealt for as long
+/// as that number is wanted.
+///
+/// A story can name a second file while the first is still coming down.
+/// The second takes the first's place when its server answers, not when it
+/// is asked for: a file that is not there must not cost the page the one it
+/// was showing. And a download the page has turned away from (the reader
+/// opened a file of their own, or recorded) is stopped where it stands,
+/// not read to its end.
+#[derive(Clone, Default)]
+pub struct Downloads {
+    started: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Every download up to this number is over, whatever it had left.
+    over_through: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Downloads {
+    /// A new download's number.
+    pub fn start(&self) -> u64 {
+        self.started.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+    }
+
+    /// Whether the page still wants what download `id` has to give.
+    pub fn wanted(&self, id: u64) -> bool {
+        id > self.over_through.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Download `id`'s server answered. When the download is still wanted
+    /// it is the page's file from here on, and the ones started before it
+    /// are over.
+    pub fn began(&self, id: u64) -> bool {
+        let wanted = self.wanted(id);
+        if wanted {
+            self.over_through.fetch_max(id.saturating_sub(1), std::sync::atomic::Ordering::SeqCst);
+        }
+        wanted
+    }
+
+    /// The page wants none of the downloads started so far.
+    pub fn drop_all(&self) {
+        let started = self.started.load(std::sync::atomic::Ordering::SeqCst);
+        self.over_through.fetch_max(started, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[derive(Default)]
@@ -354,8 +402,8 @@ pub struct Inbox {
     pub loaded_stream_by_address: bool,
     /// A `.perfr.stream` the page's address named, as it comes down: see
     /// [`StreamPiece`]. The app shows what has arrived without waiting for
-    /// the rest.
-    pub stream_pieces: Vec<StreamPiece>,
+    /// the rest. Each piece is beside its download's number.
+    pub stream_pieces: Vec<(u64, StreamPiece)>,
     /// A story document fetched from `?story=`.
     pub loaded_story: Option<String>,
     pub status: Option<StatusJson>,
@@ -773,6 +821,11 @@ pub trait Backend {
     /// Fetch a `.perfr.stream`. The bytes land in `loaded_stream` once they
     /// are all down, or in `stream_pieces` as they arrive.
     fn fetch_capture(&self, _url: &str) {}
+    /// The page wants no capture file that `fetch_capture` or the address
+    /// asked for and that has not all arrived: something else is on screen.
+    /// A download under way stops, and one not yet answered delivers
+    /// nothing.
+    fn drop_capture_fetch(&self) {}
     /// Reads a `.perfr.stream` the reader opened or dropped on the page.
     #[cfg(target_arch = "wasm32")]
     fn import_stream_file(&self, _file: web_sys::File) {}
@@ -943,7 +996,7 @@ fn open_files(capture: Option<&str>) -> Net {
 /// crate is built from as well.
 #[cfg(target_arch = "wasm32")]
 pub mod web {
-    use super::{Backend, Inbox, Latest, StreamPiece};
+    use super::{Backend, Downloads, Inbox, StreamPiece};
     use std::sync::{Arc, Mutex};
     use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsCast;
@@ -959,10 +1012,9 @@ pub mod web {
     #[derive(Clone, Default)]
     pub struct FileBackend {
         inbox: SharedInbox,
-        /// Which capture download is the one the page waits for. A story
-        /// can name a second file while the first is still coming down, and
-        /// the pieces of the two must not be dealt into one inbox.
-        captures: Latest,
+        /// The capture downloads started here, and which the page still
+        /// wants. See [`Downloads`].
+        captures: Downloads,
     }
 
     impl FileBackend {
@@ -994,13 +1046,18 @@ pub mod web {
         fn stream_capture(&self, url: &str, is_the_link: bool) {
             let url = url.to_string();
             let inbox = self.inbox.clone();
-            let latest = self.captures.clone();
-            let seq = latest.next();
+            let downloads = self.captures.clone();
+            let id = downloads.start();
             wasm_bindgen_futures::spawn_local(async move {
-                // False once another download has taken this one's place:
-                // the fetch is dropped where it stands.
+                // False once the page does not want this download any more
+                // (another took its place, or the page turned away): the
+                // fetch is dropped where it stands.
                 let deliver = |piece: StreamPiece| {
-                    if !latest.is(seq) {
+                    let wanted = match &piece {
+                        StreamPiece::Begin { .. } => downloads.began(id),
+                        _ => downloads.wanted(id),
+                    };
+                    if !wanted {
                         return false;
                     }
                     let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
@@ -1012,7 +1069,7 @@ pub mod web {
                         StreamPiece::Bytes(bytes) => g.bytes_in += bytes.len() as u64,
                         StreamPiece::End | StreamPiece::Failed(_) => {}
                     }
-                    g.stream_pieces.push(piece);
+                    g.stream_pieces.push((id, piece));
                     true
                 };
                 if let Err(e) = get_stream(&url, &deliver).await {
@@ -1056,6 +1113,10 @@ pub mod web {
 
         fn fetch_capture(&self, url: &str) {
             self.stream_capture(url, false);
+        }
+
+        fn drop_capture_fetch(&self) {
+            self.captures.drop_all();
         }
 
         fn import_stream_file(&self, file: web_sys::File) {
@@ -1103,7 +1164,9 @@ pub mod web {
         Ok(text)
     }
 
-    pub async fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
+    /// GET `url`: the response, once the server has answered with a
+    /// success. Its body is still to be read.
+    async fn get_response(url: &str) -> Result<Response, String> {
         let window = web_sys::window().ok_or("no window")?;
         let resp = JsFuture::from(window.fetch_with_str(url))
             .await
@@ -1115,6 +1178,11 @@ pub mod web {
         if !(200..300).contains(&status) {
             return Err(format!("{url}: {status}"));
         }
+        Ok(resp)
+    }
+
+    pub async fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
+        let resp = get_response(url).await?;
         let buf = JsFuture::from(resp.array_buffer().map_err(js_err)?)
             .await
             .map_err(js_err)?;
@@ -1134,17 +1202,7 @@ pub mod web {
     /// compresses the body counts in compressed bytes: it is a hint for a
     /// progress line and nothing is cut to it.
     pub async fn get_stream(url: &str, piece: &dyn Fn(StreamPiece) -> bool) -> Result<(), String> {
-        let window = web_sys::window().ok_or("no window")?;
-        let resp = JsFuture::from(window.fetch_with_str(url))
-            .await
-            .map_err(js_err)?;
-        let resp: Response = resp
-            .dyn_into()
-            .map_err(|_| "fetch: not a Response".to_string())?;
-        let status = resp.status();
-        if !(200..300).contains(&status) {
-            return Err(format!("{url}: {status}"));
-        }
+        let resp = get_response(url).await?;
         let total = resp
             .headers()
             .get("content-length")
@@ -1152,6 +1210,10 @@ pub mod web {
             .flatten()
             .and_then(|length| length.trim().parse::<u64>().ok());
         if !piece(StreamPiece::Begin { total }) {
+            // Nobody is waiting for it: the server need not send it.
+            if let Some(body) = resp.body() {
+                let _ = body.cancel();
+            }
             return Ok(());
         }
         let Some(body) = resp.body() else {
@@ -1176,8 +1238,13 @@ pub mod web {
             if done {
                 break;
             }
+            // The chunk is a Uint8Array already: `Uint8Array::new` on one
+            // would copy it before `to_vec` copies it again.
             let value = js_sys::Reflect::get(&read, &JsValue::from_str("value")).map_err(js_err)?;
-            let bytes = js_sys::Uint8Array::new(&value).to_vec();
+            let bytes = value
+                .dyn_into::<js_sys::Uint8Array>()
+                .map_err(|_| "fetch: the body's chunk is not bytes".to_string())?
+                .to_vec();
             if !bytes.is_empty() && !piece(StreamPiece::Bytes(bytes)) {
                 // Nobody is waiting for the rest: stop the server sending it.
                 let _ = reader.cancel();
@@ -1355,6 +1422,36 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_later_download_takes_over_when_it_is_answered_and_not_before() {
+        let downloads = Downloads::default();
+        let (first, second) = (downloads.start(), downloads.start());
+        assert!(downloads.began(first));
+        // Asked for, and not answered: the first is still the page's file.
+        assert!(downloads.wanted(first) && downloads.wanted(second));
+        // Answered: the first is over, wherever it had got to.
+        assert!(downloads.began(second));
+        assert!(!downloads.wanted(first) && downloads.wanted(second));
+        // An answer that comes after a later download's is too late.
+        let (third, fourth) = (downloads.start(), downloads.start());
+        assert!(downloads.began(fourth));
+        assert!(!downloads.began(third) && !downloads.wanted(third));
+        assert!(downloads.wanted(fourth));
+    }
+
+    #[test]
+    fn a_page_that_turns_away_stops_every_download_started_so_far() {
+        let downloads = Downloads::default();
+        let (under_way, unanswered) = (downloads.start(), downloads.start());
+        assert!(downloads.began(under_way));
+        downloads.drop_all();
+        assert!(!downloads.wanted(under_way));
+        assert!(!downloads.began(unanswered), "a file the page turned away from opened when its server answered");
+        // One asked for afterwards is wanted as any other.
+        let next = downloads.start();
+        assert!(downloads.began(next) && downloads.wanted(next));
+    }
 
     /// The first message of every socket.
     fn hello_message() -> Vec<u8> {

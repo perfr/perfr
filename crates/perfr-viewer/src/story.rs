@@ -228,6 +228,25 @@ impl StorySession {
         }
     }
 
+    /// A capture that was shown as it arrived (a file that downloads) is
+    /// all in. The step is put on it again, at once and without a
+    /// transition, now that every track it names exists; unless the reader
+    /// took the camera while it was arriving, and then it stays theirs.
+    pub fn note_capture_complete(&mut self) {
+        if self.doc.is_some() && !self.released {
+            self.retarget = true;
+            self.snap = true;
+            self.hold = true;
+            self.applied = None;
+        }
+    }
+
+    /// Whether the story is one that places the camera: it has steps. A
+    /// document with none (a new one in the editor) leaves the view alone.
+    pub fn drives_camera(&self) -> bool {
+        self.doc.as_ref().is_some_and(|doc| !doc.steps.is_empty())
+    }
+
     pub fn load_text(&mut self, text: &str) -> Result<(), String> {
         let story = perfr_story::parse_story(text)?;
         self.install(story);

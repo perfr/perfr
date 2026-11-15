@@ -1845,7 +1845,7 @@ impl PerfrLiveApp {
             frames_skipped: 0,
             ws_incompatible: None,
             net,
-            host,
+            host: host.clone(),
             processes: Vec::new(),
             selected_pid: None,
             adopted_target_pid: None,
@@ -3242,6 +3242,17 @@ impl PerfrLiveApp {
                 self.fail(bundle_needs_service(&name));
                 return;
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(path) = &f.path {
+                match std::fs::read(path) {
+                    Ok(bytes) => {
+                        self.import_pending = true;
+                        self.net.import_capture(bytes);
+                    }
+                    Err(e) => self.fail(format!("{name}: {e}")),
+                }
+                return;
+            }
             match &f.bytes {
                 Some(bytes) => {
                     self.import_pending = true;
@@ -4609,15 +4620,15 @@ impl PerfrLiveApp {
                 .on_hover_text("Events, samples and names in one file; drop it back on the viewer to open it")
                 .clicked()
             {
-                ui.ctx().open_url(egui::OpenUrl::new_tab("/api/capture/export?format=bundle"));
+                ui.ctx().open_url(egui::OpenUrl::new_tab(self.net.resolve_url("/api/capture/export?format=bundle")));
                 ui.close();
             }
             let slice_item = ui.add_enabled(slice.is_some(), egui::Button::new("Selected slice (.perfr.zip)"));
             if slice_item.on_hover_text("The selected time range as a capture of its own").clicked() {
                 if let Some((a, b)) = slice {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(format!(
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(self.net.resolve_url(&format!(
                         "/api/capture/export?format=bundle&t0={a}&t1={b}"
-                    )));
+                    ))));
                 }
                 ui.close();
             }
@@ -4626,7 +4637,7 @@ impl PerfrLiveApp {
                 .on_hover_text("What a connecting viewer receives, as a file; the viewer opens it with ?capture=<url> and no service")
                 .clicked()
             {
-                ui.ctx().open_url(egui::OpenUrl::new_tab("/api/capture/export?format=stream"));
+                ui.ctx().open_url(egui::OpenUrl::new_tab(self.net.resolve_url("/api/capture/export?format=stream")));
                 ui.close();
             }
         });

@@ -12,13 +12,23 @@
 
 use perfr_viewer::net::{Host, Net};
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", feature = "native"))]
 pub mod service;
+#[cfg(any(target_arch = "wasm32", feature = "native"))]
+mod transport;
+
+/// A native client connected to the given HTTP(S) service origin.
+#[cfg(all(not(target_arch = "wasm32"), feature = "native"))]
+pub fn native_host(url: &str) -> Result<Host, String> {
+    let http = transport::Http::new(url)?;
+    Ok(Host::with_service(move |_| Box::new(service::ServiceNet::native(http.clone()))))
+}
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-/// What this page is built on: a capture service, and sharing.
+/// The browser page's host: a capture service, and sharing.
+/// Desktop applications use `native_host` with an explicit service origin.
 pub fn host() -> Host {
     Host::with_service(connect)
 }
@@ -35,7 +45,8 @@ fn connect(capture: Option<&str>) -> Net {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // No browser, no socket: a native build is the tests'.
+        // This browser host is also used by headless tests. Desktop
+        // connections are constructed by native_host instead.
         let _ = capture;
         Box::new(perfr_viewer::net::NoBackend)
     }

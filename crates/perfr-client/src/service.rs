@@ -14,20 +14,31 @@
 // page shares with the callbacks the browser runs, all on one thread.
 #![allow(clippy::arc_with_non_send_sync)]
 
-use perfr_viewer::net::web::{get_bytes, get_text, js_err, FileBackend};
+#[cfg(target_arch = "wasm32")]
+use perfr_viewer::net::web::{get_bytes, js_err, FileBackend};
 use perfr_viewer::net::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
+#[cfg(target_arch = "wasm32")]
 use web_sys::{BinaryType, MessageEvent, RequestInit, Response, WebSocket};
 
-#[derive(Clone)]
+use crate::transport::Http;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::transport::{Socket as WebSocket, start_ws};
+
+#[cfg_attr(target_arch = "wasm32", derive(Clone))]
 pub struct ServiceNet {
     /// Capture files and stories, as the viewer reads them. Its inbox is
     /// the one everything here delivers to.
+    #[cfg(target_arch = "wasm32")]
     file: FileBackend,
+    http: Http,
     inbox: Arc<Mutex<Inbox>>,
     http_busy: Arc<AtomicBool>,
     view_busy: Arc<AtomicBool>,
@@ -37,6 +48,7 @@ pub struct ServiceNet {
     /// every request that would go to the service is dropped.
     offline: bool,
     /// The Share upload in flight, kept so it can be aborted.
+    #[cfg(target_arch = "wasm32")]
     upload: Arc<Mutex<ShareUpload<web_sys::XmlHttpRequest>>>,
     /// The latest request for each inbox slot whose replies do not name
     /// their request: both report forms share one, both tree forms too.
@@ -47,16 +59,18 @@ pub struct ServiceNet {
 }
 
 impl ServiceNet {
+    #[cfg(target_arch = "wasm32")]
     pub fn connect() -> Self {
         // A service is there: its log file takes this page's lines.
         perfr_viewer::logging::set_relay(true);
         let file = FileBackend::default();
         let inbox = file.inbox();
         let ws = Arc::new(Mutex::new(None));
-        start_ws(inbox.clone(), ws.clone());
+        start_ws(inbox.clone(), ws.clone(), &Http::default());
         install_login_listener(inbox.clone());
         Self {
             file,
+            http: Http::default(),
             inbox,
             http_busy: Arc::new(AtomicBool::new(false)),
             view_busy: Arc::new(AtomicBool::new(false)),
@@ -73,12 +87,14 @@ impl ServiceNet {
     /// Fetches a capture stream file (`/api/capture/export?format=stream`
     /// saved to disk) and feeds it in as if a service had sent it. The
     /// static web page's mode: no service, no socket.
+    #[cfg(target_arch = "wasm32")]
     pub fn from_capture_url(url: &str) -> Self {
         let file = FileBackend::from_capture_url(url);
         let inbox = file.inbox();
         install_login_listener(inbox.clone());
         Self {
             file,
+            http: Http::default(),
             inbox,
             http_busy: Arc::new(AtomicBool::new(false)),
             view_busy: Arc::new(AtomicBool::new(false)),
@@ -92,6 +108,20 @@ impl ServiceNet {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn native(http: Http) -> Self {
+        let inbox = Arc::new(Mutex::new(Inbox::default()));
+        let ws = Arc::new(Mutex::new(None));
+        start_ws(inbox.clone(), ws.clone(), &http);
+        Self {
+            http, inbox, ws, offline: false,
+            http_busy: Arc::default(), view_busy: Arc::default(),
+            report_seq: Latest::default(), tree_seq: Latest::default(),
+            disassembly_seq: Latest::default(), source_seq: Latest::default(),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
     fn abort_share_unless(&self, gen: u64) {
         let handle = self.upload.lock().unwrap_or_else(|e| e.into_inner()).stop_unless(gen);
         abort_upload(handle);
@@ -103,8 +133,8 @@ impl ServiceNet {
         }
         let inbox = self.inbox.clone();
         let (latest, seq) = (self.disassembly_seq.clone(), self.disassembly_seq.next());
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = get_text(&url)
+        self.http.spawn(move |http| async move {
+            let result = http.get_text(&url)
                 .await
                 .and_then(|t| serde_json::from_str::<perfr_viewer::code::Disassembly>(&t).map_err(|e| format!("disassembly: {e}")));
             if !latest.is(seq) {
@@ -120,8 +150,8 @@ impl ServiceNet {
         // are clicks (Record, Stop, Demo, config), not per-frame pulls.
         log::info!(target: "perfr_client::net", "{method} {path} {}", body.chars().take(200).collect::<String>());
         let inbox = self.inbox.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            if let Err(e) = send_text(method, path, &body).await {
+        self.http.spawn(move |http| async move {
+            if let Err(e) = http.send_text(method, path, &body).await {
                 log::warn!(target: "perfr_client::net", "{method} {e}");
                 inbox.lock().unwrap_or_else(|p| p.into_inner()).error = Some(e);
             }
@@ -130,18 +160,46 @@ impl ServiceNet {
 }
 
 impl Backend for ServiceNet {
+    fn resolve_url(&self, path: &str) -> String {
+        self.http.url(path)
+    }
+
     fn fetch_story(&self, url: &str) {
-        self.file.fetch_story(url);
+        let url = url.to_string();
+        let inbox = self.inbox.clone();
+        self.http.spawn(move |http| async move {
+            let result = http.get_text(&url).await;
+            let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
+            match result {
+                Ok(text) => g.loaded_story = Some(text),
+                Err(e) => g.error = Some(format!("story: {e}")),
+            }
+        });
     }
 
     fn fetch_capture(&self, url: &str) {
-        self.file.fetch_capture(url);
+        let url = url.to_string();
+        let inbox = self.inbox.clone();
+        self.http.spawn(move |http| async move {
+            let result = http.get_bytes(&url).await;
+            let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
+            match result {
+                Ok(bytes) => {
+                    g.bytes_in += bytes.len() as u64;
+                    g.loaded_stream = Some(bytes);
+                    g.loaded_stream_by_address = true;
+                    g.http_ok = true;
+                }
+                Err(e) => g.error = Some(format!("capture file: {e}")),
+            }
+        });
     }
 
     /// What an earlier page load left for Share: the bearer from a
     /// login redirect (the URL fragment, else what `index.html` stored),
     /// taken out of storage as it is read, and whether a same-tab login
     /// asked for the dialog to reopen.
+    #[cfg(target_arch = "wasm32")]
     fn stored_share_auth(&self) -> (Option<String>, bool) {
         let Some(window) = web_sys::window() else {
             return (None, false);
@@ -162,6 +220,7 @@ impl Backend for ServiceNet {
         (token, resume)
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn clear_share_resume_flag(&self) {
         let Some(window) = web_sys::window() else {
             return;
@@ -172,6 +231,7 @@ impl Backend for ServiceNet {
     }
 
     /// `GET /api/me` with the session cookie and, when we have one, the bearer.
+    #[cfg(target_arch = "wasm32")]
     fn check_share_session(&self, gen: u64, url: String, token: Option<String>) {
         self.abort_share_unless(gen);
         let inbox = self.inbox.clone();
@@ -183,6 +243,7 @@ impl Backend for ServiceNet {
 
     /// Open the login URL in a popup. Returns false when the browser
     /// blocked it and this tab is navigating there instead.
+    #[cfg(target_arch = "wasm32")]
     fn open_share_login(&self, url: &str) -> bool {
         let Some(window) = web_sys::window() else {
             return false;
@@ -210,6 +271,7 @@ impl Backend for ServiceNet {
 
     /// Reads a `.perfr.stream` from the service so the dialog can show
     /// its size. Does not post it.
+    #[cfg(target_arch = "wasm32")]
     fn prepare_share(&self, gen: u64, path: String) {
         self.abort_share_unless(gen);
         let inbox = self.inbox.clone();
@@ -239,6 +301,7 @@ impl Backend for ServiceNet {
 
     /// Posts `.perfr.stream` bytes to `endpoint` after one more `GET /api/me`.
     /// The dialog has already shown the size and the account.
+    #[cfg(target_arch = "wasm32")]
     fn share_capture(
         &self,
         gen: u64,
@@ -344,11 +407,13 @@ impl Backend for ServiceNet {
     /// this the bytes went to the share server to the end whatever
     /// happened in the page, and the capture stayed there under a link
     /// nobody was shown.
+    #[cfg(target_arch = "wasm32")]
     fn abort_share(&self) {
         let handle = self.upload.lock().unwrap_or_else(|e| e.into_inner()).stop();
         abort_upload(handle);
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn import_stream_file(&self, file: web_sys::File) {
         self.file.import_stream_file(file);
     }
@@ -357,10 +422,10 @@ impl Backend for ServiceNet {
         self.inbox.lock().unwrap_or_else(|e| e.into_inner()).drain()
     }
 
-    /// Closes the event socket. Its `onclose` empties the slot, after
+    /// Closes the event socket. Its close handler empties the slot, after
     /// which `reconnect_ws_if_closed` opens a new one; the slot is left
     /// alone here so a socket still closing is not replaced and then
-    /// forgotten by its own late `onclose`. A closing socket delivers no
+    /// forgotten by its own late close handler. A closing socket delivers no
     /// further messages.
     fn close_ws(&self) {
         if let Ok(slot) = self.ws.lock() {
@@ -378,7 +443,7 @@ impl Backend for ServiceNet {
         }
         let closed = self.ws.lock().map(|w| w.is_none()).unwrap_or(true);
         if closed {
-            start_ws(self.inbox.clone(), self.ws.clone());
+            start_ws(self.inbox.clone(), self.ws.clone(), &self.http);
         }
     }
 
@@ -388,8 +453,8 @@ impl Backend for ServiceNet {
             return;
         }
         let inbox = self.inbox.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = get_text("/api/settings")
+        self.http.spawn(move |http| async move {
+            let result = http.get_text("/api/settings")
                 .await
                 .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|e| format!("/api/settings: {e}")));
             let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
@@ -430,8 +495,8 @@ impl Backend for ServiceNet {
         }
         let inbox = self.inbox.clone();
         let busy = self.http_busy.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = get_text("/api/status")
+        self.http.spawn(move |http| async move {
+            let result = http.get_text("/api/status")
                 .await
                 .and_then(|t| parse_status_json(&t));
             {
@@ -440,7 +505,8 @@ impl Backend for ServiceNet {
                     Ok(s) => {
                         g.status = Some(s);
                         g.http_ok = true;
-                        g.error = None;
+                        // A successful poll must not erase a queued command
+                        // failure (e.g. a rejected import) before take sees it.
                     }
                     // A failed poll is the one way a dead service shows
                     // over HTTP; without this the flag stayed true forever.
@@ -459,8 +525,8 @@ impl Backend for ServiceNet {
             return;
         }
         let inbox = self.inbox.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = get_text("/api/processes")
+        self.http.spawn(move |http| async move {
+            let result = http.get_text("/api/processes")
                 .await
                 .and_then(|t| parse_processes_json(&t));
             let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
@@ -486,9 +552,9 @@ impl Backend for ServiceNet {
         let t1 = t1.max(t0 + 1);
         let inbox = self.inbox.clone();
         let busy = self.view_busy.clone();
-        wasm_bindgen_futures::spawn_local(async move {
+        self.http.spawn(move |http| async move {
             let qs = format!("t0={t0}&t1={t1}&width={width}");
-            let result = pull_timeline_or_frame(&qs).await;
+            let result = pull_timeline_or_frame(&http, &qs).await;
             {
                 let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
                 match result {
@@ -523,8 +589,8 @@ impl Backend for ServiceNet {
             return;
         }
         let inbox = self.inbox.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = get_text(&format!("/api/symbols/status?pid={pid}"))
+        self.http.spawn(move |http| async move {
+            let result = http.get_text(&format!("/api/symbols/status?pid={pid}"))
                 .await
                 .and_then(|t| parse_symbols_status_json(&t));
             let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
@@ -550,8 +616,8 @@ impl Backend for ServiceNet {
         let query = ranges_query(ranges);
         let inbox = self.inbox.clone();
         let (latest, seq) = (self.report_seq.clone(), self.report_seq.next());
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = get_text(&format!("/api/sampling/report{query}"))
+        self.http.spawn(move |http| async move {
+            let result = http.get_text(&format!("/api/sampling/report{query}"))
                 .await
                 .and_then(|t| parse_sampling_report_json(&t));
             if !latest.is(seq) {
@@ -574,8 +640,8 @@ impl Backend for ServiceNet {
         }
         let inbox = self.inbox.clone();
         let (latest, seq) = (self.report_seq.clone(), self.report_seq.next());
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = get_text(&format!("/api/sampling/report?scope={name_id}"))
+        self.http.spawn(move |http| async move {
+            let result = http.get_text(&format!("/api/sampling/report?scope={name_id}"))
                 .await
                 .and_then(|t| parse_sampling_report_json(&t));
             if !latest.is(seq) {
@@ -593,8 +659,8 @@ impl Backend for ServiceNet {
         let query = format!("/api/sampling/tree?scope={name_id}&mode={mode}");
         let inbox = self.inbox.clone();
         let (latest, seq) = (self.tree_seq.clone(), self.tree_seq.next());
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = get_text(&query).await.and_then(|t| parse_sampling_tree_json(&t));
+        self.http.spawn(move |http| async move {
+            let result = http.get_text(&query).await.and_then(|t| parse_sampling_tree_json(&t));
             if !latest.is(seq) {
                 return;
             }
@@ -613,8 +679,8 @@ impl Backend for ServiceNet {
         let query = sampling_tree_query(ranges, mode);
         let inbox = self.inbox.clone();
         let (latest, seq) = (self.tree_seq.clone(), self.tree_seq.next());
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = get_text(&format!("/api/sampling/tree{query}"))
+        self.http.spawn(move |http| async move {
+            let result = http.get_text(&format!("/api/sampling/tree{query}"))
                 .await
                 .and_then(|t| parse_sampling_tree_json(&t));
             if !latest.is(seq) {
@@ -643,8 +709,8 @@ impl Backend for ServiceNet {
         let inbox = self.inbox.clone();
         let url = format!("/api/code/source?path={}", perfr_viewer::net::percent_encode(path));
         let (latest, seq) = (self.source_seq.clone(), self.source_seq.next());
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = get_text(&url)
+        self.http.spawn(move |http| async move {
+            let result = http.get_text(&url)
                 .await
                 .and_then(|t| serde_json::from_str::<perfr_viewer::code::SourceFile>(&t).map_err(|e| format!("source: {e}")));
             if !latest.is(seq) {
@@ -660,8 +726,8 @@ impl Backend for ServiceNet {
             return;
         }
         let inbox = self.inbox.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = get_text(&format!("/api/symbols/modules?pid={pid}"))
+        self.http.spawn(move |http| async move {
+            let result = http.get_text(&format!("/api/symbols/modules?pid={pid}"))
                 .await
                 .and_then(|t| parse_modules_json(&t));
             let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
@@ -675,8 +741,8 @@ impl Backend for ServiceNet {
         }
         let q = perfr_viewer::util::percent_encode(q);
         let inbox = self.inbox.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = get_text(&format!(
+        self.http.spawn(move |http| async move {
+            let result = http.get_text(&format!(
                 "/api/functions/search?pid={pid}&q={q}&limit={limit}"
             ))
             .await
@@ -692,9 +758,9 @@ impl Backend for ServiceNet {
     /// Resolve portable identities against the complete symbol index.
     fn resolve_preset_functions(&self, pid: u32, generation: u64, keys: String) {
         let inbox = self.inbox.clone();
-        wasm_bindgen_futures::spawn_local(async move {
+        self.http.spawn(move |http| async move {
             let body = format!(r#"{{"pid":{pid},"functions":{keys}}}"#);
-            let result = send_text("POST", "/api/functions/resolve", &body).await
+            let result = http.send_text("POST", "/api/functions/resolve", &body).await
                 .and_then(|text| parse_function_search_json(&text));
             inbox.lock().unwrap_or_else(|e| e.into_inner()).preset_functions.push((generation, result));
         });
@@ -707,8 +773,8 @@ impl Backend for ServiceNet {
             return;
         }
         let inbox = self.inbox.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = get_text(&format!("/api/functions/search?pid={pid}&q=&limit=200000"))
+        self.http.spawn(move |http| async move {
+            let result = http.get_text(&format!("/api/functions/search?pid={pid}&q=&limit=200000"))
                 .await
                 .and_then(|t| parse_function_search_json(&t));
             let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
@@ -732,8 +798,8 @@ impl Backend for ServiceNet {
             return;
         }
         let inbox = self.inbox.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = get_text("/api/bench")
+        self.http.spawn(move |http| async move {
+            let result = http.get_text("/api/bench")
                 .await
                 .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|e| format!("/api/bench: {e}")));
             let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
@@ -806,8 +872,8 @@ impl Backend for ServiceNet {
             return;
         }
         let inbox = self.inbox.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            if let Err(e) = send_bytes("/api/capture/import", &bytes, "application/zip").await {
+        self.http.spawn(move |http| async move {
+            if let Err(e) = http.send_bytes("/api/capture/import", &bytes, "application/zip").await {
                 inbox.lock().unwrap_or_else(|p| p.into_inner()).error = Some(format!("open capture: {e}"));
             }
         });
@@ -815,6 +881,7 @@ impl Backend for ServiceNet {
 
     /// As [`import_capture`](Self::import_capture), reading the browser
     /// `File` first.
+    #[cfg(target_arch = "wasm32")]
     fn import_capture_file(&self, file: web_sys::File) {
         if self.offline {
             return;
@@ -849,19 +916,20 @@ enum ViewPull {
     Frame(ServiceFrame),
 }
 
-async fn pull_timeline_or_frame(qs: &str) -> Result<ViewPull, String> {
-    let tl_text = get_text(&format!("/api/timeline?{qs}")).await?;
+async fn pull_timeline_or_frame(http: &Http, qs: &str) -> Result<ViewPull, String> {
+    let tl_text = http.get_text(&format!("/api/timeline?{qs}")).await?;
     let tl = parse_timeline_json(&tl_text)?;
     if tl.lod == "instanced" && !tl.instances.is_empty() {
         return Ok(ViewPull::Timeline(tl));
     }
-    let bytes = get_bytes(&format!("/api/frame?{qs}")).await?;
+    let bytes = http.get_bytes(&format!("/api/frame?{qs}")).await?;
     Ok(ViewPull::Frame(parse_frame_body(&bytes)?))
 }
 
 /// POSTs raw bytes with the given content type; the response text on
 /// success, the status or error otherwise.
-async fn send_bytes(url: &str, bytes: &[u8], content_type: &str) -> Result<String, String> {
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn send_bytes(url: &str, bytes: &[u8], content_type: &str) -> Result<String, String> {
     let opts = RequestInit::new();
     opts.set_method("POST");
     let body = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
@@ -894,12 +962,14 @@ async fn send_bytes(url: &str, bytes: &[u8], content_type: &str) -> Result<Strin
     Ok(text)
 }
 
+#[cfg(target_arch = "wasm32")]
 fn push_share(inbox: &Arc<Mutex<Inbox>>, gen: u64, kind: perfr_viewer::share::ShareNoteKind) {
     inbox.lock().unwrap_or_else(|e| e.into_inner()).share_notes.push(perfr_viewer::share::ShareNote { gen, kind });
 }
 
 /// POST the stream with an XMLHttpRequest so the upload reports progress.
 /// `fetch` does not. The status is 0 when the browser could not reach the host.
+#[cfg(target_arch = "wasm32")]
 fn share_request_credentials() -> web_sys::RequestCredentials {
     if perfr_viewer::share::SHARE_CREDENTIALS == "include" {
         web_sys::RequestCredentials::Include
@@ -908,6 +978,7 @@ fn share_request_credentials() -> web_sys::RequestCredentials {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 async fn fetch_session(url: &str, token: Option<&str>) -> perfr_viewer::share::SessionCheck {
     let opts = RequestInit::new();
     opts.set_method("GET");
@@ -953,6 +1024,7 @@ async fn fetch_session(url: &str, token: Option<&str>) -> perfr_viewer::share::S
     perfr_viewer::share::parse_session_response(status, &text)
 }
 
+#[cfg(target_arch = "wasm32")]
 fn take_stored_share_token(window: &web_sys::Window) -> Option<String> {
     let mut found = None;
     for storage in [window.session_storage(), window.local_storage()] {
@@ -967,6 +1039,7 @@ fn take_stored_share_token(window: &web_sys::Window) -> Option<String> {
     found
 }
 
+#[cfg(target_arch = "wasm32")]
 fn install_login_listener(inbox: Arc<Mutex<Inbox>>) {
     let Some(window) = web_sys::window() else {
         return;
@@ -1027,6 +1100,7 @@ fn install_login_listener(inbox: Arc<Mutex<Inbox>>) {
 }
 
 /// How a Share upload ended.
+#[cfg(target_arch = "wasm32")]
 enum Posted {
     /// A 2xx answer and its body.
     Reply(String),
@@ -1039,6 +1113,7 @@ enum Posted {
 /// Aborts a request handed back by `ShareUpload`. Called with the
 /// upload's lock released: `abort` runs the request's handlers before it
 /// returns.
+#[cfg(target_arch = "wasm32")]
 fn abort_upload(handle: Option<web_sys::XmlHttpRequest>) {
     if let Some(xhr) = handle {
         log::info!(target: "perfr_client::net", "share upload aborted");
@@ -1046,6 +1121,7 @@ fn abort_upload(handle: Option<web_sys::XmlHttpRequest>) {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 async fn post_share_xhr(
     url: &str,
     bytes: &[u8],
@@ -1143,7 +1219,8 @@ async fn post_share_xhr(
     }
 }
 
-async fn send_text(method: &str, url: &str, body: &str) -> Result<String, String> {
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn send_text(method: &str, url: &str, body: &str) -> Result<String, String> {
     let opts = RequestInit::new();
     opts.set_method(method);
     opts.set_body(&JsValue::from_str(body));
@@ -1173,7 +1250,8 @@ async fn send_text(method: &str, url: &str, body: &str) -> Result<String, String
     Ok(text)
 }
 
-fn start_ws(inbox: Arc<Mutex<Inbox>>, slot: Arc<Mutex<Option<WebSocket>>>) {
+#[cfg(target_arch = "wasm32")]
+fn start_ws(inbox: Arc<Mutex<Inbox>>, slot: Arc<Mutex<Option<WebSocket>>>, _http: &Http) {
     let Some(window) = web_sys::window() else {
         push_err(&inbox, "no window (WebSocket)");
         return;
@@ -1265,10 +1343,12 @@ fn start_ws(inbox: Arc<Mutex<Inbox>>, slot: Arc<Mutex<Option<WebSocket>>>) {
 
 /// Whether the page is hidden (a background tab, a minimised window):
 /// the browser then runs no animation frames, so nothing drains the inbox.
+#[cfg(target_arch = "wasm32")]
 fn page_hidden() -> bool {
     web_sys::window().and_then(|w| w.document()).is_some_and(|d| d.hidden())
 }
 
+#[cfg(target_arch = "wasm32")]
 fn ws_bytes(ev: &MessageEvent) -> Result<Vec<u8>, String> {
     let data = ev.data();
     if let Ok(buf) = data.clone().dyn_into::<js_sys::ArrayBuffer>() {
@@ -1285,9 +1365,56 @@ fn ws_bytes(ev: &MessageEvent) -> Result<Vec<u8>, String> {
     Err("WebSocket message is not binary".into())
 }
 
+#[cfg(target_arch = "wasm32")]
 fn push_err(inbox: &Arc<Mutex<Inbox>>, msg: &str) {
     if let Ok(mut g) = inbox.lock() {
         g.error = Some(msg.to_string());
     }
     log::error!(target: "perfr_client::net", "{msg}");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for ServiceNet {
+    fn drop(&mut self) {
+        self.close_ws();
+    }
+}
+
+#[cfg(all(test, feature = "native", not(target_arch = "wasm32")))]
+mod native_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    async fn wait_for(net: &ServiceNet, predicate: impl Fn(&Inbox) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !predicate(&net.inbox.lock().unwrap()) {
+            assert!(Instant::now() < deadline, "backend reply timed out");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_successful_status_poll_preserves_an_unread_command_failure() {
+        let service = perfr_live_server::LiveService::new(perfr_live_server::ServerConfig {
+            ring_buffer_bytes: 1024 * 1024,
+            ..Default::default()
+        }).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http = Http::new(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let router = perfr_live_server::http::router(service);
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let net = ServiceNet::native(http);
+        wait_for(&net, |g| g.ws_ok).await;
+
+        // The standalone service has no bundle importer. Queue its failure
+        // without draining the inbox, then let a successful poll finish.
+        net.import_capture(b"PK".to_vec());
+        wait_for(&net, |g| g.error.as_ref().is_some_and(|e| e.contains("open capture:"))).await;
+        net.get_status();
+        wait_for(&net, |g| g.status.is_some() && g.http_ok).await;
+        assert!(net.take().error.is_some_and(|e| e.contains("open capture:")));
+
+        drop(net);
+        server.abort();
+    }
 }

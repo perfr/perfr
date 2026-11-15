@@ -8,8 +8,8 @@
 //! `perfr-client`.
 
 // The parsers and JSON mirrors here serve the wasm page and the backend in
-// `perfr-client`; the native build only has the empty backend, so nothing
-// reads them there.
+// `perfr-client`; this crate's native file host has an empty backend.
+// The desktop client provides its service backend in `perfr-client`.
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
 use perfr_live_event::chrome;
@@ -725,6 +725,9 @@ impl Inbox {
 /// and stories and leaves the rest alone. The one that talks to the capture
 /// service is in `perfr-client`.
 pub trait Backend {
+    /// Resolve service-relative download links for hosts without a page origin.
+    fn resolve_url(&self, path: &str) -> String { path.to_string() }
+
     /// What arrived since the last call.
     fn take(&self) -> Inbox;
 
@@ -805,8 +808,8 @@ pub trait Backend {
     fn abort_share(&self) {}
 }
 
-/// A backend with nothing behind it. Native builds use it: the tests drive
-/// the page by handing it frames and answers directly.
+/// A backend with nothing behind it, used by service-free native hosts and
+/// tests that hand the page frames and answers directly.
 #[derive(Default)]
 pub struct NoBackend;
 
@@ -821,14 +824,14 @@ pub type Net = Box<dyn Backend>;
 
 /// What a page is built on. The viewer's own page is [`Host::viewer`];
 /// `perfr-client` passes the one with the capture service in it.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Host {
     service: bool,
     share: bool,
     /// Opens what is behind the page. Given an address (the page's
     /// `?capture=`), that capture file is fetched and nothing else is
     /// contacted.
-    pub connect: fn(Option<&str>) -> Net,
+    pub connect: std::sync::Arc<dyn Fn(Option<&str>) -> Net>,
 }
 
 /// Whether the parts of the interface that need a capture service are in
@@ -847,18 +850,18 @@ impl Host {
         Self {
             service: false,
             share: false,
-            connect: open_files,
+            connect: std::sync::Arc::new(open_files),
         }
     }
 
     /// A page served by a capture service, which can share. `connect`
     /// opens the connection to it.
     #[cfg(any(test, feature = "service"))]
-    pub fn with_service(connect: fn(Option<&str>) -> Net) -> Self {
+    pub fn with_service(connect: impl Fn(Option<&str>) -> Net + 'static) -> Self {
         Self {
             service: true,
             share: true,
-            connect,
+            connect: std::sync::Arc::new(connect),
         }
     }
 

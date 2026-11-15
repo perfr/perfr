@@ -2817,3 +2817,80 @@ fn the_triangle_of_a_machine_health_group_folds_its_graphs() {
     assert_eq!(graphs(&page), [2, 1, 0]);
     assert_eq!(header(&page, health::group::MEMORY).top(), memory_y);
 }
+
+#[test]
+fn the_bar_keeps_more_and_the_fullscreen_button_at_its_right_end_on_every_page() {
+    // A capture running on a service's page, with a size beside the timer.
+    fn capturing_with_size() -> Page {
+        let mut page = capturing_page(100);
+        page.app.apply_status(StatusJson {
+            capture_start_ns: 1_000_000_000,
+            events_live: 300,
+            stream_bytes: 123_400_000,
+            ring_bytes: 500_000_000,
+            ..service_status(true)
+        });
+        page
+    }
+    let kinds: [(&str, fn() -> Page); 5] = [
+        ("the viewer's own page", Page::viewer),
+        ("a service's page", Page::new),
+        ("a page opened on a capture's address", || Page::with(|app| *app = loaded_static_app())),
+        ("a capture running", || capturing_page(100)),
+        ("a capture running, with its size", capturing_with_size),
+    ];
+    for (kind, make) in kinds {
+        // From the narrowest page that has the wide bar.
+        for width in [841.0, 900.0, 1000.0, 1280.0, 1920.0] {
+            let mut page = make().sized(width, 800.0);
+            page.frames(3);
+            assert!(!page.app.was_narrow);
+            let at = format!("{kind}, {width} wide");
+            let more = page.rect_of("More").unwrap_or_else(|| panic!("More: {at}"));
+            let full = page.rect_of("Fullscreen").unwrap_or_else(|| panic!("the fullscreen button: {at}"));
+            // Both whole and on the page, the button last.
+            assert!(more.left() > 0.0 && more.right() < full.left(), "{at}: More {more:?}, fullscreen {full:?}");
+            assert!(full.width() >= 28.0 && full.right() <= width, "{at}: fullscreen {full:?}");
+            assert!(width - full.right() < 16.0, "{at}: the button is at the edge: {full:?}");
+            assert_eq!(more.center().y, full.center().y, "{at}");
+            // The timer and the size are left of More, in that order.
+            let timer = page.rect_of("Timer");
+            let size = page.rect_of("Size");
+            if let Some(timer) = timer {
+                assert!(timer.right() <= more.left(), "{at}: timer {timer:?}, More {more:?}");
+            }
+            if let Some(size) = size {
+                let timer = timer.unwrap_or_else(|| panic!("a size without a timer: {at}"));
+                assert!(timer.right() <= size.left() && size.right() <= more.left(), "{at}: {timer:?} {size:?} {more:?}");
+            }
+            assert_eq!(size.is_some(), kind.ends_with("with its size"), "{at}");
+            // With room to spare the status line ends where they begin.
+            if width >= 1280.0 {
+                let status = page.rect_of("Symbols").unwrap_or_else(|| panic!("the status line: {at}"));
+                let first = size.or(timer).unwrap_or(more);
+                assert!(status.width() > 100.0 && status.right() <= first.left(), "{at}: status {status:?}, then {first:?}");
+            }
+            // The button works where it is.
+            assert!(!page.app.fullscreen);
+            page.click(full.center());
+            assert!(page.app.fullscreen, "{at}: a click on the button did nothing");
+        }
+    }
+}
+
+#[test]
+fn a_page_with_no_service_to_ask_keeps_no_room_for_a_capture_size() {
+    // The status line of a page opened on a capture's address runs up to
+    // the timer's slot, as the viewer's own does: the two bars end alike.
+    let end = |mut page: Page| {
+        page.frames(3);
+        (page.rect_of("Symbols").expect("the status line").right(), page.rect_of("More").expect("More").left())
+    };
+    let viewer = end(Page::viewer());
+    let on_address = end(Page::with(|app| *app = loaded_static_app()));
+    assert!((viewer.0 - on_address.0).abs() <= 1.0 && viewer.1 == on_address.1, "{viewer:?}, {on_address:?}");
+    // A service's page keeps the slot, empty, before its first capture.
+    let service = end(Page::new());
+    assert_eq!(service.1, viewer.1);
+    assert!(service.0 < viewer.0 - 50.0, "service {service:?}, viewer {viewer:?}");
+}

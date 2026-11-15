@@ -832,6 +832,10 @@ pub struct PerfrLiveApp {
     config_edited: bool,
     /// Dropping what the service's ring dropped: see [`Self::tick_eviction`].
     eviction: Eviction,
+    /// How wide the right end of the wide bar was a frame ago (the timer,
+    /// More and the fullscreen button): the room the rest of the bar is
+    /// kept out of. A guess before the first frame.
+    bar_end_w: f32,
     /// The most events the page holds of the service's capture
     /// ([`page_event_cap`] of the memory it has), less in a test.
     page_event_cap: usize,
@@ -1873,6 +1877,7 @@ impl PerfrLiveApp {
             notice: None,
             ring_mb: String::new(),
             eviction: Eviction::default(),
+            bar_end_w: 160.0,
             page_event_cap: page_event_cap(page_memory_limit()),
             lane_event_cap: LANE_EVENT_CAP,
             spill_path: String::new(),
@@ -4630,6 +4635,46 @@ impl PerfrLiveApp {
         }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 5.0;
+            // The right end is laid out from the edge: the timer, More and
+            // the fullscreen button. What is left of them gets the room that
+            // remains, and is cut where it would run under them. Laid out
+            // after everything else in the one run, they were what left the
+            // page whenever the rest outgrew the room kept for them.
+            let row = ui.available_rect_before_wrap();
+            let gap = ui.spacing().item_spacing.x;
+            let rest = Rect::from_min_max(row.min, Pos2::new((row.right() - self.bar_end_w - gap).max(row.left()), row.bottom()));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rest).layout(Layout::left_to_right(Align::Center)), |ui| {
+                let mut clip = ui.clip_rect();
+                clip.max.x = clip.max.x.min(rest.right());
+                ui.set_clip_rect(clip);
+                self.transport_rest(ui);
+            });
+            // In the row as the rest left it, so both are centred on one line.
+            let line = Rect::from_x_y_ranges(row.x_range(), ui.min_rect().y_range());
+            let mut end = ui.new_child(
+                egui::UiBuilder::new().id_salt("bar_end").max_rect(line).layout(Layout::right_to_left(Align::Center)),
+            );
+            end.add_space(6.0);
+            if fullscreen_pill(&mut end, self.fullscreen).clicked() {
+                self.set_fullscreen(end.ctx(), !self.fullscreen);
+            }
+            self.transport_more(&mut end);
+            self.paint_capture_timer(&mut end);
+            let end_rect = end.min_rect();
+            ui.advance_cursor_after_rect(end_rect);
+            // The rest was given its room from the width this had a frame
+            // ago. It changes when the page gains or loses its service.
+            if (end_rect.width() - self.bar_end_w).abs() > 0.5 {
+                self.bar_end_w = end_rect.width();
+                ui.ctx().request_repaint();
+            }
+        });
+    }
+
+    /// The wide bar left of its right end: the controls, the search boxes
+    /// and the status line, which takes the room that is left.
+    fn transport_rest(&mut self, ui: &mut Ui) {
+        {
             self.paint_link_dot(ui);
             if self.has_service() {
                 let recording = self.recording || self.status.demo || self.status.capturing;
@@ -4664,13 +4709,10 @@ impl PerfrLiveApp {
             }
             self.paint_track_filter(ui);
             self.paint_symbols_status(ui);
-            self.paint_capture_timer(ui);
-            self.transport_more(ui);
-            if fullscreen_pill(ui, self.fullscreen).clicked() { self.set_fullscreen(ui.ctx(), !self.fullscreen); }
-        });
+        }
     }
 
-    /// The capture timer, at the right end of the bar before More: how long
+    /// The capture timer, at the right end of the bar left of More: how long
     /// the capture has been running, on its own clock; after Stop, how long
     /// it ran, until Clear or the next Record. Its slot is there, empty,
     /// before the first capture, so starting one moves nothing: right of
@@ -4681,8 +4723,8 @@ impl PerfrLiveApp {
     /// second. It stops growing at the ring's size, where the oldest events
     /// start to go; from then it is drawn in the accent colour.
     fn paint_capture_timer(&self, ui: &mut Ui) {
-        // The size reads after the timer whichever way the bar is laid out:
-        // a narrow page's runs from the right, where the slot allocated
+        // The size reads after the timer whichever way it is laid out: the
+        // bar's right end runs from the right, where the slot allocated
         // first is the rightmost.
         if ui.layout().main_dir() == egui::Direction::RightToLeft {
             self.paint_capture_size(ui);
@@ -4711,7 +4753,9 @@ impl PerfrLiveApp {
     }
 
     fn paint_capture_size(&self, ui: &mut Ui) {
-        if !self.host.service() {
+        // No slot on a page that has no service to ask (the viewer's own,
+        // one opened on a capture's address): it never has a size to show.
+        if !self.has_service() {
             return;
         }
         let font = FontId::monospace(11.5);
@@ -5162,10 +5206,8 @@ impl PerfrLiveApp {
 
     fn paint_symbols_status(&mut self, ui: &mut Ui) {
         let text = self.symbol_status_line();
-        // What the bar keeps right of this: the timer's slot, More and the
-        // fullscreen pill.
-        let timer = capture_timer_slot_w(ui, &FontId::monospace(11.5)) + ui.spacing().item_spacing.x;
-        let width = (ui.available_width() - 105.0 - timer).max(0.0);
+        // The last thing left of the bar's right end: it takes what is left.
+        let width = ui.available_width().max(0.0);
         let label = ui.add_sized(Vec2::new(width, 22.0),
             egui::Label::new(RichText::new(&text).size(10.5).color(theme::MUTED())).truncate());
         note_ui_rect("Symbols", label.rect);
@@ -12980,6 +13022,7 @@ fn fullscreen_pill(ui: &mut Ui, on: bool) -> egui::Response {
         theme::MUTED()
     };
     paint_fullscreen_icon(ui.painter(), resp.rect, on, color);
+    note_ui_rect("Fullscreen", resp.rect);
     resp
 }
 

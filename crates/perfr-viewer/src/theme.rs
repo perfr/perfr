@@ -234,21 +234,21 @@ pub fn hairline() -> egui::Stroke {
     egui::Stroke::new(1.0, HAIR())
 }
 
+/// The active scheme is process-wide. Tests that switch it, and tests
+/// that assert the default scheme's derived colours, take this so a
+/// switch never lands mid-assertion on another thread. Switchers restore
+/// Nord before releasing it.
+#[cfg(test)]
+pub(crate) fn scheme_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use perfr_live_event::theme;
     use perfr_live_event::THREAD_PALETTE;
-    use std::sync::{Mutex, MutexGuard};
-
-    /// The active scheme is process-wide. Tests that switch it, and tests
-    /// that assert the default scheme's derived colours, take this so a
-    /// switch never lands mid-assertion on another thread. Switchers restore
-    /// Nord before releasing it.
-    fn scheme_lock() -> MutexGuard<'static, ()> {
-        static LOCK: Mutex<()> = Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
 
     #[test]
     fn display_keeps_raw_scope_palette() {

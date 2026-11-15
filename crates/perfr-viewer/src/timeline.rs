@@ -54,6 +54,10 @@ pub struct GpuDirtyKey {
     /// change, like hover.
     pub thread_sel: Option<(u32, u32)>,
     pub target: Option<u32>,
+    /// The colour scheme (`Theme::key`). What is on the GPU has its colours
+    /// in it, instances and column texture alike: under another scheme
+    /// none of it can be kept.
+    pub scheme: &'static str,
 }
 
 pub fn quant_px(v: f32) -> i32 {
@@ -89,6 +93,7 @@ pub fn upload_mode(prev: Option<&GpuDirtyKey>, next: &GpuDirtyKey) -> UploadMode
         || p.layout_gen != next.layout_gen
         || p.lod != next.lod
         || p.events != next.events
+        || p.scheme != next.scheme
     {
         return UploadMode::Full;
     }
@@ -1602,9 +1607,14 @@ mod tests {
             search: 0,
             thread_sel: None,
             target: None,
+            scheme: "nord",
         };
         assert_eq!(upload_mode(None, &base), UploadMode::Full);
         assert_eq!(upload_mode(Some(&base), &base), UploadMode::Skip);
+        // Another colour scheme: nothing on the GPU is in its colours.
+        let mut recoloured = base;
+        recoloured.scheme = "dracula";
+        assert_eq!(upload_mode(Some(&base), &recoloured), UploadMode::Full);
         let mut hover = base;
         hover.hover = Some((7, 10));
         assert_eq!(upload_mode(Some(&base), &hover), UploadMode::Flags);

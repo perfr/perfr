@@ -1138,6 +1138,34 @@ impl Page {
 }
 
 #[test]
+fn process_name_leaves_room_for_restoring_hidden_threads() {
+    let mut page = three_thread_page();
+    page.app.processes.push(ProcessJson {
+        pid: 100,
+        name: "A process name that is far too long to fit in the header".into(),
+        cpu: 0.0,
+        path: String::new(),
+    });
+    for width in [300.0, 220.0, 140.0] {
+        page.app.header_w = width;
+        page.app.tracks.toggle_hidden(crate::tracks::ThreadId { pid: 100, tid: 102 });
+        page.app.relayout_tracks();
+        page.frames(2);
+        let row = page.rect_of("row:process:100").expect("process header");
+        let label = page.text_rects.iter().zip(&page.texts)
+            .find(|(r, text)| row.contains(r.center()) && text.starts_with("pro"))
+            .map(|(r, _)| *r).expect("process label");
+        let restore = page.text_rect("1 hidden").expect("restore control");
+        assert!(label.right() <= row.right() - 74.0, "process label enters the control's space");
+        assert!(label.right() < restore.left());
+        page.click(restore.center());
+        page.frames(2);
+        assert_eq!(page.app.tracks.hidden_count(), 0);
+        assert!(page.rect_of("row:thread:100:102").is_some());
+    }
+}
+
+#[test]
 fn thread_header_stacks_name_and_id_and_keeps_hide_clear() {
     let mut page = three_thread_page();
     page.app.thread_names.insert((100, 102), "Render worker".into());

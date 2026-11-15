@@ -39,8 +39,11 @@ use perfr_live_protocol::{
 };
 use serde::Deserialize;
 
-/// `POST` target for a live capture: the service's stream export.
-pub const STREAM_EXPORT_PATH: &str = "/api/capture/export?format=stream";
+/// What Share reads from the service for a live capture: its stream
+/// export, with the event batches deflated. A viewer reads them as it
+/// reads any other, and the upload is a little over half of the packed
+/// stream that a save writes and the size beside the timer counts.
+pub const STREAM_EXPORT_PATH: &str = "/api/capture/export?format=stream&wire=deflate";
 
 /// Body type of `POST /api/share`.
 pub const SHARE_CONTENT_TYPE: &str = "application/octet-stream";
@@ -1221,6 +1224,17 @@ mod tests {
             })
             .flatten()
             .collect()
+    }
+
+    #[test]
+    fn share_reads_the_services_stream_with_its_batches_deflated() {
+        let (route, query) = STREAM_EXPORT_PATH.split_once('?').unwrap();
+        assert_eq!(route, "/api/capture/export");
+        let query: Vec<&str> = query.split('&').collect();
+        assert_eq!(query, ["format=stream", "wire=deflate"]);
+        // The name is one the service's formats are known by.
+        assert_eq!(WireFormat::parse("deflate"), Some(WireFormat::Deflate));
+        assert_eq!(WireFormat::Deflate.name(), "deflate");
     }
 
     #[test]

@@ -186,6 +186,23 @@
     window.addEventListener("error", (e) => relayLog("error", e.error || e.message));
     window.addEventListener("unhandledrejection", (e) => relayLog("error", e.reason));
 
+    // The memory the module runs in. It is linked to grow to 4 GiB, and a
+    // shared memory's whole range is reserved when it is made, which some
+    // browsers (phones) refuse: they get 2 GiB, and the app reads
+    // __perfr_wasm_max_pages to hold fewer events. `initial` only has to be
+    // no less than the module asks for, a few MiB of static data. With no
+    // memory from here the module makes its own, and the error is its own.
+    function wasmMemory() {
+      for (const maximum of [65536, 32768]) {
+        try {
+          const memory = new WebAssembly.Memory({ initial: 256, maximum, shared: true });
+          window.__perfr_wasm_max_pages = maximum;
+          return memory;
+        } catch (_) {}
+      }
+      return undefined;
+    }
+
     const fallback = document.getElementById("fallback");
     function showFallback(err) {
       console.error(err);
@@ -195,7 +212,7 @@
     }
     try {
       const mod = await import("./perfr_client.js");
-      await mod.default();
+      await mod.default({ memory: wasmMemory() });
       // SAB + COOP/COEP: init the rayon pool once, before the first collect.
       // Old browsers / missing isolation headers → sequential, no crash.
       if (typeof SharedArrayBuffer !== "undefined" && typeof mod.initThreadPool === "function") {

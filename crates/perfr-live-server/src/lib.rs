@@ -22,9 +22,12 @@ use std::sync::Arc;
 
 use perfr_live_event::{InternTable, LiveEvent, ScopePairer};
 pub use perfr_live_protocol::{decode_frame, encode_event_batch_with, WireFormat};
-use perfr_live_protocol::{encode_frame, LiveFrame, VERSION};
+use perfr_live_protocol::{
+    encode_frame, interned_string_frame_len, process_name_frame_len, thread_name_frame_len, LiveFrame,
+    CAPTURE_FINISHED_FRAME_LEN, HELLO_FRAME_LEN, STATUS_FRAME_LEN, VERSION,
+};
 use perfr_live_render::TrackIndex;
-use perfr_live_ring::{EventRing, RingStats, SharedRing};
+use perfr_live_ring::{Encoding, EventRing, RingStats, SharedRing};
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
@@ -35,7 +38,23 @@ pub type SampleRangeSpec = (u64, u64, Option<u32>);
 
 
 pub const DEFAULT_HTTP_PORT: u16 = 44766;
-pub const DEFAULT_RING_BYTES: u64 = 64 * 1024 * 1024;
+/// The ring's budget by default: 500 MB of saved capture. See [`RingUnit`].
+pub const DEFAULT_RING_BYTES: u64 = 500_000_000;
+
+/// What a byte of [`ServerConfig::ring_buffer_bytes`] is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RingUnit {
+    /// A byte of the capture as [`LiveService::capture_stream`] writes it:
+    /// the budget is the most a saved `.perfr.stream` weighs, its names
+    /// included, and a capture that goes on past it keeps the newest events
+    /// that fit. Events are dropped a batch of the stream at a time.
+    #[default]
+    Stream,
+    /// [`perfr_live_event::LIVE_EVENT_SIZE`] bytes an event, dropped one at
+    /// a time: a ring of an exact number of events, for a test or a tool
+    /// that counts them.
+    Events,
+}
 
 /// How the embedding service instruments this server's work -- one scope
 /// per WebSocket send, one per event-batch encode -- without this crate
@@ -71,6 +90,7 @@ pub(crate) fn value(name: &'static str, value: f64) {
 pub struct ServerConfig {
     pub bind: SocketAddr,
     pub ring_buffer_bytes: u64,
+    pub ring_unit: RingUnit,
     pub spill_path: Option<PathBuf>,
     /// How event batches go out on the WebSocket. `--wire raw|packed|deflate`
     /// / `PERFR_LIVE_WIRE`; packed by default.
@@ -90,6 +110,7 @@ impl Default for ServerConfig {
             // never what leaving the field out gets.
             bind: SocketAddr::from(([127, 0, 0, 1], DEFAULT_HTTP_PORT)),
             ring_buffer_bytes: DEFAULT_RING_BYTES,
+            ring_unit: RingUnit::default(),
             spill_path: None,
             wire: WireFormat::default(),
             any_local_user: false,
@@ -259,6 +280,9 @@ pub struct LiveService {
     /// subscriber after the intern table so a reopened capture labels its
     /// tracks without the process being alive.
     names: Mutex<CaptureNames>,
+    /// What the thread and process names weigh as frames of a saved
+    /// capture, kept as they change so that nobody walks them to know.
+    names_bytes: AtomicU64,
     demo_stop: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     /// Incremented on non-self `push_events` (demo / capture). Timeline cache key.
     data_gen: AtomicU64,
@@ -389,8 +413,27 @@ impl ViewerSnapshot {
     }
 }
 
-/// Events per batch frame of a snapshot.
+/// Events per batch frame of a snapshot. The ring counts its bytes in
+/// chunks of the same size, and drops whole ones, so the batches of a saved
+/// capture are the chunks it measured.
 const SNAPSHOT_BATCH_EVENTS: usize = 2048;
+
+/// The ring a configuration asks for.
+fn make_ring(config: &ServerConfig) -> Result<EventRing, String> {
+    let spill = config.spill_path.as_deref();
+    match config.ring_unit {
+        RingUnit::Events => EventRing::with_bytes(config.ring_buffer_bytes, spill),
+        RingUnit::Stream => {
+            let wire = config.wire;
+            let encoding = Encoding {
+                chunk_events: SNAPSHOT_BATCH_EVENTS,
+                size: Arc::new(move |events| encode_event_batch_with(events, wire).len()),
+            };
+            EventRing::with_encoded_bytes(config.ring_buffer_bytes, encoding, spill)
+        }
+    }
+    .map_err(|e| e.to_string())
+}
 
 /// About how large a message of joined frames is made.
 const JOINED_MESSAGE_BYTES: usize = 64 << 10;
@@ -420,8 +463,7 @@ struct CaptureNames {
 
 impl LiveService {
     pub fn new(config: ServerConfig) -> Result<Arc<Self>, String> {
-        let ring = EventRing::with_bytes(config.ring_buffer_bytes, config.spill_path.as_deref())
-            .map_err(|e| e.to_string())?;
+        let ring = make_ring(&config)?;
         // Frames a viewer may fall behind by before it is told it lagged.
         // A capture's drain pass is one batch every few milliseconds plus a
         // frame per new name, so 256 was under a second of slack -- and
@@ -462,6 +504,7 @@ impl LiveService {
             viewer_log_budget: Mutex::new(http::ViewerLogBudget::new(std::time::Instant::now())),
             log_path: Mutex::new(None),
             names: Mutex::new(CaptureNames::default()),
+            names_bytes: AtomicU64::new(0),
             demo_stop: Mutex::new(None),
             data_gen: AtomicU64::new(0),
             live_end_ns: AtomicU64::new(0),
@@ -475,6 +518,7 @@ impl LiveService {
             clock: Mutex::new(None),
             machine_name: Mutex::new(default_machine_name()),
         });
+        svc.reserve_stream_overhead();
         Ok(svc)
     }
 
@@ -648,20 +692,34 @@ impl LiveService {
     /// Names a thread for every viewer, now and for late subscribers.
     pub fn set_thread_name(&self, pid: u32, tid: u32, name: &str) {
         let _feed = self.feed.read();
-        self.names.lock().threads.insert((pid, tid), name.to_string());
+        let was = self.names.lock().threads.insert((pid, tid), name.to_string());
+        self.names_bytes.fetch_add(thread_name_frame_len(name.len()) as u64, Ordering::Relaxed);
+        if let Some(was) = was {
+            self.names_bytes.fetch_sub(thread_name_frame_len(was.len()) as u64, Ordering::Relaxed);
+        }
+        self.reserve_stream_overhead();
         self.broadcast_frame(&LiveFrame::ThreadName { pid, tid, name: name.to_string() });
     }
 
     /// Names a process for every viewer, now and for late subscribers.
     pub fn set_process_name(&self, pid: u32, name: &str) {
         let _feed = self.feed.read();
-        self.names.lock().processes.insert(pid, name.to_string());
+        let was = self.names.lock().processes.insert(pid, name.to_string());
+        self.names_bytes.fetch_add(process_name_frame_len(name.len()) as u64, Ordering::Relaxed);
+        if let Some(was) = was {
+            self.names_bytes.fetch_sub(process_name_frame_len(was.len()) as u64, Ordering::Relaxed);
+        }
+        self.reserve_stream_overhead();
         self.broadcast_frame(&LiveFrame::ProcessName { pid, name: name.to_string() });
     }
 
     /// Forgets the names of the previous capture.
     pub fn clear_names(&self) {
-        *self.names.lock() = CaptureNames::default();
+        let mut names = self.names.lock();
+        *names = CaptureNames::default();
+        self.names_bytes.store(0, Ordering::Relaxed);
+        drop(names);
+        self.reserve_stream_overhead();
     }
 
     /// The names known so far: `((pid, tid), name)` threads and `(pid, name)`
@@ -719,14 +777,51 @@ impl LiveService {
     }
 
     pub fn stats(&self) -> RingStats {
+        // Names can also be put in the table directly (it is public); this
+        // is where the ring hears of those.
+        self.reserve_stream_overhead();
         self.ring().stats()
+    }
+
+    /// What a saved capture holds besides its events, in bytes: the hello,
+    /// every interned string and name, the status and the closing frame.
+    /// Counted, not encoded.
+    pub fn stream_overhead_bytes(&self) -> u64 {
+        let interned = {
+            let intern = self.intern.lock();
+            intern.len() as u64 * interned_string_frame_len(0) as u64 + intern.text_bytes()
+        };
+        (HELLO_FRAME_LEN + STATUS_FRAME_LEN + CAPTURE_FINISHED_FRAME_LEN) as u64
+            + interned
+            + self.names_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Takes the room of those frames out of the ring's budget, so that the
+    /// budget bounds the whole saved capture and not its events alone.
+    fn reserve_stream_overhead(&self) {
+        let overhead = self.stream_overhead_bytes();
+        self.ring().set_reserved(overhead);
+    }
+
+    /// How many bytes [`Self::capture_stream`] would return now for the
+    /// whole capture, without building it: what the ring measured as it
+    /// filled, plus the names. Exact for a ring counted in stream bytes
+    /// ([`RingUnit::Stream`]); for one counted by the event, the events at
+    /// their size in memory.
+    pub fn stream_bytes(&self) -> u64 {
+        self.stats().encoded_bytes + self.stream_overhead_bytes()
     }
 
     pub fn intern_string(&self, text: &str) -> u32 {
         let _feed = self.feed.read();
         let mut intern = self.intern.lock();
+        let known = intern.len();
         let id = intern.intern(text);
+        let new = intern.len() != known;
         drop(intern);
+        if new {
+            self.reserve_stream_overhead();
+        }
         self.broadcast_frame(&LiveFrame::InternedString {
             id,
             text: text.to_string(),
@@ -737,6 +832,7 @@ impl LiveService {
     pub fn intern_id(&self, id: u32, text: &str) {
         let _feed = self.feed.read();
         self.intern.lock().insert_id(id, text);
+        self.reserve_stream_overhead();
         self.broadcast_frame(&LiveFrame::InternedString {
             id,
             text: text.to_string(),
@@ -1007,28 +1103,42 @@ impl LiveService {
     /// next to the viewer pack and needs no service. With `window`, only the
     /// events overlapping it, kept whole.
     pub fn capture_stream(&self, window: Option<(u64, u64)>) -> Vec<u8> {
-        let mut out = Vec::new();
-        for frame in self.hello_and_snapshot_frames_in(window) {
+        // Written straight into the one buffer, sized up front: a full ring
+        // is hundreds of megabytes, and a list of frames joined afterwards
+        // was a second copy of all of them.
+        let mut out = Vec::with_capacity(match window {
+            None => self.stream_bytes() as usize,
+            Some(_) => 0,
+        });
+        out.extend_from_slice(&self.hello_frame());
+        for frame in self.names_and_status_frames() {
             out.extend_from_slice(&frame);
+        }
+        let wire = self.wire();
+        for chunk in self.snapshot_in(window).chunks(SNAPSHOT_BATCH_EVENTS) {
+            out.extend_from_slice(&encode_event_batch_with(chunk, wire));
         }
         out.extend_from_slice(&encode_frame(&LiveFrame::CaptureFinished));
         out
     }
 
-    pub fn hello_and_snapshot_frames_in(&self, window: Option<(u64, u64)>) -> Vec<Vec<u8>> {
-        let mut frames = vec![self.hello_frame()];
-        frames.extend(self.names_and_status_frames());
+    /// The ring's events, oldest first; with `window`, those overlapping it.
+    fn snapshot_in(&self, window: Option<(u64, u64)>) -> Vec<LiveEvent> {
         let (_, mut events) = self.ring().snapshot();
         if let Some((a, b)) = window {
             let (a, b) = (a.min(b), a.max(b));
             events.retain(|e| e.start_ns <= b && e.end_ns() >= a);
         }
-        if !events.is_empty() {
-            // Chunk so one WS message stays reasonable.
-            let wire = self.wire();
-            for chunk in events.chunks(SNAPSHOT_BATCH_EVENTS) {
-                frames.push(encode_event_batch_with(chunk, wire));
-            }
+        events
+    }
+
+    pub fn hello_and_snapshot_frames_in(&self, window: Option<(u64, u64)>) -> Vec<Vec<u8>> {
+        let mut frames = vec![self.hello_frame()];
+        frames.extend(self.names_and_status_frames());
+        // Chunked so one WS message stays reasonable.
+        let wire = self.wire();
+        for chunk in self.snapshot_in(window).chunks(SNAPSHOT_BATCH_EVENTS) {
+            frames.push(encode_event_batch_with(chunk, wire));
         }
         frames
     }
@@ -1145,19 +1255,38 @@ impl LiveService {
     }
 
     pub fn replace_ring(&self, bytes: u64, spill: Option<PathBuf>) -> Result<(), String> {
+        let config = ServerConfig { ring_buffer_bytes: bytes, spill_path: spill.clone(), ..self.config.lock().clone() };
         // The spill directory is whatever `PUT /api/config` was given. As
         // the user who started the service, it can be made and written
         // where that user could have, and nowhere root alone can.
-        let ring = settings::as_the_invoking_user(|| EventRing::with_bytes(bytes, spill.as_deref())).map_err(|e| e.to_string())?;
+        let ring = settings::as_the_invoking_user(|| make_ring(&config))?;
         *self.ring.lock() = Arc::new(ring);
         let mut cfg = self.config.lock();
         cfg.ring_buffer_bytes = bytes;
         cfg.spill_path = spill;
         drop(cfg);
+        self.reserve_stream_overhead();
+        self.ring_changed();
+        Ok(())
+    }
+
+    /// Gives the ring another budget and keeps the capture it holds: a
+    /// smaller one drops the oldest events that no longer fit, a larger one
+    /// drops nothing.
+    pub fn resize_ring(&self, bytes: u64) -> Result<(), String> {
+        let _feed = self.feed.read();
+        self.ring().set_bytes(bytes).map_err(|e| e.to_string())?;
+        self.config.lock().ring_buffer_bytes = bytes;
+        self.ring_changed();
+        self.broadcast_status();
+        Ok(())
+    }
+
+    /// What was built from the ring is stale.
+    fn ring_changed(&self) {
         self.data_gen.fetch_add(1, Ordering::Relaxed);
         *self.index_cache.lock() = None;
         *self.timeline_cache.lock() = None;
-        Ok(())
     }
 
     pub fn broadcast_status(&self) {

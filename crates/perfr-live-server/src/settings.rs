@@ -43,6 +43,12 @@ pub struct Settings {
     /// it hooks, it aims for (`auto_profile.rs` in the service).
     #[serde(default = "default_auto_profile_budget")]
     pub auto_profile_scopes_per_s: u64,
+    /// The ring's budget, in bytes of saved capture
+    /// ([`crate::RingUnit::Stream`]): what the service starts with. The
+    /// viewer saves it here when the size is chosen in its settings;
+    /// `PUT /api/config` alone changes the running service only.
+    #[serde(default = "default_ring_bytes")]
+    pub ring_buffer_bytes: u64,
     /// Keys this build does not know, carried through a load/save cycle.
     #[serde(flatten)]
     pub other: serde_json::Map<String, serde_json::Value>,
@@ -60,6 +66,10 @@ fn default_auto_profile_budget() -> u64 {
     DEFAULT_AUTO_PROFILE_SCOPES_PER_S
 }
 
+fn default_ring_bytes() -> u64 {
+    crate::DEFAULT_RING_BYTES
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Settings {
@@ -67,6 +77,7 @@ impl Default for Settings {
             max_hook_calls_per_s: DEFAULT_MAX_HOOK_CALLS_PER_S,
             track_order: String::new(),
             auto_profile_scopes_per_s: DEFAULT_AUTO_PROFILE_SCOPES_PER_S,
+            ring_buffer_bytes: crate::DEFAULT_RING_BYTES,
             other: Default::default(),
         }
     }

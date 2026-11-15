@@ -87,6 +87,7 @@ fn spill_from_service_ring_does_not_corrupt_live_snapshot() {
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = ServerConfig {
         ring_buffer_bytes: (perfr_live_event::LIVE_EVENT_SIZE * 4) as u64,
+        ring_unit: crate::RingUnit::Events,
         spill_path: Some(dir.clone()),
         ..Default::default()
     };
@@ -342,6 +343,7 @@ fn thread_and_process_names_are_replayed_to_a_late_subscriber() {
     let svc = crate::LiveService::new(crate::ServerConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
         ring_buffer_bytes: 1 << 20,
+        ring_unit: crate::RingUnit::default(),
         spill_path: None,
         wire: crate::WireFormat::default(),
         any_local_user: false,
@@ -623,20 +625,179 @@ fn a_ring_size_outside_the_allowed_range_is_refused_rather_than_allocated() {
     assert!(text.contains(r#""ring_buffer_bytes":1048576"#), "{text}");
 }
 
+/// Scheduler-like events on a few threads, a capture's usual mix of small
+/// deltas and repeated names.
+fn busy(from: u64, n: u64) -> Vec<LiveEvent> {
+    (from..from + n)
+        .map(|i| LiveEvent {
+            start_ns: 1_000_000 + i * 937,
+            duration_ns: 100 + (i * 7919) % 5_000,
+            tid: 100 + (i % 7) as u32,
+            name_id: (i % 13) as u32,
+            ..ev(i)
+        })
+        .collect()
+}
+
+/// The number at `"key":` in a JSON body.
+fn json_u64(text: &str, key: &str) -> u64 {
+    let value: serde_json::Value = serde_json::from_str(text).unwrap();
+    value[key].as_u64().unwrap_or_else(|| panic!("no {key} in {text}"))
+}
+
 #[test]
-fn the_largest_ring_is_half_of_memory_up_to_eight_gibibytes() {
-    use crate::http::{check_ring_bytes, max_ring_bytes, MAX_RING_BYTES, MIN_RING_BYTES};
+fn the_size_the_service_reports_is_the_size_of_the_stream_it_writes() {
+    for wire in [crate::WireFormat::Packed, crate::WireFormat::Raw, crate::WireFormat::Deflate] {
+        let (svc, served) = serve_with(ServerConfig { ring_buffer_bytes: 64 << 20, wire, ..ServerConfig::default() });
+        let same = |what: &str| {
+            let written = svc.capture_stream(None).len() as u64;
+            assert_eq!(svc.stream_bytes(), written, "{wire:?}: {what}");
+            written
+        };
+        let empty = same("an empty capture");
+        for i in 0..13u32 {
+            svc.intern_id(i, &format!("scope-{i}-é"));
+        }
+        svc.intern_string("a name of its own");
+        svc.set_thread_name(1, 100, "main");
+        svc.set_thread_name(1, 100, "main, renamed");
+        svc.set_process_name(1, "game");
+        assert!(same("names alone") > empty);
+        // Under one batch of the stream, then some whole ones and a rest.
+        svc.push_events(&busy(0, 700));
+        same("part of a batch");
+        svc.push_events(&busy(700, 9_000));
+        same("several batches and part of one");
+        // A name put straight into the table, as an import does.
+        svc.intern.lock().insert_id(900, "put in directly");
+        let written = same("a name the service was not told of");
+        // A batch with a colour flag goes out raw whatever the format.
+        let mut flagged = busy(9_700, 2_048 * 2);
+        flagged[5]._pad = perfr_live_event::color_mode::MANUAL_API;
+        svc.push_events(&flagged);
+        assert!(same("a batch that is sent raw") > written);
+        // And the status route says the same number.
+        let (status, text) = get(&served, "/api/status");
+        assert_eq!(status, 200);
+        assert_eq!(json_u64(&text, "stream_bytes"), svc.capture_stream(None).len() as u64, "{wire:?}");
+        assert_eq!(json_u64(&text, "ring_bytes"), 64 << 20);
+        assert_eq!(json_u64(&text, "evicted_before_ns"), 0);
+        // Cleared, it is the size it began at, names of the table aside.
+        svc.clear_capture().unwrap();
+        same("a cleared capture");
+    }
+}
+
+#[test]
+fn a_capture_that_outgrows_the_ring_saves_as_no_more_than_the_ring_size() {
+    const BUDGET: u64 = 1 << 20;
+    let (svc, served) = serve_with(ServerConfig { ring_buffer_bytes: BUDGET, ..ServerConfig::default() });
+    for i in 0..13u32 {
+        svc.intern_id(i, &format!("scope-{i}"));
+    }
+    let mut most = 0;
+    let mut from = 0;
+    // Batches of an odd size, so that pushes and the stream's batches do
+    // not line up. Several times what the ring holds.
+    while from < 600_000 {
+        svc.push_events(&busy(from, 3_333));
+        from += 3_333;
+        let reported = svc.stream_bytes();
+        assert!(reported <= BUDGET, "{reported} bytes after {from} events");
+        most = most.max(reported);
+    }
+    let stats = svc.stats();
+    assert!(stats.dropped > 0 && stats.tail % 2048 == 0, "{stats:?}");
+    // The ring is used: what is held is nearly the budget, not a fraction.
+    assert!(most > BUDGET * 9 / 10, "at most {most} of {BUDGET}");
+    let written = svc.capture_stream(None);
+    assert_eq!(written.len() as u64, svc.stream_bytes());
+    assert!(written.len() as u64 <= BUDGET);
+    // The file is whole: it decodes to the events the ring holds, newest last.
+    let frames = decode_all(&written).unwrap();
+    let events: Vec<LiveEvent> = frames
+        .iter()
+        .filter_map(|f| match f {
+            LiveFrame::EventBatch { events } => Some(events.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(events.len() as u64, stats.events_live);
+    assert_eq!(events.last().unwrap().start_ns, busy(from - 1, 1)[0].start_ns);
+    // What the viewer is told to drop: everything that ended before the
+    // oldest batch held, which every event held ends at or after.
+    let (_, text) = get(&served, "/api/status");
+    let cut = json_u64(&text, "evicted_before_ns");
+    assert!(cut > 0 && events.iter().all(|e| e.end_ns() >= cut), "cut {cut}");
+    assert!(cut >= events[0].start_ns, "the cut is at the oldest event held, not before the capture");
+    // The estimate of what the ring holds is about what it holds.
+    let capacity = json_u64(&text, "events_capacity");
+    assert!(capacity.abs_diff(stats.events_live) < capacity / 5, "{capacity} against {} held", stats.events_live);
+
+    // Names take their room from the events: the file stays inside the budget.
+    for i in 0..2_000u32 {
+        svc.intern_id(10_000 + i, &format!("a long function name that a symbol table would hold, number {i}"));
+    }
+    assert!(svc.stream_bytes() <= BUDGET);
+    assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
+    assert!(svc.stats().events_live < stats.events_live);
+}
+
+#[test]
+fn a_new_ring_size_keeps_the_capture_and_a_new_spill_path_starts_over() {
+    let (svc, served) = serve_with(ServerConfig { ring_buffer_bytes: 8 << 20, ..ServerConfig::default() });
+    svc.push_events(&busy(0, 300_000));
+    let held = svc.stats().events_live;
+    assert_eq!(held, 300_000);
+    // Larger: nothing goes.
+    let (status, text) = send_json(&served, "PUT", "/api/config", r#"{"ring_buffer_bytes":16777216}"#);
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(svc.stats().events_live, held);
+    assert_eq!(svc.stats().bytes_capacity, 16 << 20);
+    // Smaller: the newest that fit stay, at once and not at the next event.
+    let generation = svc.data_gen();
+    let (status, text) = send_json(&served, "PUT", "/api/config", r#"{"ring_buffer_bytes":1048576}"#);
+    assert_eq!(status, 200, "{text}");
+    let stats = svc.stats();
+    assert!(stats.events_live > 0 && stats.events_live < held, "{stats:?}");
+    assert!(svc.stream_bytes() <= 1 << 20);
+    assert_eq!(svc.ring().snapshot().1.last().unwrap().start_ns, busy(299_999, 1)[0].start_ns);
+    assert_ne!(svc.data_gen(), generation, "what was built from the ring is stale");
+    assert_eq!(svc.cached_index().event_count() as u64, stats.events_live);
+    // A spill path is a new ring.
+    let dir = std::env::temp_dir().join(format!("perfr-live-resize-spill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let body = format!(r#"{{"ring_buffer_bytes":1048576,"spill_path":{:?}}}"#, dir.display().to_string());
+    let (status, text) = send_json(&served, "PUT", "/api/config", &body);
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(svc.stats().events_live, 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_largest_ring_is_an_eighth_of_memory_up_to_eight_gibibytes() {
+    use crate::http::{check_ring_bytes, max_ring_bytes, startup_ring_bytes, MAX_RING_BYTES, MIN_RING_BYTES};
     const GIB: u64 = 1 << 30;
-    assert_eq!(max_ring_bytes(Some(4 * GIB)), 2 * GIB);
+    assert_eq!(max_ring_bytes(Some(16 * GIB)), 2 * GIB);
     assert_eq!(max_ring_bytes(Some(64 * GIB)), MAX_RING_BYTES);
-    assert_eq!(max_ring_bytes(Some(16 * GIB)), MAX_RING_BYTES);
+    assert_eq!(max_ring_bytes(Some(128 * GIB)), MAX_RING_BYTES);
     assert_eq!(max_ring_bytes(None), MAX_RING_BYTES, "unknown memory leaves the fixed cap");
-    // A machine so small that half of it is under the floor still takes
-    // the one size the floor allows.
+    // The size a service starts with is the one in the settings, inside
+    // what the machine takes: the default is in range wherever these tests
+    // run, a size no machine takes is not.
+    let chosen = |bytes: u64| crate::Settings { ring_buffer_bytes: bytes, ..crate::Settings::default() };
+    assert_eq!(crate::Settings::default().ring_buffer_bytes, crate::DEFAULT_RING_BYTES);
+    assert_eq!(crate::DEFAULT_RING_BYTES, 500_000_000);
+    assert_eq!(startup_ring_bytes(&chosen(0)), MIN_RING_BYTES);
+    assert!(startup_ring_bytes(&chosen(u64::MAX)) <= MAX_RING_BYTES);
+    assert_eq!(startup_ring_bytes(&chosen(2 << 20)), 2 << 20);
+    // A machine so small that an eighth of it is under the floor still
+    // takes the one size the floor allows.
     assert_eq!(max_ring_bytes(Some(1 << 20)), MIN_RING_BYTES);
     assert_eq!(max_ring_bytes(Some(0)), MIN_RING_BYTES);
 
-    let max = max_ring_bytes(Some(4 * GIB));
+    let max = max_ring_bytes(Some(16 * GIB));
     assert!(check_ring_bytes(MIN_RING_BYTES, max).is_ok());
     assert!(check_ring_bytes(256 << 20, max).is_ok());
     assert!(check_ring_bytes(max, max).is_ok());
@@ -1578,7 +1739,12 @@ fn index_from_scratch(svc: &LiveService) -> perfr_live_render::TrackIndex {
 #[test]
 fn the_index_kept_between_requests_is_the_index_built_from_the_ring() {
     // A ring of 4096 events, so that the sequence below also runs it full.
-    let svc = LiveService::new(ServerConfig { ring_buffer_bytes: (LIVE_EVENT_SIZE * 4096) as u64, ..ServerConfig::default() }).unwrap();
+    let svc = LiveService::new(ServerConfig {
+        ring_buffer_bytes: (LIVE_EVENT_SIZE * 4096) as u64,
+        ring_unit: crate::RingUnit::Events,
+        ..ServerConfig::default()
+    })
+    .unwrap();
     let check = |what: &str| {
         let kept = svc.cached_index();
         assert_eq!(index_contents(&kept), index_contents(&index_from_scratch(&svc)), "{what}");

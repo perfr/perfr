@@ -48,8 +48,17 @@ pub struct StatusJson {
     /// The service's log file, where this page's lines are relayed to.
     #[serde(default)]
     pub log_path: Option<String>,
+    /// The ring's budget: the most a saved capture weighs.
     #[serde(default)]
     pub ring_bytes: u64,
+    /// What the capture would weigh saved as a stream now. 0 from an older
+    /// service, which does not say.
+    #[serde(default)]
+    pub stream_bytes: u64,
+    /// The ring has dropped what ended before this; 0 while it has dropped
+    /// nothing. The page drops the same (`App::tick_eviction`).
+    #[serde(default)]
+    pub evicted_before_ns: u64,
     pub spill_path: Option<String>,
     #[serde(default = "default_machine")]
     pub machine: String,
@@ -361,7 +370,7 @@ pub struct Inbox {
 /// How many bytes of the event stream may wait in the inbox while the page
 /// is hidden. A hidden page draws no frames, so nothing takes the messages
 /// out, yet the socket keeps delivering: left alone the queue grew at the
-/// full stream rate until the 2 GiB heap ran out and the tab aborted. Far
+/// full stream rate until the heap ran out and the tab aborted. Far
 /// above what gathers between two frames of a page that is drawing.
 pub const HIDDEN_BACKLOG_MAX: usize = 64 << 20;
 

@@ -4,12 +4,27 @@
 
 //! In-process ring of packed live events with optional filesystem spill.
 //!
-//! Capacity is measured in **bytes** (rounded down to a whole number of
-//! [`LiveEvent`]s). When the ring wraps, the oldest events are dropped.
-//! If a spill directory is configured, those overwritten events are appended
-//! to a file first. The in-memory ring used by the live view is never read
-//! back from the spill file, so a spill I/O error cannot corrupt live data.
+//! The ring has a budget in **bytes** and drops its oldest events to stay
+//! inside it. What a byte is depends on how the ring was made:
+//!
+//! - [`EventRing::with_encoded_bytes`]: the bytes of the capture as it would
+//!   be written out. Events are counted in chunks of
+//!   [`Encoding::chunk_events`], each at the size [`Encoding::size`] gives
+//!   it, and the oldest whole chunk goes when the total passes the budget.
+//!   This is the ring a capture service uses: its budget is the most a saved
+//!   capture can weigh, however long it has been recording.
+//! - [`EventRing::with_bytes`]: [`LIVE_EVENT_SIZE`] bytes an event, dropped
+//!   one at a time. A ring of exactly so many events.
+//!
+//! If a spill directory is configured, the events that are dropped are
+//! appended to a file first. The in-memory ring used by the live view is
+//! never read back from the spill file, so a spill I/O error cannot corrupt
+//! live data.
+//!
+//! The events are held in blocks that are allocated as the ring fills and
+//! freed as it empties, so an idle ring costs nothing whatever its budget.
 
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -104,56 +119,221 @@ impl SpillWriter {
     }
 }
 
+/// Events in one storage block: 128 KiB.
+const BLOCK_EVENTS: usize = 4096;
+
+/// The events, oldest first, in blocks. Every block but the last is full;
+/// `skip` events at the front of the first one have been dropped.
+#[derive(Default)]
+struct Store {
+    blocks: VecDeque<Vec<LiveEvent>>,
+    skip: usize,
+    len: usize,
+}
+
+impl Store {
+    fn push(&mut self, event: LiveEvent) {
+        match self.blocks.back_mut() {
+            Some(block) if block.len() < BLOCK_EVENTS => block.push(event),
+            _ => {
+                let mut block = Vec::with_capacity(BLOCK_EVENTS);
+                block.push(event);
+                self.blocks.push_back(block);
+            }
+        }
+        self.len += 1;
+    }
+
+    /// The `i`th oldest event.
+    fn get(&self, i: usize) -> LiveEvent {
+        let at = self.skip + i;
+        self.blocks[at / BLOCK_EVENTS][at % BLOCK_EVENTS]
+    }
+
+    /// Drops the `n` oldest events, and the blocks that held nothing else.
+    fn drop_front(&mut self, n: usize) {
+        let n = n.min(self.len);
+        self.len -= n;
+        self.skip += n;
+        if self.len == 0 {
+            self.blocks.clear();
+            self.skip = 0;
+            return;
+        }
+        while self.skip >= BLOCK_EVENTS {
+            self.blocks.pop_front();
+            self.skip -= BLOCK_EVENTS;
+        }
+    }
+
+    /// Appends the events at `[from, to)`, counted from the oldest, to `out`.
+    fn copy_range(&self, from: usize, to: usize, out: &mut Vec<LiveEvent>) {
+        let to = to.min(self.len);
+        if from >= to {
+            return;
+        }
+        out.reserve(to - from);
+        let mut at = self.skip + from;
+        let mut left = to - from;
+        while left > 0 {
+            let block = &self.blocks[at / BLOCK_EVENTS];
+            let offset = at % BLOCK_EVENTS;
+            let take = left.min(block.len() - offset);
+            out.extend_from_slice(&block[offset..offset + take]);
+            at += take;
+            left -= take;
+        }
+    }
+}
+
+/// How a ring made by [`EventRing::with_encoded_bytes`] counts its bytes.
+#[derive(Clone)]
+pub struct Encoding {
+    /// Events in one chunk: what one batch of the written capture holds.
+    pub chunk_events: usize,
+    /// The size of one chunk as written.
+    #[allow(clippy::type_complexity)]
+    pub size: Arc<dyn Fn(&[LiveEvent]) -> usize + Send + Sync>,
+}
+
+/// One full chunk of an encoded ring.
+struct Sealed {
+    bytes: u64,
+    /// The earliest end among its events.
+    min_end_ns: u64,
+}
+
+enum Measure {
+    /// [`LIVE_EVENT_SIZE`] bytes an event, dropped one at a time.
+    Events,
+    Encoded {
+        encoding: Encoding,
+        /// The full chunks, oldest first. The chunk `k` of the ring's life
+        /// is the events `[k * chunk_events, (k + 1) * chunk_events)`, so
+        /// the tail is always the first event of a chunk.
+        sealed: VecDeque<Sealed>,
+        sealed_bytes: u64,
+        /// The largest chunk so far: the room kept for the one being filled.
+        largest_chunk: u64,
+        /// Bytes of the budget spent on something else: see
+        /// [`EventRing::set_reserved`].
+        reserved: u64,
+    },
+}
+
 struct Inner {
-    buf: Vec<LiveEvent>,
+    store: Store,
     /// Absolute sequence number of the next write (monotone).
     head: u64,
     /// Absolute sequence number of the oldest live event.
     tail: u64,
+    budget: u64,
+    measure: Measure,
     dropped: u64,
     spilled: u64,
     spill_errors: u64,
     spill: Option<SpillWriter>,
+    /// See [`RingStats::evicted_before_ns`].
+    evicted_before_ns: u64,
+    /// One chunk, copied out to be measured or spilled.
+    scratch: Vec<LiveEvent>,
 }
 
 impl Inner {
-    fn capacity(&self) -> usize {
-        self.buf.len()
-    }
-
     fn len(&self) -> usize {
-        (self.head - self.tail) as usize
+        self.store.len
     }
 
-    fn slot(&self, seq: u64) -> usize {
-        (seq % self.buf.len() as u64) as usize
+    /// Drops the `n` oldest events, to the spill file when there is one.
+    fn evict(&mut self, n: usize) {
+        let n = n.min(self.len());
+        if n == 0 {
+            return;
+        }
+        if let Some(spill) = self.spill.as_mut() {
+            self.scratch.clear();
+            self.store.copy_range(0, n, &mut self.scratch);
+            match spill.append(&self.scratch) {
+                Ok(()) => self.spilled += n as u64,
+                Err(_) => self.spill_errors += n as u64,
+            }
+        }
+        self.store.drop_front(n);
+        self.tail += n as u64;
+        self.dropped += n as u64;
     }
 
     fn push_one(&mut self, event: LiveEvent) {
-        if self.len() == self.capacity() {
-            let old = self.buf[self.slot(self.tail)];
-            if let Some(spill) = self.spill.as_mut() {
-                match spill.append(&[old]) {
-                    Ok(()) => self.spilled += 1,
-                    Err(_) => self.spill_errors += 1,
-                }
-            }
-            self.tail += 1;
-            self.dropped += 1;
+        if matches!(self.measure, Measure::Events) && self.len() as u64 >= self.budget / LIVE_EVENT_SIZE as u64 {
+            self.evict(1);
         }
-        let idx = self.slot(self.head);
-        self.buf[idx] = event;
+        self.store.push(event);
         self.head += 1;
+        let chunk = match &self.measure {
+            Measure::Encoded { encoding, .. } => encoding.chunk_events as u64,
+            Measure::Events => return,
+        };
+        if self.head % chunk == 0 {
+            self.seal(chunk as usize);
+            self.enforce();
+        }
+    }
+
+    /// Measures the chunk that just filled.
+    fn seal(&mut self, chunk: usize) {
+        self.scratch.clear();
+        self.store.copy_range(self.store.len - chunk, self.store.len, &mut self.scratch);
+        let min_end_ns = self.scratch.iter().map(|e| e.end_ns()).min().unwrap_or(0);
+        if let Measure::Encoded { encoding, sealed, sealed_bytes, largest_chunk, .. } = &mut self.measure {
+            let bytes = (encoding.size)(&self.scratch) as u64;
+            sealed.push_back(Sealed { bytes, min_end_ns });
+            *sealed_bytes += bytes;
+            *largest_chunk = (*largest_chunk).max(bytes);
+        }
+    }
+
+    /// Drops the oldest chunks until what is left fits the budget, with room
+    /// for the chunk being filled. That one is never dropped: a budget too
+    /// small for a single chunk still holds the newest events.
+    fn enforce(&mut self) {
+        loop {
+            let Measure::Encoded { encoding, sealed, sealed_bytes, largest_chunk, reserved } = &mut self.measure else {
+                // By the event: whatever is over the count goes.
+                let capacity = (self.budget / LIVE_EVENT_SIZE as u64) as usize;
+                let over = self.len().saturating_sub(capacity);
+                self.evict(over);
+                return;
+            };
+            if sealed.is_empty() || *sealed_bytes + *reserved + *largest_chunk <= self.budget {
+                return;
+            }
+            let chunk = encoding.chunk_events;
+            let gone = sealed.pop_front().expect("checked non-empty");
+            *sealed_bytes -= gone.bytes;
+            let next_min_end = sealed.front().map(|next| next.min_end_ns);
+            self.evict(chunk);
+            // What is left begins with the next chunk. With none left it is
+            // the chunk being filled, which is walked: this is the rare case
+            // of a budget that holds less than two chunks. With nothing left
+            // at all, the chunk that went is all there is to go by.
+            let floor = next_min_end
+                .or_else(|| {
+                    self.scratch.clear();
+                    self.store.copy_range(0, self.store.len, &mut self.scratch);
+                    self.scratch.iter().map(|e| e.end_ns()).min()
+                })
+                .unwrap_or(gone.min_end_ns);
+            self.evicted_before_ns = self.evicted_before_ns.max(floor);
+        }
     }
 }
 
 /// Concurrent produce / consume ring. Producers serialize on a mutex; consumers
 /// copy a snapshot or a seq-range under the same lock. The lock is held only
-/// for the memcpy of the requested events.
+/// for the memcpy of the requested events, and for measuring a chunk when
+/// one fills.
 pub struct EventRing {
     inner: Mutex<Inner>,
-    bytes_capacity: u64,
-    events_capacity: usize,
     produce_count: AtomicU64,
 }
 
@@ -161,7 +341,10 @@ pub type SharedRing = Arc<EventRing>;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RingStats {
+    /// The budget.
     pub bytes_capacity: u64,
+    /// How many events the budget holds. For an encoded ring this is an
+    /// estimate, from the size of the events it has measured so far.
     pub events_capacity: u64,
     pub events_live: u64,
     pub head: u64,
@@ -172,32 +355,94 @@ pub struct RingStats {
     pub produced: u64,
     pub oldest_start_ns: u64,
     pub newest_end_ns: u64,
+    /// The bytes the live events count for against the budget: for an
+    /// encoded ring their size as written, the chunk being filled included.
+    pub encoded_bytes: u64,
+    /// See [`EventRing::set_reserved`].
+    pub reserved_bytes: u64,
+    /// The ring has dropped its events in the order they arrived, which is
+    /// about the order they ended in. This is a time the events it still
+    /// holds end at or after, give or take the ones that arrived out of
+    /// order: a reader that mirrors the ring (the viewer's own index) drops
+    /// what ended before it and holds about what the ring does. 0 until an
+    /// encoded ring first drops a chunk; a ring counted by the event never
+    /// sets it.
+    pub evicted_before_ns: u64,
 }
 
 impl EventRing {
+    /// A ring of `bytes / LIVE_EVENT_SIZE` events, dropped one at a time.
     pub fn with_bytes(bytes: u64, spill_dir: Option<&Path>) -> Result<Self, RingError> {
-        let events_capacity = (bytes as usize) / LIVE_EVENT_SIZE;
-        if events_capacity == 0 {
+        Self::new(bytes, Measure::Events, spill_dir)
+    }
+
+    /// A ring whose budget is the size of its events as `encoding` writes
+    /// them. See the module documentation.
+    pub fn with_encoded_bytes(bytes: u64, encoding: Encoding, spill_dir: Option<&Path>) -> Result<Self, RingError> {
+        if encoding.chunk_events == 0 {
+            return Err(RingError::CapacityTooSmall);
+        }
+        let measure =
+            Measure::Encoded { encoding, sealed: VecDeque::new(), sealed_bytes: 0, largest_chunk: 0, reserved: 0 };
+        Self::new(bytes, measure, spill_dir)
+    }
+
+    fn new(bytes: u64, measure: Measure, spill_dir: Option<&Path>) -> Result<Self, RingError> {
+        if bytes < LIVE_EVENT_SIZE as u64 {
             return Err(RingError::CapacityTooSmall);
         }
         let spill = match spill_dir {
             Some(dir) if !dir.as_os_str().is_empty() => Some(SpillWriter::create(dir)?),
             _ => None,
         };
+        // A ring counted by the event holds a whole number of them.
+        let budget = match measure {
+            Measure::Events => bytes - bytes % LIVE_EVENT_SIZE as u64,
+            Measure::Encoded { .. } => bytes,
+        };
         Ok(Self {
             inner: Mutex::new(Inner {
-                buf: vec![LiveEvent::default(); events_capacity],
+                store: Store::default(),
                 head: 0,
                 tail: 0,
+                budget,
+                measure,
                 dropped: 0,
                 spilled: 0,
                 spill_errors: 0,
                 spill,
+                evicted_before_ns: 0,
+                scratch: Vec::new(),
             }),
-            bytes_capacity: (events_capacity * LIVE_EVENT_SIZE) as u64,
-            events_capacity,
             produce_count: AtomicU64::new(0),
         })
+    }
+
+    /// Changes the budget, keeping what the ring holds that still fits.
+    pub fn set_bytes(&self, bytes: u64) -> Result<(), RingError> {
+        if bytes < LIVE_EVENT_SIZE as u64 {
+            return Err(RingError::CapacityTooSmall);
+        }
+        let mut inner = self.inner.lock();
+        inner.budget = match inner.measure {
+            Measure::Events => bytes - bytes % LIVE_EVENT_SIZE as u64,
+            Measure::Encoded { .. } => bytes,
+        };
+        inner.enforce();
+        Ok(())
+    }
+
+    /// Bytes of the budget that are not the events': what a written capture
+    /// holds besides them (its names), so that the budget bounds the whole
+    /// file. A ring counted by the event ignores it.
+    pub fn set_reserved(&self, bytes: u64) {
+        let mut inner = self.inner.lock();
+        if let Measure::Encoded { reserved, .. } = &mut inner.measure {
+            if *reserved != bytes {
+                *reserved = bytes;
+                inner.enforce();
+            }
+        }
     }
 
     pub fn push(&self, event: LiveEvent) {
@@ -231,11 +476,7 @@ impl EventRing {
         let inner = self.inner.lock();
         let end = inner.head;
         let start = from.max(inner.tail).min(end);
-        let n = (end - start) as usize;
-        out.reserve(n);
-        for seq in start..end {
-            out.push(inner.buf[inner.slot(seq)]);
-        }
+        inner.store.copy_range((start - inner.tail) as usize, (end - inner.tail) as usize, out);
         end
     }
 
@@ -251,10 +492,7 @@ impl EventRing {
         if inner.tail != tail || cursor < tail || cursor > inner.head {
             return None;
         }
-        out.reserve((inner.head - cursor) as usize);
-        for seq in cursor..inner.head {
-            out.push(inner.buf[inner.slot(seq)]);
-        }
+        inner.store.copy_range((cursor - inner.tail) as usize, (inner.head - inner.tail) as usize, out);
         Some(inner.head)
     }
 
@@ -262,33 +500,52 @@ impl EventRing {
     pub fn snapshot(&self) -> (u64, Vec<LiveEvent>) {
         let inner = self.inner.lock();
         let mut out = Vec::with_capacity(inner.len());
-        for seq in inner.tail..inner.head {
-            out.push(inner.buf[inner.slot(seq)]);
-        }
+        inner.store.copy_range(0, inner.len(), &mut out);
         (inner.tail, out)
     }
 
     pub fn stats(&self) -> RingStats {
         let inner = self.inner.lock();
-        let mut oldest_start_ns = 0;
-        let mut newest_end_ns = 0;
-        if inner.len() > 0 {
-            oldest_start_ns = inner.buf[inner.slot(inner.tail)].start_ns;
-            newest_end_ns = inner.buf[inner.slot(inner.head - 1)].end_ns();
-        }
-        RingStats {
-            bytes_capacity: self.bytes_capacity,
-            events_capacity: self.events_capacity as u64,
-            events_live: inner.len() as u64,
+        let live = inner.len();
+        let mut stats = RingStats {
+            bytes_capacity: inner.budget,
+            events_live: live as u64,
             head: inner.head,
             tail: inner.tail,
             dropped: inner.dropped,
             spilled: inner.spilled,
             spill_errors: inner.spill_errors,
             produced: self.produce_count.load(Ordering::Relaxed),
-            oldest_start_ns,
-            newest_end_ns,
+            evicted_before_ns: inner.evicted_before_ns,
+            ..RingStats::default()
+        };
+        if live > 0 {
+            stats.oldest_start_ns = inner.store.get(0).start_ns;
+            stats.newest_end_ns = inner.store.get(live - 1).end_ns();
         }
+        let Measure::Encoded { encoding, sealed, sealed_bytes, reserved, .. } = &inner.measure else {
+            stats.events_capacity = inner.budget / LIVE_EVENT_SIZE as u64;
+            stats.encoded_bytes = (live * LIVE_EVENT_SIZE) as u64;
+            return stats;
+        };
+        stats.reserved_bytes = *reserved;
+        // What the budget holds, at the size the measured events came to;
+        // at the size of an event in memory before any has been measured.
+        let sealed_events = (sealed.len() * encoding.chunk_events) as u64;
+        let room = inner.budget.saturating_sub(*reserved);
+        stats.events_capacity = if *sealed_bytes > 0 {
+            (room as u128 * sealed_events as u128 / *sealed_bytes as u128) as u64
+        } else {
+            room / LIVE_EVENT_SIZE as u64
+        };
+        // The chunk being filled is measured here, on a copy and outside the
+        // lock: it is one chunk at most, and nobody pushing waits for it.
+        let mut open = Vec::new();
+        inner.store.copy_range(sealed_events as usize, live, &mut open);
+        let (size, sealed_bytes) = (encoding.size.clone(), *sealed_bytes);
+        drop(inner);
+        stats.encoded_bytes = sealed_bytes + if open.is_empty() { 0 } else { size(&open) as u64 };
+        stats
     }
 
     pub fn spill_path(&self) -> Option<PathBuf> {
@@ -302,12 +559,14 @@ impl EventRing {
         Ok(())
     }
 
+    /// The budget.
     pub fn bytes_capacity(&self) -> u64 {
-        self.bytes_capacity
+        self.inner.lock().budget
     }
 
+    /// How many events the budget holds: see [`RingStats::events_capacity`].
     pub fn events_capacity(&self) -> usize {
-        self.events_capacity
+        self.stats().events_capacity as usize
     }
 }
 
@@ -530,6 +789,130 @@ mod tests {
         assert_eq!(stats.events_live + stats.dropped, 8_000);
         let (_, snap) = ring.snapshot();
         assert_eq!(snap.len() as u64, stats.events_live);
+    }
+
+    /// Ten bytes an event and four for the chunk: a size that is easy to
+    /// count by hand and is not the size in memory.
+    fn encoding(chunk_events: usize) -> Encoding {
+        Encoding { chunk_events, size: Arc::new(|events| 4 + events.len() * 10) }
+    }
+
+    #[test]
+    fn storage_spans_blocks_and_frees_them_from_the_front() {
+        let n = (BLOCK_EVENTS * 3 + 17) as u64;
+        let ring = EventRing::with_bytes(n * LIVE_EVENT_SIZE as u64, None).unwrap();
+        for i in 0..n + 5 {
+            ring.push(ev(i));
+        }
+        let (tail, snap) = ring.snapshot();
+        assert_eq!((tail, snap.len() as u64), (5, n));
+        assert!(snap.iter().zip(5..).all(|(e, i)| e.name_id == i as u32));
+        // A read across a block boundary, and one from the last block.
+        let mut out = Vec::new();
+        ring.read_from(BLOCK_EVENTS as u64 - 2, &mut out);
+        assert_eq!(out.len() as u64, n + 5 - (BLOCK_EVENTS as u64 - 2));
+        assert_eq!(out[0].name_id, BLOCK_EVENTS as u32 - 2);
+        assert_eq!(ring.inner.lock().store.blocks.len(), 4);
+        let stats = ring.stats();
+        assert_eq!((stats.oldest_start_ns, stats.newest_end_ns), (50, (n + 4) * 10 + 5));
+    }
+
+    #[test]
+    fn an_encoded_ring_counts_chunks_as_written_and_drops_whole_ones() {
+        // Chunks of 4 events are 44 bytes. The budget holds three, but room
+        // for the one being filled is kept: two full chunks stay.
+        let ring = EventRing::with_encoded_bytes(140, encoding(4), None).unwrap();
+        for i in 0..6 {
+            ring.push(ev(i));
+        }
+        let stats = ring.stats();
+        // One full chunk, and two events of the next measured as they are.
+        assert_eq!(stats.encoded_bytes, 44 + 24);
+        assert_eq!((stats.events_live, stats.dropped, stats.evicted_before_ns), (6, 0, 0));
+        ring.push_many(&[ev(6), ev(7)]);
+        assert_eq!(ring.stats().dropped, 0, "two chunks and room for a third");
+        for i in 8..12 {
+            ring.push(ev(i));
+        }
+        let stats = ring.stats();
+        assert_eq!((stats.tail, stats.dropped, stats.evicted_before_ns), (4, 4, 45), "the third filled: the first went");
+        ring.push_many(&[ev(12), ev(13), ev(14), ev(15)]);
+        let stats = ring.stats();
+        assert_eq!((stats.tail, stats.dropped, stats.events_live), (8, 8, 8));
+        assert_eq!(stats.encoded_bytes, 88);
+        // Event 8 is the earliest to end among what is left.
+        assert_eq!(stats.evicted_before_ns, 85);
+        let (tail, snap) = ring.snapshot();
+        assert_eq!(tail % 4, 0, "the tail is the first event of a chunk");
+        assert_eq!(snap.iter().map(|e| e.name_id).collect::<Vec<_>>(), (8..16).collect::<Vec<_>>());
+        // The estimate of what the budget holds: 140 bytes at 11 an event.
+        assert_eq!(stats.events_capacity, 12);
+        assert_eq!(ring.events_capacity(), 12);
+    }
+
+    #[test]
+    fn reserved_bytes_and_a_smaller_budget_drop_chunks_at_once() {
+        let ring = EventRing::with_encoded_bytes(1000, encoding(4), None).unwrap();
+        for i in 0..16 {
+            ring.push(ev(i));
+        }
+        assert_eq!(ring.stats().dropped, 0);
+        // 4 * 44 + 44 of room + 800 reserved is over by one chunk.
+        ring.set_reserved(800);
+        let stats = ring.stats();
+        assert_eq!((stats.dropped, stats.reserved_bytes, stats.encoded_bytes), (4, 800, 132));
+        ring.set_reserved(0);
+        assert_eq!(ring.stats().dropped, 4, "room that comes back brings nothing back");
+        ring.set_bytes(100).unwrap();
+        let stats = ring.stats();
+        assert_eq!((stats.bytes_capacity, stats.dropped, stats.events_live), (100, 12, 4));
+        assert!(ring.set_bytes(1).is_err());
+        assert_eq!(ring.bytes_capacity(), 100);
+    }
+
+    #[test]
+    fn a_budget_under_one_chunk_still_holds_the_newest_events() {
+        let ring = EventRing::with_encoded_bytes(LIVE_EVENT_SIZE as u64, encoding(4), None).unwrap();
+        for i in 0..10 {
+            ring.push(ev(i));
+        }
+        let (tail, snap) = ring.snapshot();
+        assert_eq!((tail, snap.len()), (8, 2), "the chunk being filled is never dropped");
+        // Nothing was left when the second chunk went: its own earliest end.
+        assert_eq!(ring.stats().evicted_before_ns, 45);
+        assert!(EventRing::with_encoded_bytes(1024, encoding(0), None).is_err());
+    }
+
+    #[test]
+    fn a_ring_counted_by_the_event_resizes_in_place() {
+        let ring = EventRing::with_bytes((LIVE_EVENT_SIZE * 8) as u64, None).unwrap();
+        for i in 0..8 {
+            ring.push(ev(i));
+        }
+        ring.set_bytes((LIVE_EVENT_SIZE * 3 + 5) as u64).unwrap();
+        let (tail, snap) = ring.snapshot();
+        assert_eq!((tail, snap.len()), (5, 3));
+        let stats = ring.stats();
+        assert_eq!((stats.bytes_capacity, stats.events_capacity), ((LIVE_EVENT_SIZE * 3) as u64, 3));
+        assert_eq!(stats.encoded_bytes, (LIVE_EVENT_SIZE * 3) as u64);
+        ring.set_reserved(1 << 20);
+        assert_eq!(ring.stats().events_live, 3, "reserved bytes are an encoded ring's");
+    }
+
+    #[test]
+    fn an_encoded_ring_spills_the_chunks_it_drops() {
+        let dir = std::env::temp_dir().join(format!("perfr-live-spill-chunk-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ring = EventRing::with_encoded_bytes(100, encoding(4), Some(&dir)).unwrap();
+        for i in 0..14 {
+            ring.push(ev(i));
+        }
+        ring.flush_spill().unwrap();
+        let stats = ring.stats();
+        assert_eq!((stats.spilled, stats.dropped, stats.events_live), (8, 8, 6));
+        let spilled = read_spill_file(&ring.spill_path().unwrap()).unwrap();
+        assert_eq!(spilled.iter().map(|e| e.name_id).collect::<Vec<_>>(), (0..8).collect::<Vec<_>>());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(unix)]

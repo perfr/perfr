@@ -101,6 +101,23 @@
     // Double-tap-to-zoom is a separate path again.
     document.addEventListener("dblclick", (e) => e.preventDefault(), { passive: false });
 
+    // The memory the module runs in. It is linked to grow to 4 GiB, and a
+    // shared memory's whole range is reserved when it is made, which some
+    // browsers (phones) refuse: they get 2 GiB, and the app reads
+    // __perfr_wasm_max_pages to hold fewer events. `initial` only has to be
+    // no less than the module asks for, a few MiB of static data. With no
+    // memory from here the module makes its own, and the error is its own.
+    function wasmMemory() {
+      for (const maximum of [65536, 32768]) {
+        try {
+          const memory = new WebAssembly.Memory({ initial: 256, maximum, shared: true });
+          window.__perfr_wasm_max_pages = maximum;
+          return memory;
+        } catch (_) {}
+      }
+      return undefined;
+    }
+
     const fallback = document.getElementById("fallback");
     // This page has no service behind it, so no service log to send to:
     // what goes wrong before or outside the wasm is in the console.
@@ -111,7 +128,7 @@
     }
     try {
       const mod = await import("./perfr_viewer.js");
-      await mod.default();
+      await mod.default({ memory: wasmMemory() });
       // SAB + COOP/COEP: init the rayon pool once, before the first collect.
       // Old browsers / missing isolation headers → sequential, no crash.
       if (typeof SharedArrayBuffer !== "undefined" && typeof mod.initThreadPool === "function") {

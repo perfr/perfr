@@ -292,6 +292,7 @@ mod tests {
         LiveService::new(crate::ServerConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
             ring_buffer_bytes: 1024 * 32,
+            ring_unit: crate::RingUnit::default(),
             spill_path: None,
             wire: crate::WireFormat::default(),
             any_local_user: false,

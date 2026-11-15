@@ -380,6 +380,8 @@ pub struct InternTable {
     /// How many times an id that had a name was given one that hashes
     /// differently.
     renamed: u64,
+    /// See [`Self::text_bytes`].
+    text_bytes: u64,
 }
 
 impl Default for InternTable {
@@ -391,6 +393,7 @@ impl Default for InternTable {
             next_id: 0,
             table: NEXT_TABLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             renamed: 0,
+            text_bytes: 0,
         }
     }
 }
@@ -404,14 +407,19 @@ impl InternTable {
         self.next_id = self.next_id.wrapping_add(1);
         self.by_text.insert(text.to_string(), id);
         self.by_id.insert(id, Interned { text: text.to_string(), hash: crate::color::name_hash(text.as_bytes()) });
+        self.text_bytes += text.len() as u64;
         id
     }
 
     pub fn insert_id(&mut self, id: u32, text: &str) {
         self.by_text.insert(text.to_string(), id);
         let hash = crate::color::name_hash(text.as_bytes());
-        if self.by_id.insert(id, Interned { text: text.to_string(), hash }).is_some_and(|was| was.hash != hash) {
-            self.renamed = self.renamed.wrapping_add(1);
+        self.text_bytes += text.len() as u64;
+        if let Some(was) = self.by_id.insert(id, Interned { text: text.to_string(), hash }) {
+            self.text_bytes -= was.text.len() as u64;
+            if was.hash != hash {
+                self.renamed = self.renamed.wrapping_add(1);
+            }
         }
         if id >= self.next_id {
             self.next_id = id.wrapping_add(1);
@@ -440,6 +448,12 @@ impl InternTable {
 
     pub fn len(&self) -> usize {
         self.by_id.len()
+    }
+
+    /// The UTF-8 length of every name held, added up: with [`Self::len`],
+    /// what the table weighs written out, without walking it.
+    pub fn text_bytes(&self) -> u64 {
+        self.text_bytes
     }
 
     pub fn is_empty(&self) -> bool {
@@ -990,6 +1004,23 @@ mod tests {
         assert_eq!(evs[0].start_ns, 1_000);
         assert_eq!(evs[0].duration_ns, 1_000_000);
         assert_eq!(evs[0].end_ns(), evs[2].end_ns());
+    }
+
+    #[test]
+    fn the_intern_table_keeps_the_length_of_its_text() {
+        let mut t = InternTable::default();
+        assert_eq!(t.text_bytes(), 0);
+        let a = t.intern("update");
+        t.intern("render");
+        assert_eq!(t.intern("update"), a, "a name it has is not counted twice");
+        assert_eq!((t.len(), t.text_bytes()), (2, 12));
+        t.insert_id(40, "é");
+        assert_eq!((t.len(), t.text_bytes()), (3, 14));
+        // A known id given another name weighs the new one only.
+        t.insert_id(a, "update_world");
+        assert_eq!((t.len(), t.text_bytes()), (3, 20));
+        let walked: u64 = t.iter().map(|(_, text)| text.len() as u64).sum();
+        assert_eq!(walked, t.text_bytes());
     }
 
     #[test]

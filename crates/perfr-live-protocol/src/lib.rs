@@ -228,6 +228,30 @@ pub fn encode_frame(frame: &LiveFrame) -> Vec<u8> {
     out
 }
 
+/// The length and type that lead every frame.
+pub const FRAME_HEADER_LEN: usize = 5;
+/// What [`encode_frame`] makes of a `Hello`, a `Status` and a
+/// `CaptureFinished`, in bytes. With the three functions below, the size of
+/// a capture's frames other than its events without encoding them.
+pub const HELLO_FRAME_LEN: usize = FRAME_HEADER_LEN + 8;
+pub const STATUS_FRAME_LEN: usize = FRAME_HEADER_LEN + 4 + 8 * 8;
+pub const CAPTURE_FINISHED_FRAME_LEN: usize = FRAME_HEADER_LEN;
+
+/// The encoded length of an `InternedString` whose text is `text_len` bytes.
+pub const fn interned_string_frame_len(text_len: usize) -> usize {
+    FRAME_HEADER_LEN + 8 + text_len
+}
+
+/// The encoded length of a `ThreadName` whose name is `name_len` bytes.
+pub const fn thread_name_frame_len(name_len: usize) -> usize {
+    FRAME_HEADER_LEN + 12 + name_len
+}
+
+/// The encoded length of a `ProcessName` whose name is `name_len` bytes.
+pub const fn process_name_frame_len(name_len: usize) -> usize {
+    FRAME_HEADER_LEN + 8 + name_len
+}
+
 /// `encode_frame(&LiveFrame::EventBatch { events })` without building the
 /// enum: the frame is written straight from the slice into one buffer sized
 /// up front. This is what the server sends per pass, so it neither clones the
@@ -688,6 +712,33 @@ mod tests {
             newest_end_ns: 50,
             ring_bytes: 3200,
         });
+    }
+
+    #[test]
+    fn the_frame_lengths_are_what_the_encoder_writes() {
+        assert_eq!(encode_frame(&LiveFrame::Hello { version: VERSION, event_size: 32 }).len(), HELLO_FRAME_LEN);
+        assert_eq!(encode_frame(&LiveFrame::CaptureFinished).len(), CAPTURE_FINISHED_FRAME_LEN);
+        let status = LiveFrame::Status {
+            capturing: true,
+            demo: false,
+            events_live: u64::MAX,
+            events_capacity: 1,
+            dropped: 2,
+            spilled: 3,
+            produced: 4,
+            oldest_start_ns: 5,
+            newest_end_ns: 6,
+            ring_bytes: 7,
+        };
+        assert_eq!(encode_frame(&status).len(), STATUS_FRAME_LEN);
+        for text in ["", "main", "b3Step_World<é>"] {
+            let interned = LiveFrame::InternedString { id: 9, text: text.into() };
+            assert_eq!(encode_frame(&interned).len(), interned_string_frame_len(text.len()));
+            let thread = LiveFrame::ThreadName { pid: 1, tid: 2, name: text.into() };
+            assert_eq!(encode_frame(&thread).len(), thread_name_frame_len(text.len()));
+            let process = LiveFrame::ProcessName { pid: 1, name: text.into() };
+            assert_eq!(encode_frame(&process).len(), process_name_frame_len(text.len()));
+        }
     }
 
     #[test]

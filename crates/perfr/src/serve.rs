@@ -3186,7 +3186,10 @@ pub fn run_on(
     };
     let config = ServerConfig {
         bind: format!("{host}:{port}").parse().map_err(|_| "bad bind address".to_string())?,
-        ring_buffer_bytes: 256 << 20,
+        // The size last chosen in the viewer, 500 MB of saved capture until
+        // one is.
+        ring_buffer_bytes: perfr_live_server::http::startup_ring_bytes(&perfr_live_server::Settings::load()),
+        ring_unit: perfr_live_server::RingUnit::Stream,
         spill_path: None,
         wire,
         any_local_user,
@@ -3239,8 +3242,8 @@ pub fn run_on(
     });
 
     let symbols: Arc<Mutex<SymbolState>> = Arc::new(Mutex::new(SymbolState::default()));
-    // 64 MiB of callstack rows. The event ring is already capped (256 MiB,
-    // preallocated). This stops the sampling report from retaining every
+    // 64 MiB of callstack rows. The event ring is already capped (by the
+    // size of the saved capture). This stops the sampling report from retaining every
     // sample for the life of a live capture; `SampleStore::new` stays
     // unlimited for tests and for the bench that pushes a million rows.
     let store = Arc::new(SampleStore::with_byte_limit(64 << 20));

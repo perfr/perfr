@@ -46,7 +46,7 @@ jobs:
         run: >
           cargo test -p perfr-live-event -p perfr-live-ring -p perfr-live-protocol
           -p perfr-live-render -p perfr-live-server -p perfr-live-chrome
-          -p perfr-viewer -p perfr-client
+          -p perfr-viewer -p perfr-client --features perfr-viewer/native
       - name: Compile the viewer for wasm32
         run: cargo build -p perfr-viewer --target wasm32-unknown-unknown
       - name: Compile the client for wasm32

@@ -26,6 +26,37 @@ which only `perfr-client` turns on, and the pack is built for size besides:
 about 5.4 MB of wasm (2 MB gzipped) against the client's 9.9 MB. A `.perfr.zip` is opened by
 the service too; the viewer says so when it is given one.
 
+## Native viewer
+
+The same interface and wgpu renderer also run in a desktop window:
+
+```sh
+cargo run -p perfr-viewer --features native --release -- capture.perfr.stream
+# No argument opens an empty viewer; Open and drag-and-drop work too.
+cargo run -p perfr-viewer --features native --release
+```
+
+On Linux, use a Wayland or X11 desktop with working graphics drivers.
+X11 also needs the xkbcommon X11 runtime (`libxkbcommon-x11-0` on Ubuntu).
+
+The executable is `target/release/perfr-viewer`. It accepts local perfr
+streams, Chrome/Perfetto traces, and story JSON files (capture first, story
+second). It uses the same file loader as Open and drag-and-drop. Like the
+standalone web viewer, it has no capture-service connection; recording,
+sharing and opening `.perfr.zip` bundles still belong to the service client.
+
+Use this target to profile the viewer as an ordinary native process.
+The release profile retains the viewer's debug information. To include
+source information for the renderer dependency as well:
+
+```sh
+cargo build -p perfr-viewer --features native --release \
+  --config 'profile.release.package.perfr-live-render.debug=true'
+```
+
+The `native` feature only enables the executable; the browser packs and
+the desktop window share `PerfrLiveApp`, importers, reports and rendering.
+
 ## How the two fit
 
 This crate holds the whole interface. What is behind the page is a

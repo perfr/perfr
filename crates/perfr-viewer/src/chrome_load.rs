@@ -195,37 +195,12 @@ pub fn start_open_dialog(pending: &PendingFile) -> Option<TraceLoad> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn start_open_dialog() -> Option<OpenPick> {
-    native_open_dialog()
-}
-
-/// What the native file dialog picked: a trace to parse, or a capture stream
-/// whose bytes Share can post unchanged.
-// One is made per file picked and moved once to the app: the size of the
-// larger variant is not carried anywhere.
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::large_enum_variant)]
-pub enum OpenPick {
-    Trace(TraceLoad),
-    Stream(Vec<u8>),
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn native_open_dialog() -> Option<OpenPick> {
-    let path = rfd::FileDialog::new()
+pub fn start_open_dialog() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new()
         .add_filter("perfr stream", &["perfr.stream", "orbit.stream"])
         .add_filter("Chrome / Perfetto trace", TRACE_EXTENSIONS)
-        .pick_file()?;
-    let name = path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "trace.json".into());
-    if crate::share::is_stream_file(&name) {
-        let bytes = std::fs::read(&path).ok()?;
-        return Some(OpenPick::Stream(bytes));
-    }
-    let size = std::fs::metadata(&path).ok().map(|m| m.len());
-    Some(OpenPick::Trace(spawn_path_read(name, path, size)))
+        .add_filter("perfr story", &["perfr.story", "story.json"])
+        .pick_file()
 }
 
 #[cfg(not(target_arch = "wasm32"))]

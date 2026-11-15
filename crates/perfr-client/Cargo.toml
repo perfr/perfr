@@ -92,6 +92,5 @@ name = "live_bench"
 required-features = ["native"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-eframe = { version = "0.32.3", default-features = false, features = ["wgpu", "wayland", "x11"] }
 axum = { version = "0.7", features = ["ws"] }
 perfr-live-server = { path = "../perfr-live-server" }

@@ -928,55 +928,65 @@ impl TimelineGpu {
         height: u32,
         layer: TimelineLayer,
     ) {
+        // The image goes to the queue as it is, so it has to hold every row:
+        // a short one fails wgpu's validation, which stops a native client.
+        if !holds_rgba_rows(rgba.len(), width, height) {
+            debug_assert!(false, "{} bytes for a {width} by {height} image", rgba.len());
+            return;
+        }
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
         let reuse = {
             let slot = self.layer(layer);
             slot.column_tex.is_some() && slot.column_w == width && slot.column_h == height
         };
+        if !reuse {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("perfr-columns"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("perfr-columns-bind"),
+                layout: &self.blit_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.layer(layer).blit_uni.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+            let slot = self.layer_mut(layer);
+            slot.column_bind = Some(bind);
+            slot.column_tex = Some(texture);
+            slot.column_w = width;
+            slot.column_h = height;
+        }
+        let Some(texture) = &self.layer(layer).column_tex else {
+            return;
+        };
         // Queue::write_texture accepts tightly packed rows. The 256-byte
         // alignment applies only to buffer-to-texture encoder copies.
-        let bytes_per_row = width * 4;
-        if reuse {
-            let slot = self.layer_mut(layer);
-            if let Some(texture) = &slot.column_tex {
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    rgba,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(bytes_per_row),
-                        rows_per_image: Some(height),
-                    },
-                    wgpu::Extent3d {
-                        width,
-                        height,
-                        depth_or_array_layers: 1,
-                    },
-                );
-            }
-            return;
-        }
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("perfr-columns"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -984,39 +994,11 @@ impl TimelineGpu {
             rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(bytes_per_row),
+                bytes_per_row: Some(width * 4),
                 rows_per_image: Some(height),
             },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
+            size,
         );
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("perfr-columns-bind"),
-            layout: &self.blit_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.layer(layer).blit_uni.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
-        let slot = self.layer_mut(layer);
-        slot.column_bind = Some(bind);
-        slot.column_tex = Some(texture);
-        slot.column_w = width;
-        slot.column_h = height;
     }
 
     fn upload_instances(
@@ -1075,6 +1057,11 @@ impl TimelineGpu {
             }
         }
     }
+}
+
+/// Whether `len` bytes hold every row of a tightly packed RGBA8 image.
+fn holds_rgba_rows(len: usize, width: u32, height: u32) -> bool {
+    len as u64 >= u64::from(width) * u64::from(height) * 4
 }
 
 /// Pack dest-rect blit uniforms. WGSL aligns `vec4` to 16, so `viewport` is padded.
@@ -1196,6 +1183,16 @@ mod tests {
         let u = pack_blit_uniforms([1920.0, 1080.0], [10.0, 20.0, 100.0, 50.0]);
         assert_eq!(&u[16..20], &10f32.to_le_bytes());
         assert_eq!(&u[8..16], &[0u8; 8]);
+    }
+
+    #[test]
+    fn an_image_is_uploaded_only_when_it_holds_every_row() {
+        assert!(holds_rgba_rows(100 * 2 * 4, 100, 2));
+        assert!(holds_rgba_rows(100 * 2 * 4 + 1, 100, 2));
+        assert!(!holds_rgba_rows(100 * 2 * 4 - 1, 100, 2));
+        assert!(!holds_rgba_rows(100 * 4, 100, 2));
+        // A size whose byte count does not fit 32 bits is still compared whole.
+        assert!(!holds_rgba_rows(16, 65_536, 65_536));
     }
 
     #[test]

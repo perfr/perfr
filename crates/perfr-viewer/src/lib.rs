@@ -52,6 +52,9 @@ pub mod util;
 mod vscroll;
 
 pub use app::PerfrLiveApp;
+/// The windowing crate the interface is an `eframe::App` of, for a program
+/// that wraps it: one version, the interface's own.
+pub use eframe;
 pub use net::Host;
 
 /// `globalThis.performance.timeOrigin + .now()` — works on Window and
@@ -160,16 +163,24 @@ pub async fn start_viewer(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsVa
     run(canvas, Host::viewer()).await
 }
 
+/// The window and renderer the desktop client runs in. Anything else that
+/// puts the interface in a desktop window (the live benchmark) starts from
+/// these, so it draws the way the client does.
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+pub fn native_options() -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        renderer: eframe::Renderer::Wgpu,
+        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
+        ..Default::default()
+    }
+}
+
 /// Run the shared interface in a desktop window over a viewer or service host.
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub fn run_native(host: Host, paths: Vec<std::path::PathBuf>) -> eframe::Result {
     eframe::run_native(
         "perfr",
-        eframe::NativeOptions {
-            renderer: eframe::Renderer::Wgpu,
-            viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
-            ..Default::default()
-        },
+        native_options(),
         Box::new(move |cc| {
             let mut app = PerfrLiveApp::new(cc, host);
             for path in paths {

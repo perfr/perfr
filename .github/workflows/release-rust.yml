@@ -78,18 +78,25 @@ jobs:
           #
           # The client: the page the service serves. The platform jobs
           # embed this pack in the binary.
+          #
+          # Each archive's listing is read whole before it is searched. Piped
+          # into `grep -q`, tar was still listing when grep found its line
+          # and left: tar failed on the closed pipe, and under pipefail so
+          # did the step.
           ./crates/perfr-client/build_wasm.sh
           tar -C crates/perfr-client/viewer-dist -czf perfr-client.tar.gz .
           sha256sum perfr-client.tar.gz | tee perfr-client.tar.gz.sha256
-          tar -tzf perfr-client.tar.gz | grep -qE '(^|/)index.html$'
-          tar -tzf perfr-client.tar.gz | grep -qE '(^|/)perfr_client_bg.wasm$'
+          listing="$(tar -tzf perfr-client.tar.gz)"
+          grep -qE '(^|/)index.html$' <<<"$listing"
+          grep -qE '(^|/)perfr_client_bg.wasm$' <<<"$listing"
           # The viewer: the same interface with no service behind it, which
           # is what perfr.dev hosts.
           ./crates/perfr-viewer/build_wasm.sh
           tar -C crates/perfr-viewer/viewer-dist -czf perfr-viewer.tar.gz .
           sha256sum perfr-viewer.tar.gz | tee perfr-viewer.tar.gz.sha256
-          tar -tzf perfr-viewer.tar.gz | grep -qE '(^|/)index.html$'
-          tar -tzf perfr-viewer.tar.gz | grep -qE '(^|/)perfr_viewer_bg.wasm$'
+          listing="$(tar -tzf perfr-viewer.tar.gz)"
+          grep -qE '(^|/)index.html$' <<<"$listing"
+          grep -qE '(^|/)perfr_viewer_bg.wasm$' <<<"$listing"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -194,8 +201,11 @@ jobs:
           file dist/stripped/perfr | grep -qE 'static(ally|-pie) linked'
           # The symbol table stays (a profiler symbolizes its own binary).
           # DWARF does not: it is in dist/debug, linked by .gnu_debuglink.
-          readelf -S dist/stripped/perfr | grep -q '.gnu_debuglink'
-          readelf -n dist/stripped/perfr | grep -q 'Build ID'
+          # Read whole first, for the reason the packs' listings are.
+          sections="$(readelf -S dist/stripped/perfr)"
+          grep -q '.gnu_debuglink' <<<"$sections"
+          notes="$(readelf -n dist/stripped/perfr)"
+          grep -q 'Build ID' <<<"$notes"
 
           stage=dist/perfr
           mkdir -p "$stage/include" "$stage/licenses"

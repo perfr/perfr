@@ -2757,3 +2757,63 @@ fn a_page_holds_no_more_events_than_it_has_room_for_whatever_the_ring_holds() {
     page.frames(4);
     assert_eq!(page.app.index.event_count(), 1_501);
 }
+
+#[test]
+fn the_triangle_of_a_machine_health_group_folds_its_graphs() {
+    use perfr_live_event::health;
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(true));
+        let mut frames = vec![
+            hello(),
+            LiveFrame::ProcessName { pid: health::PID, name: health::PROCESS_NAME.into() },
+            LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000_000_000 },
+        ];
+        for (tid, name) in health::GROUPS {
+            frames.push(LiveFrame::ThreadName { pid: health::PID, tid: *tid, name: (*name).into() });
+        }
+        let lanes = [health::lane::CPU, health::lane::CPU_PRESSURE, health::lane::MEMORY_USED, health::lane::DISK_READ];
+        let mut events = Vec::new();
+        for id in lanes {
+            let lane = health::lane_by_id(id).unwrap();
+            frames.push(LiveFrame::InternedString { id: lane.id, text: lane.name.into() });
+            for i in 0..4u64 {
+                events.push(LiveEvent::from_value(1_000_000_000 + i * 500_000_000, health::PID, lane.group, lane.id, i as f32));
+            }
+        }
+        frames.push(LiveFrame::EventBatch { events });
+        feed(app, &frames);
+    });
+    page.frames(3);
+    // How many graphs each group shows on the rail.
+    let graphs = |page: &Page| {
+        [health::group::CPU, health::group::MEMORY, health::group::IO].map(|group| {
+            let label = format!("row:lane:{}:{group}:{}", health::PID, perfr_live_event::kind::VALUE);
+            let rects: Vec<serde_json::Value> = serde_json::from_str(&page.app.ui_readout).unwrap();
+            rects.iter().filter(|r| r[0].as_str() == Some(label.as_str())).count()
+        })
+    };
+    let header = |page: &Page, group: u32| page.rect_of(&format!("row:thread:{}:{group}", health::PID)).expect("the group has a header");
+    let triangle = |page: &Page, group: u32| {
+        page.rect_of(&format!("fold:thread:{}:{group}", health::PID)).expect("the group has a triangle").center()
+    };
+    assert_eq!(graphs(&page), [2, 1, 1]);
+    let memory_y = header(&page, health::group::MEMORY).top();
+
+    // cpu: its two graphs go, and memory moves up under it.
+    let at = triangle(&page, health::group::CPU);
+    page.click(at);
+    page.frames(2);
+    assert_eq!(graphs(&page), [0, 1, 1]);
+    assert!(header(&page, health::group::MEMORY).top() < memory_y);
+    // io too, and memory is as it was.
+    let at = triangle(&page, health::group::IO);
+    page.click(at);
+    page.frames(2);
+    assert_eq!(graphs(&page), [0, 1, 0]);
+    // Open again: the graphs are back.
+    let at = triangle(&page, health::group::CPU);
+    page.click(at);
+    page.frames(2);
+    assert_eq!(graphs(&page), [2, 1, 0]);
+    assert_eq!(header(&page, health::group::MEMORY).top(), memory_y);
+}

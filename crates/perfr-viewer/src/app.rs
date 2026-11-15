@@ -6928,6 +6928,7 @@ impl PerfrLiveApp {
                 if resp.drag_stopped() {
                     self.tracks.end_drag();
                 }
+                note_ui_rect_fmt(format_args!("fold:thread:{}:{}", th.pid, th.tid), chevron_hit);
                 if chevron(ui, title, chevron_x, open, ("t", th.pid, th.tid)) {
                     self.tracks.toggle(row.id);
                     self.relayout_tracks();

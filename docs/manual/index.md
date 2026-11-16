@@ -141,6 +141,8 @@ The viewer and the API share the port. The routes the page itself uses:
 | `POST /api/capture/clear` | Refuses the same way: `busy: stop the capture before clearing` |
 | `GET` / `PUT /api/settings` | Auto-unhook, stored in `~/.config/perfr/settings.json` |
 | `GET /api/capture/export` | Download the capture, including `?format=stream` |
+| `GET` / `PUT /api/track-order` | The [track order](timeline.html#track-order) remembered for a process name: `?process=<name>` to read, `{"process", "text"}` to write, `"text": null` to forget |
+| `GET` / `PUT /api/capture/track-order` | The order the current capture's tracks are shown in, `{"text"}`. Every export made afterwards carries it |
 
 Symbols, function search, disassembly and source are `/api/symbols/load`, `/api/functions/search`, `/api/code/disassembly` and `/api/code/source`. `GET /api/functions/stats` is one row per hooked function or manual scope (count, total, average, min, max, stddev). `GET /api/sampling/callstacks` is the hottest distinct stacks, one page.
 

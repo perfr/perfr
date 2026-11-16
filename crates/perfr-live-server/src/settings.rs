@@ -130,6 +130,101 @@ impl Settings {
     }
 }
 
+/// The track orders the viewer was asked to remember, one text file per
+/// process name: `~/.config/perfr/track-order/<process>.txt`, next to the
+/// settings and under the same rules for whose files they are. The viewer
+/// writes the text and reads it back when a process of that name is
+/// captured again (`track_order.rs` there has the format); the service
+/// only keeps the files, which are plain text so that one can be edited,
+/// copied to another machine or handed to a colleague.
+pub mod track_orders {
+    use std::path::{Path, PathBuf};
+
+    /// The most a track order file may hold. A line is a track name, so
+    /// this is thousands of tracks.
+    pub const MAX_BYTES: usize = 256 * 1024;
+
+    /// The file name a process's order is kept under: its name with
+    /// whatever cannot be part of a file name on some system replaced, so
+    /// that the name of a process can never reach outside the directory.
+    /// `None` for a name there is nothing left of.
+    pub fn file_name(process: &str) -> Option<String> {
+        let mut stem: String = process
+            .trim()
+            .chars()
+            .map(|c| if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
+            .collect();
+        while stem.len() > 120 {
+            stem.pop();
+        }
+        let stem = stem.trim_end_matches(['.', ' ']);
+        if stem.is_empty() {
+            return None;
+        }
+        // A leading dot is a hidden file, and `.` and `..` are not files.
+        let lead = if stem.starts_with('.') { "_" } else { "" };
+        Some(format!("{lead}{stem}.txt"))
+    }
+
+    /// Where the files live for this run.
+    pub fn dir() -> Option<PathBuf> {
+        Some(super::config_dir()?.join("perfr").join("track-order"))
+    }
+
+    fn path_in(dir: &Path, process: &str) -> Result<PathBuf, String> {
+        let name = file_name(process).ok_or("no process name to keep a track order under")?;
+        Ok(dir.join(name))
+    }
+
+    fn the_dir() -> Result<PathBuf, String> {
+        dir().ok_or_else(|| "no home directory to keep track orders in".to_string())
+    }
+
+    /// The order kept for `process`, or `None` when there is none.
+    pub fn load(process: &str) -> Option<String> {
+        load_in(&dir()?, process)
+    }
+
+    pub fn load_in(dir: &Path, process: &str) -> Option<String> {
+        let path = path_in(dir, process).ok()?;
+        super::for_the_settings_owner(|_| {
+            let meta = std::fs::metadata(&path).ok()?;
+            if !meta.is_file() || meta.len() > MAX_BYTES as u64 {
+                return None;
+            }
+            std::fs::read_to_string(&path).ok()
+        })
+    }
+
+    /// Keeps `text` as the order of `process`, replacing what was there.
+    pub fn save(process: &str, text: &str) -> Result<PathBuf, String> {
+        save_in(&the_dir()?, process, text)
+    }
+
+    pub fn save_in(dir: &Path, process: &str, text: &str) -> Result<PathBuf, String> {
+        if text.len() > MAX_BYTES {
+            return Err(format!("a track order file can be {MAX_BYTES} bytes at most"));
+        }
+        let path = path_in(dir, process)?;
+        super::for_the_settings_owner(|for_other| super::write_replacing(&path, text.as_bytes(), for_other))?;
+        Ok(path)
+    }
+
+    /// Forgets the order of `process`. Not an error when there was none.
+    pub fn remove(process: &str) -> Result<(), String> {
+        remove_in(&the_dir()?, process)
+    }
+
+    pub fn remove_in(dir: &Path, process: &str) -> Result<(), String> {
+        let path = path_in(dir, process)?;
+        super::for_the_settings_owner(|_| match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        })
+    }
+}
+
 /// `$XDG_CONFIG_HOME`, else the home of the user who ran the service (the
 /// sudo invoker when it runs privileged, so a setting made from the viewer
 /// is the same file whether or not the service was started with sudo).
@@ -339,6 +434,47 @@ fn write_replacing(path: &Path, bytes: &[u8], for_other: Option<Owner>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_track_order_is_kept_per_process_and_forgotten_on_request() {
+        let dir = scratch("track-orders");
+        assert_eq!(track_orders::load_in(&dir, "game"), None);
+        let path = track_orders::save_in(&dir, "game", "[game]\nmain\n").unwrap();
+        assert_eq!(path, dir.join("game.txt"));
+        track_orders::save_in(&dir, "editor", "[editor]\n").unwrap();
+        assert_eq!(track_orders::load_in(&dir, "game").as_deref(), Some("[game]\nmain\n"));
+        assert_eq!(track_orders::load_in(&dir, "editor").as_deref(), Some("[editor]\n"));
+        track_orders::save_in(&dir, "game", "[game]\nrender\n").unwrap();
+        assert_eq!(track_orders::load_in(&dir, "game").as_deref(), Some("[game]\nrender\n"));
+        track_orders::remove_in(&dir, "game").unwrap();
+        assert_eq!(track_orders::load_in(&dir, "game"), None);
+        track_orders::remove_in(&dir, "game").unwrap();
+        assert_eq!(track_orders::load_in(&dir, "editor").as_deref(), Some("[editor]\n"));
+        let big = "x".repeat(track_orders::MAX_BYTES + 1);
+        assert!(track_orders::save_in(&dir, "game", &big).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_process_name_names_a_file_outside_the_directory() {
+        use track_orders::file_name;
+        assert_eq!(file_name("game").as_deref(), Some("game.txt"));
+        assert_eq!(file_name("  My Game (x64) ").as_deref(), Some("My Game (x64).txt"));
+        assert_eq!(file_name("../../etc/passwd").as_deref(), Some("_.._.._etc_passwd.txt"));
+        assert_eq!(file_name("a/b\\c:d").as_deref(), Some("a_b_c_d.txt"));
+        assert_eq!(file_name(".hidden").as_deref(), Some("_.hidden.txt"));
+        assert_eq!(file_name("game @host").as_deref(), Some("game @host.txt"));
+        for nothing in ["", "  ", ".", "..", " . "] {
+            assert_eq!(file_name(nothing), None, "{nothing:?}");
+        }
+        let long = file_name(&"é".repeat(400)).unwrap();
+        assert!(long.len() <= 124 && long.ends_with(".txt"), "{}", long.len());
+        for name in ["../x", "a/../../b", "/abs", "c:\\x", "x\0y"] {
+            let file = file_name(name).unwrap();
+            assert!(!file.contains('/') && !file.contains('\\') && !file.contains('\0'), "{file:?}");
+            assert!(std::path::Path::new(&file).components().count() == 1, "{file:?}");
+        }
+    }
 
     #[test]
     fn defaults_are_on_at_a_hundred_thousand() {

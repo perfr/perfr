@@ -165,7 +165,10 @@ pub fn slice_bundle_bytes(file: Bytes, t0: u64, t1: u64) -> Result<(CaptureBundl
         Some(t) => read_frames_parquet(t)?,
         None => Vec::new(),
     };
-    let whole = CaptureBundle { target_pid, slice_ns: None, processes, threads, events, samples, frames };
+    let track_order = serde_json::from_slice::<serde_json::Value>(&manifest)
+        .map(|m| crate::bundle::manifest_track_order(&m))
+        .unwrap_or_default();
+    let whole = CaptureBundle { target_pid, slice_ns: None, processes, threads, events, samples, frames, track_order };
     // `slice` prunes the frames to those referenced and the names to what
     // is left; the events and samples are already inside the window.
     Ok((
@@ -244,6 +247,7 @@ mod tests {
             events,
             samples,
             frames: (0..3).map(|i| FrameRow { id: i, name: format!("f{i}"), module: "m".into(), address: i as u64 }).collect(),
+            track_order: "[@7]\n@71\n@70\n".into(),
         }
     }
 

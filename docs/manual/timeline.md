@@ -75,4 +75,50 @@ The box hint is `tracks`. It hides rows whose labels do not match, and a counter
 
 `?collapse=scheduler` starts with the scheduler track folded, which matters on a machine with many cores.
 
+## Track order
+
+By default the target leads the rail and the busiest thread leads each process. Drag a thread, a graph or a process header to put it somewhere else.
+
+### Remember it for a process
+
+Right-click the name on the target's header and tick **Remember track order for** *name*. The same checkbox is in the settings window. The service then keeps the order as a text file, one per process name, and rewrites it each time you move a track or a header:
+
+```
+~/.config/perfr/track-order/<process name>.txt
+```
+
+The next capture of a process with that name starts in that order. Tracks the file does not name come after the ones it does, in the usual order. Untick the box and the file is deleted.
+
+The file is plain text and can be edited or copied to another machine:
+
+```
+# a comment
+[MyGame]
+main
+Compute Task Pool (*)
+render
+main > frame time
+[Node Health]
+CPU
+```
+
+| Line | Meaning |
+|---|---|
+| `[name]` | The tracks that follow belong to processes with this name. Lines before the first one belong to the capture's target |
+| `name` | A thread |
+| `thread > graph` | One graph of a thread |
+| `thread > [async]` | A thread's async block |
+
+`*` matches any run of characters and `?` one. Case does not matter. A process is matched by its name, its executable's name or its path; a pattern with a `/` in it is tried against the path only.
+
+Processes come in the order of their sections and tracks in the order of their lines. The first line that matches a track places it. Tracks that one line matches are in name order, with numbers counted as numbers, so `Worker (2)` is before `Worker (10)`. A graph or an async block with no line of its own stays under its thread.
+
+When the viewer writes the file, threads that follow one another and differ only in a rising number become one line, `Compute Task Pool (*)`, so the line still holds on a machine with more cores.
+
+Two limits follow from matching by name. Threads with the same name cannot be told apart, so they stay together. A thread with no name is not in the file. With the option on, a track you drag lands where the file can keep it, which is what the next capture will show.
+
+### In a saved or shared capture
+
+A capture carries the order its tracks were in when it was saved or shared. **Save**, **Share** and `.perfr.stream` exports all include it, so the file opens the way it looked, with nothing to set up on the other side. That copy names tracks by process and thread id, so same-named threads keep their places too. An older viewer ignores it and shows its default order.
+
 The full binding list is the [keyboard and mouse reference](keys.html).

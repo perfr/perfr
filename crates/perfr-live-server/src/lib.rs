@@ -21,9 +21,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use perfr_live_event::{InternTable, LiveEvent, ScopePairer};
-pub use perfr_live_protocol::{decode_frame, encode_event_batch_with, WireFormat};
+pub use perfr_live_protocol::{decode_frame, encode_event_batch_with, LiveFrame, WireFormat};
 use perfr_live_protocol::{
-    encode_frame, interned_string_frame_len, process_name_frame_len, thread_name_frame_len, LiveFrame,
+    encode_frame, interned_string_frame_len, process_name_frame_len, thread_name_frame_len,
+    track_order_frame_len,
     CAPTURE_FINISHED_FRAME_LEN, HELLO_FRAME_LEN, STATUS_FRAME_LEN, VERSION,
 };
 use perfr_live_render::TrackIndex;
@@ -459,6 +460,9 @@ pub fn join_frames(frames: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
 struct CaptureNames {
     threads: std::collections::HashMap<(u32, u32), String>,
     processes: std::collections::HashMap<u32, String>,
+    /// The order the capture's tracks were last seen in, as the viewer
+    /// wrote it; empty when no viewer has said. The service only keeps it.
+    track_order: String,
 }
 
 impl LiveService {
@@ -711,6 +715,42 @@ impl LiveService {
         }
         self.reserve_stream_overhead();
         self.broadcast_frame(&LiveFrame::ProcessName { pid, name: name.to_string() });
+    }
+
+    /// Keeps the order a viewer shows the capture's tracks in, so that every
+    /// copy of the capture made from here on (a save, a share, the snapshot
+    /// a page gets when it connects) opens the same way. Not broadcast: the
+    /// viewer that said it has it, and another one open on the same capture
+    /// keeps the arrangement its own user made. Empty forgets it.
+    pub fn set_track_order(&self, text: &str) {
+        let _feed = self.feed.read();
+        let frame_len = |text: &str| if text.is_empty() { 0 } else { track_order_frame_len(text.len()) as u64 };
+        let mut names = self.names.lock();
+        if names.track_order == text {
+            return;
+        }
+        self.names_bytes.fetch_add(frame_len(text), Ordering::Relaxed);
+        self.names_bytes.fetch_sub(frame_len(&names.track_order), Ordering::Relaxed);
+        names.track_order = text.to_string();
+        drop(names);
+        self.reserve_stream_overhead();
+    }
+
+    /// The order a capture came with when it was opened from a file: kept
+    /// as [`Self::set_track_order`] keeps one, and sent to the viewers that
+    /// are connected, which are being shown that capture now and have no
+    /// arrangement of it of their own.
+    pub fn restore_track_order(&self, text: &str) {
+        self.set_track_order(text);
+        if !text.is_empty() {
+            let _feed = self.feed.read();
+            self.broadcast_frame(&LiveFrame::TrackOrder { text: text.to_string() });
+        }
+    }
+
+    /// The track order the capture carries; empty when it has none.
+    pub fn track_order(&self) -> String {
+        self.names.lock().track_order.clone()
     }
 
     /// Forgets the names of the previous capture.
@@ -1178,6 +1218,9 @@ impl LiveService {
             }
             for (pid, name) in names.processes.iter() {
                 frames.push(encode_frame(&LiveFrame::ProcessName { pid: *pid, name: name.clone() }));
+            }
+            if !names.track_order.is_empty() {
+                frames.push(encode_frame(&LiveFrame::TrackOrder { text: names.track_order.clone() }));
             }
         }
         let stats = self.stats();

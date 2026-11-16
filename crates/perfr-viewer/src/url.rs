@@ -30,6 +30,20 @@ pub fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// A value as it goes into a query string: every byte but the unreserved
+/// ones (letters, digits, `-`, `.`, `_`, `~`) as `%XX`.
+pub fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 fn hex_digit(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
@@ -54,6 +68,15 @@ mod tests {
     fn a_plus_is_not_a_space() {
         assert_eq!(percent_decode("runs/build+debug.perfr.stream"), "runs/build+debug.perfr.stream");
         assert_eq!(percent_decode("a%2Bb"), "a+b");
+    }
+
+    #[test]
+    fn what_is_encoded_decodes_to_itself() {
+        assert_eq!(percent_encode("game"), "game");
+        assert_eq!(percent_encode("My Game (x64) & co/é"), "My%20Game%20%28x64%29%20%26%20co%2F%C3%A9");
+        for name in ["TP_ThirdPerson-", "a+b=c?d#e", "caf\u{e9} @host", "100%"] {
+            assert_eq!(percent_decode(&percent_encode(name)), name);
+        }
     }
 
     #[test]

@@ -202,7 +202,7 @@ pub fn capture_bundle(
         })
         .collect();
 
-    CaptureBundle { target_pid, slice_ns: None, processes, threads, events: rows, samples, frames }
+    CaptureBundle { target_pid, slice_ns: None, processes, threads, events: rows, samples, frames, track_order: String::new() }
 }
 
 #[cfg(test)]

@@ -481,6 +481,54 @@ impl Backend for ServiceNet {
         self.send("PUT", "/api/settings", settings.to_string());
     }
 
+    fn get_track_order(&self, process: &str) {
+        if self.offline {
+            return;
+        }
+        let path = format!("/api/track-order?process={}", perfr_viewer::url::percent_encode(process));
+        let inbox = self.inbox.clone();
+        self.http.spawn(move |http| async move {
+            // No answer is no order: the page goes on with its own.
+            if let Ok(reply) = http.get_text(&path).await.map(|t| serde_json::from_str::<TrackOrderReply>(&t)) {
+                if let Ok(reply) = reply {
+                    inbox.lock().unwrap_or_else(|e| e.into_inner()).track_order = Some(reply);
+                }
+            }
+        });
+    }
+
+    fn put_track_order(&self, process: &str, text: Option<&str>) {
+        if self.offline {
+            return;
+        }
+        log::info!(target: "perfr_client::net", "PUT /api/track-order {process:?} {}", if text.is_some() { "kept" } else { "forgotten" });
+        let body = serde_json::json!({ "process": process, "text": text }).to_string();
+        let inbox = self.inbox.clone();
+        self.http.spawn(move |http| async move {
+            let result = http.send_text("PUT", "/api/track-order", &body).await;
+            let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
+            match result.map(|t| serde_json::from_str::<TrackOrderReply>(&t)) {
+                Ok(Ok(reply)) => g.track_order = Some(reply),
+                Ok(Err(e)) => g.error = Some(format!("/api/track-order: {e}")),
+                Err(e) => g.error = Some(e),
+            }
+        });
+    }
+
+    fn put_capture_order(&self, text: &str) {
+        if self.offline {
+            return;
+        }
+        let body = serde_json::json!({ "text": text }).to_string();
+        let inbox = self.inbox.clone();
+        self.http.spawn(move |http| async move {
+            if let Err(e) = http.send_text("PUT", "/api/capture/track-order", &body).await {
+                log::warn!(target: "perfr_client::net", "PUT {e}");
+                inbox.lock().unwrap_or_else(|p| p.into_inner()).error = Some(e);
+            }
+        });
+    }
+
     /// Auto-profiling on or off for the running capture (and the next).
     fn set_auto_profile(&self, on: bool) {
         if self.offline {

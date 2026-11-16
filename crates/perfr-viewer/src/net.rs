@@ -410,6 +410,9 @@ pub struct Inbox {
     /// The service's persisted user settings (`/api/settings`), as the raw
     /// object so keys this viewer does not know survive a round trip.
     pub settings: Option<serde_json::Value>,
+    /// The track order the service keeps for a process name
+    /// (`/api/track-order`), asked for or just written.
+    pub track_order: Option<TrackOrderReply>,
     /// `/api/bench`: the benchmark producer's knobs and counters.
     pub bench: Option<serde_json::Value>,
     pub processes: Option<Vec<ProcessJson>>,
@@ -773,6 +776,7 @@ impl Inbox {
             loaded_story: self.loaded_story.take(),
             status: self.status.take(),
             settings: self.settings.take(),
+            track_order: self.track_order.take(),
             bench: self.bench.take(),
             processes: self.processes.take(),
             sampling: self.sampling.take(),
@@ -807,6 +811,18 @@ impl Inbox {
 /// ask: this crate's own backend (`web::FileBackend`) reads capture files
 /// and stories and leaves the rest alone. The one that talks to the capture
 /// service is in `perfr-client`.
+/// What the service says of the track order it keeps for a process name.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct TrackOrderReply {
+    pub process: String,
+    /// The order's text; `None` when the service keeps none.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Where the file is, or would be, on the service's machine.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 pub trait Backend {
     /// Resolve service-relative download links for hosts without a page origin.
     fn resolve_url(&self, path: &str) -> String { path.to_string() }
@@ -835,6 +851,16 @@ pub trait Backend {
     fn get_status(&self) {}
     fn get_settings(&self) {}
     fn put_settings(&self, _settings: &serde_json::Value) {}
+    /// Asks for the track order the service keeps for processes named
+    /// `process`; the answer lands in `Inbox::track_order`.
+    fn get_track_order(&self, _process: &str) {}
+    /// Has the service keep `text` as the track order of processes named
+    /// `process`, or forget the one it keeps (`None`). Answered as
+    /// [`get_track_order`](Self::get_track_order) is.
+    fn put_track_order(&self, _process: &str, _text: Option<&str>) {}
+    /// Tells the service the order the capture's tracks are shown in, which
+    /// every copy of the capture it makes from then on carries.
+    fn put_capture_order(&self, _text: &str) {}
     fn set_auto_profile(&self, _on: bool) {}
     fn close_ws(&self) {}
     fn reconnect_ws_if_closed(&self) {}
@@ -905,6 +931,47 @@ pub struct NoBackend;
 impl Backend for NoBackend {
     fn take(&self) -> Inbox {
         Inbox::default()
+    }
+}
+
+/// A backend that answers nothing and writes down what it was asked about
+/// track orders, for the tests of what the page asks.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct OrdersAsked(pub std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+#[cfg(test)]
+impl OrdersAsked {
+    /// What was asked since the last call, oldest first.
+    pub(crate) fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+
+    pub(crate) fn host(&self) -> Host {
+        let asked = self.clone();
+        Host::with_service(move |_| Box::new(asked.clone()))
+    }
+}
+
+#[cfg(test)]
+impl Backend for OrdersAsked {
+    fn take(&self) -> Inbox {
+        Inbox::default()
+    }
+
+    fn get_track_order(&self, process: &str) {
+        self.0.lock().unwrap().push(format!("get {process}"));
+    }
+
+    fn put_track_order(&self, process: &str, text: Option<&str>) {
+        self.0.lock().unwrap().push(match text {
+            Some(text) => format!("keep {process}\n{text}"),
+            None => format!("forget {process}"),
+        });
+    }
+
+    fn put_capture_order(&self, text: &str) {
+        self.0.lock().unwrap().push(format!("capture\n{text}"));
     }
 }
 

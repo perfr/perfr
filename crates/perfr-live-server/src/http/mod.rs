@@ -84,6 +84,8 @@ pub fn router(service: Arc<LiveService>) -> Router {
         .route("/api/bench/stop", post(bench_stop))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/settings", get(get_settings).put(put_settings))
+        .route("/api/track-order", get(get_track_order).put(put_track_order))
+        .route("/api/capture/track-order", get(get_capture_track_order).put(put_capture_track_order))
         .route("/api/auto_profile", post(auto_profile))
         .route("/api/frame", get(frame))
         .route("/api/timeline", get(timeline))
@@ -485,6 +487,25 @@ struct ExportQuery {
     /// `packed` or `deflate`. Without it, as the service sends them to its
     /// viewers (`--wire`), which is the size `/api/status` reports.
     wire: Option<String>,
+    /// For `bundle` and `stream`: the tag of the track order the file is
+    /// to carry (`track_order_tag`, in hex). A viewer sends its order with
+    /// `PUT /api/capture/track-order` and asks for the download at once;
+    /// the two requests are not ordered, so the export waits a moment for
+    /// the order it was told of. Without it, the order held now.
+    order: Option<String>,
+}
+
+/// How long an export waits for the track order it was told to carry.
+const TRACK_ORDER_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Waits until the service holds the track order tagged `tag`, or the wait
+/// is over; the export then goes on with whatever is held.
+async fn await_track_order(svc: &LiveService, tag: Option<&str>) {
+    let Some(tag) = tag.and_then(|t| u64::from_str_radix(t, 16).ok()) else { return };
+    let deadline = tokio::time::Instant::now() + TRACK_ORDER_WAIT;
+    while perfr_live_protocol::track_order_tag(&svc.track_order()) != tag && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 /// The file name a download gets: the format's extension, and `-slice`
@@ -511,6 +532,9 @@ async fn capture_export(
             return (StatusCode::BAD_REQUEST, "give both t0 and t1, or neither").into_response();
         }
     };
+    if matches!(format.as_str(), "stream" | "bundle") {
+        await_track_order(&svc, q.order.as_deref()).await;
+    }
     if format == "stream" {
         let wire = match q.wire.as_deref().map(perfr_live_protocol::WireFormat::parse) {
             None => svc.wire(),
@@ -1486,6 +1510,76 @@ async fn put_settings(State(svc): State<Arc<LiveService>>, Json(body): Json<crat
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     })
     .await
+}
+
+#[derive(Deserialize)]
+struct TrackOrderQuery {
+    process: String,
+}
+
+#[derive(Deserialize)]
+struct TrackOrderBody {
+    process: String,
+    /// The order to keep; `null` forgets the one kept.
+    text: Option<String>,
+}
+
+fn track_order_reply(process: &str, text: Option<String>) -> Response {
+    let path = crate::settings::track_orders::dir()
+        .zip(crate::settings::track_orders::file_name(process))
+        .map(|(dir, name)| dir.join(name).display().to_string());
+    Json(serde_json::json!({ "process": process, "text": text, "path": path })).into_response()
+}
+
+/// `GET /api/track-order?process=<name>`: the track order remembered for
+/// processes of that name (`settings::track_orders`), as `{"process",
+/// "text", "path"}`. `text` is `null` when none is kept; `path` is where
+/// the file is, or would be.
+async fn get_track_order(Query(q): Query<TrackOrderQuery>) -> Response {
+    blocking(move || {
+        let text = crate::settings::track_orders::load(&q.process);
+        track_order_reply(&q.process, text)
+    })
+    .await
+}
+
+/// `PUT /api/track-order` with `{"process": "<name>", "text": "..."}`:
+/// keeps that order for the process name, or forgets it when `text` is
+/// `null`. Answers as the `GET` does.
+async fn put_track_order(Json(body): Json<TrackOrderBody>) -> Response {
+    blocking(move || {
+        let done = match &body.text {
+            Some(text) => crate::settings::track_orders::save(&body.process, text).map(|_| ()),
+            None => crate::settings::track_orders::remove(&body.process),
+        };
+        match done {
+            Ok(()) => track_order_reply(&body.process, body.text),
+            Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        }
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct CaptureTrackOrderBody {
+    text: String,
+}
+
+/// `GET /api/capture/track-order`: the order the current capture's tracks
+/// were last seen in, as `{"text"}`; empty when no viewer has said.
+async fn get_capture_track_order(State(svc): State<Arc<LiveService>>) -> Response {
+    Json(serde_json::json!({ "text": svc.track_order() })).into_response()
+}
+
+/// `PUT /api/capture/track-order` with `{"text": "..."}`: the order a
+/// viewer shows the capture's tracks in. Every copy of the capture made
+/// afterwards carries it (a save, a share, what a page gets on connecting).
+async fn put_capture_track_order(State(svc): State<Arc<LiveService>>, Json(body): Json<CaptureTrackOrderBody>) -> Response {
+    if body.text.len() > crate::settings::track_orders::MAX_BYTES {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "a track order can be 256 KiB at most").into_response();
+    }
+    svc.set_track_order(&body.text);
+    StatusCode::OK.into_response()
 }
 
 /// The smallest ring `PUT /api/config` takes: under this a capture is a

@@ -66,6 +66,16 @@ pub struct CaptureBundle {
     pub events: Vec<EventRow>,
     pub samples: Vec<SampleRow>,
     pub frames: Vec<FrameRow>,
+    /// The order the capture's tracks were last seen in, as the viewer
+    /// wrote it (its track order format); empty when it was never said.
+    /// Kept so the capture opens the way it looked when it was saved.
+    pub track_order: String,
+}
+
+/// The track order a manifest carries; empty when it has none, which is
+/// every bundle written before there was one.
+pub(crate) fn manifest_track_order(manifest: &serde_json::Value) -> String {
+    manifest["bundle"]["track_order"].as_str().unwrap_or_default().to_string()
 }
 
 /// The file name suffix of a bundle. The viewer tells a bundle from a zipped
@@ -147,6 +157,7 @@ impl CaptureBundle {
             events,
             samples,
             frames,
+            track_order: self.track_order.clone(),
         }
     }
 
@@ -182,6 +193,7 @@ impl CaptureBundle {
                 "slice_ns": self.slice_ns.map(|(a, b)| serde_json::json!({"start": a, "end": b})),
                 "processes": self.processes.iter().map(|p| serde_json::json!({"pid": p.pid, "name": p.name})).collect::<Vec<_>>(),
                 "threads": self.threads.iter().map(|t| serde_json::json!({"pid": t.pid, "tid": t.tid, "name": t.name})).collect::<Vec<_>>(),
+                "track_order": self.track_order,
             },
         })
     }
@@ -210,6 +222,7 @@ impl CaptureBundle {
         for f in &self.frames { append(LiveFrame::InternedString { id: frame_ids[&f.id], text: f.name.clone() }); }
         for p in &self.processes { append(LiveFrame::ProcessName { pid: p.pid, name: p.name.clone() }); }
         for t in &self.threads { append(LiveFrame::ThreadName { pid: t.pid, tid: t.tid, name: t.name.clone() }); }
+        if !self.track_order.is_empty() { append(LiveFrame::TrackOrder { text: self.track_order.clone() }); }
         let mut events: Vec<LiveEvent> = self.events.iter().map(|r| r.event)
             .filter(|e| e.kind != kind::SAMPLE && !(e.kind == kind::FUNCTION_CALL && e.extra == extra::SAMPLED_FRAME)).collect();
         let periods: HashMap<(u32, u64), u64> = self.events.iter()
@@ -323,6 +336,7 @@ impl CaptureBundle {
             events,
             samples,
             frames,
+            track_order: manifest_track_order(&manifest),
         })
     }
 }
@@ -432,6 +446,7 @@ mod tests {
                 FrameRow { id: 3, name: "physics".into(), module: "game".into(), address: 0x30 },
                 FrameRow { id: 4, name: "nanosleep".into(), module: "libc".into(), address: 0x40 },
             ],
+            track_order: "[@7]\n@71\n@70\n[@9]\n@90\n".into(),
         }
     }
 
@@ -448,6 +463,7 @@ mod tests {
     fn a_slice_keeps_straddling_events_whole_and_cuts_samples_by_time() {
         let s = sample_bundle().slice(110, 220);
         assert_eq!(s.slice_ns, Some((110, 220)));
+        assert_eq!(s.track_order, sample_bundle().track_order, "a slice opens in the order the capture was in");
         // Tick (100..150) and Physics (140..240) overlap; the later Tick and
         // Sleep do not.
         let names: Vec<&str> = s.events.iter().map(|r| r.name.as_str()).collect();

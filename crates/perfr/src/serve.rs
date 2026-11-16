@@ -939,6 +939,9 @@ fn open_bundle(
             .map(|f| (f.id, FrameInfo { name: f.name.clone(), module: f.module.clone(), address: f.address, function_id: 0 }))
             .collect(),
     );
+    // The order the capture was saved in, after everything else of it: a
+    // viewer drops the order it holds at each start of a capture.
+    service.restore_track_order(&bundle.track_order);
     service.mark_capture_finished();
     service.broadcast_status();
     Ok(serde_json::json!({
@@ -3335,10 +3338,13 @@ pub fn run_on(
         let (_, events) = bundle_service.ring().snapshot();
         let (threads, processes) = bundle_service.capture_names();
         let target_pid = bundle_target.load(Ordering::Relaxed).max(0) as u32;
-        let bundle = {
+        let mut bundle = {
             let intern = bundle_service.intern.lock();
             crate::names::capture_bundle(&events, &intern, &bundle_store, &threads, &processes, target_pid)
         };
+        // The order the viewer shows the tracks in: the file opens as the
+        // capture looked.
+        bundle.track_order = bundle_service.track_order();
         match window {
             Some((a, b)) => bundle.slice(a, b),
             None => bundle,
@@ -4094,6 +4100,62 @@ mod tests {
         assert_eq!(by_name(gpu_lane::MEMORY_MIB), Some(3072.0));
         assert_eq!(by_name(gpu_lane::POWER_W), Some(220.0));
         assert_eq!(by_name(gpu_lane::TEMPERATURE_C), Some(71.0));
+    }
+
+    #[test]
+    fn opening_a_bundle_restores_the_order_it_was_saved_in_and_tells_the_viewers() {
+        use perfr_live_server::{decode_frame, LiveFrame};
+        let service = LiveService::new(ServerConfig { ring_buffer_bytes: 1 << 20, ..Default::default() }).unwrap();
+        let store = Arc::new(SampleStore::new());
+        let target = Arc::new(AtomicI32::new(0));
+        let event = LiveEvent {
+            start_ns: 10,
+            duration_ns: 30,
+            tid: 8,
+            pid: 7,
+            kind: kind::API_SCOPE,
+            depth: 0,
+            extra: 0,
+            _pad: 0,
+            name_id: 1,
+        };
+        let saved = perfr_capture::CaptureBundle {
+            target_pid: 7,
+            events: vec![perfr_capture::EventRow { event, name: "frame".to_string() }],
+            track_order: "[@7]\n@8\n".to_string(),
+            ..Default::default()
+        };
+        // Through the file, as a save and an open go.
+        let saved = perfr_capture::CaptureBundle::from_zip(&saved.to_zip().unwrap()).unwrap();
+        // A viewer that is connected, with an order of the last capture.
+        service.set_track_order("[@1]\n");
+        let mut viewer = service.subscribe();
+        open_bundle(&service, &store, &target, saved).unwrap();
+        assert_eq!(service.track_order(), "[@7]\n@8\n");
+        let mut frames = Vec::new();
+        while let Ok(bytes) = viewer.try_recv() {
+            let mut rest = bytes.as_slice();
+            while !rest.is_empty() {
+                let (frame, used) = decode_frame(rest).unwrap();
+                frames.push(frame);
+                rest = &rest[used..];
+            }
+        }
+        let at = |wanted: &dyn Fn(&LiveFrame) -> bool| frames.iter().rposition(wanted);
+        let order = at(&|f| matches!(f, LiveFrame::TrackOrder { text } if text == "[@7]\n@8\n")).expect("the order is sent");
+        let started = at(&|f| matches!(f, LiveFrame::CaptureStarted { .. })).expect("a start");
+        let finished = at(&|f| matches!(f, LiveFrame::CaptureFinished)).expect("an end");
+        assert!(started < order && order < finished, "start {started}, order {order}, end {finished}");
+        // A capture saved without one clears what was held and sends none.
+        let plain = perfr_capture::CaptureBundle {
+            target_pid: 7,
+            events: vec![perfr_capture::EventRow { event, name: "frame".to_string() }],
+            ..Default::default()
+        };
+        open_bundle(&service, &store, &target, plain).unwrap();
+        assert_eq!(service.track_order(), "");
+        assert!(std::iter::from_fn(|| viewer.try_recv().ok())
+            .all(|bytes| !matches!(decode_frame(&bytes), Ok((LiveFrame::TrackOrder { .. }, _)))));
     }
 
     #[test]

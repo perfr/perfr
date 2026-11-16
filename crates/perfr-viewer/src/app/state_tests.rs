@@ -3622,3 +3622,176 @@ fn a_new_colour_scheme_rasterizes_a_zoomed_out_view_again() {
     page.frames(3);
     assert_eq!(page.app.column_rasters, drawn + 1, "and they are drawn once");
 }
+
+/// A capture of `game` (100) with three named threads and a busier fourth,
+/// and of `helper` (200). `tail` goes after the events.
+fn ordered_capture(tail: Vec<LiveFrame>) -> Vec<LiveFrame> {
+    let mut events: Vec<LiveEvent> = [101, 102, 103].iter().map(|t| scope(100, *t, 1_000_000_000, 500_000, 7)).collect();
+    events.extend((0..32u64).map(|i| scope(100, 104, 1_000_000_000 + i * 1_000_000, 500_000, 7)));
+    events.push(scope(200, 2, 1_000_000_000, 500_000, 7));
+    let mut frames = vec![
+        hello(),
+        LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000_000_000 },
+        LiveFrame::ProcessName { pid: 100, name: "game".into() },
+        LiveFrame::ProcessName { pid: 200, name: "helper".into() },
+        LiveFrame::ThreadName { pid: 100, tid: 101, name: "main".into() },
+        LiveFrame::ThreadName { pid: 100, tid: 102, name: "render".into() },
+        LiveFrame::ThreadName { pid: 100, tid: 103, name: "audio".into() },
+        LiveFrame::ThreadName { pid: 100, tid: 104, name: "worker".into() },
+        LiveFrame::ThreadName { pid: 200, tid: 2, name: "main".into() },
+        LiveFrame::InternedString { id: 7, text: "work".into() },
+        LiveFrame::EventBatch { events },
+    ];
+    frames.extend(tail);
+    frames
+}
+
+/// The rows named `row:<kind>:<ids>` for each of `ids`, top to bottom.
+fn rows_in_order(page: &Page, kind: &str, ids: &[&str]) -> Vec<String> {
+    let mut tops: Vec<(f32, String)> =
+        ids.iter().filter_map(|id| page.rect_of(&format!("row:{kind}:{id}")).map(|r| (r.top(), id.to_string()))).collect();
+    tops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    tops.into_iter().map(|(_, id)| id).collect()
+}
+
+fn game_threads(page: &Page) -> Vec<String> {
+    rows_in_order(page, "thread", &["100:101", "100:102", "100:103", "100:104"])
+}
+
+#[test]
+fn a_capture_that_carries_its_track_order_opens_in_it() {
+    // As it comes: the target first, its busiest thread on top.
+    let mut plain = Page::viewer();
+    feed(&mut plain.app, &ordered_capture(vec![LiveFrame::CaptureFinished]));
+    plain.frames(3);
+    plain.time += 2.0;
+    plain.frames(3);
+    assert_eq!(rows_in_order(&plain, "process", &["100", "200"]), ["100", "200"]);
+    assert_eq!(game_threads(&plain)[0], "100:104");
+
+    // The same file with the order it was saved in: the other process
+    // first, and the threads as they were arranged. No service is needed.
+    let order = "[@200]\n@2\n[@100]\n@103\n@101\n@104\n@102\n";
+    let mut page = Page::viewer();
+    feed(&mut page.app, &ordered_capture(vec![LiveFrame::TrackOrder { text: order.into() }, LiveFrame::CaptureFinished]));
+    page.frames(3);
+    assert_eq!(rows_in_order(&page, "process", &["100", "200"]), ["200", "100"]);
+    assert_eq!(game_threads(&page), ["100:103", "100:101", "100:104", "100:102"]);
+    // The sort by work, a second on, leaves it alone.
+    page.time += 2.0;
+    page.frames(3);
+    assert_eq!(game_threads(&page), ["100:103", "100:101", "100:104", "100:102"]);
+    // What a share of this capture would carry is that order.
+    assert_eq!(page.app.exact_track_order(), order);
+
+    // A track moved by hand moves, stays, and is in what is shared next.
+    page.app.tracks.place(TrackKey::Thread(crate::tracks::ThreadId { pid: 100, tid: 102 }), 100, 0);
+    page.frames(3);
+    page.time += 2.0;
+    page.frames(3);
+    assert_eq!(game_threads(&page), ["100:102", "100:103", "100:101", "100:104"]);
+    assert_eq!(page.app.exact_track_order(), "[@200]\n@2\n[@100]\n@102\n@103\n@101\n@104\n");
+
+    // Another capture opened on the same page does not inherit it.
+    feed(&mut page.app, &ordered_capture(vec![LiveFrame::CaptureFinished]));
+    page.frames(3);
+    page.time += 2.0;
+    page.frames(3);
+    assert_eq!(rows_in_order(&page, "process", &["100", "200"]), ["100", "200"]);
+    assert_eq!(game_threads(&page)[0], "100:104");
+}
+
+#[test]
+fn the_order_remembered_for_the_target_is_asked_for_applied_and_kept_up() {
+    let asked = crate::net::OrdersAsked::default();
+    let mut page = Page::on(asked.host(), |app| {
+        app.apply_status(service_status(true));
+        feed(app, &ordered_capture(Vec::new()));
+    });
+    page.frames(3);
+    // The target has a name: its order is asked for, once.
+    assert_eq!(asked.take(), ["get game"]);
+    page.time += 2.0;
+    page.frames(3);
+    assert!(asked.take().is_empty());
+    assert_eq!(game_threads(&page)[0], "100:104", "nothing remembered: the busiest thread leads");
+
+    // The service keeps one: the threads it names lead, in its order, and
+    // what it does not name comes after.
+    page.app.arranging.adopt_remembered("game", Some("[game]\nrender\nmain\n".into()), Some("/cfg/perfr/track-order/game.txt".into()));
+    page.frames(3);
+    page.time += 2.0;
+    page.frames(3);
+    assert_eq!(game_threads(&page), ["100:102", "100:101", "100:104", "100:103"]);
+    assert!(asked.take().is_empty(), "applying an order writes nothing, and a running capture's order is not sent");
+
+    // A track moved by hand: the file is written again, from the rail.
+    page.app.tracks.place(TrackKey::Thread(crate::tracks::ThreadId { pid: 100, tid: 103 }), 100, 0);
+    page.frames(3);
+    let written = asked.take();
+    assert_eq!(written.len(), 1, "{written:?}");
+    let lines: Vec<&str> = written[0].lines().filter(|l| !l.starts_with('#')).collect();
+    assert_eq!(lines, ["keep game", "[game]", "audio", "render", "main", "worker", "[helper]", "main"]);
+    assert_eq!(game_threads(&page), ["100:103", "100:102", "100:101", "100:104"]);
+
+    // Turned off, the service is told to forget it, and the rail goes back
+    // to following the work.
+    page.app.remember_track_order(false);
+    assert_eq!(asked.take(), ["forget game"]);
+    page.frames(3);
+    page.time += 2.0;
+    page.frames(3);
+    assert_eq!(game_threads(&page)[0], "100:104");
+    // Turned on, the rail as it stands is what is kept.
+    page.app.remember_track_order(true);
+    let written = asked.take();
+    assert!(written.len() == 1 && written[0].starts_with("keep game\n# perfr track order for game\n"), "{written:?}");
+    let top = game_threads(&page);
+    page.time += 2.0;
+    page.frames(3);
+    assert_eq!(game_threads(&page), top, "what was on screen when it was turned on stays");
+
+    // The capture stops: the service is told the order it is shown in.
+    page.app.apply_status(service_status(false));
+    page.time += 2.0;
+    page.frames(3);
+    let sent = asked.take();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].starts_with("capture\n[@100]\n@"), "{sent:?}");
+    // And not again while nothing moves.
+    page.time += 2.0;
+    page.frames(3);
+    assert!(asked.take().is_empty());
+    // A save names that order, and sends nothing it has already sent.
+    let tag = page.app.send_capture_order();
+    assert_eq!(tag, perfr_live_protocol::track_order_tag(&page.app.exact_track_order()));
+    assert!(asked.take().is_empty());
+}
+
+#[test]
+fn the_remember_option_is_on_the_targets_header_and_says_where_the_file_is() {
+    let asked = crate::net::OrdersAsked::default();
+    let mut page = Page::on(asked.host(), |app| {
+        app.apply_status(service_status(false));
+        feed(app, &ordered_capture(vec![LiveFrame::CaptureFinished]));
+    });
+    page.frames(3);
+    page.app.arranging.adopt_remembered("game", None, Some("/cfg/perfr/track-order/game.txt".into()));
+    let header = page.rect_of("row:process:100").expect("the target's header");
+    let at = Pos2::new(header.left() + 120.0, header.center().y);
+    page.frame(vec![Event::PointerMoved(at)]);
+    page.frame(vec![Event::PointerButton { pos: at, button: PointerButton::Secondary, pressed: true, modifiers: Default::default() }]);
+    page.frame(vec![Event::PointerButton { pos: at, button: PointerButton::Secondary, pressed: false, modifiers: Default::default() }]);
+    page.frames(2);
+    let item = page.rect_of("remember-track-order").expect("the option in the header's menu");
+    assert!(page.texts.iter().any(|t| t.contains("Remember track order for game")), "{:?}", page.texts);
+    asked.take();
+    page.click(item.left_center() + Vec2::new(8.0, 0.0));
+    page.frames(2);
+    let written = asked.take();
+    assert!(written.iter().any(|w| w.starts_with("keep game\n")), "{written:?}");
+    assert!(page.app.arranging.remembered.is_some());
+    // The other process's header has no such menu: the order is the target's.
+    let other = page.rect_of("row:process:200").expect("the other header");
+    assert!(other.top() > header.top());
+}

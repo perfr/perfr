@@ -521,6 +521,52 @@ pub fn slice_stream(bytes: &[u8], start_ns: u64, end_ns: u64) -> Result<Vec<u8>,
     Ok(out)
 }
 
+/// Makes a `.perfr.stream` carry `text` as its track order, in place of
+/// any it had; an empty `text` leaves it with none. The order goes just
+/// before the frame that ends the capture, or last when there is none.
+/// Done in place: the stream is the whole capture, and a copy of it to add
+/// a few lines would be a second capture in memory.
+pub fn set_stream_track_order(stream: &mut Vec<u8>, text: &str) -> Result<(), String> {
+    use perfr_live_protocol::{encode_frame, FRAME_CAPTURE_FINISHED, FRAME_TRACK_ORDER};
+    let mut had: Vec<(usize, usize)> = Vec::new();
+    // Where the last frame that is not an order starts, and its type.
+    let mut last: Option<(usize, u8)> = None;
+    let mut at = 0usize;
+    while at < stream.len() {
+        let rest = stream.len() - at;
+        if rest < 5 {
+            return Err("Could not read this capture.".into());
+        }
+        let payload_len = u32::from_le_bytes(stream[at..at + 4].try_into().unwrap()) as usize;
+        let total = 5usize.saturating_add(payload_len);
+        if rest < total {
+            return Err("Could not read this capture.".into());
+        }
+        if stream[at + 4] == FRAME_TRACK_ORDER {
+            had.push((at, total));
+        } else {
+            last = Some((at, stream[at + 4]));
+        }
+        at += total;
+    }
+    let mut end = match last {
+        Some((at, FRAME_CAPTURE_FINISHED)) => at,
+        _ => stream.len(),
+    };
+    for (at, total) in had.into_iter().rev() {
+        stream.drain(at..at + total);
+        if at < end {
+            end -= total;
+        }
+    }
+    if !text.is_empty() {
+        let frame = encode_frame(&LiveFrame::TrackOrder { text: text.to_string() });
+        let end = end.min(stream.len());
+        stream.splice(end..end, frame);
+    }
+    Ok(())
+}
+
 /// `{id, url}` from a 2xx body.
 pub fn parse_share_reply(text: &str) -> Result<ShareLink, String> {
     #[derive(Deserialize)]
@@ -1341,6 +1387,61 @@ mod tests {
         }
         let broken = slice_stream(&[1, 2, 3, 4], 0, 1);
         assert!(broken.is_err());
+    }
+
+    #[test]
+    fn a_shared_stream_carries_the_order_on_screen_in_place_of_the_one_it_came_with() {
+        use perfr_live_event::kind;
+        use perfr_live_protocol::{decode_all, encode_frame};
+        let orders = |bytes: &[u8]| -> Vec<(usize, String)> {
+            decode_all(bytes)
+                .unwrap()
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, f)| match f {
+                    LiveFrame::TrackOrder { text } => Some((i, text)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let plain = framed(&[event(0, 200, kind::API_SCOPE), event(160, 10, kind::API_SCOPE)], WireFormat::Packed);
+        let frames = decode_all(&plain).unwrap();
+        assert_eq!(frames.last(), Some(&LiveFrame::CaptureFinished), "the fixture ends as a saved capture does");
+
+        // None before: added, just before the end of the capture.
+        let mut stream = plain.clone();
+        set_stream_track_order(&mut stream, "[@8]\n@9\n").unwrap();
+        assert_eq!(orders(&stream), [(frames.len() - 1, "[@8]\n@9\n".to_string())]);
+        assert_eq!(decode_all(&stream).unwrap().last(), Some(&LiveFrame::CaptureFinished));
+        assert_eq!(events_of(&stream), events_of(&plain));
+
+        // One it came with, near the head as the service writes it, and a
+        // second one: both go, the new one is the only one.
+        let old = encode_frame(&LiveFrame::TrackOrder { text: "[@8]\n@1\n@2\n@3\n".into() });
+        let hello_len = 5 + u32::from_le_bytes(plain[0..4].try_into().unwrap()) as usize;
+        let mut stream = plain.clone();
+        stream.splice(hello_len..hello_len, old.clone());
+        stream.extend_from_slice(&old);
+        assert_eq!(orders(&stream).len(), 2);
+        set_stream_track_order(&mut stream, "[@8]\n@9\n").unwrap();
+        assert_eq!(orders(&stream), [(frames.len() - 1, "[@8]\n@9\n".to_string())]);
+        assert_eq!(events_of(&stream), events_of(&plain));
+        // A slice keeps the order the stream has.
+        assert_eq!(orders(&slice_stream(&stream, 150, 180).unwrap()).len(), 1);
+
+        // No order to give: the stream is as it would be without one.
+        set_stream_track_order(&mut stream, "").unwrap();
+        assert_eq!(stream, plain);
+
+        // A stream that does not end its capture gets the order last.
+        let mut open = plain[..plain.len() - 5].to_vec();
+        set_stream_track_order(&mut open, "[@8]\n").unwrap();
+        assert_eq!(decode_all(&open).unwrap().last(), Some(&LiveFrame::TrackOrder { text: "[@8]\n".into() }));
+
+        // Bytes that are not frames are left alone and reported.
+        let mut broken = vec![9, 0, 0, 0, 2, 1];
+        assert!(set_stream_track_order(&mut broken, "x").is_err());
+        assert_eq!(broken, [9, 0, 0, 0, 2, 1]);
     }
 
     fn account(used: u64, limit: u64, max_capture: u64) -> ShareAccount {

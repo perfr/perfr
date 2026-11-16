@@ -1442,6 +1442,9 @@ pub struct PerfrLiveApp {
     /// When the file-given process priorities were last recomputed from the
     /// process names, which the service refreshes about once a second.
     track_order_applied_s: f64,
+    /// The rail orders: the capture's own and the one remembered for the
+    /// target (see `track_order::Arranging`).
+    arranging: crate::track_order::Arranging,
     last_symbol_poll: f64,
     loaded_symbol_pid: Option<u32>,
     /// Chrome-trace file session (not Demo, not the 64 MB ring).
@@ -2249,6 +2252,7 @@ impl PerfrLiveApp {
             presets: crate::presets::State::default(),
             track_order: crate::track_order::State::default(),
             track_order_applied_s: -1.0,
+            arranging: crate::track_order::Arranging::default(),
             last_symbol_poll: -1.0,
             loaded_symbol_pid: None,
             trace_load: None,
@@ -2943,6 +2947,7 @@ impl PerfrLiveApp {
         self.trace_processes.clear();
         self.held_stream.forget();
         self.forget_share();
+        self.arranging.forget_capture();
     }
 
     /// A share link names one capture: anything that replaces the capture
@@ -3430,12 +3435,16 @@ impl PerfrLiveApp {
         } else {
             self.share_whole_owned()
         };
-        let Some(bytes) = bytes.filter(|b| !b.is_empty()) else {
+        let Some(mut bytes) = bytes.filter(|b| !b.is_empty()) else {
             if let Some(draft) = &mut self.share_draft {
                 draft.error = Some("Nothing to share.".into());
             }
             return;
         };
+        // The link opens the way the capture looks here: the tracks in
+        // the order they are in now, whatever order the bytes came with.
+        // A stream this cannot read is posted as it is.
+        let _ = crate::share::set_stream_track_order(&mut bytes, &self.exact_track_order());
         let what = if range { "The selected range" } else { "This capture" };
         let block = match &self.share_session {
             crate::share::ShareSession::SignedIn(account) => {
@@ -4151,6 +4160,10 @@ impl PerfrLiveApp {
                 self.track_order_applied_s = -1.0;
                 self.server_settings = Some(s);
             }
+            if let Some(reply) = inbox.track_order {
+                self.arranging.adopt_remembered(&reply.process, reply.text, reply.path);
+                self.needs_repaint = true;
+            }
             if let Some(b) = inbox.bench {
                 self.bench_status = b;
                 self.needs_repaint = true;
@@ -4568,6 +4581,10 @@ impl PerfrLiveApp {
                     }),
                 }
             }
+            LiveFrame::TrackOrder { text } => {
+                self.arranging.adopt_capture(&text);
+                self.needs_repaint = true;
+            }
             LiveFrame::CaptureFinished => {
                 self.live_resort_pending = true;
                 // A live capture that just stopped stays where it was -- the
@@ -4614,6 +4631,9 @@ impl PerfrLiveApp {
                     self.hover = None;
                     self.refresh_content_bounds();
                     self.needs_repaint = true;
+                    // The snapshot says what order the capture is in, and
+                    // the rail is rebuilt from it.
+                    self.arranging.forget_capture();
                 }
             }
         }
@@ -5259,14 +5279,18 @@ impl PerfrLiveApp {
                 .on_hover_text("Events, samples and names in one file; drop it back on the viewer to open it")
                 .clicked()
             {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(self.net.resolve_url("/api/capture/export?format=bundle")));
+                let order = self.send_capture_order();
+                ui.ctx().open_url(egui::OpenUrl::new_tab(
+                    self.net.resolve_url(&format!("/api/capture/export?format=bundle&order={order:x}")),
+                ));
                 ui.close();
             }
             let slice_item = ui.add_enabled(slice.is_some(), egui::Button::new("Selected slice (.perfr.zip)"));
             if slice_item.on_hover_text("The selected time range as a capture of its own").clicked() {
                 if let Some((a, b)) = slice {
+                    let order = self.send_capture_order();
                     ui.ctx().open_url(egui::OpenUrl::new_tab(self.net.resolve_url(&format!(
-                        "/api/capture/export?format=bundle&t0={a}&t1={b}"
+                        "/api/capture/export?format=bundle&t0={a}&t1={b}&order={order:x}"
                     ))));
                 }
                 ui.close();
@@ -5276,7 +5300,10 @@ impl PerfrLiveApp {
                 .on_hover_text("What a connecting viewer receives, as a file; the viewer opens it with ?capture=<url> and no service")
                 .clicked()
             {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(self.net.resolve_url("/api/capture/export?format=stream")));
+                let order = self.send_capture_order();
+                ui.ctx().open_url(egui::OpenUrl::new_tab(
+                    self.net.resolve_url(&format!("/api/capture/export?format=stream&order={order:x}")),
+                ));
                 ui.close();
             }
         });
@@ -6518,6 +6545,9 @@ impl PerfrLiveApp {
                 let _sched = dev.scope(TID_UI, NAME_SCHEDULER);
                 self.refresh_track_filter();
                 self.apply_track_order();
+                if !self.in_self_pane {
+                    self.arrange_tracks();
+                }
                 self.tracks.sync(&self.index, filter);
                 // The default order follows the work: every so often (a
                 // tweak; once a second by default) the busiest tracks move
@@ -7327,6 +7357,14 @@ impl PerfrLiveApp {
                 let galley = ui.fonts(|f| f.layout_job(job));
                 let label_pos = Pos2::new(label_left, r.center().y - galley.size().y * 0.5);
                 ui.painter_at(label_rect).galley(label_pos, galley, theme::TEXT());
+                // The order of the rail is remembered for the target, and
+                // its header is where to say so: a menu under the right
+                // button, on the name. It takes clicks only, so the header
+                // under it is still dragged by its name.
+                if self.tracks.order_hints.target == Some(pid) && self.has_service() && !self.arranging.process.is_empty() {
+                    let menu = ui.interact(label_rect, ui.id().with(("p-menu", pid, 0u32)), Sense::click());
+                    menu.context_menu(|ui| self.remember_track_order_item(ui));
+                }
                 if let Some(chip) = hidden_chip {
                     let hit = ui.interact(chip, ui.id().with(("phide", pid, 0u32)), Sense::click());
                     ui.painter().text(
@@ -10599,6 +10637,207 @@ impl PerfrLiveApp {
         }
     }
 
+    /// The name a process is remembered by: the one on the rail, without
+    /// the `@host` a linked machine's processes carry. Empty for a process
+    /// that has none, which nothing can be remembered for.
+    fn remembered_name(&self, pid: u32) -> String {
+        let name = self.process_display_name(pid);
+        let name = match MachineId::from_pid(pid) {
+            MachineId::Peer(_) => name.rsplit_once(" @").map_or(name.as_str(), |(own, _)| own).to_string(),
+            _ => name,
+        };
+        // "process" is what a pid with no name is shown as.
+        if name == "process" || is_self_pid(pid) {
+            String::new()
+        } else {
+            name
+        }
+    }
+
+    /// A thread's name as an order finds it by: empty when the thread has
+    /// none of its own and is shown by its number.
+    fn ordered_thread_name(&self, pid: u32, tid: u32) -> String {
+        let name = self.thread_display_name(pid, tid);
+        if name == tid.to_string() {
+            String::new()
+        } else {
+            name
+        }
+    }
+
+    /// The rail as it stands, for writing an order from or matching one
+    /// against: every process with its tracks top to bottom.
+    fn rail_sections(&self) -> Vec<crate::track_order::RailSection> {
+        self.tracks
+            .rail()
+            .into_iter()
+            .map(|(pid, keys)| crate::track_order::RailSection {
+                pid,
+                name: self.remembered_name(pid),
+                tracks: keys
+                    .into_iter()
+                    .map(|(key, follows)| {
+                        let owner = key.owner();
+                        let graph = match key {
+                            TrackKey::Value(lane) => value_lane_name(&self.index, &self.intern, lane),
+                            _ => String::new(),
+                        };
+                        crate::track_order::RailTrack { key, thread: self.ordered_thread_name(owner.pid, owner.tid), graph, follows }
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// The order of the rail by number: what the capture carries.
+    fn exact_track_order(&self) -> String {
+        crate::track_order::write_exact(&self.rail_sections())
+    }
+
+    /// The order of the rail by name: what is remembered for the target.
+    /// The service's and the viewer's own rows are not part of it: they
+    /// are last and folded on every capture, whatever it is of.
+    fn named_track_order(&self) -> String {
+        let sections: Vec<_> =
+            self.rail_sections().into_iter().filter(|s| !self.tracks.is_auto_process(s.pid) && !is_self_pid(s.pid)).collect();
+        crate::track_order::write_by_name(&self.arranging.process, &sections)
+    }
+
+    /// Applies and keeps the rail orders, once a frame: asks for the order
+    /// remembered for the target, writes the orders again after a change
+    /// by hand, works out what the order in force asks of the rail, and
+    /// tells the service the order its capture is shown in.
+    fn arrange_tracks(&mut self) {
+        let service = self.has_service();
+        // The order remembered for the target, asked for when the target
+        // is another process name than the last one asked about.
+        if service {
+            let name = self.tracks.order_hints.target.map(|pid| self.remembered_name(pid)).unwrap_or_default();
+            if !name.is_empty() && name != self.arranging.process {
+                self.arranging.process = name.clone();
+                self.arranging.remembered = None;
+                self.arranging.path.clear();
+                self.arranging.applied_s = -1.0;
+                self.net.get_track_order(&name);
+            }
+        }
+        // A change by hand is the new order: of the capture, and of what
+        // is remembered when that is on.
+        let hand = self.tracks.hand_gen();
+        if hand != self.arranging.hand_gen {
+            self.arranging.hand_gen = hand;
+            if self.arranging.capture.is_some() {
+                self.arranging.capture = Some(crate::track_order::Arrangement::parse(&self.exact_track_order()));
+            }
+            if self.arranging.remembered.is_some() {
+                self.remember_track_order(true);
+            }
+            self.arranging.applied_s = -1.0;
+        }
+        // What the order asks depends on names, which arrive over time, and
+        // on what is on the rail: worked out again about once a second,
+        // and at once when the rail has more or fewer rows.
+        let rail = (self.tracks.process_order.len(), self.tracks.track_order.len());
+        let due = self.arranging.applied_s < 0.0 || self.now_s - self.arranging.applied_s >= 1.0 || rail != self.arranging.applied_to;
+        if due && !self.tracks.any_dragging() {
+            self.arranging.applied_s = self.now_s;
+            self.arranging.applied_to = rail;
+            let asked = match self.arranging.active() {
+                Some(order) => {
+                    let target = self.tracks.order_hints.target;
+                    let sections = self.rail_sections();
+                    let processes: Vec<crate::track_order::RailProcess> = sections
+                        .iter()
+                        .map(|s| {
+                            let path = self.processes.iter().find(|p| p.pid == s.pid).map(|p| p.path.clone()).unwrap_or_default();
+                            let base = path.rsplit('/').next().unwrap_or("").to_string();
+                            let mut names: Vec<String> = self.process_asked_names(s.pid).lines().map(str::to_string).collect();
+                            names.extend([s.name.clone(), base, path]);
+                            crate::track_order::RailProcess { pid: s.pid, names, target: target == Some(s.pid) }
+                        })
+                        .collect();
+                    let tracks: Vec<crate::track_order::RailTrack> = sections.into_iter().flat_map(|s| s.tracks).collect();
+                    order.resolve(&processes, &tracks)
+                }
+                None => Default::default(),
+            };
+            if self.tracks.set_arrangement(asked.processes, asked.tracks, asked.hosts) {
+                self.needs_repaint = true;
+            }
+        }
+        // The service keeps the order its capture is shown in, so a save
+        // or a share made from it opens the same way. Told once the capture
+        // has stopped: while it runs the rail follows the work, and the
+        // order of one second is not the next one's.
+        let settled = !self.status.capturing && !self.status.demo && !self.recording;
+        if service && settled && !self.capture_is_local() && self.index.event_count() > 0 && self.now_s - self.arranging.sent_s >= 1.0 {
+            self.send_capture_order();
+        }
+    }
+
+    /// Tells the service the order the capture is shown in, when that is
+    /// not the one it has. Returns the order's tag, which a download names
+    /// so the service waits for this order before writing the file
+    /// (`/api/capture/export?order=`).
+    fn send_capture_order(&mut self) -> u64 {
+        self.arranging.sent_s = self.now_s;
+        let text = self.exact_track_order();
+        let tag = perfr_live_protocol::track_order_tag(&text);
+        if text != self.arranging.sent {
+            self.net.put_capture_order(&text);
+            self.arranging.sent = text;
+        }
+        tag
+    }
+
+    /// Remembers the rail's order for the target's name, or forgets it.
+    /// The service keeps it as a text file, and the rail is in that order
+    /// the next time a process of that name is captured.
+    fn remember_track_order(&mut self, on: bool) {
+        if self.arranging.process.is_empty() {
+            return;
+        }
+        if !on {
+            if self.arranging.remembered.take().is_some() {
+                self.net.put_track_order(&self.arranging.process, None);
+                self.arranging.applied_s = -1.0;
+            }
+            return;
+        }
+        let text = self.named_track_order();
+        if self.arranging.remembered.as_ref().map(|(t, _)| t) != Some(&text) {
+            self.net.put_track_order(&self.arranging.process, Some(&text));
+            let parsed = crate::track_order::Arrangement::parse(&text);
+            self.arranging.remembered = Some((text, parsed));
+            self.arranging.applied_s = -1.0;
+        }
+    }
+
+    /// The "Remember track order" option, where it is offered: a checkbox
+    /// that says whether the service keeps an order for the target's name.
+    /// Returns nothing to do when there is no target to remember for.
+    fn remember_track_order_item(&mut self, ui: &mut Ui) {
+        if !self.has_service() || self.arranging.process.is_empty() {
+            return;
+        }
+        let mut on = self.arranging.remembered.is_some();
+        let label = format!("Remember track order for {}", self.arranging.process);
+        let item = ui.checkbox(&mut on, label);
+        note_ui_rect("remember-track-order", item.rect);
+        let kept = if self.arranging.path.is_empty() { String::new() } else { format!("\n\nKept in {}", self.arranging.path) };
+        let changed = item.changed();
+        item.on_hover_text(format!(
+            "Keeps the order the tracks are in now, and every change made to it by hand, as a text file. The next \
+             capture of a process named {} starts in that order; tracks the file does not name come after, in the \
+             usual order. The file lists track names, one per line, and can be edited: `*` matches any run of \
+             characters and `?` one.{kept}",
+            self.arranging.process
+        ));
+        if changed {
+            self.remember_track_order(on);
+        }
+    }
+
     /// Sends the track order text to the service's settings when it differs
     /// from what was last exchanged. The whole object goes, so other keys
     /// survive; a change applies to the rail at once.
@@ -10621,7 +10860,8 @@ impl PerfrLiveApp {
              matter, `#` starts a comment. Matched against the process name, its executable's name and \
              its path (a pattern with a `/` against the path only). Processes the file names come first \
              on the rail, in file order; the rest keep their usual order. Kept by the service \
-             (~/.config/perfr/settings.json), so it holds across sessions.",
+             (~/.config/perfr/settings.json), so it holds across sessions. This orders processes, for every \
+             capture; the order of the tracks under them is remembered per target, with the box below.",
         );
         let edit = ui.add(
             egui::TextEdit::multiline(&mut self.track_order.text)
@@ -11842,6 +12082,8 @@ impl PerfrLiveApp {
                 ui.add_space(6.0);
                 if has_service {
                     self.track_order_control(ui, ctx);
+                    ui.add_space(6.0);
+                    self.remember_track_order_item(ui);
                     ui.add_space(6.0);
                 }
                 if ui.button("Reset").clicked() {

@@ -1989,3 +1989,44 @@ fn connect_bench() {
     }
     eprintln!("connecting with 30,000 names held: {:?} and {messages} messages a viewer", asked.elapsed() / 10);
 }
+
+#[test]
+fn a_capture_carries_the_track_order_a_viewer_gave_it_and_the_next_one_does_not() {
+    let svc = LiveService::new(small_cfg()).unwrap();
+    svc.set_process_name(1, "game");
+    svc.push_events(&[ev(1), ev(2)]);
+    let order_of = |bytes: &[u8]| -> Vec<String> {
+        decode_all(bytes)
+            .unwrap()
+            .into_iter()
+            .filter_map(|f| match f {
+                LiveFrame::TrackOrder { text } => Some(text),
+                _ => None,
+            })
+            .collect()
+    };
+    // No viewer has said: the file has no such frame, as before there was one.
+    assert!(order_of(&svc.capture_stream(None)).is_empty());
+    assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
+
+    svc.set_track_order("[@1]\n@1\n");
+    assert_eq!(svc.track_order(), "[@1]\n@1\n");
+    // In the file, in what a page is sent when it connects, and counted in
+    // the size the status reports.
+    assert_eq!(order_of(&svc.capture_stream(None)), ["[@1]\n@1\n"]);
+    assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
+    assert_eq!(order_of(&svc.capture_stream(Some((0, 15)))), ["[@1]\n@1\n"], "a slice opens in the same order");
+    let (_rx, snapshot) = svc.subscribe_with_snapshot();
+    assert_eq!(order_of(&snapshot.head.concat()), ["[@1]\n@1\n"]);
+
+    // A later one replaces it; the size follows.
+    svc.set_track_order("[@1]\n");
+    assert_eq!(order_of(&svc.capture_stream(None)), ["[@1]\n"]);
+    assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
+
+    // The order is the capture's: gone with its names when another begins.
+    svc.clear_names();
+    assert_eq!(svc.track_order(), "");
+    assert!(order_of(&svc.capture_stream(None)).is_empty());
+    assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
+}

@@ -29,6 +29,12 @@ pub const FRAME_PROCESS_NAME: u8 = 8;
 pub const FRAME_EVENT_BATCH_PACKED: u8 = 9;
 /// A packed batch, deflated on top (see [`WireFormat::Deflate`]).
 pub const FRAME_EVENT_BATCH_DEFLATE: u8 = 10;
+/// The order the capture's tracks were last seen in, as text (the viewer's
+/// track order format; see `track_order` there). A viewer sends it to the
+/// service that holds the capture, and it travels in every copy of that
+/// capture from then on, so a saved or shared capture opens the way it
+/// looked. A reader that does not know the frame skips it.
+pub const FRAME_TRACK_ORDER: u8 = 11;
 
 /// Sanity cap on a decoded batch, so a corrupt count cannot ask for gigabytes.
 const MAX_BATCH_EVENTS: usize = 1 << 24;
@@ -117,6 +123,9 @@ pub enum LiveFrame {
     ProcessName {
         pid: u32,
         name: String,
+    },
+    TrackOrder {
+        text: String,
     },
 }
 
@@ -220,6 +229,12 @@ pub fn encode_frame(frame: &LiveFrame) -> Vec<u8> {
             payload.extend_from_slice(bytes);
             FRAME_PROCESS_NAME
         }
+        LiveFrame::TrackOrder { text } => {
+            let bytes = text.as_bytes();
+            payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            payload.extend_from_slice(bytes);
+            FRAME_TRACK_ORDER
+        }
     };
     let mut out = Vec::with_capacity(5 + payload.len());
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -250,6 +265,23 @@ pub const fn thread_name_frame_len(name_len: usize) -> usize {
 /// The encoded length of a `ProcessName` whose name is `name_len` bytes.
 pub const fn process_name_frame_len(name_len: usize) -> usize {
     FRAME_HEADER_LEN + 8 + name_len
+}
+
+/// The encoded length of a `TrackOrder` whose text is `text_len` bytes.
+pub const fn track_order_frame_len(text_len: usize) -> usize {
+    FRAME_HEADER_LEN + 4 + text_len
+}
+
+/// A short tag of a track order's text (FNV-1a), for saying which one is
+/// meant without sending it again: a viewer asking for a capture to save
+/// names the order it last sent, and the service waits for that one.
+pub fn track_order_tag(text: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in text.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// `encode_frame(&LiveFrame::EventBatch { events })` without building the
@@ -283,6 +315,7 @@ fn utf8_field(bytes: &[u8], what: &'static str) -> Result<String, ProtocolError>
         .map(str::to_string)
         .map_err(|_| ProtocolError::InvalidPayload(match what {
             "thread name" => "thread name is not utf-8",
+            "track order" => "track order is not utf-8",
             _ => "process name is not utf-8",
         }))
 }
@@ -629,6 +662,7 @@ fn decode_payload(typ: u8, payload: &[u8]) -> Result<LiveFrame, ProtocolError> {
             let name = utf8_field(&payload[4..], "process name")?;
             Ok(LiveFrame::ProcessName { pid, name })
         }
+        FRAME_TRACK_ORDER => Ok(LiveFrame::TrackOrder { text: utf8_field(payload, "track order")? }),
         other => Err(ProtocolError::UnknownFrame(other)),
     }
 }
@@ -738,6 +772,8 @@ mod tests {
             assert_eq!(encode_frame(&thread).len(), thread_name_frame_len(text.len()));
             let process = LiveFrame::ProcessName { pid: 1, name: text.into() };
             assert_eq!(encode_frame(&process).len(), process_name_frame_len(text.len()));
+            let order = LiveFrame::TrackOrder { text: text.into() };
+            assert_eq!(encode_frame(&order).len(), track_order_frame_len(text.len()));
         }
     }
 
@@ -747,6 +783,8 @@ mod tests {
             LiveFrame::ThreadName { pid: 7, tid: 70, name: "Worker-1".into() },
             LiveFrame::ProcessName { pid: 7, name: "game".into() },
             LiveFrame::ThreadName { pid: 1, tid: 1, name: String::new() },
+            LiveFrame::TrackOrder { text: "[game]\nmain\nWorker-*\n".into() },
+            LiveFrame::TrackOrder { text: String::new() },
         ] {
             let bytes = encode_frame(&frame);
             let (back, used) = decode_frame(&bytes).unwrap();
@@ -987,6 +1025,7 @@ mod tests {
             }),
             encode_frame(&LiveFrame::ThreadName { pid: 4, tid: 5, name: "Worker-1".into() }),
             encode_frame(&LiveFrame::ProcessName { pid: 4, name: "game".into() }),
+            encode_frame(&LiveFrame::TrackOrder { text: "[game]\nmain\n".into() }),
         ]
     }
 

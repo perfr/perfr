@@ -226,6 +226,20 @@ pub struct TrackStrip {
     /// rail puts these first, in file order, ahead of the tiers. Absent
     /// means the file says nothing about it.
     pub process_priority: FastMap<u32, usize>,
+    /// What a rail order asks (`track_order::Arrangement`): the place of
+    /// each process and each track it names, ahead of everything it does
+    /// not, and the section a track is drawn in when not its own. Set by
+    /// [`Self::set_arrangement`].
+    arranged_processes: FastMap<u32, usize>,
+    arranged_tracks: FastMap<TrackKey, u64>,
+    arranged_hosts: FastMap<TrackKey, u32>,
+    /// The arrangement changed, or a track it places has just arrived: the
+    /// next `sync` puts the placed tracks where it says.
+    arrange_pending: bool,
+    /// Counts the changes of order made by hand (a track dropped, a header
+    /// dragged, a track sent home), so that whoever keeps the order as text
+    /// knows to write it again.
+    hand_gen: u64,
     /// Chrome `process_sort_index` / `thread_sort_index` (lower first).
     pub process_sort: HashMap<u32, i32>,
     pub thread_sort: HashMap<(u32, u32), i32>,
@@ -392,6 +406,11 @@ impl Default for TrackStrip {
             auto_folded: FastSet::default(),
             user_toggled: FastSet::default(),
             process_priority: FastMap::default(),
+            arranged_processes: FastMap::default(),
+            arranged_tracks: FastMap::default(),
+            arranged_hosts: FastMap::default(),
+            arrange_pending: false,
+            hand_gen: 0,
             process_sort: HashMap::new(),
             thread_sort: HashMap::new(),
             pinned_sections: FastSet::default(),
@@ -485,11 +504,13 @@ impl TrackStrip {
             (tier, bucket)
         };
         let file_rank = |p: u32| self.process_priority.get(&p).copied().unwrap_or(usize::MAX);
+        let arranged = |p: u32| self.arranged_processes.get(&p).copied().unwrap_or(usize::MAX);
         let mut keys: FastMap<u32, ProcessKey> = pids
             .iter()
             .map(|&p| {
                 let own = (
                     machine_rank(&self.machine_sort, MachineId::from_pid(p)),
+                    arranged(p),
                     file_rank(p),
                     rank(p),
                     self.process_sort.get(&p).copied().unwrap_or(0),
@@ -503,9 +524,12 @@ impl TrackStrip {
         // wherever that one is: the target, or the process leading its
         // machine when the page knows no target (a capture opened from a
         // file) or the target has no rows. A line of the order file that
-        // names the health track still places it.
+        // names the health track still places it, and so does a rail order.
         for &p in &pids {
-            if !perfr_live_event::health::is_health_pid(p) || self.process_priority.contains_key(&p) {
+            if !perfr_live_event::health::is_health_pid(p)
+                || self.process_priority.contains_key(&p)
+                || self.arranged_processes.contains_key(&p)
+            {
                 continue;
             }
             let machine = MachineId::from_pid(p);
@@ -516,8 +540,8 @@ impl TrackStrip {
                     .min_by_key(|q| keys[q])
             });
             if let Some(lead) = lead {
-                let (machine_rank, file_rank, rank, sort, pid, _) = keys[&lead];
-                keys.insert(p, (machine_rank, file_rank, rank, sort, pid, true));
+                let (machine_rank, arranged, file_rank, rank, sort, pid, _) = keys[&lead];
+                keys.insert(p, (machine_rank, arranged, file_rank, rank, sort, pid, true));
             }
         }
         pids.sort_by_key(|p| keys[p]);
@@ -541,8 +565,8 @@ impl TrackStrip {
         self.process_order.sort_by_key(|p| keys[p]);
         // Tracks: what is still there keeps its order and its host; a new
         // thread joins at the end with its async block and its graphs behind
-        // it, and a new graph or async block of a known thread joins right
-        // after that thread's last track, so it starts out under it.
+        // it, and a new graph or async block of a known thread joins the
+        // others under it, in the place it has among them.
         let present: FastSet<ThreadId> = threads.iter().copied().collect();
         let catalogue = &self.catalogue;
         self.track_order.retain(|key| {
@@ -565,22 +589,38 @@ impl TrackStrip {
             want.extend(
                 self.catalogue.leaves_of(t).iter().filter(|k| k.kind == kind::VALUE).map(|k| TrackKey::Value(*k)),
             );
-            for key in want {
+            for (n, &key) in want.iter().enumerate() {
                 if !known.insert(key) {
                     continue;
                 }
-                let at = self
-                    .track_order
+                // Right after the part that comes before it in the
+                // thread's own order, so that graphs arriving one by one
+                // end up in the order they have when they arrive together;
+                // after the thread's last track when that part is not
+                // under the thread's process any more.
+                let at = want[..n]
                     .iter()
-                    .rposition(|k| k.owner() == t)
+                    .rev()
+                    .filter(|prev| self.host_pid(**prev) == t.pid)
+                    .find_map(|prev| self.track_order.iter().position(|k| k == prev))
+                    .or_else(|| self.track_order.iter().rposition(|k| k.owner() == t))
                     .map(|i| i + 1)
                     .unwrap_or(self.track_order.len());
                 self.track_order.insert(at, key);
+                // A track the rail order places, or draws elsewhere: it
+                // goes there as it arrives, not at the next sort.
+                if let Some(host) = self.arranged_hosts.get(&key) {
+                    self.host.insert(key, *host);
+                }
+                self.arrange_pending |= self.arranged_tracks.contains_key(&key) || self.arranged_hosts.contains_key(&key);
             }
         }
         // A host that left the rail sends its guests home.
         let listed = &self.process_order;
         self.host.retain(|key, pid| known.contains(key) && listed.contains(pid) && *pid != key.owner_pid());
+        if std::mem::take(&mut self.arrange_pending) {
+            self.sort_sections(None);
+        }
         // No seeding of `y` here. That used to retain the skeleton's rows and
         // insert the rest at 0 for the lerp animation rows no longer have --
         // and the skeleton lists only the rail lanes, so every frame it
@@ -595,7 +635,9 @@ impl TrackStrip {
     /// scopes first (instrumented and manual spans, async lanes), then
     /// sampled frames, so the busiest thread is on top by default. A thread
     /// moves with its async block and graphs, in the order they already
-    /// have. Sections the user has arranged by hand are left as they are.
+    /// have. Tracks a rail order places come first, in its order, whatever
+    /// they have to show. Sections the user has arranged by hand are left
+    /// as they are.
     /// Returns whether anything moved; the caller decides how often to ask
     /// (once a second reads well; every frame would fight the eye).
     pub fn sort_by_activity(&mut self, index: &TrackIndex) -> bool {
@@ -608,6 +650,14 @@ impl TrackStrip {
                 entry.0 += lane.len() as u64;
             }
         }
+        self.sort_sections(Some(&activity))
+    }
+
+    /// Puts the tracks of every section in order: those a rail order
+    /// places first, by their place; then the rest by `activity`, or as
+    /// they are when there is none to go by. A track without a place of
+    /// its own goes with its thread.
+    fn sort_sections(&mut self, activity: Option<&FastMap<ThreadId, (u64, u64)>>) -> bool {
         let sections: Vec<u32> = {
             let mut seen = Vec::new();
             for key in &self.track_order {
@@ -626,22 +676,44 @@ impl TrackStrip {
             let slots: Vec<usize> =
                 (0..self.track_order.len()).filter(|i| self.host_pid(self.track_order[*i]) == pid).collect();
             // Group the section's tracks by owner thread, keeping each
-            // group's own order (thread, then its async block and graphs).
-            let mut groups: Vec<(ThreadId, Vec<TrackKey>)> = Vec::new();
+            // group's own order (thread, then its async block and graphs);
+            // a graph or an async block with a place of its own is a group
+            // of one.
+            struct Group {
+                owner: ThreadId,
+                place: Option<u64>,
+                keys: Vec<TrackKey>,
+            }
+            let mut groups: Vec<Group> = Vec::new();
             for &i in &slots {
                 let key = self.track_order[i];
                 let owner = key.owner();
-                match groups.iter_mut().find(|(t, _)| *t == owner) {
-                    Some((_, keys)) => keys.push(key),
-                    None => groups.push((owner, vec![key])),
+                let place = self.arranged_tracks.get(&key).copied();
+                if place.is_some() && !matches!(key, TrackKey::Thread(_)) {
+                    groups.push(Group { owner, place, keys: vec![key] });
+                    continue;
+                }
+                let own = |g: &&mut Group| g.owner == owner && !(g.keys.len() == 1 && !matches!(g.keys[0], TrackKey::Thread(_)) && g.place.is_some());
+                match groups.iter_mut().find(own) {
+                    Some(group) => {
+                        group.place = group.place.or(place);
+                        group.keys.push(key);
+                    }
+                    None => groups.push(Group { owner, place, keys: vec![key] }),
                 }
             }
-            let score = |t: &ThreadId| activity.get(t).copied().unwrap_or((0, 0));
-            groups.sort_by(|(a, _), (b, _)| {
-                let (sa, sb) = (score(a), score(b));
-                sb.0.cmp(&sa.0).then(sb.1.cmp(&sa.1)).then(a.tid.cmp(&b.tid))
+            let score = |t: &ThreadId| activity.and_then(|a| a.get(t)).copied().unwrap_or((0, 0));
+            // Stable: with no activity to go by, what is not placed stays
+            // in the order it has.
+            groups.sort_by(|a, b| {
+                let placed = a.place.unwrap_or(u64::MAX).cmp(&b.place.unwrap_or(u64::MAX));
+                if activity.is_none() {
+                    return placed;
+                }
+                let (sa, sb) = (score(&a.owner), score(&b.owner));
+                placed.then(sb.0.cmp(&sa.0)).then(sb.1.cmp(&sa.1)).then(a.owner.tid.cmp(&b.owner.tid))
             });
-            let ordered: Vec<TrackKey> = groups.into_iter().flat_map(|(_, keys)| keys).collect();
+            let ordered: Vec<TrackKey> = groups.into_iter().flat_map(|g| g.keys).collect();
             for (i, key) in slots.into_iter().zip(ordered) {
                 if self.track_order[i] != key {
                     self.track_order[i] = key;
@@ -653,6 +725,96 @@ impl TrackStrip {
             self.layout_gen = self.layout_gen.wrapping_add(1);
         }
         moved
+    }
+
+    /// Takes what a rail order asks of this rail (see
+    /// `track_order::Arrangement::resolve`). The sections it orders are
+    /// its own from here on: one arranged by hand before is not kept as it
+    /// was. Returns whether it changed anything.
+    pub fn set_arrangement(
+        &mut self,
+        processes: FastMap<u32, usize>,
+        tracks: FastMap<TrackKey, u64>,
+        hosts: FastMap<TrackKey, u32>,
+    ) -> bool {
+        if processes == self.arranged_processes && tracks == self.arranged_tracks && hosts == self.arranged_hosts {
+            return false;
+        }
+        for (key, host) in &hosts {
+            if self.arranged_hosts.get(key) != Some(host) && self.track_order.contains(key) {
+                self.host.insert(*key, *host);
+            }
+        }
+        self.arranged_processes = processes;
+        self.arranged_tracks = tracks;
+        self.arranged_hosts = hosts;
+        let ordered: FastSet<u32> = self.arranged_processes.keys().copied().collect();
+        self.pinned_sections.retain(|pid| !ordered.contains(pid));
+        self.arrange_pending = true;
+        // The order of the sections is not counted by `layout_gen`.
+        self.laid_out = None;
+        true
+    }
+
+    /// Whether a rail order is in force on this rail.
+    pub fn is_arranged(&self) -> bool {
+        !self.arranged_processes.is_empty() || !self.arranged_tracks.is_empty()
+    }
+
+    /// How many changes of order were made by hand so far.
+    pub fn hand_gen(&self) -> u64 {
+        self.hand_gen
+    }
+
+    /// The rail as it stands: every process in order, with the tracks
+    /// drawn under it top to bottom, shown or not. The flag says whether a
+    /// graph or an async block sits right under its thread, in the order it
+    /// goes there by itself: what a written order need not say.
+    pub fn rail(&self) -> Vec<(u32, Vec<(TrackKey, bool)>)> {
+        self.process_order
+            .iter()
+            .map(|&pid| {
+                let keys: Vec<TrackKey> = self.track_order.iter().copied().filter(|k| self.host_pid(*k) == pid).collect();
+                let mut follows = vec![false; keys.len()];
+                let mut i = 0;
+                while i < keys.len() {
+                    let TrackKey::Thread(t) = keys[i] else {
+                        i += 1;
+                        continue;
+                    };
+                    // Everything of the thread that is in this section,
+                    // against what comes right after the thread.
+                    let here = keys.iter().filter(|k| k.owner() == t && **k != keys[i]).count();
+                    let wanted: Vec<TrackKey> =
+                        self.default_parts(t).into_iter().filter(|k| self.host_pid(*k) == pid).collect();
+                    let after = &keys[i + 1..(i + 1 + here).min(keys.len())];
+                    if here > 0 && after == wanted.as_slice() {
+                        for flag in &mut follows[i + 1..i + 1 + here] {
+                            *flag = true;
+                        }
+                    }
+                    i += 1 + if after == wanted.as_slice() { here } else { 0 };
+                }
+                (pid, keys.into_iter().zip(follows).collect())
+            })
+            .collect()
+    }
+
+    /// A thread's async block and graphs, in the order they join the rail.
+    fn default_parts(&self, t: ThreadId) -> Vec<TrackKey> {
+        let leaves = self.catalogue.leaves_of(t);
+        let mut parts = Vec::new();
+        if leaves.iter().any(|k| k.kind == kind::API_TRACK) {
+            parts.push(TrackKey::Async(t));
+        }
+        parts.extend(leaves.iter().filter(|k| k.kind == kind::VALUE).map(|k| TrackKey::Value(*k)));
+        parts
+    }
+
+    /// Whether `pid` is one of the rows the rail keeps last and folded: the
+    /// service's and the viewer's own.
+    pub fn is_auto_process(&self, pid: u32) -> bool {
+        self.process_tier.get(&pid).copied() == Some(TIER_AUTO)
     }
 
     pub fn toggle(&mut self, id: RowId) {
@@ -805,6 +967,7 @@ impl TrackStrip {
     /// Puts a moved track back under its own process, after its thread's
     /// other tracks so a graph lands under its thread again.
     pub fn send_home(&mut self, key: TrackKey) {
+        self.hand_gen = self.hand_gen.wrapping_add(1);
         self.host.remove(&key);
         let Some(cur) = self.track_order.iter().position(|k| *k == key) else {
             return;
@@ -829,6 +992,7 @@ impl TrackStrip {
     /// keeps its place in the list and comes back where it was; a track
     /// arriving from another section takes a new position after them.
     pub fn place(&mut self, key: TrackKey, pid: u32, slot: usize) {
+        self.hand_gen = self.hand_gen.wrapping_add(1);
         let was_here = self.host_pid(key) == pid;
         self.pinned_sections.insert(self.host_pid(key));
         self.pinned_sections.insert(pid);
@@ -1374,8 +1538,24 @@ impl TrackStrip {
         let Some(cur) = same.iter().position(|p| *p == pid) else {
             return;
         };
+        let dest = dest.min(same.len() - 1);
+        if dest == cur {
+            return;
+        }
+        self.hand_gen = self.hand_gen.wrapping_add(1);
+        // A rail order placed these processes: from here the hand does,
+        // starting from the order they are in. Whoever keeps the order as
+        // text writes the new one, which places them again.
+        if self.process_order.iter().any(|p| MachineId::from_pid(*p) == machine && self.arranged_processes.contains_key(p)) {
+            let on_machine: Vec<u32> =
+                self.process_order.iter().copied().filter(|p| MachineId::from_pid(*p) == machine).collect();
+            for (i, p) in on_machine.iter().enumerate() {
+                self.process_sort.insert(*p, i as i32);
+                self.arranged_processes.remove(p);
+            }
+            self.hand_ordered.insert(machine);
+        }
         same.remove(cur);
-        let dest = dest.min(same.len());
         same.insert(dest, pid);
         for (i, p) in same.iter().enumerate() {
             self.process_sort.insert(*p, i as i32);
@@ -1672,7 +1852,7 @@ fn machine_rank(machine_sort: &HashMap<MachineId, i32>, m: MachineId) -> i64 {
 /// file, its tier and place in the tier, its own order and pid. The health
 /// track takes the key of the process it follows with the last field set,
 /// which is what puts it right after that process.
-type ProcessKey = (i64, usize, (u8, i64), i32, u32, bool);
+type ProcessKey = (i64, usize, usize, (u8, i64), i32, u32, bool);
 
 /// The tier a process sorts into: the target, the health track (see the
 /// tiers), everything instrumented, then the service and the viewer's own
@@ -1979,6 +2159,233 @@ mod tests {
         assert_ne!(manual[0], 1, "the drag moved the top thread down");
         assert!(!strip.sort_by_activity(&idx), "a hand-arranged section is not re-sorted");
         assert_eq!(strip.thread_order().iter().map(|t| t.tid).collect::<Vec<_>>(), manual);
+    }
+
+    /// What a rail order asks, written as the places it gives.
+    fn asked(tracks: &[(TrackKey, u64)]) -> FastMap<TrackKey, u64> {
+        tracks.iter().copied().collect()
+    }
+
+    fn th(pid: u32, tid: u32) -> TrackKey {
+        TrackKey::Thread(ThreadId { pid, tid })
+    }
+
+    #[test]
+    fn a_rail_order_places_its_tracks_first_and_the_rest_follow_the_work() {
+        let mut idx = TrackIndex::default();
+        // Arrival order 1, 2, 3, 4; thread 3 is the busiest, then 1.
+        for tid in 1..=4u32 {
+            idx.insert(scope(7, tid, tid));
+        }
+        for i in 0..50u64 {
+            idx.insert(LiveEvent { start_ns: 100 + i * 20, ..scope(7, 3, 3) });
+        }
+        for i in 0..10u64 {
+            idx.insert(LiveEvent { start_ns: 100 + i * 20, ..scope(7, 1, 1) });
+        }
+        let mut strip = TrackStrip::default();
+        strip.sync(&idx, None);
+        let tids = |strip: &TrackStrip| strip.thread_order().iter().map(|t| t.tid).collect::<Vec<_>>();
+        assert_eq!(tids(&strip), [1, 2, 3, 4]);
+        // The order names 4 and then 2: they lead at once, in that order,
+        // and what it does not name stays as it was behind them.
+        assert!(strip.set_arrangement(FastMap::default(), asked(&[(th(7, 4), 1 << 32), (th(7, 2), 2 << 32)]), FastMap::default()));
+        assert!(strip.is_arranged());
+        strip.sync(&idx, None);
+        assert_eq!(tids(&strip), [4, 2, 1, 3]);
+        // The sort by work orders the rest and leaves the named ones.
+        strip.sort_by_activity(&idx);
+        assert_eq!(tids(&strip), [4, 2, 3, 1]);
+        // A named thread that turns up later goes to its place as it
+        // arrives, not at the next sort.
+        assert!(strip.set_arrangement(
+            FastMap::default(),
+            asked(&[(th(7, 9), 0), (th(7, 4), 1 << 32), (th(7, 2), 2 << 32)]),
+            FastMap::default()
+        ));
+        strip.sync(&idx, None);
+        idx.insert(scope(7, 9, 9));
+        idx.insert(scope(7, 8, 8));
+        strip.sync(&idx, None);
+        assert_eq!(tids(&strip), [9, 4, 2, 3, 1, 8]);
+        // The same order again changes nothing; none at all lets go.
+        assert!(!strip.set_arrangement(
+            FastMap::default(),
+            asked(&[(th(7, 9), 0), (th(7, 4), 1 << 32), (th(7, 2), 2 << 32)]),
+            FastMap::default()
+        ));
+        assert!(strip.set_arrangement(FastMap::default(), FastMap::default(), FastMap::default()));
+        assert!(!strip.is_arranged());
+        strip.sort_by_activity(&idx);
+        assert_eq!(tids(&strip), [3, 1, 2, 4, 8, 9]);
+    }
+
+    #[test]
+    fn tracks_of_one_place_are_ordered_by_the_work_among_themselves() {
+        // Two threads of one name on one line cannot be told apart.
+        let mut idx = TrackIndex::default();
+        for tid in 1..=3u32 {
+            idx.insert(scope(7, tid, tid));
+        }
+        for i in 0..20u64 {
+            idx.insert(LiveEvent { start_ns: 100 + i * 20, ..scope(7, 3, 3) });
+        }
+        let mut strip = TrackStrip::default();
+        strip.set_arrangement(FastMap::default(), asked(&[(th(7, 2), 5), (th(7, 3), 5)]), FastMap::default());
+        strip.sync(&idx, None);
+        let tids = |strip: &TrackStrip| strip.thread_order().iter().map(|t| t.tid).collect::<Vec<_>>();
+        assert_eq!(tids(&strip), [2, 3, 1], "as they arrived until the work says");
+        strip.sort_by_activity(&idx);
+        assert_eq!(tids(&strip), [3, 2, 1]);
+    }
+
+    #[test]
+    fn graphs_that_arrive_one_by_one_end_in_the_order_they_have_together() {
+        let graph = |name: u32| LiveEvent::from_value(5, 7, 1, name, 1.0);
+        let mut together = TrackIndex::default();
+        together.insert(scope(7, 1, 1));
+        for name in [40, 41, 42] {
+            together.insert(graph(name));
+        }
+        let mut all_at_once = TrackStrip::default();
+        all_at_once.sync(&together, None);
+        // The last one first, then the first, then the middle one, a
+        // layout apart each.
+        let mut idx = TrackIndex::default();
+        idx.insert(scope(7, 1, 1));
+        idx.insert(scope(7, 2, 2));
+        let mut strip = TrackStrip::default();
+        strip.sync(&idx, None);
+        for name in [42, 40, 41] {
+            idx.insert(graph(name));
+            strip.sync(&idx, None);
+        }
+        let of_thread = |strip: &TrackStrip| strip.track_order.iter().copied().filter(|k| k.owner().tid == 1).collect::<Vec<_>>();
+        assert_eq!(of_thread(&strip), of_thread(&all_at_once));
+        // And they are under their thread, not after the next one.
+        assert_eq!(strip.track_order.last(), Some(&th(7, 2)));
+        assert!(strip.rail()[0].1.iter().filter(|(k, _)| matches!(k, TrackKey::Value(_))).all(|(_, follows)| *follows));
+    }
+
+    #[test]
+    fn a_graph_follows_its_thread_unless_the_order_places_it() {
+        let mut idx = TrackIndex::default();
+        idx.insert(scope(7, 1, 1));
+        idx.insert(LiveEvent::from_value(5, 7, 1, 40, 1.0));
+        idx.insert(LiveEvent::from_value(5, 7, 1, 41, 1.0));
+        idx.insert(scope(7, 2, 2));
+        let mut strip = TrackStrip::default();
+        strip.sync(&idx, None);
+        let graphs: Vec<TrackKey> = strip.track_order.iter().copied().filter(|k| matches!(k, TrackKey::Value(_))).collect();
+        assert_eq!(strip.track_order, [th(7, 1), graphs[0], graphs[1], th(7, 2)]);
+        // As it stands every graph is under its thread.
+        let rail = strip.rail();
+        assert_eq!(rail, [(7, vec![(th(7, 1), false), (graphs[0], true), (graphs[1], true), (th(7, 2), false)])]);
+        // Thread 2 first: thread 1 goes after it, with both its graphs.
+        strip.set_arrangement(FastMap::default(), asked(&[(th(7, 2), 1), (th(7, 1), 2)]), FastMap::default());
+        strip.sync(&idx, None);
+        assert_eq!(strip.track_order, [th(7, 2), th(7, 1), graphs[0], graphs[1]]);
+        // One graph has a line of its own, above everything.
+        strip.set_arrangement(FastMap::default(), asked(&[(graphs[1], 0), (th(7, 2), 1), (th(7, 1), 2)]), FastMap::default());
+        strip.sync(&idx, None);
+        assert_eq!(strip.track_order, [graphs[1], th(7, 2), th(7, 1), graphs[0]]);
+        // It is not under its thread any more, and the rail says so: the
+        // other one is not either, since not all of them are.
+        let rail = strip.rail();
+        assert_eq!(rail[0].1, [(graphs[1], false), (th(7, 2), false), (th(7, 1), false), (graphs[0], false)]);
+    }
+
+    #[test]
+    fn a_rail_order_places_processes_ahead_of_the_tiers_and_draws_a_track_where_it_says() {
+        use perfr_live_event::health;
+        let (idx, mut strip) = health_rail(Some(30), &[health::PID, 11, 30, 40]);
+        strip.sync(&idx, None);
+        assert_eq!(strip.process_order, [30, health::PID, 11, 40]);
+        // The service's rows first, the target last, the health track
+        // where the order has it: nothing of the tiers is left.
+        let places: FastMap<u32, usize> = [(40, 0), (health::PID, 1), (11, 2), (30, 3)].into_iter().collect();
+        let hosts: FastMap<TrackKey, u32> = [(th(11, 1), 30)].into_iter().collect();
+        assert!(strip.set_arrangement(places.clone(), FastMap::default(), hosts.clone()));
+        strip.sync(&idx, None);
+        assert_eq!(strip.process_order, [40, health::PID, 11, 30]);
+        assert_eq!(strip.host_pid(th(11, 1)), 30);
+        assert!(strip.is_guest(th(11, 1)));
+        assert_eq!(strip.rail().iter().find(|(pid, _)| *pid == 30).unwrap().1, [(th(30, 1), false), (th(11, 1), false)]);
+        // Sent home by hand, it stays home: the order drew it there once.
+        let before = strip.hand_gen();
+        strip.send_home(th(11, 1));
+        assert_ne!(strip.hand_gen(), before);
+        strip.sync(&idx, None);
+        assert!(!strip.is_guest(th(11, 1)));
+        // A process the order does not name comes after those it does.
+        let mut more = idx;
+        more.insert(scope(12, 1, 1));
+        strip.sync(&more, None);
+        assert_eq!(strip.process_order, [40, health::PID, 11, 30, 12]);
+    }
+
+    #[test]
+    fn a_track_the_order_draws_elsewhere_goes_there_when_it_arrives() {
+        let mut idx = TrackIndex::default();
+        idx.insert(scope(30, 1, 1));
+        let mut strip = TrackStrip::default();
+        strip.sync(&idx, None);
+        let hosts: FastMap<TrackKey, u32> = [(th(11, 1), 30)].into_iter().collect();
+        strip.set_arrangement(FastMap::default(), asked(&[(th(11, 1), 0), (th(30, 1), 1)]), hosts);
+        strip.sync(&idx, None);
+        idx.insert(scope(11, 1, 1));
+        strip.sync(&idx, None);
+        assert_eq!(strip.host_pid(th(11, 1)), 30);
+        assert_eq!(strip.rail().iter().find(|(pid, _)| *pid == 30).unwrap().1, [(th(11, 1), false), (th(30, 1), false)]);
+    }
+
+    #[test]
+    fn a_header_dragged_over_a_rail_order_moves_and_counts_as_a_change_by_hand() {
+        let mut idx = TrackIndex::default();
+        for pid in [10, 11, 12] {
+            idx.insert(scope(pid, 1, 1));
+        }
+        let mut strip = TrackStrip::default();
+        let places: FastMap<u32, usize> = [(12, 0), (10, 1), (11, 2)].into_iter().collect();
+        strip.set_arrangement(places, FastMap::default(), FastMap::default());
+        strip.sync(&idx, None);
+        assert_eq!(strip.process_order, [12, 10, 11]);
+        let before = strip.hand_gen();
+        // Dropped where it already is: nothing happened.
+        strip.reorder_process(12, 0);
+        assert_eq!(strip.hand_gen(), before);
+        strip.sync(&idx, None);
+        assert_eq!(strip.process_order, [12, 10, 11]);
+        // Moved: the order it had is where the drag starts from, and the
+        // new one holds though the rail order said otherwise.
+        strip.reorder_process(11, 0);
+        assert_ne!(strip.hand_gen(), before);
+        assert_eq!(strip.process_order, [11, 12, 10]);
+        strip.sync(&idx, None);
+        assert_eq!(strip.process_order, [11, 12, 10]);
+    }
+
+    #[test]
+    fn a_section_arranged_by_hand_is_the_orders_again_once_the_order_is_set() {
+        let mut idx = TrackIndex::default();
+        for tid in 1..=3u32 {
+            idx.insert(scope(7, tid, tid));
+        }
+        let mut strip = TrackStrip::default();
+        strip.sync(&idx, None);
+        let before = strip.hand_gen();
+        strip.place(th(7, 3), 7, 0);
+        assert_ne!(strip.hand_gen(), before);
+        let tids = |strip: &TrackStrip| strip.thread_order().iter().map(|t| t.tid).collect::<Vec<_>>();
+        assert_eq!(tids(&strip), [3, 1, 2]);
+        // An order for another process leaves the hand's section alone.
+        strip.set_arrangement([(8u32, 0usize)].into_iter().collect(), asked(&[(th(7, 2), 0)]), FastMap::default());
+        strip.sync(&idx, None);
+        assert_eq!(tids(&strip), [3, 1, 2]);
+        // One that orders this process takes the section over.
+        strip.set_arrangement([(7u32, 0usize)].into_iter().collect(), asked(&[(th(7, 2), 0)]), FastMap::default());
+        strip.sync(&idx, None);
+        assert_eq!(tids(&strip), [2, 3, 1]);
     }
 
     #[test]

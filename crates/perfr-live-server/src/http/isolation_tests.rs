@@ -608,3 +608,74 @@ async fn logs_are_listed_by_window_and_grouped_by_the_scope_they_were_logged_in(
     assert_eq!(get("scope=load")["logs"][0]["count"], 1);
     assert_eq!(get("scope=no-such-scope")["total"], 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_viewer_gives_the_capture_its_track_order_and_an_export_waits_for_the_one_it_names() {
+    let svc = test_service();
+    let base = spawn_router(svc.clone()).await;
+    // The body on the standard input: one past the limit is longer than an
+    // argument may be.
+    let put = |text: &str| {
+        use std::io::Write;
+        let mut curl = std::process::Command::new("curl")
+            .args(["-si", "--max-time", "5", "-X", "PUT", "-H", "Content-Type: application/json", "-H", "Expect:"])
+            .args(["--data-binary", "@-"])
+            .arg(format!("{base}/api/capture/track-order"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("curl");
+        let body = serde_json::json!({ "text": text }).to_string();
+        let mut stdin = curl.stdin.take().unwrap();
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(body.as_bytes());
+        });
+        let out = curl.wait_with_output().expect("curl");
+        writer.join().unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    let got = put("[@7]\n@70\n");
+    assert!(got.to_ascii_lowercase().contains("200 ok"), "{got}");
+    assert_eq!(svc.track_order(), "[@7]\n@70\n");
+    let read = String::from_utf8_lossy(&curl_si(&format!("{base}/api/capture/track-order")).stdout).to_string();
+    assert!(read.contains(r#""text":"[@7]\n@70\n""#), "{read}");
+    assert!(put(&"x".repeat(300 * 1024)).contains("413"), "an order past the limit is refused");
+    assert_eq!(svc.track_order(), "[@7]\n@70\n");
+
+    // The stream export carries it.
+    let stream = std::process::Command::new("curl")
+        .args(["-s", "--max-time", "5"])
+        .arg(format!("{base}/api/capture/export?format=stream"))
+        .output()
+        .expect("curl")
+        .stdout;
+    let frames = perfr_live_protocol::decode_all(&stream).unwrap();
+    assert!(frames.contains(&perfr_live_protocol::LiveFrame::TrackOrder { text: "[@7]\n@70\n".into() }));
+
+    // An export that names an order the service does not hold yet waits
+    // for it: the page sends the order and asks for the file at once.
+    let next = "[@7]\n@71\n@70\n";
+    let tag = perfr_live_protocol::track_order_tag(next);
+    let late = svc.clone();
+    let sender = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        late.set_track_order(next);
+    });
+    let began = std::time::Instant::now();
+    let stream = std::process::Command::new("curl")
+        .args(["-s", "--max-time", "5"])
+        .arg(format!("{base}/api/capture/export?format=stream&order={tag:x}"))
+        .output()
+        .expect("curl")
+        .stdout;
+    sender.join().unwrap();
+    assert!(began.elapsed() >= std::time::Duration::from_millis(250), "{:?}", began.elapsed());
+    let frames = perfr_live_protocol::decode_all(&stream).unwrap();
+    assert!(frames.contains(&perfr_live_protocol::LiveFrame::TrackOrder { text: next.into() }), "the order it named");
+
+    // One that never comes does not hold the download for good.
+    let began = std::time::Instant::now();
+    let out = curl_si(&format!("{base}/api/capture/export?format=stream&order=1234"));
+    assert!(String::from_utf8_lossy(&out.stdout).to_ascii_lowercase().contains("200 ok"));
+    assert!(began.elapsed() < std::time::Duration::from_secs(4), "{:?}", began.elapsed());
+}

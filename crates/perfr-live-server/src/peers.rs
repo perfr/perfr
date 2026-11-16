@@ -719,10 +719,13 @@ impl Ingest {
                 self.events += out.len() as u64;
                 svc.push_events(&out);
             }
+            // A track order is in the pids of the machine it was made on,
+            // and is of that machine's capture alone: not this one's.
             LiveFrame::Hello { .. }
             | LiveFrame::CaptureStarted { .. }
             | LiveFrame::CaptureFinished
-            | LiveFrame::Status { .. } => {}
+            | LiveFrame::Status { .. }
+            | LiveFrame::TrackOrder { .. } => {}
         }
     }
 

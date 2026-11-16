@@ -22,15 +22,15 @@ Settings, **COLLECT**:
 | **States** | Thread state slices | Running, Sleeping, and the other states |
 | **API** | Manual perfr.h API scopes | Scopes from `perfr.h`, Rust and Python |
 | **Sample** | Callstack sampling | A stack sample per period |
-| **Health** | Machine health | The machine's CPU, memory, pressure, disks, network and GPU, twice a second |
+| **Health** | Node Health | The machine's CPU, memory, pressure, disks, network and GPU, twice a second |
 
 The field beside Sample is a period in milliseconds (`ms`). It starts at `1.0`. The viewer sends it as `samples_per_second`. The service on main does not read that field: a Linux or Windows capture samples at a fixed 1 kHz.
 
 > The COLLECT switches are sent with the capture start. On this service a Linux capture always samples, always opens the scheduler and thread-state rings when the kernel allows it, and always reads manual scopes; a Windows capture does the same through the kernel logger when the service is elevated. Turning a switch off does not drop that stream yet.
 
-## Machine health
+## Node Health
 
-A stall in the target is not always the target's doing: the machine may have been reclaiming memory, a disk may have been saturated, another process may have had every core. With **Health** on (the default), a Linux service samples the machine every 500 ms and draws the result as a **machine health** track right under the target, so the machine's state is under the same cursor as the stall. The switch is honoured: off, nothing is read. The body field is `machine_health`.
+A stall in the target is not always the target's doing: the machine may have been reclaiming memory, a disk may have been saturated, another process may have had every core. With **Health** on (the default), a Linux service samples the machine every 500 ms and draws the result as a **Node Health** track right under the target, so the machine's state is under the same cursor as the stall. A capture opened from a file names no target: there the track is under the process that leads the rail. The switch is honoured: off, nothing is read. The body field is `machine_health`.
 
 | Group | Graph | What it is |
 |---|---|---|

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Machine health: what the whole machine was doing while the capture ran.
+//! Node Health: what the whole machine was doing while the capture ran.
 //!
 //! A stall in the target is not always the target's doing. The machine may
 //! have been out of memory and reclaiming, a disk may have been saturated,

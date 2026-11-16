@@ -442,7 +442,7 @@ pub fn lane_height(key: LaneKey) -> f32 {
         kind::LOG => 8.0,
         kind::DROP => 6.0,
         kind::SCHEDULING_SLICE => 12.0,
-        // The machine health track is a dozen graphs right under the
+        // The health track is a dozen graphs right under the
         // target: shorter, so the track is context and not the whole rail.
         kind::VALUE if perfr_live_event::health::is_health_pid(key.pid) => 30.0,
         kind::VALUE => 38.0,

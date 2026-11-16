@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The machine health track: what the whole machine was doing while the
+//! The Node Health track: what the whole machine was doing while the
 //! capture ran, so a stall on the timeline can be read against memory
 //! pressure, a saturated disk or a busy GPU.
 //!
@@ -24,7 +24,11 @@ pub const PID: u32 = 0x00FF_0001;
 const _: () = assert!(PID >= 1 << 22 && PID < 1 << crate::dev::MACHINE_SHIFT);
 
 /// What the process is called on the rail.
-pub const PROCESS_NAME: &str = "machine health";
+pub const PROCESS_NAME: &str = "Node Health";
+
+/// What it was called through perfr 0.1.4. Captures made then carry this
+/// name, and a story or a track order file may ask for the track by it.
+pub const FORMER_PROCESS_NAME: &str = "machine health";
 
 /// Whether `pid` is the health process, of this machine or a linked one.
 pub fn is_health_pid(pid: u32) -> bool {

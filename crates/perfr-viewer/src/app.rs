@@ -175,6 +175,18 @@ fn adopt_capture_target(
     (selected, Some(target))
 }
 
+/// The process the rail treats as the target: the first of `named`, in
+/// their order of say, that has rows, and the first named at all while
+/// none has (a capture that has just started).
+fn rail_target(named: [Option<u32>; 3], has_rows: impl Fn(u32) -> bool) -> Option<u32> {
+    let mut named = named.into_iter().flatten();
+    let first = named.next()?;
+    if has_rows(first) {
+        return Some(first);
+    }
+    named.find(|pid| has_rows(*pid)).or(Some(first))
+}
+
 fn sort_processes_by_cpu(processes: &mut [ProcessJson]) {
     processes.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(a.pid.cmp(&b.pid)));
 }
@@ -1357,7 +1369,7 @@ pub struct PerfrLiveApp {
     opt_csw: bool,
     opt_thread_states: bool,
     opt_sampling: bool,
-    /// The machine health track: the machine's CPU, memory, pressure, disks,
+    /// The Node Health track: the machine's CPU, memory, pressure, disks,
     /// network and GPU, sampled by the service twice a second.
     opt_health: bool,
     sample_period_ms: String,
@@ -2705,6 +2717,11 @@ impl PerfrLiveApp {
         if pid == VIEWER_PID {
             return perfr_live_event::dev::VIEWER_NAME.to_string();
         }
+        // The health track is the viewer's to name too: a capture made
+        // before it was renamed carries the name it had then.
+        if perfr_live_event::health::is_health_pid(pid) {
+            return perfr_live_event::health::PROCESS_NAME.to_string();
+        }
         self.processes
             .iter()
             .find(|p| p.pid == pid)
@@ -2717,12 +2734,20 @@ impl PerfrLiveApp {
                     .map(|p| p.name.as_str())
                     .filter(|s| !s.is_empty())
             })
-            .unwrap_or(if perfr_live_event::health::is_health_pid(pid) {
-                perfr_live_event::health::PROCESS_NAME
-            } else {
-                "process"
-            })
+            .unwrap_or("process")
             .to_string()
+    }
+
+    /// The names a story or a track order file can ask for a process by:
+    /// the one on the rail and, for the health track, the one it had
+    /// before, so what was written against that name still finds it.
+    fn process_asked_names(&self, pid: u32) -> String {
+        let name = self.process_display_name(pid);
+        if perfr_live_event::health::is_health_pid(pid) {
+            format!("{name}\n{}", perfr_live_event::health::FORMER_PROCESS_NAME)
+        } else {
+            name
+        }
     }
 
     fn thread_display_name(&self, pid: u32, tid: u32) -> String {
@@ -5806,7 +5831,7 @@ impl PerfrLiveApp {
             }
             if pill(ui, "Health", self.opt_health)
                 .on_hover_text(
-                    "Machine health: the whole machine's CPU, memory, pressure, disks, network and GPU, \
+                    "Node Health: the whole machine's CPU, memory, pressure, disks, network and GPU, \
                      sampled twice a second into a track under the target (Linux services)",
                 )
                 .clicked()
@@ -6471,8 +6496,21 @@ impl PerfrLiveApp {
                 // and arrive open.
                 crate::tracks::OrderHints { target: Some(VIEWER_PID), service: None }
             } else {
+                // The target is the process picked here, else the one the
+                // service says the capture is of, else the one the capture's
+                // start frame names. One with nothing on the rail gives way
+                // to the next: the process picked may not be the one the
+                // capture on screen is of. A saved capture has no start
+                // frame, so a file names no target.
+                self.tracks.ensure_catalogue(&self.index);
+                let named = [
+                    self.selected_pid.filter(|p| *p > 0),
+                    (self.status.target_pid > 0).then_some(self.status.target_pid),
+                    self.adopted_target_pid,
+                ];
+                let target = rail_target(named, |pid| self.tracks.has_lanes(pid));
                 crate::tracks::OrderHints {
-                    target: self.selected_pid.filter(|p| *p > 0).or((self.status.target_pid > 0).then_some(self.status.target_pid)),
+                    target,
                     service: (self.status.service_pid > 0).then_some(self.status.service_pid),
                 }
             };
@@ -7383,7 +7421,7 @@ impl PerfrLiveApp {
                 ui.painter()
                     .rect_filled(chip_r, theme::TRACK_RADIUS, c32(chip));
                 let tname = self.thread_display_name(th.pid, th.tid);
-                // A group of the machine health track is not a thread:
+                // A group of the Node Health track is not a thread:
                 // its name alone, without a number that means nothing.
                 let health_group = perfr_live_event::health::is_health_pid(th.pid)
                     .then(|| perfr_live_event::health::group_name(th.tid))
@@ -10542,7 +10580,7 @@ impl PerfrLiveApp {
         pids.dedup();
         let mut priority: crate::tracks::FastMap<u32, usize> = Default::default();
         for pid in pids {
-            let display = self.process_display_name(pid);
+            let asked = self.process_asked_names(pid);
             let path = self
                 .processes
                 .iter()
@@ -10550,8 +10588,8 @@ impl PerfrLiveApp {
                 .map(|p| p.path.clone())
                 .unwrap_or_default();
             let base = path.rsplit('/').next().unwrap_or("").to_string();
-            let names = [display.as_str(), base.as_str(), path.as_str()];
-            if let Some(rank) = self.track_order.rules.rank(names.into_iter().filter(|n| !n.is_empty())) {
+            let names = asked.lines().chain([base.as_str(), path.as_str()]);
+            if let Some(rank) = self.track_order.rules.rank(names.filter(|n| !n.is_empty())) {
                 priority.insert(pid, rank);
             }
         }
@@ -11859,7 +11897,7 @@ impl PerfrLiveApp {
                 _ => {}
             }
         }
-        let processes = pids.into_iter().map(|pid| (pid, self.process_display_name(pid))).collect();
+        let processes = pids.into_iter().map(|pid| (pid, self.process_asked_names(pid))).collect();
         (threads, processes)
     }
 
@@ -12105,7 +12143,7 @@ impl PerfrLiveApp {
             self.t0,
             self.t1,
             |pid, tid| self.thread_display_name(pid, tid),
-            |pid| self.process_display_name(pid),
+            |pid| self.process_asked_names(pid),
         );
     }
 }
@@ -13638,7 +13676,7 @@ fn value_extent(samples: &[(f32, f32)]) -> (f32, f32) {
 }
 
 /// The values at the bottom and the top of a graph. A graph spans what is
-/// in view, so a small change fills the lane. A machine health lane is the
+/// in view, so a small change fills the lane. A Node Health lane is the
 /// exception: its axis starts at zero and has a least top of its own
 /// (`perfr_live_event::health`), so a CPU at 3 percent draws near the
 /// floor and the lanes of the track compare at a glance.
@@ -15987,6 +16025,21 @@ mod tests {
         assert!(accent);
         assert!(!auto.contains("no functions hooked"));
         assert!(auto.contains("10 auto-profile"));
+    }
+
+    #[test]
+    fn the_rail_target_is_the_first_process_named_that_has_rows() {
+        let rows = |pid: u32| pid == 7 || pid == 9;
+        assert_eq!(rail_target([None, None, None], rows), None);
+        assert_eq!(rail_target([Some(7), Some(9), Some(9)], rows), Some(7));
+        // The process picked is not on the rail: the capture's own target.
+        assert_eq!(rail_target([Some(5), Some(9), Some(7)], rows), Some(9));
+        assert_eq!(rail_target([Some(5), None, Some(7)], rows), Some(7));
+        // A file: only the capture says.
+        assert_eq!(rail_target([None, None, Some(7)], rows), Some(7));
+        // Nothing has rows yet: what was named first, as before.
+        assert_eq!(rail_target([Some(5), Some(6), None], rows), Some(5));
+        assert_eq!(rail_target([None, Some(6), Some(4)], rows), Some(6));
     }
 
     #[test]

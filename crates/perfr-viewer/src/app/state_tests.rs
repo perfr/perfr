@@ -3312,8 +3312,83 @@ fn a_page_holds_no_more_events_than_it_has_room_for_whatever_the_ring_holds() {
     assert_eq!(page.app.index.event_count(), 1_501);
 }
 
+/// A capture with the health track and two processes, the health track's
+/// rows first. `target` is the pid the capture says it is of, 0 for none.
+fn health_capture(target: u32, health_name: &str) -> Vec<LiveFrame> {
+    use perfr_live_event::health;
+    let lane = health::lane_by_id(health::lane::CPU).unwrap();
+    let mut events = vec![LiveEvent::from_value(1_000_000_000, health::PID, lane.group, lane.id, 1.0)];
+    events.extend((0..64u64).map(|i| scope(100, 1, 1_000_000_000 + i * 1_000_000, 500_000, 7)));
+    events.push(scope(200, 2, 1_000_000_000, 500_000, 7));
+    vec![
+        hello(),
+        LiveFrame::CaptureStarted { pid: target, start_ns: 1_000_000_000 },
+        LiveFrame::ProcessName { pid: health::PID, name: health_name.into() },
+        LiveFrame::ProcessName { pid: 100, name: "game".into() },
+        LiveFrame::ProcessName { pid: 200, name: "helper".into() },
+        LiveFrame::InternedString { id: lane.id, text: lane.name.into() },
+        LiveFrame::InternedString { id: 7, text: "work".into() },
+        LiveFrame::EventBatch { events },
+    ]
+}
+
+/// The process headers on the rail, top to bottom.
+fn process_headers(page: &Page) -> Vec<u32> {
+    use perfr_live_event::health;
+    let mut tops: Vec<(f32, u32)> = [health::PID, 100, 200]
+        .into_iter()
+        .filter_map(|pid| page.rect_of(&format!("row:process:{pid}")).map(|r| (r.top(), pid)))
+        .collect();
+    tops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    tops.into_iter().map(|(_, pid)| pid).collect()
+}
+
 #[test]
-fn the_triangle_of_a_machine_health_group_folds_its_graphs() {
+fn the_health_track_is_under_the_target_and_under_the_leading_process_of_a_file() {
+    use perfr_live_event::health;
+    // The quieter process is the target: the health track is under it.
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(true));
+        feed(app, &health_capture(200, health::PROCESS_NAME));
+    });
+    page.frames(3);
+    assert_eq!(process_headers(&page), [200, health::PID, 100]);
+    // A page with no service behind it, reading a stream that has its
+    // start frame: the target that frame names is all there is to go by.
+    let mut page = Page::with(|app| feed(app, &health_capture(200, health::PROCESS_NAME)));
+    page.frames(3);
+    assert_eq!(process_headers(&page), [200, health::PID, 100]);
+    // A capture that names no target: under the process that leads the
+    // rail, not above it.
+    let mut page = Page::with(|app| feed(app, &health_capture(0, health::PROCESS_NAME)));
+    page.frames(3);
+    assert_eq!(process_headers(&page), [100, health::PID, 200]);
+    // The process picked here is not in the capture on screen: the
+    // capture's own target leads, with the health track under it.
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(true));
+        app.selected_pid = Some(4242);
+        feed(app, &health_capture(200, health::PROCESS_NAME));
+    });
+    page.frames(3);
+    assert_eq!(process_headers(&page), [200, health::PID, 100]);
+}
+
+#[test]
+fn a_capture_from_before_the_health_track_was_renamed_shows_the_name_it_has_now() {
+    use perfr_live_event::health;
+    let mut page = Page::with(|app| feed(app, &health_capture(100, health::FORMER_PROCESS_NAME)));
+    page.frames(3);
+    assert_eq!(page.app.process_display_name(health::PID), "Node Health");
+    assert_eq!(page.app.process_display_name(100), "game");
+    // What was written against the old name still finds the track.
+    let asked = page.app.process_asked_names(health::PID);
+    assert_eq!(asked.lines().collect::<Vec<_>>(), ["Node Health", "machine health"]);
+    assert_eq!(page.app.process_asked_names(100), "game");
+}
+
+#[test]
+fn the_triangle_of_a_health_group_folds_its_graphs() {
     use perfr_live_event::health;
     let mut page = Page::with(|app| {
         app.apply_status(service_status(true));

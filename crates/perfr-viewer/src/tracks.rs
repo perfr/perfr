@@ -410,11 +410,12 @@ pub struct OrderHints {
     pub service: Option<u32>,
 }
 
-/// The rail's tiers, top to bottom: the target, the machine health track
-/// (what the machine was doing while the target ran, so it sits where a
-/// stall in the target is read against it), every other process by what it
-/// said, the service and the viewer last. Header drags reorder within a
-/// tier; the tiers themselves do not move.
+/// The rail's tiers, top to bottom: the target, every other process by what
+/// it said, the service and the viewer last. The health track is a tier of
+/// its own so that no header drag moves it; `sync` places it right under
+/// the target, or under the process leading its machine when there is no
+/// target, so it sits where a stall is read against it. Header drags
+/// reorder within a tier; the tiers themselves do not move.
 const TIER_TARGET: u8 = 0;
 const TIER_HEALTH: u8 = 1;
 const TIER_INSTRUMENTED: u8 = 2;
@@ -426,6 +427,12 @@ impl TrackStrip {
         if self.catalogue.gen != Some(index.lane_gen()) {
             self.catalogue = LaneCatalogue::build(index);
         }
+    }
+
+    /// Whether `pid` has anything to show, as of the last
+    /// `ensure_catalogue`.
+    pub fn has_lanes(&self, pid: u32) -> bool {
+        self.catalogue.pids_with_lanes.contains(&pid)
     }
 
     pub fn sync(&mut self, index: &TrackIndex, filter_pid: Option<u32>) {
@@ -478,26 +485,43 @@ impl TrackStrip {
             (tier, bucket)
         };
         let file_rank = |p: u32| self.process_priority.get(&p).copied().unwrap_or(usize::MAX);
-        pids.sort_by_key(|p| {
-            (
-                machine_rank(&self.machine_sort, MachineId::from_pid(*p)),
-                file_rank(*p),
-                rank(*p),
-                self.process_sort.get(p).copied().unwrap_or(0),
-                *p,
-            )
-        });
-        threads.sort_by_key(|t| {
-            (
-                machine_rank(&self.machine_sort, MachineId::from_pid(t.pid)),
-                file_rank(t.pid),
-                rank(t.pid),
-                self.process_sort.get(&t.pid).copied().unwrap_or(0),
-                t.pid,
-                self.thread_sort.get(&(t.pid, t.tid)).copied().unwrap_or(0),
-                t.tid,
-            )
-        });
+        let mut keys: FastMap<u32, ProcessKey> = pids
+            .iter()
+            .map(|&p| {
+                let own = (
+                    machine_rank(&self.machine_sort, MachineId::from_pid(p)),
+                    file_rank(p),
+                    rank(p),
+                    self.process_sort.get(&p).copied().unwrap_or(0),
+                    p,
+                    false,
+                );
+                (p, own)
+            })
+            .collect();
+        // The health track goes right under the process it is read against,
+        // wherever that one is: the target, or the process leading its
+        // machine when the page knows no target (a capture opened from a
+        // file) or the target has no rows. A line of the order file that
+        // names the health track still places it.
+        for &p in &pids {
+            if !perfr_live_event::health::is_health_pid(p) || self.process_priority.contains_key(&p) {
+                continue;
+            }
+            let machine = MachineId::from_pid(p);
+            let lead = hints.target.filter(|t| MachineId::from_pid(*t) == machine && keys.contains_key(t)).or_else(|| {
+                pids.iter()
+                    .copied()
+                    .filter(|q| MachineId::from_pid(*q) == machine && process_tier(*q, hints) == TIER_INSTRUMENTED)
+                    .min_by_key(|q| keys[q])
+            });
+            if let Some(lead) = lead {
+                let (machine_rank, file_rank, rank, sort, pid, _) = keys[&lead];
+                keys.insert(p, (machine_rank, file_rank, rank, sort, pid, true));
+            }
+        }
+        pids.sort_by_key(|p| keys[p]);
+        threads.sort_by_key(|t| (keys[&t.pid], t.pid, self.thread_sort.get(&(t.pid, t.tid)).copied().unwrap_or(0), t.tid));
         self.process_order.retain(|p| pids.contains(p));
         // Processes arrive expanded -- collapsing is a deliberate act, and a
         // collapsed track hides the very thing the viewer is for -- except
@@ -514,15 +538,7 @@ impl TrackStrip {
                 self.collapsed.insert(RowId::Process(p));
             }
         }
-        self.process_order.sort_by_key(|p| {
-            (
-                machine_rank(&self.machine_sort, MachineId::from_pid(*p)),
-                file_rank(*p),
-                rank(*p),
-                self.process_sort.get(p).copied().unwrap_or(0),
-                *p,
-            )
-        });
+        self.process_order.sort_by_key(|p| keys[p]);
         // Tracks: what is still there keeps its order and its host; a new
         // thread joins at the end with its async block and its graphs behind
         // it, and a new graph or async block of a known thread joins right
@@ -969,8 +985,8 @@ impl TrackStrip {
     ///
     /// Folding a thread hides the lanes packed under its row. Its graphs
     /// are tracks of their own and stay, which suits a thread that has
-    /// both. A thread that has only graphs (a group of the machine health
-    /// track, a GPU) would have nothing to fold, and its triangle would
+    /// both. A thread that has only graphs (a group of the health track,
+    /// a GPU) would have nothing to fold, and its triangle would
     /// turn and do nothing: there the fold hides the graphs. One that was
     /// moved under another process is not under that header any more, and
     /// stays.
@@ -1652,9 +1668,15 @@ fn machine_rank(machine_sort: &HashMap<MachineId, i32>, m: MachineId) -> i64 {
         .unwrap_or(1_000 + m.sort_key() as i64)
 }
 
-/// The tier a process sorts into: the target, then the machine health
-/// track, then everything instrumented, then the service and the viewer's
-/// own rows.
+/// Where a process goes on the rail: its machine, its line in the order
+/// file, its tier and place in the tier, its own order and pid. The health
+/// track takes the key of the process it follows with the last field set,
+/// which is what puts it right after that process.
+type ProcessKey = (i64, usize, (u8, i64), i32, u32, bool);
+
+/// The tier a process sorts into: the target, the health track (see the
+/// tiers), everything instrumented, then the service and the viewer's own
+/// rows.
 fn process_tier(pid: u32, hints: OrderHints) -> u8 {
     if hints.target == Some(pid) {
         TIER_TARGET
@@ -2129,8 +2151,68 @@ mod tests {
         assert!(!strip.collapsed(RowId::Process(40)));
     }
 
+    fn health_rail(target: Option<u32>, lanes_of: &[u32]) -> (TrackIndex, TrackStrip) {
+        use perfr_live_event::health;
+        let mut idx = TrackIndex::default();
+        let lane = health::lane_by_id(health::lane::CPU).unwrap();
+        for &pid in lanes_of {
+            if health::is_health_pid(pid) {
+                idx.insert(LiveEvent::from_value(5, pid, lane.group, lane.id, 1.0));
+            } else {
+                idx.insert(scope(pid, 1, 1));
+            }
+        }
+        let strip = TrackStrip { order_hints: OrderHints { target, service: Some(40) }, ..Default::default() };
+        (idx, strip)
+    }
+
     #[test]
-    fn machine_health_sits_right_under_the_target_in_its_own_order() {
+    fn the_health_track_leads_only_when_there_is_no_process_to_read_it_against() {
+        use perfr_live_event::health;
+        // The machine alone: nothing but the service's own rows.
+        let (idx, mut strip) = health_rail(None, &[health::PID, 40]);
+        strip.sync(&idx, None);
+        assert_eq!(strip.process_order, [health::PID, 40]);
+        // The service is the target of a capture of itself.
+        let (idx, mut strip) = health_rail(Some(40), &[health::PID, 40, 11]);
+        strip.sync(&idx, None);
+        assert_eq!(strip.process_order, [40, health::PID, 11]);
+    }
+
+    #[test]
+    fn the_health_track_follows_the_target_past_the_order_file_unless_the_file_names_it() {
+        use perfr_live_event::health;
+        let (idx, mut strip) = health_rail(Some(30), &[health::PID, 11, 30, 50]);
+        // The file puts 50 first and then the target: the health track is
+        // still the next one under the target.
+        strip.process_priority.insert(50, 0);
+        strip.process_priority.insert(30, 1);
+        strip.sync(&idx, None);
+        assert_eq!(strip.process_order, [50, 30, health::PID, 11]);
+        // A file that names the health track has it where it says.
+        strip.process_priority.insert(health::PID, 0);
+        strip.process_priority.insert(50, 1);
+        strip.process_priority.insert(30, 2);
+        strip.sync(&idx, None);
+        assert_eq!(strip.process_order, [health::PID, 50, 30, 11]);
+    }
+
+    #[test]
+    fn each_machine_has_its_health_track_under_its_own_leading_process() {
+        use perfr_live_event::health;
+        let far = |pid: u32| (1 << perfr_live_event::dev::MACHINE_SHIFT) | pid;
+        let (far_health, far_a, far_b) = (far(health::PID), far(21), far(22));
+        // The target is on this machine; the other one has no target.
+        let (mut idx, mut strip) = health_rail(Some(30), &[far_health, far_b, far_a, health::PID, 11, 30]);
+        for i in 0..64 {
+            idx.insert(scope(far_b, 2, i + 2));
+        }
+        strip.sync(&idx, None);
+        assert_eq!(strip.process_order, [30, health::PID, 11, far_b, far_health, far_a]);
+    }
+
+    #[test]
+    fn the_health_track_sits_right_under_the_target_in_its_own_order() {
         use perfr_live_event::health;
         let mut idx = TrackIndex::default();
         // The health lanes arrive first and in no order; 11 says far more
@@ -2150,10 +2232,19 @@ mod tests {
         strip.tick(1.0, &idx, None);
         assert_eq!(strip.process_order, [30, health::PID, 11, 40]);
         assert!(!strip.collapsed(RowId::Process(health::PID)), "it arrives open");
-        // With no target (a capture of the machine alone) it leads.
-        let mut alone = TrackStrip { order_hints: OrderHints { target: None, service: Some(40) }, ..Default::default() };
-        alone.sync(&idx, None);
-        assert_eq!(alone.process_order[0], health::PID);
+        // A page that knows no target (a capture opened from a file) reads
+        // it against the process that leads the rail.
+        let mut file = TrackStrip { order_hints: OrderHints { target: None, service: Some(40) }, ..Default::default() };
+        file.sync(&idx, None);
+        assert_eq!(file.process_order, [11, health::PID, 30, 40]);
+        // So does one whose target has no rows.
+        let mut gone = TrackStrip { order_hints: OrderHints { target: Some(77), service: Some(40) }, ..Default::default() };
+        gone.sync(&idx, None);
+        assert_eq!(gone.process_order, [11, health::PID, 30, 40]);
+        // A process dragged to the top takes the health track with it.
+        file.reorder_process(30, 0);
+        file.sync(&idx, None);
+        assert_eq!(file.process_order, [30, health::PID, 11, 40]);
         // A header drag does not take it out of its place.
         strip.reorder_process(health::PID, 3);
         strip.sync(&idx, None);
@@ -2210,7 +2301,8 @@ mod tests {
         }
         let (cpu, memory, io) = (health::group::CPU, health::group::MEMORY, health::group::IO);
         let health_graphs = [(health::PID, cpu), (health::PID, cpu), (health::PID, memory), (health::PID, io)];
-        let all: Vec<(u32, u32)> = health_graphs.iter().copied().chain([(30, 1), (30, 2)]).collect();
+        // The health track is under the one process there is.
+        let all: Vec<(u32, u32)> = [(30, 1), (30, 2)].into_iter().chain(health_graphs).collect();
         assert_eq!(graphs(&strip), all);
         let open_h = strip.total_height();
 
@@ -2219,7 +2311,7 @@ mod tests {
         let group = |tid| RowId::Thread(ThreadId { pid: health::PID, tid });
         strip.toggle(group(cpu));
         strip.tick(1.0, &idx, None);
-        assert_eq!(graphs(&strip), all[2..]);
+        assert_eq!(graphs(&strip), [(30, 1), (30, 2), (health::PID, memory), (health::PID, io)]);
         assert!(strip.rows().iter().any(|row| row.id == group(cpu)));
         let cpu_graph = LiveEvent::from_value(0, health::PID, cpu, health::lane::CPU, 0.0).lane_key();
         let graph_h = strip.block_h(TrackKey::Value(cpu_graph));
@@ -2227,7 +2319,7 @@ mod tests {
         // Each group folds its own.
         strip.toggle(group(io));
         strip.tick(1.0, &idx, None);
-        assert_eq!(graphs(&strip), [(health::PID, memory), (30, 1), (30, 2)]);
+        assert_eq!(graphs(&strip), [(30, 1), (30, 2), (health::PID, memory)]);
         // Unfolded, they are back where they were.
         strip.toggle(group(cpu));
         strip.toggle(group(io));
@@ -2240,8 +2332,7 @@ mod tests {
         strip.toggle(RowId::Thread(ThreadId { pid: 30, tid: 2 }));
         strip.toggle(RowId::Thread(ThreadId { pid: 30, tid: 1 }));
         strip.tick(1.0, &idx, None);
-        let mut kept = health_graphs.to_vec();
-        kept.push((30, 1));
+        let kept: Vec<(u32, u32)> = [(30, 1)].into_iter().chain(health_graphs).collect();
         assert_eq!(graphs(&strip), kept);
 
         // A graph moved under another process is not under its group's

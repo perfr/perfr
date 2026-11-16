@@ -1065,7 +1065,7 @@ pub struct StartBody {
     #[serde(default)]
     pub auto_profile: bool,
     /// Sample the machine itself twice a second (CPU, memory, pressure,
-    /// disks, network, GPU) into the machine health track. On by default.
+    /// disks, network, GPU) into the Node Health track. On by default.
     #[serde(default = "default_true")]
     pub machine_health: bool,
 }

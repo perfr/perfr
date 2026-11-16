@@ -112,7 +112,7 @@ fn intern_gpu_lane_names(service: &LiveService) {
     service.intern_id(gpu_lane::JOB, "GPU job");
 }
 
-/// Names the machine health track for the viewer: its process, one thread
+/// Names the Node Health track for the viewer: its process, one thread
 /// per group, and the lanes. At every capture start, since a capture's
 /// names are forgotten when the next one begins.
 #[cfg(target_os = "linux")]
@@ -664,7 +664,7 @@ struct StartRequest {
     /// This capture's own auto-unhook limit, when the request carries one;
     /// see [`StartRequest::max_hook_calls_per_s`].
     max_hook_calls_per_s: Option<u64>,
-    /// The machine health track. Absent means on: it costs a few file
+    /// The Node Health track. Absent means on: it costs a few file
     /// reads twice a second, and it can only explain a stall if it was on
     /// when the stall happened.
     machine_health: bool,
@@ -2735,7 +2735,7 @@ fn capture_loop(
         if let Some(health) = health.as_mut() {
             let now_ns = crate::now_monotonic_ns();
             if health.due(now_ns) {
-                let _health = perfr_api::scope("read machine health");
+                let _health = perfr_api::scope("read node health");
                 health.sample(now_ns, &mut batch);
             }
         }

@@ -96,13 +96,19 @@ async fn native_client_controls_and_reconnects_to_a_real_service() {
 
 #[tokio::test]
 async fn a_missing_service_reports_the_http_failure() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let origin = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
+    // A port that refuses connections for as long as the test runs: bound,
+    // and not listening. One that was bound and let go could be handed to
+    // the service of the test beside this one, which then answers here.
+    let port = tokio::net::TcpSocket::new_v4().unwrap();
+    port.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let origin = format!("http://{}", port.local_addr().unwrap());
     let host = perfr_client::native_host(&origin).unwrap();
     let net = (host.connect)(None);
-    net.get_status();
+    // Asked again on every look, as the page does: the event socket fails
+    // against the same address and leaves its own error in the one place
+    // there is for one, which can be over this request's.
     until(&*net, |inbox| {
+        net.get_status();
         !inbox.http_ok && inbox.error.is_some_and(|e| e.contains("/api/status"))
     })
     .await;

@@ -96,7 +96,12 @@ Left to right, in clusters separated by thin rules. A filled pill is on.
   it as `stream_bytes`; the page reads it four times a second. Share
   uploads less: it asks for the same stream with its batches deflated
   (`&wire=deflate`), a little over half the size, and its dialog shows
-  the size it will post. It grows
+  the size it will post. The dialog also names the capture before it
+  goes: the Name field opens on the target process and the time
+  (`bevy_city-2026-11-16-143207`), takes another name or a folder path
+  (`runs/first`), and shows the link that name gives,
+  `perfr.dev/<handle>/<name>`. Left empty, the site names the capture by
+  its upload time. It grows
   until it reaches the ring's size and stays there, in the accent colour:
   the ring is full, and the oldest events go as new ones arrive. Shown
   whenever the service holds a capture, running or not; not for a file on

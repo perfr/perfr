@@ -143,5 +143,6 @@ loading under COOP/COEP, and the complete archive download. It requires
 `openssl` in addition to `google-chrome`.
 
 `python3 tools/e2e/share_link.py` checks the viewer's Share button against a
-local mock of `POST /api/share`. Pass a viewer pack directory if `viewer-dist`
+local mock of `POST /api/share`: the sign-in, the size, the name field (the
+suggestion, a refused name, a taken one) and the upload under the name typed. Pass a viewer pack directory if `viewer-dist`
 is not the one just built.

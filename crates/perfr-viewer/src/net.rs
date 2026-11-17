@@ -911,12 +911,16 @@ pub trait Backend {
         false
     }
     fn prepare_share(&self, _gen: u64, _path: String) {}
+    /// Posts the capture. `name` is what it is to be called on the site
+    /// ([`crate::share::SHARE_NAME_HEADER`]); `None` leaves the naming to
+    /// the website.
     fn share_capture(
         &self,
         _gen: u64,
         _endpoint: String,
         _me_url: String,
         _token: Option<String>,
+        _name: Option<String>,
         _bytes: Vec<u8>,
     ) {
     }

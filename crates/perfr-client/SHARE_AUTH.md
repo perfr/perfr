@@ -58,11 +58,25 @@ or the remaining quota (`limit_bytes - used_bytes`). A size equal to the
 limit is allowed. The message tells the reader to share a selected range,
 and that button is offered only when the range itself fits.
 
+Signed in, the dialog also has a **Name** field: what the capture is called
+on the site, `{base}/{handle}/{name}`. It opens on a suggestion, the target
+process and the time of the share (`bevy_city-2026-11-16-143207`), and the
+reader can type another, with `/` for folders. `user.handle` in the
+`/api/me` answer is the account's handle, empty or absent until it has one;
+the line under the field shows the link the name gives. The name is checked
+against the website's rules (`handles.clean_capture_path` in perfr-web,
+`check_share_name` here) and neither upload button is offered for one it
+would refuse. An empty field sends no name, and the website names the
+capture by its upload time.
+
 `POST {base}/api/share` (`Content-Type: application/octet-stream`) is sent
-only after a fresh `GET /api/me` still says the bytes fit.
+only after a fresh `GET /api/me` still says the bytes fit. The name goes as
+`X-Perfr-Name: <name>`.
 
 | Status | Dialog |
 | --- | --- |
+| 400 `bad_name` | Stay signed in, the name still in the field. "That name cannot be used." and the website's `message` |
+| 409 `name_taken` | Stay signed in, the name still in the field. "You already have a capture named {name}. Give this one another name." |
 | 401 | Back to **Sign in to share**. "Your session expired. Sign in again to share." |
 | 403 | Stay signed in. "You don't have permission to share this capture." |
 | 413 | Stay signed in. "This capture is too large to share. Share a selected range to upload less." |
@@ -103,7 +117,7 @@ On `GET /api/me`, `POST /api/share`, and the `OPTIONS` preflight, when
 Access-Control-Allow-Origin: <the request Origin>
 Access-Control-Allow-Credentials: true
 Access-Control-Allow-Methods: GET, POST, OPTIONS
-Access-Control-Allow-Headers: Content-Type, Authorization
+Access-Control-Allow-Headers: Content-Type, Authorization, X-Perfr-Name
 Access-Control-Max-Age: 600
 Vary: Origin
 ```

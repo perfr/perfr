@@ -23,7 +23,11 @@
 //! see `SHARE_AUTH.md`.
 //!
 //! Share asks before posting. The dialog shows the size of the bytes
-//! that will be uploaded. A selected time range can be posted instead:
+//! that will be uploaded, and the name the capture will have on the site:
+//! one is suggested, the reader can type another, and it goes with the
+//! upload as `X-Perfr-Name`. The rules for a name are the website's
+//! (`handles.clean_capture_path` in perfr-web), written again here so the
+//! dialog can refuse a name before the bytes leave. A selected time range can be posted instead:
 //! the stream is cut to the events that overlap that window, the same
 //! rule the service uses for `capture_stream`. The cut is the whole
 //! window, on every thread.
@@ -47,6 +51,20 @@ pub const STREAM_EXPORT_PATH: &str = "/api/capture/export?format=stream&wire=def
 
 /// Body type of `POST /api/share`.
 pub const SHARE_CONTENT_TYPE: &str = "application/octet-stream";
+
+/// Request header of `POST /api/share` that names the capture: its path
+/// under the account's handle, `https://perfr.dev/<handle>/<name>`. Without
+/// it the website names the capture by its upload time.
+pub const SHARE_NAME_HEADER: &str = "X-Perfr-Name";
+
+/// The website's limits on a name: the whole of it, each part between
+/// slashes, and how many parts.
+pub const NAME_MAX: usize = 240;
+pub const NAME_PART_MAX: usize = 64;
+pub const NAME_PARTS_MAX: usize = 16;
+
+/// What the name field shows while it is empty.
+pub const NAME_HINT: &str = "named by its upload time";
 
 /// `GET {base}/api/me`. Change this if the website accounts PR moves it.
 pub const ME_PATH: &str = "/api/me";
@@ -131,7 +149,7 @@ pub const SHARE_CORS: &[(&str, &str)] = &[
     ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
     (
         "Access-Control-Allow-Headers",
-        "Content-Type, Authorization",
+        "Content-Type, Authorization, X-Perfr-Name",
     ),
     ("Access-Control-Max-Age", "600"),
     ("Vary", "Origin"),
@@ -158,6 +176,9 @@ pub struct ShareFailure {
     pub message: String,
     /// The session is missing or expired. The dialog goes back to sign-in.
     pub needs_login: bool,
+    /// The website refused the name the upload carried. The dialog stops
+    /// saying so once the name is changed.
+    pub about_name: bool,
 }
 
 impl ShareFailure {
@@ -165,6 +186,7 @@ impl ShareFailure {
         Self {
             message: text.into(),
             needs_login: false,
+            about_name: false,
         }
     }
 
@@ -172,6 +194,7 @@ impl ShareFailure {
         Self {
             message: text.into(),
             needs_login: true,
+            about_name: false,
         }
     }
 }
@@ -181,6 +204,9 @@ impl ShareFailure {
 pub struct ShareUser {
     pub id: String,
     pub name: String,
+    /// The account's handle, the first part of its captures' addresses.
+    /// Empty until the account has chosen one.
+    pub handle: String,
     pub avatar: String,
 }
 
@@ -419,6 +445,13 @@ impl HeldStream {
 /// capture itself. 429 is the account's rate. Other failures stay a short
 /// line; an HTML body is not shown.
 pub fn share_failure(status: u16, body: &str) -> ShareFailure {
+    if let Some(message) = name_refusal(status, body) {
+        return ShareFailure {
+            message,
+            needs_login: false,
+            about_name: true,
+        };
+    }
     let message = match status {
         0 => "Could not reach the share server.".into(),
         401 => "Your session expired. Sign in again to share.".into(),
@@ -438,6 +471,169 @@ pub fn share_failure(status: u16, body: &str) -> ShareFailure {
     ShareFailure {
         message,
         needs_login: status == 401,
+        about_name: false,
+    }
+}
+
+/// What to say when the website refused the name the upload carried:
+/// `400 {"error": "bad_name", "message"}` for one it does not accept, and
+/// `409 {"error": "name_taken", "name"}` for one the account already uses.
+/// `None` for any other refusal.
+fn name_refusal(status: u16, body: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Refusal {
+        #[serde(default)]
+        error: String,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        message: String,
+    }
+    let refusal: Refusal = serde_json::from_str(body).ok()?;
+    match (status, refusal.error.as_str()) {
+        (400, "bad_name") => {
+            let why = refusal.message.trim();
+            Some(if plain_error_body(why) {
+                format!("That name cannot be used. {why}")
+            } else {
+                "That name cannot be used.".into()
+            })
+        }
+        (409, "name_taken") => {
+            let name = refusal.name.trim();
+            Some(if plain_error_body(name) {
+                format!("You already have a capture named {name}. Give this one another name.")
+            } else {
+                "You already have a capture with that name. Give this one another name.".into()
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The name the upload will carry, from what is in the name field.
+///
+/// `Ok(None)` is an empty field: no name is sent and the website names the
+/// capture by its upload time. `Ok(Some(name))` is a name the website
+/// takes, with the spaces around it gone and `\` read as `/`. `Err` is why
+/// it would be refused, in words for the dialog. The rules are those of
+/// `handles.clean_capture_path` in perfr-web: parts separated by `/`, each
+/// of letters, digits, `.`, `_` and `-`, starting and ending on a letter or
+/// a digit.
+pub fn check_share_name(typed: &str) -> Result<Option<String>, String> {
+    let name = typed.trim().replace('\\', "/");
+    if name.is_empty() {
+        return Ok(None);
+    }
+    if name.starts_with('/') || name.ends_with('/') {
+        return Err("Leave the slashes off the ends of the name.".into());
+    }
+    if name.len() > NAME_MAX {
+        return Err(format!("A name is at most {NAME_MAX} characters."));
+    }
+    let parts: Vec<&str> = name.split('/').collect();
+    if parts.len() > NAME_PARTS_MAX {
+        return Err(format!("A name can have at most {NAME_PARTS_MAX} folders."));
+    }
+    for part in &parts {
+        if part.is_empty() {
+            return Err("A name cannot have an empty folder.".into());
+        }
+        if *part == "." || *part == ".." {
+            return Err("A name cannot contain '.' or '..'.".into());
+        }
+        if !name_part_ok(part) {
+            return Err(format!(
+                "Use letters, digits, '.', '_' and '-', starting and ending on a letter or a digit. Each part is at most {NAME_PART_MAX} characters."
+            ));
+        }
+    }
+    Ok(Some(name))
+}
+
+fn name_part_ok(part: &str) -> bool {
+    let bytes = part.as_bytes();
+    let edge = |b: Option<&u8>| b.is_some_and(u8::is_ascii_alphanumeric);
+    bytes.len() <= NAME_PART_MAX
+        && edge(bytes.first())
+        && edge(bytes.last())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// The name the dialog opens with: what the capture is of and when it is
+/// shared, `bevy_city-2026-11-16-143207`. `subject` is the target process's
+/// name, cut down to what a name may hold, or `capture` when there is none.
+/// `stamp` is [`local_stamp`]; without one the subject is the name. The
+/// time is what keeps two shares of one program from asking for one name.
+pub fn suggested_share_name(subject: &str, stamp: Option<&str>) -> String {
+    let mut subject = name_part_from(subject, 40);
+    if subject.is_empty() {
+        subject = "capture".into();
+    }
+    match stamp.map(|s| name_part_from(s, 20)).filter(|s| !s.is_empty()) {
+        Some(stamp) => format!("{subject}-{stamp}"),
+        None => subject,
+    }
+}
+
+/// `text` as one part of a name, at most `max` characters: what a name
+/// cannot hold becomes `-`, runs of `-` become one, and the ends are a
+/// letter or a digit. Empty when nothing of `text` can be kept.
+fn name_part_from(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    for c in text.trim().chars() {
+        let c = if c.is_ascii_alphanumeric() || matches!(c, '.' | '_') { c } else { '-' };
+        if c == '-' && out.ends_with('-') {
+            continue;
+        }
+        out.push(c);
+    }
+    let edge = |c: char| !c.is_ascii_alphanumeric();
+    let mut out = out.trim_start_matches(edge).to_string();
+    out.truncate(max);
+    out.truncate(out.trim_end_matches(edge).len());
+    out
+}
+
+/// The reader's clock as `2026-11-16-143207`, for [`suggested_share_name`].
+/// `None` off the web, where nothing shares.
+pub fn local_stamp() -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let now = js_sys::Date::new_0();
+        Some(format!(
+            "{:04}-{:02}-{:02}-{:02}{:02}{:02}",
+            now.get_full_year(),
+            now.get_month() + 1,
+            now.get_date(),
+            now.get_hours(),
+            now.get_minutes(),
+            now.get_seconds(),
+        ))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        None
+    }
+}
+
+/// What the dialog says under the name field, for a name that passed
+/// [`check_share_name`]: where the capture will be. An account with no
+/// handle has no such address yet, and a capture with no name is given one
+/// by the website.
+pub fn share_name_note(base: &str, handle: &str, name: Option<&str>) -> String {
+    let handle = handle.trim();
+    match name {
+        None => "With no name, the capture is named by its upload time.".into(),
+        Some(_) if handle.is_empty() => {
+            "The link uses this name once your account has a handle.".into()
+        }
+        Some(name) => format!(
+            "The link will be {}/{handle}/{name}",
+            base.trim().trim_end_matches('/')
+        ),
     }
 }
 
@@ -633,6 +829,8 @@ fn parse_account(body: &str) -> Result<ShareAccount, String> {
         #[serde(default)]
         name: String,
         #[serde(default)]
+        handle: Option<String>,
+        #[serde(default)]
         avatar: Option<String>,
     }
     #[derive(Deserialize)]
@@ -650,6 +848,7 @@ fn parse_account(body: &str) -> Result<ShareAccount, String> {
         user: ShareUser {
             id: body.user.id,
             name: body.user.name,
+            handle: body.user.handle.unwrap_or_default(),
             avatar: body.user.avatar.unwrap_or_default(),
         },
         quota: ShareQuota {
@@ -851,6 +1050,8 @@ pub enum ShareLineRole {
     Quota,
     /// The formatted size of the whole capture, not the whole sentence.
     Size,
+    /// Where the name field goes. The text is what is said under it.
+    Name,
     Hint,
     Error,
     Progress,
@@ -903,6 +1104,10 @@ pub struct ConfirmInput<'a> {
     pub login_returned: bool,
     pub cross_origin: bool,
     pub busy: bool,
+    /// What is in the name field.
+    pub name: &'a str,
+    /// The share host, for the address the name gives the capture.
+    pub base: &'a str,
 }
 
 pub fn confirm_view(input: &ConfirmInput<'_>) -> ShareConfirmView {
@@ -1018,6 +1223,23 @@ fn signed_in_view(input: &ConfirmInput<'_>, account: &ShareAccount) -> ShareConf
         }
         None => lines.push(progress("Reading the capture…")),
     }
+    // The name goes with whichever upload is clicked, so one the website
+    // would refuse takes both buttons away and says why.
+    let name = check_share_name(input.name);
+    lines.push(ShareLine {
+        text: match &name {
+            Ok(name) => share_name_note(input.base, &account.user.handle, name.as_deref()),
+            Err(_) => String::new(),
+        },
+        role: ShareLineRole::Name,
+    });
+    if let Err(why) = &name {
+        lines.push(ShareLine {
+            text: why.clone(),
+            role: ShareLineRole::Error,
+        });
+        actions.clear();
+    }
     if let Some(error) = input.error.map(str::trim).filter(|s| !s.is_empty()) {
         lines.push(ShareLine {
             text: error.to_string(),
@@ -1045,7 +1267,7 @@ fn signed_in_view(input: &ConfirmInput<'_>, account: &ShareAccount) -> ShareConf
         text: share_section_hint(input.can_slice, input.has_range && range_fits).into(),
         role: ShareLineRole::Hint,
     });
-    if range_fits {
+    if range_fits && name.is_ok() {
         actions.push(ShareAction::Range {
             bytes: input.range_bytes.unwrap_or(0),
         });
@@ -1449,6 +1671,7 @@ mod tests {
             user: ShareUser {
                 id: "u1".into(),
                 name: "Ada Lovelace".into(),
+                handle: "ada".into(),
                 avatar: "https://perfr.dev/a.png".into(),
             },
             quota: ShareQuota {
@@ -1475,6 +1698,8 @@ mod tests {
             login_returned: false,
             cross_origin: false,
             busy: false,
+            name: "",
+            base: "https://perfr.dev",
         }
     }
 
@@ -1705,5 +1930,184 @@ mod tests {
             .text
             .contains("Checking your perfr.dev account"));
         assert_eq!(action_ids(&view), ["cancel"]);
+    }
+
+    #[test]
+    fn a_name_is_checked_by_the_websites_rules() {
+        // Nothing typed: no name goes, and the website picks one.
+        assert_eq!(check_share_name(""), Ok(None));
+        assert_eq!(check_share_name("   "), Ok(None));
+        // What `handles.clean_capture_path` takes, as it would store it.
+        for (typed, name) in [
+            ("bevy-4s", "bevy-4s"),
+            ("  bevy-4s ", "bevy-4s"),
+            ("runs/2026.11/first_try", "runs/2026.11/first_try"),
+            ("runs\\first", "runs/first"),
+            ("a", "a"),
+            ("a..b", "a..b"),
+        ] {
+            assert_eq!(check_share_name(typed), Ok(Some(name.to_string())), "{typed}");
+        }
+        let longest = "a".repeat(NAME_PART_MAX);
+        assert_eq!(check_share_name(&longest), Ok(Some(longest.clone())));
+        // And what it refuses.
+        let too_many = ["a"; NAME_PARTS_MAX + 1].join("/");
+        let too_long = [longest.as_str(); 4].join("/");
+        for typed in [
+            "first try",
+            "/runs",
+            "runs/",
+            "runs//first",
+            "runs/../first",
+            ".",
+            "-first",
+            "first-",
+            ".hidden",
+            "caf\u{e9}",
+            "a?b",
+            "a#b",
+            "a\nb",
+            &format!("{longest}a"),
+            &too_many,
+            &too_long,
+        ] {
+            assert!(check_share_name(typed).is_err(), "{typed:?} was taken");
+        }
+        assert!(too_long.len() > NAME_MAX);
+    }
+
+    #[test]
+    fn the_suggested_name_is_the_program_and_the_time_and_always_one_the_website_takes() {
+        assert_eq!(
+            suggested_share_name("bevy_city", Some("2026-11-16-143207")),
+            "bevy_city-2026-11-16-143207"
+        );
+        // No clock: the program alone. No program: `capture`.
+        assert_eq!(suggested_share_name("bevy_city", None), "bevy_city");
+        assert_eq!(suggested_share_name("", Some("2026-11-16-143207")), "capture-2026-11-16-143207");
+        assert_eq!(suggested_share_name("  ", None), "capture");
+        // What a process is called is not always what a name may hold.
+        for (process, part) in [
+            ("My Game (debug)", "My-Game-debug"),
+            ("node /srv/app.js", "node-srv-app.js"),
+            ("--weird--", "weird"),
+            ("caf\u{e9}.exe", "caf-.exe"),
+            ("...", "capture"),
+            ("\u{6e38}\u{620f}", "capture"),
+        ] {
+            assert_eq!(suggested_share_name(process, None), part, "{process}");
+        }
+        let long = suggested_share_name(&"x-".repeat(200), Some("2026-11-16-143207"));
+        assert!(long.len() <= NAME_PART_MAX, "{long}");
+        for process in ["bevy_city", "My Game (debug)", "", "...", "a/b\\c", &"x-".repeat(200)] {
+            for stamp in [None, Some("2026-11-16-143207")] {
+                let name = suggested_share_name(process, stamp);
+                assert_eq!(check_share_name(&name), Ok(Some(name.clone())), "{process:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_account_says_its_handle_when_it_has_one() {
+        let with = parse_session_response(
+            200,
+            r#"{"user":{"id":"u1","name":"Ada","handle":"ada","avatar":""},"quota":{"used_bytes":0,"limit_bytes":10,"max_capture_bytes":10}}"#,
+        );
+        let SessionCheck::SignedIn(account) = with else {
+            panic!("signed in")
+        };
+        assert_eq!(account.user.handle, "ada");
+        // An account that has not chosen one, and a website that does not say.
+        for user in [r#"{"id":"u1","handle":""}"#, r#"{"id":"u1","handle":null}"#, r#"{"id":"u1"}"#] {
+            let body = format!(
+                r#"{{"user":{user},"quota":{{"used_bytes":0,"limit_bytes":10,"max_capture_bytes":10}}}}"#
+            );
+            let SessionCheck::SignedIn(account) = parse_session_response(200, &body) else {
+                panic!("signed in: {user}")
+            };
+            assert_eq!(account.user.handle, "", "{user}");
+        }
+    }
+
+    #[test]
+    fn the_dialog_says_where_the_name_puts_the_capture_and_withholds_upload_for_a_bad_one() {
+        let session = ShareSession::SignedIn(account(12_000_000, 1_000_000_000, 50_000_000));
+        let note = |view: &ShareConfirmView| {
+            view.lines
+                .iter()
+                .find(|line| line.role == ShareLineRole::Name)
+                .map(|line| line.text.clone())
+                .expect("the signed-in dialog has a name field")
+        };
+        let named = ConfirmInput {
+            name: " runs/bevy-4s ",
+            ..input(&session, Some(2_100_000), Some(400_000))
+        };
+        let view = confirm_view(&named);
+        assert_eq!(note(&view), "The link will be https://perfr.dev/ada/runs/bevy-4s");
+        assert_eq!(action_ids(&view), ["upload", "range:400000", "cancel"]);
+
+        let unnamed = confirm_view(&input(&session, Some(2_100_000), None));
+        assert!(note(&unnamed).contains("named by its upload time"));
+        assert_eq!(action_ids(&unnamed), ["upload", "cancel"]);
+
+        let mut no_handle = account(0, 1_000_000_000, 50_000_000);
+        no_handle.user.handle.clear();
+        let session_no_handle = ShareSession::SignedIn(no_handle);
+        let view = confirm_view(&ConfirmInput {
+            name: "bevy-4s",
+            ..input(&session_no_handle, Some(2_100_000), None)
+        });
+        assert!(note(&view).contains("once your account has a handle"));
+        assert_eq!(action_ids(&view), ["upload", "cancel"]);
+
+        // A name the website would refuse: the reason, and nothing to
+        // upload with, whole or cut.
+        let bad = ConfirmInput {
+            name: "first try",
+            ..input(&session, Some(2_100_000), Some(400_000))
+        };
+        let view = confirm_view(&bad);
+        assert_eq!(note(&view), "");
+        assert!(view
+            .lines
+            .iter()
+            .any(|line| line.role == ShareLineRole::Error && line.text.contains("letters, digits")));
+        assert_eq!(action_ids(&view), ["cancel"]);
+
+        // Signed out, there is no name to give yet.
+        let signed_out = ShareSession::SignedOut { login_url: String::new() };
+        let view = confirm_view(&ConfirmInput {
+            name: "first try",
+            ..input(&signed_out, Some(1000), None)
+        });
+        assert!(!view.lines.iter().any(|line| line.role == ShareLineRole::Name));
+    }
+
+    #[test]
+    fn a_refused_name_is_said_in_the_dialogs_words() {
+        let taken = share_failure(
+            409,
+            r#"{"error":"name_taken","name":"runs/bevy-4s","handle":"ada","existing_id":"abc","existing_url":"https://perfr.dev/ada/runs/bevy-4s"}"#,
+        );
+        assert_eq!(
+            taken.message,
+            "You already have a capture named runs/bevy-4s. Give this one another name."
+        );
+        assert!(!taken.needs_login);
+        assert!(taken.about_name);
+        let bad = share_failure(
+            400,
+            r#"{"error":"bad_name","message":"A name cannot contain '.' or '..'."}"#,
+        );
+        assert_eq!(bad.message, "That name cannot be used. A name cannot contain '.' or '..'.");
+        // A message that is not plain text is not shown.
+        let markup = share_failure(400, r#"{"error":"bad_name","message":"<b>no</b>"}"#);
+        assert_eq!(markup.message, "That name cannot be used.");
+        // Other 400s and 409s are not about the name.
+        let other = share_failure(400, r#"{"error": "not a .perfr.stream"}"#);
+        assert!(other.message.starts_with("Could not share this capture (400)"), "{}", other.message);
+        assert!(!other.about_name);
+        assert!(share_failure(409, "conflict").message.starts_with("Could not share this capture (409)"));
     }
 }

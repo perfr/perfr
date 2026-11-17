@@ -867,6 +867,9 @@ struct ShareDraft {
     /// dialog stayed open.
     range_failed: Option<(u64, u64)>,
     error: Option<String>,
+    /// `error` is about the name the upload carried: it is taken down when
+    /// the name is changed, being about one that is no longer in the field.
+    name_refused: bool,
 }
 
 impl ShareDraft {
@@ -877,6 +880,7 @@ impl ShareDraft {
             range_unslicable: false,
             range_failed: None,
             error: None,
+            name_refused: false,
         }
     }
 
@@ -887,6 +891,14 @@ impl ShareDraft {
             range_unslicable: false,
             range_failed: None,
             error: None,
+            name_refused: false,
+        }
+    }
+
+    /// The name in the field changed: what was said about the old one goes.
+    fn name_changed(&mut self) {
+        if std::mem::take(&mut self.name_refused) {
+            self.error = None;
         }
     }
 }
@@ -1110,6 +1122,10 @@ pub struct PerfrLiveApp {
     /// Bytes the confirm dialog is showing. Present from Confirm through a
     /// failed upload; cleared when the link arrives or the capture changes.
     share_draft: Option<ShareDraft>,
+    /// What is in the dialog's name field: the name the capture will have
+    /// on the site. Suggested when a share begins, and the reader's from
+    /// then on. Empty leaves the naming to the website.
+    share_name: String,
     /// Who `GET /api/me` says is signed in, if anyone.
     share_session: crate::share::ShareSession,
     /// Bearer from a login return's `#share_token=`, when the website sent one.
@@ -2292,6 +2308,7 @@ impl PerfrLiveApp {
             share_gen: 0,
             share_ui: ShareUi::Idle,
             share_draft: None,
+            share_name: String::new(),
             share_session: crate::share::ShareSession::Unknown,
             share_token,
             share_login_waiting: false,
@@ -2977,6 +2994,7 @@ impl PerfrLiveApp {
         self.share_gen = self.share_gen.wrapping_add(1);
         self.share_ui = ShareUi::Idle;
         self.share_draft = None;
+        self.share_name.clear();
         self.share_session = crate::share::ShareSession::Unknown;
         self.share_login_waiting = false;
         self.share_login_probe = false;
@@ -3316,7 +3334,9 @@ impl PerfrLiveApp {
                 self.request_share_session(true);
                 return;
             }
-            ShareUi::Idle | ShareUi::Ready { .. } | ShareUi::Failed(_) => {}
+            // A share that failed is tried again under the name it had.
+            ShareUi::Failed(_) => {}
+            ShareUi::Idle | ShareUi::Ready { .. } => self.share_name = self.suggested_share_name(),
         }
         self.share_gen = self.share_gen.wrapping_add(1);
         self.share_login_waiting = false;
@@ -3338,6 +3358,30 @@ impl PerfrLiveApp {
 
     fn share_base(&self) -> String {
         crate::share::resolve_share_base(&crate::dev::location_search())
+    }
+
+    /// The name the dialog opens with: the program the capture is of and
+    /// the time of the share. The program is the first process down the
+    /// rail that has a name and is not perfr's own, which is the target
+    /// when there is one and the busiest process of a file, which names no
+    /// target. Before the rail is laid out it is the first one the capture
+    /// names.
+    fn suggested_share_name(&self) -> String {
+        let service = self.status.service_pid;
+        let subject = self
+            .tracks
+            .order_hints
+            .target
+            .into_iter()
+            .chain(self.tracks.rail().into_iter().map(|(pid, _)| pid))
+            .chain(self.trace_processes.iter().map(|p| p.pid))
+            .filter(|pid| !(perfr_live_event::health::is_health_pid(*pid) || (service > 0 && *pid == service)))
+            .map(|pid| self.remembered_name(pid))
+            .find(|name| !name.is_empty());
+        crate::share::suggested_share_name(
+            subject.as_deref().unwrap_or(""),
+            crate::share::local_stamp().as_deref(),
+        )
     }
 
     /// `quiet` keeps the dialog as it is until the answer arrives, so a
@@ -3447,6 +3491,11 @@ impl PerfrLiveApp {
         if !matches!(self.share_ui, ShareUi::Confirm) {
             return;
         }
+        // Whatever this click finds wrong is said in place of what the
+        // last one did.
+        if let Some(draft) = &mut self.share_draft {
+            draft.name_refused = false;
+        }
         let bytes = if range {
             let span = self.selection_span();
             self.share_draft.as_ref().and_then(|draft| {
@@ -3478,13 +3527,25 @@ impl PerfrLiveApp {
             }
             return;
         }
+        // The dialog offers no upload under a name the website would
+        // refuse; this is for a click that got here some other way.
+        let name = match crate::share::check_share_name(&self.share_name) {
+            Ok(name) => name,
+            Err(why) => {
+                if let Some(draft) = &mut self.share_draft {
+                    draft.error = Some(why);
+                    draft.name_refused = true;
+                }
+                return;
+            }
+        };
         if let Some(draft) = &mut self.share_draft {
             draft.error = None;
         }
         self.share_ui = ShareUi::Authorizing;
         let endpoint = crate::share::share_post_url(&self.share_base());
         let me = crate::share::me_url(&self.share_base());
-        self.net.share_capture(self.share_gen, endpoint, me, self.share_token.clone(), bytes);
+        self.net.share_capture(self.share_gen, endpoint, me, self.share_token.clone(), name, bytes);
     }
 
     fn apply_share_note(&mut self, kind: crate::share::ShareNoteKind) {
@@ -3536,12 +3597,14 @@ impl PerfrLiveApp {
                     self.share_login_waiting = false;
                     self.share_login_probe = false;
                 }
+                let about_name = failure.about_name;
                 let message = failure.message;
                 let keep = self.share_draft.is_some()
                     && matches!(self.share_ui, ShareUi::Uploading { .. } | ShareUi::Confirm | ShareUi::Authorizing | ShareUi::Reading);
                 if keep {
                     if let Some(draft) = &mut self.share_draft {
                         draft.error = Some(message);
+                        draft.name_refused = about_name;
                     }
                     self.share_ui = ShareUi::Confirm;
                 } else {
@@ -5499,7 +5562,8 @@ impl PerfrLiveApp {
             self.request_share_session(false);
         }
         if retry {
-            self.share_ui = ShareUi::Idle;
+            // Still `Failed`, which is how `open_share` knows to keep the
+            // name the reader gave it.
             self.share_draft = None;
             self.open_share();
         }
@@ -5559,6 +5623,8 @@ impl PerfrLiveApp {
             login_returned: self.share_login_returned,
             cross_origin: self.share_cross_origin,
             busy: matches!(self.share_ui, ShareUi::Authorizing),
+            name: &self.share_name,
+            base: &self.share_base(),
         })
     }
 
@@ -5621,6 +5687,39 @@ impl PerfrLiveApp {
                     note_ui_rect(&format!("share-size:{}", line.text), label.rect);
                     if let Some(n) = view.whole_bytes {
                         note_ui_rect(&format!("share-bytes:{n}"), label.rect);
+                    }
+                }
+                crate::share::ShareLineRole::Name => {
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Name").size(12.0).color(theme::MUTED()));
+                        // Not while the upload is being cleared to go: the
+                        // name it carries is already decided.
+                        let busy = matches!(self.share_ui, ShareUi::Authorizing);
+                        let field = ui.add_enabled(
+                            !busy,
+                            egui::TextEdit::singleline(&mut self.share_name)
+                                .id(egui::Id::new("perfr_share_name"))
+                                .desired_width(ui.available_width())
+                                .hint_text(crate::share::NAME_HINT)
+                                .font(FontId::monospace(12.0))
+                                .background_color(theme::INPUT()),
+                        );
+                        note_ui_rect("share-name", field.rect);
+                        note_ui_rect(&format!("share-name-text:{}", self.share_name), field.rect);
+                        if field.changed() {
+                            if let Some(draft) = &mut self.share_draft {
+                                draft.name_changed();
+                            }
+                        }
+                        field.on_hover_text(
+                            "The capture's name on perfr.dev, after your handle in its link. Letters, digits, '.', '_' and '-'; a '/' puts it in a folder.",
+                        );
+                    });
+                    if !line.text.is_empty() {
+                        let label =
+                            ui.label(RichText::new(&line.text).size(12.0).color(theme::MUTED()));
+                        note_ui_rect(&format!("share-name-note:{}", line.text), label.rect);
                     }
                 }
                 crate::share::ShareLineRole::Hint => {

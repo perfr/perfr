@@ -1974,6 +1974,132 @@ fn a_range_that_could_not_be_cut_is_not_cut_again_every_frame() {
     assert!(app.share_draft.as_ref().unwrap().range.is_some());
 }
 
+/// A backend that writes down the name each upload was sent under.
+#[derive(Clone, Default)]
+struct UploadsNamed(std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>);
+
+impl UploadsNamed {
+    fn take(&self) -> Vec<Option<String>> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+impl crate::net::Backend for UploadsNamed {
+    fn take(&self) -> crate::net::Inbox {
+        crate::net::Inbox::default()
+    }
+
+    fn share_capture(
+        &self,
+        _gen: u64,
+        _endpoint: String,
+        _me_url: String,
+        _token: Option<String>,
+        name: Option<String>,
+        _bytes: Vec<u8>,
+    ) {
+        self.0.lock().unwrap().push(name);
+    }
+}
+
+fn signed_in() -> crate::share::ShareSession {
+    crate::share::ShareSession::SignedIn(crate::share::ShareAccount {
+        user: crate::share::ShareUser {
+            id: "u1".into(),
+            name: "Ada Lovelace".into(),
+            handle: "ada".into(),
+            avatar: String::new(),
+        },
+        quota: crate::share::ShareQuota {
+            used_bytes: 0,
+            limit_bytes: 1_000_000_000,
+            max_capture_bytes: 50_000_000,
+        },
+    })
+}
+
+#[test]
+fn share_opens_on_a_name_for_the_capture_and_uploads_under_the_one_typed() {
+    let uploads = UploadsNamed::default();
+    let mut app = static_app();
+    app.net = Box::new(uploads.clone());
+    app.accept_stream(whole_stream());
+    app.open_share();
+    assert!(matches!(app.share_ui, ShareUi::Confirm));
+    // The process the file names. A test has no clock to add the time from.
+    assert_eq!(app.share_name, "target");
+    app.share_session = signed_in();
+
+    // The reader's name is the one that goes, without the spaces around it.
+    app.share_name = "  runs/first-try ".into();
+    app.start_share_upload(false);
+    assert_eq!(uploads.take(), [Some("runs/first-try".to_string())]);
+    assert!(matches!(app.share_ui, ShareUi::Authorizing));
+
+    // The website refuses it: the dialog is back at the confirm step, says
+    // why, and still has the name to correct.
+    app.apply_share_note(crate::share::ShareNoteKind::Failed(crate::share::share_failure(
+        409,
+        r#"{"error":"name_taken","name":"runs/first-try","handle":"ada"}"#,
+    )));
+    assert!(matches!(app.share_ui, ShareUi::Confirm));
+    assert_eq!(app.share_name, "  runs/first-try ");
+    let error = app.share_draft.as_ref().unwrap().error.clone().unwrap();
+    assert!(error.contains("already have a capture named runs/first-try"), "{error}");
+    // That was about the name that went. Another one in the field, and it
+    // is no longer said; an error about something else would stay.
+    app.share_draft.as_mut().unwrap().name_changed();
+    assert!(app.share_draft.as_ref().unwrap().error.is_none());
+    app.apply_share_note(crate::share::ShareNoteKind::Failed(crate::share::share_failure(429, "")));
+    app.share_draft.as_mut().unwrap().name_changed();
+    assert!(app.share_draft.as_ref().unwrap().error.is_some());
+
+    // An empty field sends no name: the website names the capture.
+    app.share_name.clear();
+    app.start_share_upload(false);
+    assert_eq!(uploads.take(), [None]);
+}
+
+#[test]
+fn a_name_the_website_would_refuse_is_not_uploaded() {
+    let uploads = UploadsNamed::default();
+    let mut app = share_confirm_app(whole_stream());
+    app.net = Box::new(uploads.clone());
+    app.share_session = signed_in();
+    app.share_name = "first try".into();
+    app.start_share_upload(false);
+    assert!(uploads.take().is_empty());
+    assert!(matches!(app.share_ui, ShareUi::Confirm));
+    assert!(app.share_draft.as_ref().unwrap().error.is_some());
+    // And the dialog offers no upload to click while it stands.
+    let view = app.share_confirm_view();
+    assert!(!view.actions.iter().any(|a| matches!(a, crate::share::ShareAction::Upload | crate::share::ShareAction::Range { .. })));
+}
+
+#[test]
+fn a_new_share_is_suggested_a_name_again_and_a_reopened_dialog_keeps_the_readers() {
+    let mut app = static_app();
+    app.accept_stream(whole_stream());
+    app.open_share();
+    app.share_name = "mine".into();
+    // Closed and opened again before any upload: the same dialog.
+    app.share_open = false;
+    app.open_share();
+    assert_eq!(app.share_name, "mine");
+    // Shared: the next share is another capture's worth of naming.
+    app.apply_share_note(crate::share::ShareNoteKind::Done(crate::share::ShareLink {
+        id: "abc".into(),
+        url: "https://perfr.dev/ada/mine".into(),
+    }));
+    app.share_open = false;
+    app.open_share();
+    assert_eq!(app.share_name, "target");
+    // Another capture on screen: nothing of the old name is left.
+    app.share_name = "mine".into();
+    app.accept_stream(whole_stream());
+    assert_eq!(app.share_name, "");
+}
+
 /// Not a check: what the Share dialog costs per frame while it shows a
 /// range it could not cut. `cargo test --release -- --ignored --nocapture share_range_times`.
 #[test]

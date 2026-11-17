@@ -16,12 +16,19 @@ After GitHub sign-in it names the account and the quota. Nothing is posted
 until Upload, and the dialog shows the byte size of the loaded capture.
 With no time range selected, the hint explains how to share one.
 
+The dialog has a name field, opened on a suggestion (the capture's process
+and the time). A name the website would refuse takes Upload away, one the
+account already uses comes back from the server as a 409 and stays in the
+field, and the name typed last goes with the upload as X-Perfr-Name and is
+the one in the link.
+
 Usage:
   python3 tools/e2e/share_link.py [/path/to/viewer-dist]
 """
 import json
 import os
 from pathlib import Path
+import re
 import struct
 import sys
 import threading
@@ -48,13 +55,30 @@ def demo_stream():
     event = struct.pack("<QQIIBBBBI", 1_000_000, 500_000, 8, 7, 1, 0, 0, 0, 1)
     return b"".join([
         frame(1, b"OLIV" + struct.pack("<HH", 1, 32)),
+        # The capture's start comes before its names: a viewer drops the
+        # names it holds when a capture starts.
+        frame(4, struct.pack("<IQ", 7, 1_000_000)),
         frame(8, struct.pack("<II", 7, len(b"demo")) + b"demo"),
         frame(7, struct.pack("<III", 7, 8, len(b"main")) + b"main"),
         frame(3, struct.pack("<II", 1, len(name)) + name),
-        frame(4, struct.pack("<IQ", 7, 1_000_000)),
         frame(2, struct.pack("<I", 1) + event),
         frame(5, b""),
     ])
+
+
+def without_track_order(data):
+    """The stream less its track order frames (type 11).
+
+    Share writes the order the tracks are in on screen into what it posts,
+    so the link opens the same way; the rest is the capture as loaded.
+    """
+    out, at = [], 0
+    while at + 5 <= len(data):
+        end = at + 5 + struct.unpack_from("<I", data, at)[0]
+        if data[at + 4] != 11:
+            out.append(data[at:end])
+        at = end
+    return b"".join(out)
 
 
 def main():
@@ -90,7 +114,7 @@ def main():
             if path == "/api/me":
                 if self.signed_in():
                     self.json_response(200, {
-                        "user": {"id": "u1", "name": "Ada Lovelace", "avatar": ""},
+                        "user": {"id": "u1", "name": "Ada Lovelace", "handle": "ada", "avatar": ""},
                         "quota": {
                             "used_bytes": 12_000_000,
                             "limit_bytes": 1_000_000_000,
@@ -157,9 +181,16 @@ def main():
             if self.headers.get("Content-Type") != "application/octet-stream":
                 self.send_error(415)
                 return
+            name = self.headers.get("X-Perfr-Name")
+            posted.setdefault("names", []).append(name)
+            if name == "taken":
+                # The account already has a capture there, as perfr-web says it.
+                self.json_response(409, {"error": "name_taken", "name": name, "handle": "ada"})
+                return
             posted["body"] = body
             posted["type"] = self.headers.get("Content-Type")
-            url = f"http://127.0.0.1:{httpd.server_address[1]}/c/abc"
+            origin = f"http://127.0.0.1:{httpd.server_address[1]}"
+            url = f"{origin}/ada/{name}" if name else f"{origin}/c/abc"
             payload = json.dumps({"id": "abc", "url": url}).encode()
             store["abc"] = body
             self.send_response(200)
@@ -244,10 +275,53 @@ def main():
         assert "right-drag" in hint[0] and "sample bar" in hint[0], hint[0]
         assert rect("share-range-bytes:") is None, "a range was offered with nothing selected"
         assert "body" not in posted, "Share posted before Upload"
+        # The name field opens on the capture's process and the time, and
+        # the line under it is the link that name gives.
+        origin = f"http://127.0.0.1:{host_port}"
+        try:
+            suggested = wait_until(lambda: rect("share-name-text:demo-"), timeout=5)[0][len("share-name-text:"):]
+        except AssertionError:
+            rows = chrome.eval("JSON.parse(window.__perfr_ui || '[]')") or []
+            print("UI", [row[0] for row in rows if str(row[0]).startswith("share-")])
+            raise
+        assert re.fullmatch(r"demo-\d{4}-\d\d-\d\d-\d{6}", suggested), suggested
+        note = wait_until(lambda: rect("share-name-note:"), timeout=5)
+        assert note[0] == f"share-name-note:The link will be {origin}/ada/{suggested}", note[0]
         assert chrome.screenshot(str(signed_in_shot)) > 20000, "signed-in dialog screenshot looks blank"
         confirm_shot = Path(os.environ.get("PERFR_SHARE_CONFIRM_SHOT", str(signed_in_shot)))
-        upload = wait_until(lambda: rect("share-upload"), timeout=5)
-        chrome.click(upload[1] + upload[3] / 2, upload[2] + upload[4] / 2)
+
+        def name_it(text):
+            """Replace what is in the name field with `text`."""
+            field = wait_until(lambda: rect("share-name"), timeout=5)
+            chrome.click(field[1] + field[3] / 2, field[2] + field[4] / 2)
+            for kind in ("keyDown", "keyUp"):
+                chrome.call("Input.dispatchKeyEvent", type=kind, key="a", code="KeyA", modifiers=2,
+                            windowsVirtualKeyCode=65, nativeVirtualKeyCode=65)
+            chrome.call("Input.insertText", text=text)
+            wait_until(lambda: rect(f"share-name-text:{text}"), timeout=5)
+
+        def click_upload():
+            upload = wait_until(lambda: rect("share-upload"), timeout=5)
+            chrome.click(upload[1] + upload[3] / 2, upload[2] + upload[4] / 2)
+
+        # A name the website would refuse: the reason, and no Upload.
+        name_it("first try")
+        refused = wait_until(lambda: rect("share-error:Use letters, digits"), timeout=5)
+        assert rect("share-upload") is None, f"Upload was offered under a refused name: {refused[0]}"
+        assert rect("share-name-note:") is None, "a refused name was given a link"
+        # One the account already uses: the server says so, and the dialog
+        # keeps the name for the reader to change.
+        name_it("taken")
+        click_upload()
+        taken = wait_until(lambda: rect("share-error:You already have a capture named taken"), timeout=15)
+        assert rect("share-name-text:taken"), taken
+        assert "body" not in posted, "a refused upload was stored"
+        named_shot = Path(os.environ.get("PERFR_SHARE_NAMED_SHOT", "/tmp/perfr-share-named.png"))
+        name_it("runs/first-try")
+        wait_until(lambda: rect(f"share-name-note:The link will be {origin}/ada/runs/first-try"), timeout=5)
+        wait_until(lambda: rect("share-error:") is None, timeout=5)
+        assert chrome.screenshot(str(named_shot)) > 20000, "named dialog screenshot looks blank"
+        click_upload()
         try:
             url_row = wait_until(lambda: rect("share-url:"), timeout=15)
         except AssertionError:
@@ -256,18 +330,20 @@ def main():
             print("posted", posted)
             chrome.screenshot("/tmp/perfr-share-fail.png")
             raise
-        assert url_row[0] == f"share-url:http://127.0.0.1:{host_port}/c/abc", url_row[0]
-        assert posted.get("body") == stream, "Share did not post the loaded capture"
+        assert url_row[0] == f"share-url:{origin}/ada/runs/first-try", url_row[0]
+        assert posted["names"] == ["taken", "runs/first-try"], posted["names"]
+        assert without_track_order(posted.get("body", b"")) == stream, "Share did not post the loaded capture"
         assert posted.get("type") == "application/octet-stream"
         # The link's capture path is what a recipient's viewer fetches.
         got = store["abc"]
-        assert got == stream
+        assert without_track_order(got) == stream
         copy = wait_until(lambda: rect("Copy"), timeout=10)
         chrome.click(copy[1] + copy[3] / 2, copy[2] + copy[4] / 2)
         wait_until(lambda: rect("Copied"), timeout=10)
         assert chrome.screenshot(str(shot)) > 20000, "share dialog screenshot looks blank"
-        print(f"PASS: signed out, then shared as Ada Lovelace, showed {human[0][len('share-size:'):]} ({len(stream)} bytes) before upload, posted the loaded capture, link {url_row[0][len('share-url:'):]}")
+        print(f"PASS: signed out, then shared as Ada Lovelace, showed {human[0][len('share-size:'):]} ({len(stream)} bytes) before upload, suggested {suggested}, refused a bad name and a taken one, posted the loaded capture as runs/first-try, link {url_row[0][len('share-url:'):]}")
         print(f"screenshot {shot}")
+        print(f"named {named_shot}")
         print(f"signed-out {signed_out_shot}")
         print(f"signed-in {signed_in_shot}")
         print(f"confirm {confirm_shot}")

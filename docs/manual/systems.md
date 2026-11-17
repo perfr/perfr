@@ -8,6 +8,8 @@ Where the thread ran, and what the profiler itself is doing. The scheduler is on
 
 **States** draws a strip of thread states on each thread. The names the tooltip uses are Running (on a CPU), Runnable (ready, waiting for a CPU), Sleeping (interruptible), Uninterruptible sleep, Stopped, Traced, Dead, Zombie, Parked and Idle.
 
+With no thread focused, the scheduler shows the slices of the capture's target in colour and the rest of the machine's in grey. A capture with no target has them all in colour. A saved or shared capture names its target, so it opens with the same slices in colour as when it was captured; a `.perfr.stream` saved by perfr 0.1.5 or older names none, and opens with them all in colour.
+
 Click a thread header to focus it. Click again to release. The scheduler keeps that thread’s slices in colour and greys the others, and a chip above the timeline names it. Clicking one of that thread’s scopes does the same. A click on a scheduler slice, a state bar, or a sample tick does not move the focus. Escape, a click on empty canvas, or the chip’s × clears it.
 
 @clip 04-scheduler | Scheduler and thread states | Scheduler track with one lane per core, thread focus, and Running and Sleeping states

@@ -345,7 +345,10 @@ opens on first load with a service and closes with its ×. Its rows:
   sample, a value, a hooked call. The scheduler's thread-state slices
   alone do not earn one, so a capture of a busy process is not a wall of
   rows for threads that only ever slept.
-- **Colour.** Scopes are coloured by thread. When a thread is focused
+- **Colour.** Scopes are coloured by thread. On the scheduler, the slices
+  of the capture's target are in colour and every other process's are
+  grey; a capture with no target has them all in colour. A saved capture
+  names its target, so a file opens the same way. When a thread is focused
   (section 5) the scheduler greys every other thread's slices and keeps
   the focused one in colour; the thread tracks keep their colours, so the
   focused thread can be read against the others.
@@ -496,7 +499,8 @@ in the URL opens a tab on load.
   ..., "t1": ...}` to open a file the service can see. Screenshot:
   `17-opened-slice.png`.
 - **Stream export.** `GET /api/capture/export?format=stream` writes the
-  frames a connecting viewer receives as one `.perfr.stream` file. Its
+  frames a connecting viewer receives as one `.perfr.stream` file, led by
+  a start frame that names the capture's target. Its
   event batches are in the format the service sends its viewers
   (`--wire`, packed unless set), or the one named by `&wire=raw`,
   `&wire=packed` or `&wire=deflate`; a viewer reads all three. The

@@ -178,7 +178,7 @@ fn adopt_capture_target(
 /// The process the rail treats as the target: the first of `named`, in
 /// their order of say, that has rows, and the first named at all while
 /// none has (a capture that has just started).
-fn rail_target(named: [Option<u32>; 3], has_rows: impl Fn(u32) -> bool) -> Option<u32> {
+fn rail_target<const N: usize>(named: [Option<u32>; N], has_rows: impl Fn(u32) -> bool) -> Option<u32> {
     let mut named = named.into_iter().flatten();
     let first = named.next()?;
     if has_rows(first) {
@@ -935,6 +935,9 @@ pub struct PerfrLiveApp {
     selected_pid: Option<u32>,
     /// The last capture target picked automatically (see `adopt_capture_target`).
     adopted_target_pid: Option<u32>,
+    /// The target the stream file being read or on screen names in its
+    /// start frame: see [`file_target`](Self::file_target).
+    stream_target: Option<u32>,
     /// When the rail last re-sorted its tracks by activity.
     last_activity_sort_s: f64,
     /// The service's persisted user settings (`/api/settings`), the whole
@@ -1763,11 +1766,26 @@ impl PerfrLiveApp {
     /// Which threads draw in colour: the selected thread if one is
     /// selected (by its header, or through a selected scope), else the
     /// capture's target process, else everything. C++ perfr's rule.
+    ///
+    /// The target is the one a capture file names, and the process picked
+    /// here otherwise: for the service's own capture, and for a file saved
+    /// before files named their target, which on a service's page is most
+    /// often the capture that was just made of that process.
     fn thread_focus(&self) -> ThreadFocus {
         let target = self
-            .selected_pid
+            .file_target()
+            .or(self.selected_pid)
             .filter(|_| !self.status.demo && self.trace_name.is_none());
         thread_focus_from(self.selected_thread, self.selected, target)
+    }
+
+    /// The process a capture file says it is a capture of, while that file
+    /// is being read or is what is on screen. A file is read with no
+    /// service to ask, or with one whose own capture is another: its start
+    /// frame is all that says whose threads the capture is about.
+    fn file_target(&self) -> Option<u32> {
+        self.stream_target
+            .filter(|_| self.held_stream.is_loading() || self.held_stream.is_local())
     }
 
     /// Hands the selection to the page as `window.__perfr_sel`, so a harness
@@ -2044,6 +2062,7 @@ impl PerfrLiveApp {
             processes: Vec::new(),
             selected_pid: None,
             adopted_target_pid: None,
+            stream_target: None,
             last_activity_sort_s: -1.0e9,
             server_settings: None,
             status: StatusJson::default(),
@@ -2948,6 +2967,7 @@ impl PerfrLiveApp {
         self.held_stream.forget();
         self.forget_share();
         self.arranging.forget_capture();
+        self.stream_target = None;
     }
 
     /// A share link names one capture: anything that replaces the capture
@@ -4475,16 +4495,23 @@ impl PerfrLiveApp {
                 if self.import_pending {
                     self.import_started = true;
                 }
+                // The start of a file being read names the file's target,
+                // a process of the machine and the day it was saved on.
+                let of_file = self.held_stream.is_loading();
                 // A capture started elsewhere (the API, an agent) names its
                 // target: with nothing picked here, that is the process the
-                // symbols, the hooks and the Functions view are about.
-                if pid > 0 && self.selected_pid.is_none() && self.has_service() {
+                // symbols, the hooks and the Functions view are about. The
+                // target of a file is not: the service is asked about the
+                // processes of its own machine, and a pid of another's
+                // would be a different program here, or none.
+                if pid > 0 && self.selected_pid.is_none() && self.has_service() && !of_file {
                     self.selected_pid = Some(pid);
                 }
                 // A fresh capture is a fresh adoption, even of a recycled pid.
                 self.adopted_target_pid = (pid > 0).then_some(pid);
                 self.user_set_view = false;
                 self.clear_file_trace();
+                self.stream_target = (of_file && pid > 0).then_some(pid);
                 self.index.clear();
                 self.reset_eviction();
                 self.live_all.clear();
@@ -6523,14 +6550,15 @@ impl PerfrLiveApp {
                 // and arrive open.
                 crate::tracks::OrderHints { target: Some(VIEWER_PID), service: None }
             } else {
-                // The target is the process picked here, else the one the
-                // service says the capture is of, else the one the capture's
-                // start frame names. One with nothing on the rail gives way
-                // to the next: the process picked may not be the one the
-                // capture on screen is of. A saved capture has no start
-                // frame, so a file names no target.
+                // The target is the one a capture file names, else the
+                // process picked here, else the one the service says the
+                // capture is of, else the one the capture's start frame
+                // names. One with nothing on the rail gives way to the
+                // next: the process picked may not be the one the capture
+                // on screen is of.
                 self.tracks.ensure_catalogue(&self.index);
                 let named = [
+                    self.file_target(),
                     self.selected_pid.filter(|p| *p > 0),
                     (self.status.target_pid > 0).then_some(self.status.target_pid),
                     self.adopted_target_pid,

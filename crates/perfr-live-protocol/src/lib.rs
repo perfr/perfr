@@ -8,7 +8,7 @@
 //! those fields into length-prefixed frames the WASM client can consume
 //! without protobuf, ELF, or DWARF.
 
-use perfr_live_event::{LiveEvent, LIVE_EVENT_SIZE};
+use perfr_live_event::{CoreInfo, LiveEvent, LIVE_EVENT_SIZE};
 
 pub const MAGIC: &[u8; 4] = b"OLIV";
 pub const VERSION: u16 = 1;
@@ -35,6 +35,14 @@ pub const FRAME_EVENT_BATCH_DEFLATE: u8 = 10;
 /// capture from then on, so a saved or shared capture opens the way it
 /// looked. A reader that does not know the frame skips it.
 pub const FRAME_TRACK_ORDER: u8 = 11;
+/// What each core of the captured machine is (see [`CoreInfo`]): its kind,
+/// its top frequency, its level 3 cache. Sent once per capture by a service
+/// that can read them, replayed to late subscribers and kept in every copy
+/// of the capture, as the names are. The payload is a count (u16), the size
+/// of one record (u8) and the records; a record may grow at its end, and a
+/// reader takes the fields it knows. A reader that does not know the frame
+/// skips it.
+pub const FRAME_CPU_CORES: u8 = 12;
 
 /// Sanity cap on a decoded batch, so a corrupt count cannot ask for gigabytes.
 const MAX_BATCH_EVENTS: usize = 1 << 24;
@@ -126,6 +134,9 @@ pub enum LiveFrame {
     },
     TrackOrder {
         text: String,
+    },
+    CpuCores {
+        cores: Vec<CoreInfo>,
     },
 }
 
@@ -235,6 +246,19 @@ pub fn encode_frame(frame: &LiveFrame) -> Vec<u8> {
             payload.extend_from_slice(bytes);
             FRAME_TRACK_ORDER
         }
+        LiveFrame::CpuCores { cores } => {
+            // A count that fits its field; a machine has no more.
+            let cores = &cores[..cores.len().min(usize::from(u16::MAX))];
+            payload.extend_from_slice(&(cores.len() as u16).to_le_bytes());
+            payload.push(CPU_CORE_RECORD_LEN as u8);
+            for core in cores {
+                payload.extend_from_slice(&core.cpu.to_le_bytes());
+                payload.push(core.kind);
+                payload.extend_from_slice(&core.max_freq_khz.to_le_bytes());
+                payload.extend_from_slice(&core.l3_kb.to_le_bytes());
+            }
+            FRAME_CPU_CORES
+        }
     };
     let mut out = Vec::with_capacity(5 + payload.len());
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -271,6 +295,16 @@ pub const fn process_name_frame_len(name_len: usize) -> usize {
 /// The encoded length of a `TrackOrder` whose text is `text_len` bytes.
 pub const fn track_order_frame_len(text_len: usize) -> usize {
     FRAME_HEADER_LEN + 4 + text_len
+}
+
+/// One core of a `CpuCores` frame, as this version writes it: the CPU's
+/// number (u16), its kind (u8), its top frequency in kHz (u32) and its
+/// level 3 cache in KiB (u32).
+pub const CPU_CORE_RECORD_LEN: usize = 11;
+
+/// The encoded length of a `CpuCores` of `cores` cores.
+pub const fn cpu_cores_frame_len(cores: usize) -> usize {
+    FRAME_HEADER_LEN + 3 + cores * CPU_CORE_RECORD_LEN
 }
 
 /// A short tag of a track order's text (FNV-1a), for saying which one is
@@ -664,6 +698,33 @@ fn decode_payload(typ: u8, payload: &[u8]) -> Result<LiveFrame, ProtocolError> {
             Ok(LiveFrame::ProcessName { pid, name })
         }
         FRAME_TRACK_ORDER => Ok(LiveFrame::TrackOrder { text: utf8_field(payload, "track order")? }),
+        FRAME_CPU_CORES => {
+            if payload.len() < 3 {
+                return Err(ProtocolError::Truncated);
+            }
+            let count = usize::from(u16::from_le_bytes(payload[0..2].try_into().unwrap()));
+            let record_len = usize::from(payload[2]);
+            // A later version may add fields to the end of a record; one
+            // shorter than this version's is not a record.
+            if record_len < CPU_CORE_RECORD_LEN {
+                return Err(ProtocolError::InvalidPayload("cpu core record is too short"));
+            }
+            let records = &payload[3..];
+            if records.len() < count * record_len {
+                return Err(ProtocolError::Truncated);
+            }
+            let cores = records
+                .chunks_exact(record_len)
+                .take(count)
+                .map(|r| CoreInfo {
+                    cpu: u16::from_le_bytes(r[0..2].try_into().unwrap()),
+                    kind: r[2],
+                    max_freq_khz: u32::from_le_bytes(r[3..7].try_into().unwrap()),
+                    l3_kb: u32::from_le_bytes(r[7..11].try_into().unwrap()),
+                })
+                .collect();
+            Ok(LiveFrame::CpuCores { cores })
+        }
         other => Err(ProtocolError::UnknownFrame(other)),
     }
 }
@@ -778,6 +839,63 @@ mod tests {
             let order = LiveFrame::TrackOrder { text: text.into() };
             assert_eq!(encode_frame(&order).len(), track_order_frame_len(text.len()));
         }
+        for count in [0usize, 1, 32] {
+            let cores = LiveFrame::CpuCores { cores: hybrid_cores(count) };
+            assert_eq!(encode_frame(&cores).len(), cpu_cores_frame_len(count));
+        }
+    }
+
+    /// The first `count` CPUs of a machine with performance cores first and
+    /// efficiency cores after them.
+    fn hybrid_cores(count: usize) -> Vec<CoreInfo> {
+        (0..count as u16)
+            .map(|cpu| {
+                let performance = usize::from(cpu) < count.div_ceil(2);
+                CoreInfo {
+                    cpu,
+                    kind: if performance { perfr_live_event::core_kind::PERFORMANCE } else { perfr_live_event::core_kind::EFFICIENCY },
+                    max_freq_khz: if performance { 5_800_000 } else { 4_300_000 },
+                    l3_kb: 36_864,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_cores_of_a_machine_round_trip() {
+        for count in [0usize, 1, 32] {
+            let frame = LiveFrame::CpuCores { cores: hybrid_cores(count) };
+            let bytes = encode_frame(&frame);
+            let (back, used) = decode_frame(&bytes).unwrap();
+            assert_eq!(back, frame);
+            assert_eq!(used, bytes.len());
+        }
+    }
+
+    #[test]
+    fn a_core_record_longer_than_this_version_writes_is_read_for_what_is_known() {
+        // Two cores as a later version might write them: this version's
+        // eleven bytes and two more it knows nothing of.
+        let cores = hybrid_cores(2);
+        let mut payload = vec![2, 0, 13];
+        for core in &cores {
+            payload.extend_from_slice(&core.cpu.to_le_bytes());
+            payload.push(core.kind);
+            payload.extend_from_slice(&core.max_freq_khz.to_le_bytes());
+            payload.extend_from_slice(&core.l3_kb.to_le_bytes());
+            payload.extend_from_slice(&[0xAA, 0xBB]);
+        }
+        let mut bytes = (payload.len() as u32).to_le_bytes().to_vec();
+        bytes.push(FRAME_CPU_CORES);
+        bytes.extend_from_slice(&payload);
+        assert_eq!(decode_frame(&bytes).unwrap(), (LiveFrame::CpuCores { cores }, bytes.len()));
+        // A record shorter than this version's is refused, not guessed at.
+        let mut short = vec![1, 0, 10];
+        short.extend_from_slice(&[0; 10]);
+        let mut bytes = (short.len() as u32).to_le_bytes().to_vec();
+        bytes.push(FRAME_CPU_CORES);
+        bytes.extend_from_slice(&short);
+        assert!(matches!(decode_frame(&bytes), Err(ProtocolError::InvalidPayload(_))));
     }
 
     #[test]
@@ -1029,6 +1147,7 @@ mod tests {
             encode_frame(&LiveFrame::ThreadName { pid: 4, tid: 5, name: "Worker-1".into() }),
             encode_frame(&LiveFrame::ProcessName { pid: 4, name: "game".into() }),
             encode_frame(&LiveFrame::TrackOrder { text: "[game]\nmain\n".into() }),
+            encode_frame(&LiveFrame::CpuCores { cores: hybrid_cores(4) }),
         ]
     }
 

@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 mod color;
+pub mod cores;
 pub mod logs;
 pub mod dev;
 pub mod health;
@@ -26,6 +27,7 @@ pub use color::{
     BOX_BORDER, DROP_MARK, PERFR_API_COLORS_RGBA, PERFR_COLOR_RED, SHADE_LEFT, THREAD_PALETTE,
 };
 pub use color::{chrome, mode as color_mode};
+pub use cores::{core_kind, CoreInfo};
 
 /// Wire size of [`LiveEvent`]. Must stay 32 so C FFI and the WS stream agree.
 pub const LIVE_EVENT_SIZE: usize = 32;

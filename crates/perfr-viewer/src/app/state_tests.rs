@@ -4046,3 +4046,92 @@ fn a_capture_file_on_a_services_page_is_coloured_by_its_own_target() {
     page.frames(2);
     assert_eq!(page.app.thread_focus().target_pid, Some(200));
 }
+
+/// A saved capture with a slice on each of two cores, and what `cores`
+/// says they are.
+fn two_core_file(cores: Vec<perfr_live_event::CoreInfo>) -> Vec<u8> {
+    let mut frames = vec![
+        hello(),
+        LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000_000_000 },
+        LiveFrame::ProcessName { pid: 100, name: "game".into() },
+        LiveFrame::ThreadName { pid: 100, tid: 101, name: "main".into() },
+    ];
+    if !cores.is_empty() {
+        frames.push(LiveFrame::CpuCores { cores });
+    }
+    frames.extend([
+        LiveFrame::EventBatch {
+            events: vec![slice(100, 101, 1_000_000_000), LiveEvent { extra: 1, ..slice(100, 101, 1_001_000_000) }],
+        },
+        LiveFrame::CaptureFinished,
+    ]);
+    stream(&frames)
+}
+
+fn hybrid_pair() -> Vec<perfr_live_event::CoreInfo> {
+    use perfr_live_event::{core_kind, CoreInfo};
+    vec![
+        CoreInfo { cpu: 0, kind: core_kind::PERFORMANCE, max_freq_khz: 5_800_000, l3_kb: 36_864 },
+        CoreInfo { cpu: 1, kind: core_kind::EFFICIENCY, max_freq_khz: 4_300_000, l3_kb: 36_864 },
+    ]
+}
+
+#[test]
+fn the_scheduler_lanes_of_a_capture_are_marked_with_what_its_cores_are() {
+    // The viewer's own page: the file is all there is to say it.
+    let mut page = Page::viewer();
+    page.drop_file("game.perfr.stream", &two_core_file(hybrid_pair()));
+    page.frames(3);
+    let fast = page.rect_of("coremark:0:P:5.8").expect("core 0 is marked a performance core");
+    let slow = page.rect_of("coremark:1:E:4.3").expect("core 1 is marked an efficiency core");
+    assert!(page.shows("P") && page.shows("E") && page.shows("5.8") && page.shows("4.3"), "{:?}", page.texts);
+    // One column, after the label and clear of the percentage at the right.
+    assert_eq!(fast.left(), slow.left());
+    let label = page.text_rect("Core 1").expect("the lane's label");
+    let percent = page.texts.iter().position(|t| t.ends_with('%')).map(|i| page.text_rects[i]).expect("a utilization");
+    assert!(label.right() < slow.left() && slow.right() < percent.left(), "{label:?} {slow:?} {percent:?}");
+    assert!(slow.top() > fast.top(), "each on its own lane");
+
+    // A slice on that lane says what the core under it is.
+    draw_as_with_a_gpu(&mut page.app);
+    let over = (300..1200)
+        .step_by(20)
+        .map(|x| Pos2::new(x as f32, fast.center().y))
+        .find(|at| {
+            page.frame(vec![Event::PointerMoved(*at)]);
+            page.frames(2);
+            page.app.hover.is_some_and(|h| h.kind == kind::SCHEDULING_SLICE)
+        })
+        .expect("a slice of core 0 under the pointer");
+    assert!(
+        page.shows("Core: 0 (Performance core, up to 5.80 GHz, 36 MB L3)"),
+        "at {over:?}: {:?}",
+        page.texts.iter().filter(|t| t.contains("Core")).collect::<Vec<_>>()
+    );
+
+    // A capture that does not say, opened next, is not marked with the
+    // last one's cores.
+    page.drop_file("plain.perfr.stream", &two_core_file(Vec::new()));
+    page.frames(3);
+    assert!(page.text_rect("Core 1").is_some());
+    assert!(!page.app.ui_readout.contains("coremark:"), "{}", page.app.ui_readout);
+    assert!(!page.shows("P") && !page.shows("5.8"));
+}
+
+#[test]
+fn a_rail_too_narrow_for_a_cores_mark_keeps_its_percentage_clear() {
+    // A phone's width: the rail has room for the label and the percentage.
+    let mut page = Page::viewer().sized(390.0, 800.0);
+    page.drop_file("game.perfr.stream", &two_core_file(hybrid_pair()));
+    page.frames(3);
+    let label = page.text_rect("Core 1").expect("the lane's label");
+    let percents: Vec<Rect> =
+        page.texts.iter().zip(&page.text_rects).filter(|(t, _)| t.ends_with('%')).map(|(_, r)| *r).collect();
+    assert!(!percents.is_empty());
+    for (text, rect) in page.texts.iter().zip(&page.text_rects) {
+        if ["P", "E", "5.8", "4.3"].contains(&text.as_str()) {
+            assert!(rect.left() > label.left(), "{text} at {rect:?}");
+            assert!(percents.iter().all(|p| !p.intersects(*rect)), "{text} at {rect:?} is under a percentage");
+        }
+    }
+}

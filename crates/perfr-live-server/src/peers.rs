@@ -719,6 +719,21 @@ impl Ingest {
                 self.events += out.len() as u64;
                 svc.push_events(&out);
             }
+            // A remote's core `c` draws as lane `core_base + c`, and what
+            // the core is goes with it. One past the last lane has no lane.
+            LiveFrame::CpuCores { cores } => {
+                let cores: Vec<_> = cores
+                    .into_iter()
+                    .filter_map(|mut core| {
+                        let lane = self.core_base.saturating_add(u32::from(core.cpu));
+                        core.cpu = u16::from(u8::try_from(lane).ok()?);
+                        Some(core)
+                    })
+                    .collect();
+                if !cores.is_empty() {
+                    svc.set_cpu_cores(&cores);
+                }
+            }
             // A track order is in the pids of the machine it was made on,
             // and is of that machine's capture alone: not this one's.
             LiveFrame::Hello { .. }
@@ -1262,6 +1277,12 @@ mod tests {
             encode_frame(&LiveFrame::InternedString { id: 5, text: "work".into() }),
             encode_frame(&LiveFrame::ProcessName { pid: 1234, name: "game".into() }),
             encode_frame(&LiveFrame::ThreadName { pid: 1234, tid: 1235, name: "render".into() }),
+            encode_frame(&LiveFrame::CpuCores {
+                cores: vec![
+                    perfr_live_event::CoreInfo { cpu: 3, kind: perfr_live_event::core_kind::EFFICIENCY, max_freq_khz: 4_300_000, l3_kb: 36_864 },
+                    perfr_live_event::CoreInfo { cpu: 250, kind: perfr_live_event::core_kind::EFFICIENCY, max_freq_khz: 4_300_000, l3_kb: 36_864 },
+                ],
+            }),
             encode_event_batch_with(
                 &[
                     LiveEvent { start_ns: stamp(1_000), duration_ns: 50, tid: 1235, pid: 1234, kind: kind::API_SCOPE, depth: 0, extra: 0, _pad: 0, name_id: 5 },
@@ -1300,6 +1321,12 @@ mod tests {
         let names = svc.names.lock();
         assert_eq!(names.processes.get(&((2 << 24) | 1234)).map(String::as_str), Some("game @render-01"));
         assert_eq!(names.threads.get(&((2 << 24) | 1234, (2 << 24) | 1235)).map(String::as_str), Some("render"));
+        drop(names);
+        // What the remote's core 3 is goes to the lane it draws as; its
+        // core 250 would be lane 262, which there is not.
+        let cores = svc.cpu_cores();
+        assert_eq!(cores.len(), 1);
+        assert_eq!((cores[0].cpu, cores[0].kind, cores[0].max_freq_khz), (15, perfr_live_event::core_kind::EFFICIENCY, 4_300_000));
     }
 
     #[test]

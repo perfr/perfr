@@ -24,6 +24,8 @@
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(any(test, target_os = "windows"))]
+mod processor_info;
 // Driven by the Linux capture loop alone. Its rules are pure, so their
 // tests run on every platform.
 #[cfg(any(test, target_os = "linux"))]

@@ -1478,6 +1478,9 @@ pub struct PerfrLiveApp {
     trace_args: HashMap<ArgKey, u32>,
     trace_flows: Vec<FlowEdge>,
     thread_names: HashMap<(u32, u32), String>,
+    /// What the capture says of its machine's cores, and the mark each
+    /// scheduler lane carries for it.
+    core_marks: crate::cores::CoreMarks,
     trace_processes: Vec<ProcessJson>,
     /// Log window: lines in the visible range, or the lines inside a clicked
     /// scope.
@@ -2340,6 +2343,7 @@ impl PerfrLiveApp {
             trace_args: HashMap::new(),
             trace_flows: Vec::new(),
             thread_names: HashMap::new(),
+            core_marks: crate::cores::CoreMarks::default(),
             trace_processes: Vec::new(),
             log_ui: crate::logs::LogUi::default(),
             frame_series: None,
@@ -2980,6 +2984,7 @@ impl PerfrLiveApp {
         self.trace_args.clear();
         self.trace_flows.clear();
         self.thread_names.clear();
+        self.core_marks.clear();
         self.trace_processes.clear();
         self.held_stream.forget();
         self.forget_share();
@@ -3057,6 +3062,7 @@ impl PerfrLiveApp {
         self.live_all.clear();
         self.intern = InternTable::default();
         self.thread_names.clear();
+        self.core_marks.clear();
         self.trace_processes.clear();
         self.selected = None;
         self.hover = None;
@@ -3649,6 +3655,7 @@ impl PerfrLiveApp {
         self.trace_args.clear();
         self.trace_flows.clear();
         self.thread_names.clear();
+        self.core_marks.clear();
         self.trace_processes.clear();
         self.held_stream.trace_opened();
         self.forget_share();
@@ -4675,6 +4682,10 @@ impl PerfrLiveApp {
                 self.arranging.adopt_capture(&text);
                 self.needs_repaint = true;
             }
+            LiveFrame::CpuCores { cores } => {
+                self.core_marks.adopt(&cores);
+                self.needs_repaint = true;
+            }
             LiveFrame::CaptureFinished => {
                 self.live_resort_pending = true;
                 // A live capture that just stopped stays where it was -- the
@@ -4717,6 +4728,7 @@ impl PerfrLiveApp {
                     self.live_all.clear();
                     self.log_ui.reset_capture();
                     self.thread_names.clear();
+                    self.core_marks.clear();
                     self.trace_processes.clear();
                     self.hover = None;
                     self.refresh_content_bounds();
@@ -7116,7 +7128,10 @@ impl PerfrLiveApp {
                         Vec::new()
                     };
                     let copied = self.now_s - self.callstack_copied_at < 1.5;
-                    show_scope_tooltip(ui, &self.intern, &self.processes, &self.trace_args, h, &stack, copied);
+                    let core = (h.kind == kind::SCHEDULING_SLICE)
+                        .then(|| self.core_marks.describe(u16::from(h.extra)))
+                        .flatten();
+                    show_scope_tooltip(ui, &self.intern, &self.processes, &self.trace_args, h, &stack, copied, core.as_deref());
                 }
             } else {
                 ui.painter().text(
@@ -7701,18 +7716,41 @@ impl PerfrLiveApp {
             }
             RowId::Lane(key) => {
                 if key.is_scheduler() {
+                    let font = FontId::new(10.5, FontFamily::Proportional);
                     ui.painter().text(
                         Pos2::new(r.left() + 22.0, r.center().y),
                         Align2::LEFT_CENTER,
                         leaf_label(key),
-                        FontId::new(10.5, FontFamily::Proportional),
+                        font.clone(),
                         theme::MUTED(),
                     );
+                    // What the core is, after the label: in one column for
+                    // every core, so past the longest label of them.
+                    let cpu = u16::from(key.extra);
+                    let mut clear_left = r.left() + 66.0;
+                    if let Some(mark) = self.core_marks.mark(cpu) {
+                        let last = TrackStrip::scheduler_core_count_in(&self.index).saturating_sub(1);
+                        let widest = ui.painter().layout_no_wrap(format!("Core {last}"), font, theme::MUTED());
+                        let left = r.left() + 22.0 + widest.size().x + 6.0;
+                        // The percentage is always there; the mark has what
+                        // is left of it.
+                        let right = r.right() - 36.0;
+                        clear_left = clear_left.max(paint_core_mark(ui.painter(), r, left, right, &mark));
+                        if !self.in_self_pane {
+                            note_ui_rect_fmt(
+                                format_args!("coremark:{cpu}:{}:{}", mark.chip, mark.freq),
+                                Rect::from_min_max(Pos2::new(left, r.top()), Pos2::new(clear_left.max(left), r.bottom())),
+                            );
+                        }
+                    }
                     // htop-like per-core utilization over the visible window,
                     // right-aligned so the cores line up; a bar when there is
                     // room, always the percentage.
                     let util = core_util.get(&key.extra).copied().unwrap_or(0.0);
-                    paint_core_util(ui.painter(), r, util);
+                    paint_core_util(ui.painter(), r, clear_left, util);
+                    if let Some(what) = self.core_marks.describe(cpu) {
+                        ui.interact(r, ui.id().with(("core", cpu)), Sense::hover()).on_hover_text(what);
+                    }
                     return;
                 }
                 // A graph is a track of its own: its handle lifts it alone,
@@ -14645,10 +14683,55 @@ fn flame_layout(roots: &[crate::net::TreeNodeJson], width: f32) -> Vec<FlameBar>
     out
 }
 
+/// The mark of a core on its scheduler header, from `left`: a chip with the
+/// core's kind (`P`, `E`, or its cache where that is what differs) and its
+/// top frequency in GHz after it. The stronger kind is in the accent colour
+/// and the highest frequency in the text's, so the cores a thread should
+/// want stand out of the column. Each part is drawn only if it ends before
+/// `right`. Returns where what was drawn ends, `left` when nothing was.
+fn paint_core_mark(painter: &egui::Painter, r: Rect, left: f32, right: f32, mark: &crate::cores::CoreMark) -> f32 {
+    let mut x = left;
+    if !mark.chip.is_empty() {
+        let color = if mark.strong { theme::ACCENT() } else { theme::MUTED() };
+        let galley = painter.layout_no_wrap(mark.chip.clone(), FontId::new(9.0, fonts::medium()), color);
+        // A hair short of the row, so the chips of two lanes do not touch.
+        let height = (r.height() - 2.0).clamp(8.0, 13.0);
+        let chip = Rect::from_min_size(
+            Pos2::new(x, r.center().y - height / 2.0),
+            Vec2::new(galley.size().x + 7.0, height),
+        );
+        if chip.right() > right {
+            return x;
+        }
+        let fill = if mark.strong { theme::ACCENT().gamma_multiply(0.18) } else { theme::INPUT() };
+        painter.rect_filled(chip, 3.0, fill);
+        painter.galley(
+            Pos2::new(chip.center().x - galley.size().x / 2.0, chip.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+        x = chip.right();
+    }
+    if !mark.freq.is_empty() {
+        let color = if mark.fastest { theme::TEXT() } else { theme::MUTED() };
+        let galley = painter.layout_no_wrap(mark.freq.clone(), FontId::new(9.5, fonts::medium()), color);
+        let at = if x > left { x + 4.0 } else { x };
+        if at + galley.size().x > right {
+            return x;
+        }
+        let end = at + galley.size().x;
+        painter.galley(Pos2::new(at, r.center().y - galley.size().y / 2.0), galley, color);
+        x = end;
+    }
+    x
+}
+
 /// The htop-like per-core utilization on a scheduler header: a colour-coded
 /// bar (when the header column is wide enough) and the percentage, both
-/// right-aligned so the cores line up.
-fn paint_core_util(painter: &egui::Painter, r: Rect, util: f32) {
+/// right-aligned so the cores line up. The bar starts after `clear_left`,
+/// where the label and the core's mark end, and is left out when that
+/// leaves it too short to read.
+fn paint_core_util(painter: &egui::Painter, r: Rect, clear_left: f32, util: f32) {
     let util = util.clamp(0.0, 1.0);
     let color = util_color(util);
     let pct = (util * 100.0).round() as i32;
@@ -14660,9 +14743,10 @@ fn paint_core_util(painter: &egui::Painter, r: Rect, util: f32) {
         color,
     );
     // A bar left of the percentage, only when the header is wide enough to
-    // keep clear of the "Core N" label.
-    let (bar_left, bar_right) = (r.right() - 86.0, r.right() - 34.0);
-    if bar_left > r.left() + 66.0 {
+    // keep clear of the "Core N" label and the mark after it.
+    let bar_right = r.right() - 34.0;
+    let bar_left = (r.right() - 86.0).max(clear_left + 6.0);
+    if bar_right - bar_left >= 24.0 {
         let track = Rect::from_min_max(
             Pos2::new(bar_left, r.center().y - 4.0),
             Pos2::new(bar_right, r.center().y + 4.0),
@@ -15110,6 +15194,7 @@ fn show_scope_tooltip(
     pick: ScopePick,
     callstack: &[String],
     callstack_copied: bool,
+    core: Option<&str>,
 ) {
     let _ = egui::Tooltip::always_open(
         ui.ctx().clone(),
@@ -15140,9 +15225,12 @@ fn show_scope_tooltip(
                     .color(theme::TEXT()),
             );
             ui.label(
-                RichText::new(format!("Core: {}", pick.extra))
-                    .font(FontId::monospace(11.0))
-                    .color(theme::MUTED()),
+                RichText::new(match core {
+                    Some(what) => format!("Core: {} ({what})", pick.extra),
+                    None => format!("Core: {}", pick.extra),
+                })
+                .font(FontId::monospace(11.0))
+                .color(theme::MUTED()),
             );
             ui.label(
                 RichText::new(format!("Process: {pname} [{}]", pick.pid))

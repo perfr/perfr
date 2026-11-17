@@ -27,7 +27,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use perfr_live_event::LiveEvent;
+use perfr_live_event::{core_kind, CoreInfo, LiveEvent};
 
 use crate::zipstore::read_store_zip;
 #[cfg(test)]
@@ -70,12 +70,73 @@ pub struct CaptureBundle {
     /// wrote it (its track order format); empty when it was never said.
     /// Kept so the capture opens the way it looked when it was saved.
     pub track_order: String,
+    /// What each core of the captured machine is, in the order of their
+    /// numbers; empty when the capture's source did not say.
+    pub cores: Vec<CoreInfo>,
 }
 
 /// The track order a manifest carries; empty when it has none, which is
 /// every bundle written before there was one.
 pub(crate) fn manifest_track_order(manifest: &serde_json::Value) -> String {
     manifest["bundle"]["track_order"].as_str().unwrap_or_default().to_string()
+}
+
+/// A core's kind as a manifest spells it; nothing for a kind not told.
+fn core_kind_name(kind: u8) -> Option<&'static str> {
+    match kind {
+        core_kind::PERFORMANCE => Some("performance"),
+        core_kind::EFFICIENCY => Some("efficiency"),
+        _ => None,
+    }
+}
+
+/// The cores as a manifest lists them: one object per core, with the facts
+/// that are known.
+fn manifest_of_cores(cores: &[CoreInfo]) -> Vec<serde_json::Value> {
+    cores
+        .iter()
+        .map(|core| {
+            let mut entry = serde_json::json!({ "cpu": core.cpu });
+            if let Some(kind) = core_kind_name(core.kind) {
+                entry["kind"] = kind.into();
+            }
+            if core.max_freq_khz > 0 {
+                entry["max_freq_khz"] = core.max_freq_khz.into();
+            }
+            if core.l3_kb > 0 {
+                entry["l3_kb"] = core.l3_kb.into();
+            }
+            entry
+        })
+        .collect()
+}
+
+/// The cores a manifest lists; none when it has no list, which is every
+/// bundle written before there was one. An entry that is not a core (no
+/// number, or one past any machine's) is left out.
+pub(crate) fn manifest_cores(manifest: &serde_json::Value) -> Vec<CoreInfo> {
+    let Some(entries) = manifest["bundle"]["cpu_cores"].as_array() else {
+        return Vec::new();
+    };
+    let number = |value: &serde_json::Value| value.as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
+    let mut cores: Vec<CoreInfo> = entries
+        .iter()
+        .filter_map(|entry| {
+            Some(CoreInfo {
+                cpu: u16::try_from(entry["cpu"].as_u64()?).ok()?,
+                kind: match entry["kind"].as_str() {
+                    Some("performance") => core_kind::PERFORMANCE,
+                    Some("efficiency") => core_kind::EFFICIENCY,
+                    _ => core_kind::UNKNOWN,
+                },
+                max_freq_khz: number(&entry["max_freq_khz"]),
+                l3_kb: number(&entry["l3_kb"]),
+            })
+        })
+        .collect();
+    cores.sort_by_key(|core| core.cpu);
+    cores.dedup_by_key(|core| core.cpu);
+    cores
 }
 
 /// The file name suffix of a bundle. The viewer tells a bundle from a zipped
@@ -158,6 +219,7 @@ impl CaptureBundle {
             samples,
             frames,
             track_order: self.track_order.clone(),
+            cores: self.cores.clone(),
         }
     }
 
@@ -194,6 +256,7 @@ impl CaptureBundle {
                 "processes": self.processes.iter().map(|p| serde_json::json!({"pid": p.pid, "name": p.name})).collect::<Vec<_>>(),
                 "threads": self.threads.iter().map(|t| serde_json::json!({"pid": t.pid, "tid": t.tid, "name": t.name})).collect::<Vec<_>>(),
                 "track_order": self.track_order,
+                "cpu_cores": manifest_of_cores(&self.cores),
             },
         })
     }
@@ -223,6 +286,7 @@ impl CaptureBundle {
         for p in &self.processes { append(LiveFrame::ProcessName { pid: p.pid, name: p.name.clone() }); }
         for t in &self.threads { append(LiveFrame::ThreadName { pid: t.pid, tid: t.tid, name: t.name.clone() }); }
         if !self.track_order.is_empty() { append(LiveFrame::TrackOrder { text: self.track_order.clone() }); }
+        if !self.cores.is_empty() { append(LiveFrame::CpuCores { cores: self.cores.clone() }); }
         let mut events: Vec<LiveEvent> = self.events.iter().map(|r| r.event)
             .filter(|e| e.kind != kind::SAMPLE && !(e.kind == kind::FUNCTION_CALL && e.extra == extra::SAMPLED_FRAME)).collect();
         let periods: HashMap<(u32, u64), u64> = self.events.iter()
@@ -337,6 +401,7 @@ impl CaptureBundle {
             samples,
             frames,
             track_order: manifest_track_order(&manifest),
+            cores: manifest_cores(&manifest),
         })
     }
 }
@@ -447,6 +512,11 @@ mod tests {
                 FrameRow { id: 4, name: "nanosleep".into(), module: "libc".into(), address: 0x40 },
             ],
             track_order: "[@7]\n@71\n@70\n[@9]\n@90\n".into(),
+            cores: vec![
+                CoreInfo { cpu: 0, kind: core_kind::PERFORMANCE, max_freq_khz: 5_800_000, l3_kb: 36_864 },
+                CoreInfo { cpu: 1, kind: core_kind::EFFICIENCY, max_freq_khz: 4_300_000, l3_kb: 36_864 },
+                CoreInfo { cpu: 2, kind: core_kind::UNKNOWN, max_freq_khz: 0, l3_kb: 0 },
+            ],
         }
     }
 
@@ -460,10 +530,50 @@ mod tests {
     }
 
     #[test]
+    fn a_bundle_says_what_the_machines_cores_are_in_its_manifest_and_its_stream() {
+        let b = sample_bundle();
+        let manifest = b.manifest_json();
+        assert_eq!(
+            manifest["bundle"]["cpu_cores"],
+            serde_json::json!([
+                {"cpu": 0, "kind": "performance", "max_freq_khz": 5_800_000, "l3_kb": 36_864},
+                {"cpu": 1, "kind": "efficiency", "max_freq_khz": 4_300_000, "l3_kb": 36_864},
+                {"cpu": 2},
+            ])
+        );
+        assert_eq!(manifest_cores(&manifest), b.cores);
+        let frames = perfr_live_protocol::decode_all(&b.to_stream()).unwrap();
+        assert!(frames.contains(&perfr_live_protocol::LiveFrame::CpuCores { cores: b.cores.clone() }));
+        // A bundle saved before there was a list, and one of a machine that
+        // does not tell, have no cores and no frame.
+        assert!(manifest_cores(&serde_json::json!({"bundle": {"target_pid": 7}})).is_empty());
+        let plain = CaptureBundle { cores: Vec::new(), ..sample_bundle() };
+        let frames = perfr_live_protocol::decode_all(&plain.to_stream()).unwrap();
+        assert!(!frames.iter().any(|f| matches!(f, perfr_live_protocol::LiveFrame::CpuCores { .. })));
+        // What is not a core is left out, a kind this version does not know
+        // is a core of no known kind, and the cores come back in order.
+        let odd = serde_json::json!({"bundle": {"cpu_cores": [
+            {"cpu": 3, "kind": "prime", "max_freq_khz": 3_000_000},
+            {"kind": "performance"},
+            {"cpu": 70_000},
+            "core",
+            {"cpu": 1, "l3_kb": 512},
+        ]}});
+        assert_eq!(
+            manifest_cores(&odd),
+            [
+                CoreInfo { cpu: 1, kind: core_kind::UNKNOWN, max_freq_khz: 0, l3_kb: 512 },
+                CoreInfo { cpu: 3, kind: core_kind::UNKNOWN, max_freq_khz: 3_000_000, l3_kb: 0 },
+            ]
+        );
+    }
+
+    #[test]
     fn a_slice_keeps_straddling_events_whole_and_cuts_samples_by_time() {
         let s = sample_bundle().slice(110, 220);
         assert_eq!(s.slice_ns, Some((110, 220)));
         assert_eq!(s.track_order, sample_bundle().track_order, "a slice opens in the order the capture was in");
+        assert_eq!(s.cores, sample_bundle().cores, "a slice is of the same machine");
         // Tick (100..150) and Physics (140..240) overlap; the later Tick and
         // Sleep do not.
         let names: Vec<&str> = s.events.iter().map(|r| r.name.as_str()).collect();

@@ -2065,3 +2065,56 @@ fn a_capture_carries_the_track_order_a_viewer_gave_it_and_the_next_one_does_not(
     assert!(order_of(&svc.capture_stream(None)).is_empty());
     assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
 }
+
+#[test]
+fn a_capture_carries_what_its_machines_cores_are_and_the_next_one_does_not() {
+    use perfr_live_event::{core_kind, CoreInfo};
+    let svc = LiveService::new(small_cfg()).unwrap();
+    svc.push_events(&[ev(1), ev(2)]);
+    let cores_of = |bytes: &[u8]| -> Vec<Vec<CoreInfo>> {
+        decode_all(bytes)
+            .unwrap()
+            .into_iter()
+            .filter_map(|f| match f {
+                LiveFrame::CpuCores { cores } => Some(cores),
+                _ => None,
+            })
+            .collect()
+    };
+    let core = |cpu: u16, kind: u8, max_freq_khz: u32| CoreInfo { cpu, kind, max_freq_khz, l3_kb: 36_864 };
+    // A machine that does not tell: the file has no such frame.
+    assert!(cores_of(&svc.capture_stream(None)).is_empty());
+
+    let local = [core(0, core_kind::PERFORMANCE, 5_800_000), core(1, core_kind::EFFICIENCY, 4_300_000)];
+    let mut viewer = svc.subscribe();
+    svc.set_cpu_cores(&local);
+    assert_eq!(svc.cpu_cores(), local);
+    // To the viewer that is connected, in the file, in what a page is sent
+    // when it connects, and counted in the size the status reports.
+    let sent: Vec<u8> = std::iter::from_fn(|| viewer.try_recv().ok()).flat_map(|m| m.to_vec()).collect();
+    assert_eq!(cores_of(&sent), [local.to_vec()]);
+    assert_eq!(cores_of(&svc.capture_stream(None)), [local.to_vec()]);
+    assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
+    assert_eq!(cores_of(&svc.capture_stream(Some((0, 15)))), [local.to_vec()], "a slice is of the same machine");
+    let (_rx, snapshot) = svc.subscribe_with_snapshot();
+    assert_eq!(cores_of(&snapshot.head.concat()), [local.to_vec()]);
+
+    // Said again, nothing is sent again.
+    svc.set_cpu_cores(&local);
+    assert!(viewer.try_recv().is_err());
+
+    // Another machine's cores, on the lanes after these, join them; a core
+    // said again is replaced. The size follows.
+    let more = [core(1, core_kind::EFFICIENCY, 4_400_000), core(2, core_kind::UNKNOWN, 3_000_000)];
+    svc.set_cpu_cores(&more);
+    assert_eq!(svc.cpu_cores(), [local[0], more[0], more[1]]);
+    assert_eq!(cores_of(&svc.capture_stream(None)), [vec![local[0], more[0], more[1]]]);
+    assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
+
+    // The cores are the capture's machine's: gone with its names when
+    // another begins, which may be a file from another machine.
+    svc.clear_names();
+    assert!(svc.cpu_cores().is_empty());
+    assert!(cores_of(&svc.capture_stream(None)).is_empty());
+    assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
+}

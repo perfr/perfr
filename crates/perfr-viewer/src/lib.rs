@@ -26,6 +26,7 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 
 mod app;
 mod chrome_load;
+mod cores;
 pub mod code;
 pub mod dev;
 mod fonts;

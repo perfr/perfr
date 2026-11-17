@@ -942,6 +942,8 @@ fn open_bundle(
     // The order the capture was saved in, after everything else of it: a
     // viewer drops the order it holds at each start of a capture.
     service.restore_track_order(&bundle.track_order);
+    // And the cores of the machine it was captured on.
+    service.set_cpu_cores(&bundle.cores);
     service.mark_capture_finished();
     service.broadcast_status();
     Ok(serde_json::json!({
@@ -1802,6 +1804,9 @@ fn capture_loop(
     let has_target = target_pid > 0;
     // The scope reader and epoch were established before Frida attachment.
     service.mark_capture_started(target_pid.max(0) as u32, capture_start_ns);
+    // What each core is, for the scheduler's lanes. Said after the start:
+    // a viewer drops what it holds of the last capture there.
+    service.set_cpu_cores(&crate::sysinfo::cpu_cores());
     // The machine's own state, twice a second, as the value lanes of a
     // process of their own (`health.rs`).
     let mut health = machine_health.then(|| {
@@ -3345,6 +3350,9 @@ pub fn run_on(
         // The order the viewer shows the tracks in: the file opens as the
         // capture looked.
         bundle.track_order = bundle_service.track_order();
+        // What the machine's cores are: the file is read where they cannot
+        // be asked.
+        bundle.cores = bundle_service.cpu_cores();
         match window {
             Some((a, b)) => bundle.slice(a, b),
             None => bundle,
@@ -4156,6 +4164,51 @@ mod tests {
         assert_eq!(service.track_order(), "");
         assert!(std::iter::from_fn(|| viewer.try_recv().ok())
             .all(|bytes| !matches!(decode_frame(&bytes), Ok((LiveFrame::TrackOrder { .. }, _)))));
+    }
+
+    #[test]
+    fn opening_a_bundle_says_what_the_cores_of_its_machine_are_and_not_of_this_one() {
+        use perfr_live_event::{core_kind, CoreInfo};
+        let service = LiveService::new(ServerConfig { ring_buffer_bytes: 1 << 20, ..Default::default() }).unwrap();
+        let store = Arc::new(SampleStore::new());
+        let target = Arc::new(AtomicI32::new(0));
+        let event = LiveEvent {
+            start_ns: 10,
+            duration_ns: 30,
+            tid: 8,
+            pid: 7,
+            kind: kind::SCHEDULING_SLICE,
+            depth: 0,
+            extra: 1,
+            _pad: 0,
+            name_id: 1,
+        };
+        let cores = vec![
+            CoreInfo { cpu: 0, kind: core_kind::PERFORMANCE, max_freq_khz: 5_800_000, l3_kb: 36_864 },
+            CoreInfo { cpu: 1, kind: core_kind::EFFICIENCY, max_freq_khz: 4_300_000, l3_kb: 36_864 },
+        ];
+        let saved = perfr_capture::CaptureBundle {
+            target_pid: 7,
+            events: vec![perfr_capture::EventRow { event, name: "game".to_string() }],
+            cores: cores.clone(),
+            ..Default::default()
+        };
+        // Through the file, as a save and an open go.
+        let saved = perfr_capture::CaptureBundle::from_zip(&saved.to_zip().unwrap()).unwrap();
+        // The service's own machine, from the capture before: more cores
+        // than the file's, and of another kind.
+        let own: Vec<CoreInfo> = (0..4).map(|cpu| CoreInfo { cpu, kind: core_kind::UNKNOWN, max_freq_khz: 3_000_000, l3_kb: 8_192 }).collect();
+        service.set_cpu_cores(&own);
+        open_bundle(&service, &store, &target, saved).unwrap();
+        assert_eq!(service.cpu_cores(), cores);
+        // A capture saved by a machine that told nothing has none.
+        let plain = perfr_capture::CaptureBundle {
+            target_pid: 7,
+            events: vec![perfr_capture::EventRow { event, name: "game".to_string() }],
+            ..Default::default()
+        };
+        open_bundle(&service, &store, &target, plain).unwrap();
+        assert!(service.cpu_cores().is_empty());
     }
 
     #[test]

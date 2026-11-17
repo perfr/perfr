@@ -165,10 +165,10 @@ pub fn slice_bundle_bytes(file: Bytes, t0: u64, t1: u64) -> Result<(CaptureBundl
         Some(t) => read_frames_parquet(t)?,
         None => Vec::new(),
     };
-    let track_order = serde_json::from_slice::<serde_json::Value>(&manifest)
-        .map(|m| crate::bundle::manifest_track_order(&m))
+    let (track_order, cores) = serde_json::from_slice::<serde_json::Value>(&manifest)
+        .map(|m| (crate::bundle::manifest_track_order(&m), crate::bundle::manifest_cores(&m)))
         .unwrap_or_default();
-    let whole = CaptureBundle { target_pid, slice_ns: None, processes, threads, events, samples, frames, track_order };
+    let whole = CaptureBundle { target_pid, slice_ns: None, processes, threads, events, samples, frames, track_order, cores };
     // `slice` prunes the frames to those referenced and the names to what
     // is left; the events and samples are already inside the window.
     Ok((
@@ -248,6 +248,7 @@ mod tests {
             samples,
             frames: (0..3).map(|i| FrameRow { id: i, name: format!("f{i}"), module: "m".into(), address: i as u64 }).collect(),
             track_order: "[@7]\n@71\n@70\n".into(),
+            cores: vec![perfr_live_event::CoreInfo { cpu: 0, kind: perfr_live_event::core_kind::PERFORMANCE, max_freq_khz: 5_800_000, l3_kb: 36_864 }],
         }
     }
 

@@ -58,6 +58,7 @@ extern "system" {
     fn GetSystemInfo(info: *mut SystemInfo);
     fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> i32;
     fn GetLogicalProcessorInformation(buffer: *mut LogicalProcessorInformation, length: *mut u32) -> i32;
+    fn GetLogicalProcessorInformationEx(relationship: u32, buffer: *mut u8, length: *mut u32) -> i32;
 }
 
 #[link(name = "ntdll")]
@@ -387,6 +388,24 @@ fn cpu_topology() -> (u32, u32) {
     (cores.max(1), logical.max(1))
 }
 
+/// What each core of this machine is, for the viewer's scheduler lanes: its
+/// kind where the machine has more than one, and its level 3 cache. Empty
+/// when Windows tells neither. See `processor_info`.
+pub fn cpu_cores() -> Vec<perfr_live_event::CoreInfo> {
+    const RELATION_ALL: u32 = 0xffff;
+    let mut length: u32 = 0;
+    // SAFETY: a size query, which fails and says the size.
+    unsafe { GetLogicalProcessorInformationEx(RELATION_ALL, std::ptr::null_mut(), &mut length) };
+    let mut buffer = vec![0u8; length as usize];
+    // SAFETY: a buffer of the size the query asked for; the call writes at
+    // most `length` bytes and says how many.
+    if buffer.is_empty() || unsafe { GetLogicalProcessorInformationEx(RELATION_ALL, buffer.as_mut_ptr(), &mut length) } == 0 {
+        return Vec::new();
+    }
+    buffer.truncate(length as usize);
+    crate::processor_info::cores_from_processor_information(&buffer)
+}
+
 /// The `SystemInfo` event for this machine.
 pub fn system_info(capture_start_unix_ns: u64, capture_start_monotonic_ns: u64) -> perfr_wire::Event {
     // SAFETY: zeroed structures sized by their own length fields.
@@ -691,6 +710,9 @@ pub fn capture_loop(
     const SAMPLE_HZ: u64 = 1000;
     let period_ns = 1_000_000_000 / SAMPLE_HZ;
     service.mark_capture_started(target_pid.max(0) as u32, capture_start_ns);
+    // What each core is, for the scheduler's lanes. Said after the start:
+    // a viewer drops what it holds of the last capture there.
+    service.set_cpu_cores(&cpu_cores());
     {
         let mut early: Vec<LiveEvent> = Vec::new();
         scopes.drain_now(crate::now_monotonic_ns(), &mut early);
@@ -1093,5 +1115,10 @@ mod tests {
         assert!(!hostname.is_empty());
         // The LAN list is whatever the box has; it must not list loopback.
         assert!(lan_interfaces().iter().all(|i| !i.addr.is_loopback()));
+        // The cores are none (a machine that tells nothing) or one for each
+        // logical processor, in order.
+        let cores = super::cpu_cores();
+        assert!(cores.is_empty() || cores.len() == cpu_threads as usize, "{} cores for {cpu_threads} threads", cores.len());
+        assert!(cores.windows(2).all(|w| w[0].cpu < w[1].cpu));
     }
 }

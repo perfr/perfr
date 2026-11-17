@@ -23,8 +23,8 @@ use std::sync::Arc;
 use perfr_live_event::{InternTable, LiveEvent, ScopePairer};
 pub use perfr_live_protocol::{decode_frame, encode_event_batch_with, LiveFrame, WireFormat};
 use perfr_live_protocol::{
-    encode_frame, interned_string_frame_len, process_name_frame_len, thread_name_frame_len,
-    track_order_frame_len,
+    cpu_cores_frame_len, encode_frame, interned_string_frame_len, process_name_frame_len,
+    thread_name_frame_len, track_order_frame_len,
     CAPTURE_FINISHED_FRAME_LEN, CAPTURE_STARTED_FRAME_LEN, HELLO_FRAME_LEN, STATUS_FRAME_LEN, VERSION,
 };
 use perfr_live_render::TrackIndex;
@@ -463,6 +463,9 @@ struct CaptureNames {
     /// The order the capture's tracks were last seen in, as the viewer
     /// wrote it; empty when no viewer has said. The service only keeps it.
     track_order: String,
+    /// What each core of the captured machine is, in the order of their
+    /// numbers; empty when the capture's source did not say.
+    cores: Vec<perfr_live_event::CoreInfo>,
 }
 
 impl LiveService {
@@ -751,6 +754,38 @@ impl LiveService {
     /// The track order the capture carries; empty when it has none.
     pub fn track_order(&self) -> String {
         self.names.lock().track_order.clone()
+    }
+
+    /// Says what cores of the captured machine are, for every viewer, now
+    /// and for late subscribers, and for every copy of the capture. Cores
+    /// said before are kept, and one said again is replaced: the machines
+    /// of a capture each tell of their own, on the lanes they draw as.
+    pub fn set_cpu_cores(&self, cores: &[perfr_live_event::CoreInfo]) {
+        let _feed = self.feed.read();
+        let frame_len = |cores: &[perfr_live_event::CoreInfo]| if cores.is_empty() { 0 } else { cpu_cores_frame_len(cores.len()) as u64 };
+        let mut names = self.names.lock();
+        let mut merged = names.cores.clone();
+        for core in cores {
+            match merged.binary_search_by_key(&core.cpu, |c| c.cpu) {
+                Ok(at) => merged[at] = *core,
+                Err(at) => merged.insert(at, *core),
+            }
+        }
+        if merged == names.cores {
+            return;
+        }
+        self.names_bytes.fetch_add(frame_len(&merged), Ordering::Relaxed);
+        self.names_bytes.fetch_sub(frame_len(&names.cores), Ordering::Relaxed);
+        names.cores = merged;
+        drop(names);
+        self.reserve_stream_overhead();
+        self.broadcast_frame(&LiveFrame::CpuCores { cores: cores.to_vec() });
+    }
+
+    /// What is known of the captured machine's cores, in the order of their
+    /// numbers; empty when nothing.
+    pub fn cpu_cores(&self) -> Vec<perfr_live_event::CoreInfo> {
+        self.names.lock().cores.clone()
     }
 
     /// Forgets the names of the previous capture.
@@ -1242,6 +1277,9 @@ impl LiveService {
             }
             if !names.track_order.is_empty() {
                 frames.push(encode_frame(&LiveFrame::TrackOrder { text: names.track_order.clone() }));
+            }
+            if !names.cores.is_empty() {
+                frames.push(encode_frame(&LiveFrame::CpuCores { cores: names.cores.clone() }));
             }
         }
         let stats = self.stats();

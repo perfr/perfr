@@ -25,7 +25,7 @@ pub use perfr_live_protocol::{decode_frame, encode_event_batch_with, LiveFrame, 
 use perfr_live_protocol::{
     encode_frame, interned_string_frame_len, process_name_frame_len, thread_name_frame_len,
     track_order_frame_len,
-    CAPTURE_FINISHED_FRAME_LEN, HELLO_FRAME_LEN, STATUS_FRAME_LEN, VERSION,
+    CAPTURE_FINISHED_FRAME_LEN, CAPTURE_STARTED_FRAME_LEN, HELLO_FRAME_LEN, STATUS_FRAME_LEN, VERSION,
 };
 use perfr_live_render::TrackIndex;
 use perfr_live_ring::{Encoding, EventRing, RingStats, SharedRing};
@@ -824,14 +824,14 @@ impl LiveService {
     }
 
     /// What a saved capture holds besides its events, in bytes: the hello,
-    /// every interned string and name, the status and the closing frame.
-    /// Counted, not encoded.
+    /// the start, every interned string and name, the status and the
+    /// closing frame. Counted, not encoded.
     pub fn stream_overhead_bytes(&self) -> u64 {
         let interned = {
             let intern = self.intern.lock();
             intern.len() as u64 * interned_string_frame_len(0) as u64 + intern.text_bytes()
         };
-        (HELLO_FRAME_LEN + STATUS_FRAME_LEN + CAPTURE_FINISHED_FRAME_LEN) as u64
+        (HELLO_FRAME_LEN + CAPTURE_STARTED_FRAME_LEN + STATUS_FRAME_LEN + CAPTURE_FINISHED_FRAME_LEN) as u64
             + interned
             + self.names_bytes.load(Ordering::Relaxed)
     }
@@ -1162,6 +1162,8 @@ impl LiveService {
             _ => 0,
         });
         out.extend_from_slice(&self.hello_frame());
+        // Before the names: a viewer drops those it holds at a start.
+        out.extend_from_slice(&encode_frame(&self.saved_start_frame(window)));
         for frame in self.names_and_status_frames() {
             out.extend_from_slice(&frame);
         }
@@ -1170,6 +1172,25 @@ impl LiveService {
         }
         out.extend_from_slice(&encode_frame(&LiveFrame::CaptureFinished));
         out
+    }
+
+    /// The start a saved capture opens with. A viewer of the service is
+    /// told the capture's target and where its time begins by the status;
+    /// a file has this frame alone to say them, and without it a viewer
+    /// could not tell the target's threads from the rest of the machine's.
+    /// The demo names no target: it has none while it runs either. The time
+    /// is the capture's start, or the window's when the file is a cut, or
+    /// the oldest event's for events that came with no capture started.
+    fn saved_start_frame(&self, window: Option<(u64, u64)>) -> LiveFrame {
+        let pid = if self.demo.load(Ordering::Relaxed) { 0 } else { self.capture_pid() };
+        let mut start_ns = self.capture_start_ns.load(Ordering::Relaxed);
+        if start_ns == 0 {
+            start_ns = self.stats().oldest_start_ns;
+        }
+        if let Some((a, b)) = window {
+            start_ns = start_ns.max(a.min(b));
+        }
+        LiveFrame::CaptureStarted { pid, start_ns }
     }
 
     /// The ring's events, oldest first; with `window`, those overlapping it.

@@ -245,10 +245,11 @@ pub fn encode_frame(frame: &LiveFrame) -> Vec<u8> {
 
 /// The length and type that lead every frame.
 pub const FRAME_HEADER_LEN: usize = 5;
-/// What [`encode_frame`] makes of a `Hello`, a `Status` and a
-/// `CaptureFinished`, in bytes. With the three functions below, the size of
+/// What [`encode_frame`] makes of a `Hello`, a `CaptureStarted`, a `Status`
+/// and a `CaptureFinished`, in bytes. With the functions below, the size of
 /// a capture's frames other than its events without encoding them.
 pub const HELLO_FRAME_LEN: usize = FRAME_HEADER_LEN + 8;
+pub const CAPTURE_STARTED_FRAME_LEN: usize = FRAME_HEADER_LEN + 12;
 pub const STATUS_FRAME_LEN: usize = FRAME_HEADER_LEN + 4 + 8 * 8;
 pub const CAPTURE_FINISHED_FRAME_LEN: usize = FRAME_HEADER_LEN;
 
@@ -752,6 +753,8 @@ mod tests {
     fn the_frame_lengths_are_what_the_encoder_writes() {
         assert_eq!(encode_frame(&LiveFrame::Hello { version: VERSION, event_size: 32 }).len(), HELLO_FRAME_LEN);
         assert_eq!(encode_frame(&LiveFrame::CaptureFinished).len(), CAPTURE_FINISHED_FRAME_LEN);
+        let started = LiveFrame::CaptureStarted { pid: u32::MAX, start_ns: u64::MAX };
+        assert_eq!(encode_frame(&started).len(), CAPTURE_STARTED_FRAME_LEN);
         let status = LiveFrame::Status {
             capturing: true,
             demo: false,

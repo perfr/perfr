@@ -3795,3 +3795,128 @@ fn the_remember_option_is_on_the_targets_header_and_says_where_the_file_is() {
     let other = page.rect_of("row:process:200").expect("the other header");
     assert!(other.top() > header.top());
 }
+
+/// A slice of thread `tid` of `pid` on core 0.
+fn slice(pid: u32, tid: u32, start_ns: u64) -> LiveEvent {
+    LiveEvent { kind: kind::SCHEDULING_SLICE, name_id: tid, ..scope(pid, tid, start_ns, 400_000, 0) }
+}
+
+/// A saved capture of `game` (100) on a machine where `helper` (200) ran
+/// too: a scope and a scheduler slice of each. `start` is the file's start
+/// frame, which names the target; a file saved before files had one has
+/// none.
+fn two_process_file(start: Option<LiveFrame>) -> Vec<u8> {
+    let mut frames = vec![hello()];
+    frames.extend(start);
+    frames.extend([
+        LiveFrame::InternedString { id: 7, text: "work".into() },
+        LiveFrame::ProcessName { pid: 100, name: "game".into() },
+        LiveFrame::ProcessName { pid: 200, name: "helper".into() },
+        LiveFrame::ThreadName { pid: 100, tid: 101, name: "main".into() },
+        LiveFrame::ThreadName { pid: 200, tid: 2, name: "main".into() },
+        status_frame(false, false),
+        LiveFrame::EventBatch {
+            events: vec![
+                scope(100, 101, 1_000_000_000, 500_000, 7),
+                slice(100, 101, 1_000_000_000),
+                scope(200, 2, 1_001_000_000, 500_000, 7),
+                slice(200, 2, 1_001_000_000),
+            ],
+        },
+        LiveFrame::CaptureFinished,
+    ]);
+    stream(&frames)
+}
+
+fn game_file() -> Vec<u8> {
+    two_process_file(Some(LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000_000_000 }))
+}
+
+/// Which of the game's and the helper's scheduler slices are in colour.
+fn slices_in_colour(app: &PerfrLiveApp) -> (bool, bool) {
+    let focus = app.thread_focus();
+    (focus.active_on_scheduler(100, 101), focus.active_on_scheduler(200, 2))
+}
+
+#[test]
+fn the_scheduler_of_a_capture_file_colours_the_target_the_file_names() {
+    // The viewer's own page: nobody to ask what the capture is of.
+    let mut page = Page::viewer();
+    page.drop_file("game.perfr.stream", &game_file());
+    page.frames(3);
+    assert_eq!(page.app.index.event_count(), 4);
+    assert_eq!(page.app.thread_focus(), ThreadFocus { selected: None, target_pid: Some(100) });
+    assert_eq!(slices_in_colour(&page.app), (true, false), "nothing selected: the target's slices only");
+    // The thread tracks keep their colours, the helper's too.
+    assert!(page.app.thread_focus().active_on_track(200, 2));
+    // The rail knows the target as well.
+    assert_eq!(page.app.tracks.order_hints.target, Some(100));
+
+    // A thread selected: its slices. Escape: the target's again.
+    page.app.selected_thread = Some((200, 2));
+    page.frames(2);
+    assert_eq!(slices_in_colour(&page.app), (false, true));
+    page.key(Key::Escape);
+    assert_eq!(page.app.selected_thread, None);
+    assert_eq!(slices_in_colour(&page.app), (true, false), "Escape gives the scheduler back to the target");
+
+    // A file that names no target, opened next, does not inherit this one's.
+    page.drop_file("old.perfr.stream", &two_process_file(None));
+    page.frames(3);
+    assert_eq!(page.app.thread_focus(), ThreadFocus::default());
+    assert_eq!(slices_in_colour(&page.app), (true, true));
+    // Nor does one that says it has none.
+    page.drop_file("game.perfr.stream", &game_file());
+    page.frames(3);
+    assert_eq!(slices_in_colour(&page.app), (true, false));
+    page.drop_file("machine.perfr.stream", &two_process_file(Some(LiveFrame::CaptureStarted { pid: 0, start_ns: 1_000_000_000 })));
+    page.frames(3);
+    assert_eq!(slices_in_colour(&page.app), (true, true));
+}
+
+#[test]
+fn a_capture_file_on_a_services_page_is_coloured_by_its_own_target() {
+    // The service's capture is of another process, picked in the bar.
+    let mut page = Page::with(|app| {
+        app.apply_status(StatusJson { target_pid: 200, ..service_status(false) });
+        app.selected_pid = Some(200);
+    });
+    page.frames(2);
+    page.drop_file("game.perfr.stream", &game_file());
+    page.frames(3);
+    assert_eq!(slices_in_colour(&page.app), (true, false), "the file's target, not the process picked");
+    assert_eq!(page.app.tracks.order_hints.target, Some(100));
+    // The file's target is not picked for the service: its pid is of the
+    // machine the file was saved on.
+    assert_eq!(page.app.selected_pid, Some(200));
+    // A status answer changes nothing while the file is on screen.
+    page.app.apply_status(StatusJson { target_pid: 200, ..service_status(false) });
+    page.frames(2);
+    assert_eq!(slices_in_colour(&page.app), (true, false));
+
+    // With nothing picked, the file's target still is not.
+    let mut page = Page::with(|app| app.apply_status(service_status(false)));
+    page.frames(2);
+    page.drop_file("game.perfr.stream", &game_file());
+    page.frames(3);
+    assert_eq!(page.app.selected_pid, None);
+    assert_eq!(slices_in_colour(&page.app), (true, false));
+
+    // A file saved before files named their target: the process picked, as before.
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.selected_pid = Some(100);
+    });
+    page.frames(2);
+    page.drop_file("old.perfr.stream", &two_process_file(None));
+    page.frames(3);
+    assert_eq!(slices_in_colour(&page.app), (true, false));
+
+    // The service's own capture taking the screen again: the process picked.
+    page.drop_file("game.perfr.stream", &game_file());
+    page.frames(3);
+    page.app.selected_pid = Some(200);
+    page.app.apply_frame(LiveFrame::CaptureStarted { pid: 200, start_ns: 2_000_000_000 });
+    page.frames(2);
+    assert_eq!(page.app.thread_focus().target_pid, Some(200));
+}

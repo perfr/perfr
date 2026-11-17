@@ -492,6 +492,41 @@ fn stream_slice_keeps_events_crossing_both_edges_and_normalizes_bounds() {
     assert!(matches!(frames.last(), Some(LiveFrame::CaptureFinished)));
 }
 
+#[test]
+fn a_saved_stream_opens_with_the_captures_target_and_start() {
+    let start_of = |stream: &[u8]| {
+        let frames = decode_all(stream).unwrap();
+        assert!(matches!(frames[0], LiveFrame::Hello { .. }));
+        // Ahead of every name: a viewer forgets the names it holds at a start.
+        match frames[1] {
+            LiveFrame::CaptureStarted { pid, start_ns } => (pid, start_ns),
+            ref other => panic!("the second frame is {other:?}"),
+        }
+    };
+    let svc = LiveService::new(small_cfg()).unwrap();
+    // Events with no capture started (a program that reports on its own):
+    // no target, and the time begins with the oldest event.
+    svc.intern_id(7, "scope");
+    svc.push_events(&[ev(30), ev(40)]);
+    assert_eq!(start_of(&svc.capture_stream(None)), (0, 300));
+    assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
+
+    // A capture of pid 42: the file says so, and where the capture began.
+    svc.mark_capture_started(42, 1_000);
+    svc.push_events(&[ev(120), ev(150), ev(200)]);
+    svc.mark_capture_finished();
+    assert_eq!(start_of(&svc.capture_stream(None)), (42, 1_000));
+    assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
+    // A cut begins where it was cut, whichever end was given first.
+    assert_eq!(start_of(&svc.capture_stream(Some((2_000, 1_500)))), (42, 1_500));
+    // But not before the capture did.
+    assert_eq!(start_of(&svc.capture_stream(Some((500, 1_500)))), (42, 1_000));
+
+    // The demo has no target while it runs, and none when saved.
+    svc.demo.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(start_of(&svc.capture_stream(None)), (0, 1_000));
+}
+
 // ------------------------------------------------- the router, over TCP ---
 
 /// The real router on a loopback port, with the runtime that serves it.

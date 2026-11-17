@@ -308,6 +308,7 @@ impl Backend for ServiceNet {
         endpoint: String,
         me_url: String,
         token: Option<String>,
+        name: Option<String>,
         bytes: Vec<u8>,
     ) {
         let stale = self.upload.lock().unwrap_or_else(|e| e.into_inner()).begin(gen);
@@ -377,7 +378,8 @@ impl Backend for ServiceNet {
                     total: bytes.len() as u64,
                 },
             );
-            let result = post_share_xhr(&endpoint, &bytes, token.as_deref(), &inbox, gen, &upload).await;
+            let result =
+                post_share_xhr(&endpoint, &bytes, token.as_deref(), name.as_deref(), &inbox, gen, &upload).await;
             upload.lock().unwrap_or_else(|e| e.into_inner()).finish(gen);
             let kind = match result {
                 Posted::Reply(text) => match perfr_viewer::share::parse_share_reply(&text) {
@@ -1181,6 +1183,7 @@ async fn post_share_xhr(
     url: &str,
     bytes: &[u8],
     token: Option<&str>,
+    name: Option<&str>,
     inbox: &Arc<Mutex<Inbox>>,
     gen: u64,
     upload: &Arc<Mutex<ShareUpload<web_sys::XmlHttpRequest>>>,
@@ -1200,6 +1203,13 @@ async fn post_share_xhr(
     }
     if let Some(token) = token.and_then(perfr_viewer::share::usable_share_token) {
         if let Err(e) = xhr.set_request_header("authorization", &perfr_viewer::share::bearer_value(&token)) {
+            return failed(e);
+        }
+    }
+    // What the capture is to be called. The dialog checked it against the
+    // website's rules, which leave nothing a header cannot carry.
+    if let Some(name) = name.filter(|name| !name.is_empty()) {
+        if let Err(e) = xhr.set_request_header(perfr_viewer::share::SHARE_NAME_HEADER, name) {
             return failed(e);
         }
     }

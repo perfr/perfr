@@ -81,10 +81,39 @@ def without_track_order(data):
     return b"".join(out)
 
 
+def servable(root):
+    """Every file under `root`, by the URL path it is served at.
+
+    The server answers from this table and from nothing else: a request
+    names a key, never a path on disk, so no spelling of `..` or of a link
+    reaches a file outside the pack.
+    """
+    root = root.resolve()
+    return {file.relative_to(root).as_posix(): file for file in root.rglob("*") if file.is_file()}
+
+
+def local_redirect(target):
+    """Where /login sends the browser back to: `target` when it is a path on
+    this server or a URL on this machine, and the front page otherwise.
+
+    The target comes from the query string and goes into a header, so its
+    line breaks are taken out: a header has none.
+    """
+    target = target.replace("\r", "").replace("\n", "")
+    parts = urllib.parse.urlsplit(target)
+    if parts.scheme not in ("", "http") or parts.hostname not in (None, "127.0.0.1", "localhost"):
+        return "/"
+    # `//host/path` has no scheme and names another host all the same.
+    if not parts.scheme and not target.startswith("/") or target.startswith("//"):
+        return "/"
+    return target
+
+
 def main():
     stream = demo_stream()
     store = {"demo": stream}
     posted = {}
+    files = servable(VIEWER)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -126,10 +155,7 @@ def main():
                 return
             if path == "/login":
                 query = urllib.parse.parse_qs(parsed.query)
-                nxt = (query.get("next") or ["/"])[0]
-                host = urllib.parse.urlsplit(nxt).hostname
-                if host not in (None, "127.0.0.1", "localhost"):
-                    nxt = "/"
+                nxt = local_redirect((query.get("next") or ["/"])[0])
                 self.send_response(302)
                 self.send_header("Set-Cookie", "perfr_session=ok; Path=/; SameSite=Lax")
                 self.send_header("Location", nxt)
@@ -146,9 +172,8 @@ def main():
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            rel = "index.html" if path in ("/", "") else path.lstrip("/")
-            file = (VIEWER / rel).resolve()
-            if not str(file).startswith(str(VIEWER.resolve())) or not file.is_file():
+            file = files.get("index.html" if path in ("/", "") else path.lstrip("/"))
+            if file is None:
                 self.send_error(404)
                 return
             data = file.read_bytes()

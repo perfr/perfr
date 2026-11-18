@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile, PeFile32, PeFile64};
-use object::{pe, LittleEndian, U32Bytes};
+use object::{pe, LittleEndian};
 
 use crate::Symbol;
 
@@ -286,12 +286,12 @@ where
     // subset of exports that have one.
     let names: HashMap<u16, u32> = export_table
         .name_iter()
-        .map(|(name_pointer, ordinal_index)| (ordinal_index, name_pointer))
+        .map(|(name_pointer, ordinal_index)| (ordinal_index.0, name_pointer))
         .collect();
 
     let mut symbols = Vec::new();
     for (index, address) in export_table.addresses().iter().enumerate() {
-        let rva = U32Bytes::get(*address, LittleEndian);
+        let rva = address.get(LittleEndian);
         // A forwarder re-exports a definition from another image, so the
         // symbol does not belong to this file.
         if export_table.is_forward(rva) {
@@ -310,7 +310,7 @@ where
             // .def file, which is where the spelling comes from.
             None => format!(
                 "NONAME{}",
-                export_table.ordinal_base().wrapping_add(index as u32)
+                u32::from(export_table.ordinal_base()).wrapping_add(index as u32)
             ),
         };
 
@@ -473,8 +473,8 @@ mod tests {
     fn an_image_for_another_machine_has_no_x64_unwind_ranges_and_keeps_its_exports() {
         let mut data = testdata("libtest.dll");
         let machine_at = pe_header_at(&data) + 4;
-        assert_eq!(data[machine_at..machine_at + 2], pe::IMAGE_FILE_MACHINE_AMD64.to_le_bytes());
-        data[machine_at..machine_at + 2].copy_from_slice(&pe::IMAGE_FILE_MACHINE_ARM64.to_le_bytes());
+        assert_eq!(data[machine_at..machine_at + 2], pe::IMAGE_FILE_MACHINE_AMD64.0.to_le_bytes());
+        data[machine_at..machine_at + 2].copy_from_slice(&pe::IMAGE_FILE_MACHINE_ARM64.0.to_le_bytes());
         let error = exception_table_symbols(&data).unwrap_err();
         assert!(error.contains("not an x64 image"), "{error}");
         let symbols = export_table_symbols(&data).expect("the export table is still there");

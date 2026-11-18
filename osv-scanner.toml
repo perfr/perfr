@@ -1,0 +1,25 @@
+# Advisories on this lockfile that are read and not acted on, each with why
+# and with a date after which the scanner reports it again.
+#
+# All three say a crate has no maintainer. None says the crate has a flaw.
+# Each comes in through a dependency this workspace cannot drop without
+# moving the viewer to a new major version of its UI or data stack, which is
+# a change to make for its own reasons and to test as one. Until then the
+# entry is here, where it is visible, and not silently open.
+#
+# An advisory with a fixed version does not belong in this file: update.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+ignoreUntil = 2027-05-18
+reason = "paste (unmaintained): a proc-macro, run at build time, pulled in by metal 0.31 under wgpu-hal 25 for the macOS viewer. Goes away with the wgpu version a later egui brings."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0192"
+ignoreUntil = 2027-05-18
+reason = "ttf-parser (unmaintained): under ab_glyph in epaint 0.32. It parses the fonts the viewer ships in its own binary and no others. Goes away with an egui upgrade."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0543"
+ignoreUntil = 2027-05-18
+reason = "chrono (unmaintained): a dependency of arrow-array and parquet, which perfr-capture uses to read and write bundles. perfr stores no dates through it. Follows arrow's own move off chrono."

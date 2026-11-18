@@ -1489,9 +1489,10 @@ pub struct PerfrLiveApp {
     /// The lane whose detail a click last copied, and when: its tooltip
     /// says so for a moment.
     core_copied: Option<(u16, f64)>,
-    /// The width of the widest scheduler lane label, and what it was
-    /// measured for: the machines, the number of lanes, the pixel ratio.
-    lane_label_w: Option<((u64, usize, u32), f32)>,
+    /// The widths of the scheduler lanes' two label columns, the core and
+    /// the thread of it, and what they were measured for: the machines,
+    /// the number of lanes, the pixel ratio.
+    lane_label_w: Option<((u64, usize, u32), (f32, f32))>,
     trace_processes: Vec<ProcessJson>,
     /// Log window: lines in the visible range, or the lines inside a clicked
     /// scope.
@@ -7160,10 +7161,9 @@ impl PerfrLiveApp {
                         Vec::new()
                     };
                     let copied = self.now_s - self.callstack_copied_at < 1.5;
-                    // One line of what the core is. The rest is on its lane.
-                    let core = (h.kind == kind::SCHEDULING_SLICE)
-                        .then(|| self.core_marks.describe(u16::from(h.extra)))
-                        .flatten();
+                    // One line of what the core is, with the name its lane
+                    // has. The rest is on the lane.
+                    let core = (h.kind == kind::SCHEDULING_SLICE).then(|| self.core_line(u16::from(h.extra))).flatten();
                     show_scope_tooltip(ui, &self.intern, &self.processes, &self.trace_args, h, &stack, copied, core.as_deref());
                 }
             } else {
@@ -7820,8 +7820,10 @@ impl PerfrLiveApp {
                 if key.is_scheduler() {
                     let font = FontId::new(10.5, FontFamily::Proportional);
                     let cpu = u16::from(key.extra);
+                    let (core_w, label_w) = self.lane_label_widths(ui);
                     let lane = self.machines.lane(cpu);
-                    let label = lane.and_then(|lane| lane.label.clone()).unwrap_or_else(|| leaf_label(key));
+                    let core = lane.and_then(|lane| lane.core.clone()).unwrap_or_else(|| leaf_label(key));
+                    let thread = lane.and_then(|lane| lane.thread.clone());
                     // The threads of one physical core, where their lanes
                     // are next to each other, are joined by a bracket.
                     let bracket = lane.map(|lane| lane.bracket).unwrap_or_default();
@@ -7844,7 +7846,17 @@ impl PerfrLiveApp {
                             note_ui_rect_fmt(format_args!("corepair:{cpu}:{bracket:?}"), Rect::from_min_max(Pos2::new(x, top), Pos2::new(x + 2.5, bottom)));
                         }
                     }
-                    ui.painter().text(Pos2::new(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, label, font.clone(), theme::MUTED());
+                    // The core and the thread of it each in a column of their
+                    // own, so the threads line up under each other whatever
+                    // the width of the core's number.
+                    ui.painter().text(Pos2::new(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, core, font.clone(), theme::MUTED());
+                    if let Some(thread) = thread {
+                        let at = Pos2::new(r.left() + 22.0 + core_w + LANE_THREAD_GAP, r.center().y);
+                        let drawn = ui.painter().text(at, Align2::LEFT_CENTER, thread, font.clone(), theme::MUTED());
+                        if !self.in_self_pane {
+                            note_ui_rect_fmt(format_args!("corethread:{cpu}"), drawn);
+                        }
+                    }
                     // What the core is, after the label: in one column for
                     // every core, so past the longest label of them. The
                     // frequency is shown even when every core has the same one.
@@ -7857,8 +7869,7 @@ impl PerfrLiveApp {
                     }
                     let known = lane.is_some();
                     if !mark.chip.is_empty() || !mark.freq.is_empty() {
-                        let widest = self.widest_lane_label(ui);
-                        let left = r.left() + 22.0 + widest + 6.0;
+                        let left = r.left() + 22.0 + label_w + 6.0;
                         // The percentage is always there; the mark has what
                         // is left of it.
                         let right = r.right() - 36.0;
@@ -10145,12 +10156,17 @@ impl PerfrLiveApp {
                 self.needs_repaint = true;
             }
         }
-        let hovering = pos.is_some_and(|p| handle.contains(p));
+        // Not through a window or a menu over the edge: a press there does
+        // not start the drag, so the edge does not light up for it either.
+        let hovering = pos.is_some_and(|p| handle.contains(p) && nothing_floats_over(ctx, p));
         if hovering || dragging {
             ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
         let active = hovering || dragging;
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("perfr_report_splitter")));
+        // Over the two panels it sits between and under everything that
+        // floats: on a layer of the windows' order the line was drawn after
+        // them, down the middle of any window over the panel's edge.
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("perfr_report_splitter")));
         let x = panel.left() + 1.0;
         painter.line_segment(
             [Pos2::new(x, handle.top()), Pos2::new(x, handle.bottom())],
@@ -12314,27 +12330,50 @@ impl PerfrLiveApp {
         self.presets.open = open;
     }
 
-    /// The widest scheduler lane label, so the frequency column lines up.
-    /// Measured when the machines or the lanes change, not for each lane of
-    /// each frame.
-    fn widest_lane_label(&mut self, ui: &Ui) -> f32 {
+    /// The width of the widest core name of the scheduler's lanes, and of
+    /// the widest whole label (the core, and the thread of it after a gap):
+    /// where the thread column and the frequency column start. Measured
+    /// when the machines or the lanes change, not for each lane of each
+    /// frame.
+    fn lane_label_widths(&mut self, ui: &Ui) -> (f32, f32) {
         let lanes = TrackStrip::scheduler_core_count_in(&self.index);
         let key = (self.machines.generation(), lanes, ui.ctx().pixels_per_point().to_bits());
-        if let Some((_, width)) = self.lane_label_w.filter(|(have, _)| *have == key) {
-            return width;
+        if let Some((_, widths)) = self.lane_label_w.filter(|(have, _)| *have == key) {
+            return widths;
         }
         let font = FontId::new(10.5, FontFamily::Proportional);
-        let mut widest = 0.0f32;
+        let width = |text: String| ui.painter().layout_no_wrap(text, font.clone(), theme::MUTED()).size().x;
+        let (mut core_w, mut thread_w) = (0.0f32, 0.0f32);
         for row in self.tracks.rows() {
             if let RowId::Lane(key) = row.id {
                 if key.is_scheduler() {
-                    let label = self.machines.lane(u16::from(key.extra)).and_then(|lane| lane.label.clone()).unwrap_or_else(|| leaf_label(key));
-                    widest = widest.max(ui.painter().layout_no_wrap(label, font.clone(), theme::MUTED()).size().x);
+                    let lane = self.machines.lane(u16::from(key.extra));
+                    core_w = core_w.max(width(lane.and_then(|lane| lane.core.clone()).unwrap_or_else(|| leaf_label(key))));
+                    if let Some(thread) = lane.and_then(|lane| lane.thread.clone()) {
+                        thread_w = thread_w.max(width(thread));
+                    }
                 }
             }
         }
-        self.lane_label_w = Some((key, widest));
-        widest
+        let label_w = if thread_w > 0.0 { core_w + LANE_THREAD_GAP + thread_w } else { core_w };
+        self.lane_label_w = Some((key, (core_w, label_w)));
+        (core_w, label_w)
+    }
+
+    /// What a slice says of the core it ran on: the lane's name where it
+    /// has one (`C1 · T1`), then the kind, top frequency and level 3.
+    fn core_line(&self, cpu: u16) -> Option<String> {
+        let name = self.machines.lane(cpu).and_then(|lane| {
+            let core = lane.core.as_deref()?;
+            Some(match lane.thread.as_deref() {
+                Some(thread) => format!("{core} · {thread}"),
+                None => core.to_string(),
+            })
+        });
+        match (name, self.core_marks.describe(cpu)) {
+            (Some(name), Some(what)) => Some(format!("{name}, {what}")),
+            (name, what) => name.or(what),
+        }
     }
 
     fn cpu_menu(&mut self, ui: &mut Ui) {
@@ -14908,6 +14947,9 @@ fn flame_layout(roots: &[crate::net::TreeNodeJson], width: f32) -> Vec<FlameBar>
 /// and the highest frequency in the text's, so the cores a thread should
 /// want stand out of the column. Each part is drawn only if it ends before
 /// `right`. Returns where what was drawn ends, `left` when nothing was.
+/// Between a scheduler lane's core name and the thread of it.
+const LANE_THREAD_GAP: f32 = 6.0;
+
 fn paint_core_mark(painter: &egui::Painter, r: Rect, left: f32, right: f32, mark: &crate::cores::CoreMark) -> f32 {
     let mut x = left;
     if !mark.chip.is_empty() {

@@ -945,7 +945,7 @@ mod tests {
         assert!(topo.layout.summary.is_empty(), "four cores are not a 13900K's 24, so the table stays out");
         assert_eq!(topo.product_page(), None);
         assert_eq!(topo.power.turbo, Some(true));
-        assert_eq!(topo.cpu_detail(4).unwrap().title, "Core 4 · Efficiency core");
+        assert_eq!(topo.cpu_detail(4).unwrap().title, "CPU 4 · Efficiency core");
     }
 
     #[test]
@@ -979,7 +979,9 @@ mod tests {
         assert_eq!(topo.cpus[0].l3_kb, 98_304);
         assert_eq!(topo.cpus[2].die, Some(1));
         assert_eq!(topo.cpus[2].l3_kb, 32_768);
-        assert_eq!(topo.lane_label(3).as_deref(), Some("C8 · T1"));
+        // The system calls the second core 8; the lanes count them.
+        assert_eq!(topo.lane_label(3).as_deref(), Some("C1 · T1"));
+        assert_eq!(topo.cpu_detail(3).unwrap().value("Physical core"), Some("1, thread 1 (system core id 8)"));
         let mut l3s: Vec<_> = topo.caches.iter().filter(|c| c.level == 3).map(|c| c.size_kb).collect();
         l3s.sort_unstable();
         assert_eq!(l3s, vec![32_768, 98_304]);

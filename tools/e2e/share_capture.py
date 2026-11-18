@@ -73,6 +73,9 @@ def main():
 
         https = http.server.ThreadingHTTPServer(('127.0.0.1', s3_port), functools.partial(Handler, directory=str(objects)))
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        # A server context still answers TLS 1.0 and 1.1 where the system's
+        # OpenSSL lets it. Nothing here needs them.
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(cert, key)
         https.socket = context.wrap_socket(https.socket, server_side=True)
         threading.Thread(target=https.serve_forever, daemon=True).start()

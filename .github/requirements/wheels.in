@@ -1,0 +1,7 @@
+# What tools/release/build_wheels.sh drives. setuptools>=77 reads the SPDX
+# license string in the pyproject files.
+setuptools>=77
+cargo-zigbuild
+ziglang
+build
+wheel

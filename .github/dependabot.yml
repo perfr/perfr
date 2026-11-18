@@ -1,0 +1,45 @@
+# Dependabot keeps what the workflows and the build pin up to date, so a pin
+# is a decision that gets revisited and not one that is forgotten.
+#
+# Everything a workflow runs is pinned to a commit or a hash: the actions,
+# the pip requirements under .github/requirements, and the toolchain archives
+# manual-bindings.yml checks against their publishers' hashes. Dependabot
+# moves the first two. The archives are moved by hand, hash and version
+# together.
+#
+# One grouped pull request per ecosystem per week. Security updates are not
+# grouped and do not wait for the week.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip
+    directory: /.github/requirements
+    schedule:
+      interval: weekly
+    groups:
+      workflow-python:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /web/perfr
+    schedule:
+      interval: weekly
+    groups:
+      web:
+        patterns: ["*"]

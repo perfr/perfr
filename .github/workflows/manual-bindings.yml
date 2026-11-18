@@ -36,14 +36,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Rust toolchain
         run: |
           rustup toolchain install 1.88.0 --profile minimal
           rustup default 1.88.0
       - name: Build libperfr
         run: cargo build -p perfr-lib
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: libperfr
           path: target/debug/libperfr.so
@@ -53,13 +53,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: |
             8.0.x
             6.0.x
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: libperfr
           path: dist
@@ -68,7 +68,7 @@ jobs:
           chmod +x crates/perfr-api/csharp/test.sh
           crates/perfr-api/csharp/test.sh "$PWD/dist/libperfr.so"
           dotnet pack crates/perfr-api/csharp/src/Perfr/Perfr.csproj -c Release -o dist/nupkg
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: perfr-nupkg
           path: dist/nupkg/*.nupkg
@@ -78,10 +78,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Lua
         run: sudo apt-get update && sudo apt-get install -y lua5.4 liblua5.4-dev luajit pkg-config
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: libperfr
           path: dist
@@ -95,13 +95,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Zig 0.17.1
         run: |
           curl -fsSL -o /tmp/zig.tar.xz https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz
+          # The shasum ziglang.org/download/index.json lists for this file.
+          echo "3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a  /tmp/zig.tar.xz" | sha256sum -c -
           tar -C /tmp -xf /tmp/zig.tar.xz
           echo /tmp/zig-x86_64-linux-0.17.1 >> "$GITHUB_PATH"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: libperfr
           path: dist
@@ -115,14 +117,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Swift 6.1.2
         run: |
           curl -fL -o /tmp/swift.tar.gz https://download.swift.org/swift-6.1.2-release/ubuntu2404/swift-6.1.2-RELEASE/swift-6.1.2-RELEASE-ubuntu24.04.tar.gz
+          # swift.org signs its archives and publishes no hash. This is the
+          # hash of the archive as it was on 2026-11-18, so a later change
+          # to the file fails here.
+          echo "d749d5fe2d6709ee988e96b16f02bca7b53304d09925e31063fd5ec56019de9f  /tmp/swift.tar.gz" | sha256sum -c -
           mkdir -p /tmp/swift
           tar -C /tmp/swift -xzf /tmp/swift.tar.gz
           echo /tmp/swift/swift-6.1.2-RELEASE-ubuntu24.04/usr/bin >> "$GITHUB_PATH"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: libperfr
           path: dist
@@ -136,17 +142,19 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: temurin
           java-version: '21'
       - name: Kotlin 2.1.10
         run: |
           curl -fL -o /tmp/kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.1.10/kotlin-compiler-2.1.10.zip
+          # The release's own kotlin-compiler-2.1.10.zip.sha256.
+          echo "c6e9e2636889828e19c8811d5ab890862538c89dc2a3101956dfee3c2a8ba6b1  /tmp/kotlin.zip" | sha256sum -c -
           unzip -q -d /tmp /tmp/kotlin.zip
           echo /tmp/kotlinc/bin >> "$GITHUB_PATH"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: libperfr
           path: dist
@@ -160,12 +168,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - name: Julia
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Julia 1.13.4
+        # A release archive checked against the hash julialang.org publishes
+        # for it (bin/versions.json), not an installer piped into a shell:
+        # what runs here is the same bytes every time.
         run: |
-          curl -fsSL https://install.julialang.org | sh -s -- --yes --add-to-path no -p "$HOME/.juliaup"
-          echo "$HOME/.juliaup/bin" >> "$GITHUB_PATH"
-      - uses: actions/download-artifact@v4
+          curl -fsSL -o /tmp/julia.tar.gz https://julialang-s3.julialang.org/bin/linux/x64/1.13/julia-1.13.4-linux-x86_64.tar.gz
+          echo "cf1658f13b91facccd57d41464d7125a0e48a1d24f49062d71532d04d4ec4130  /tmp/julia.tar.gz" | sha256sum -c -
+          tar -C /tmp -xzf /tmp/julia.tar.gz
+          echo /tmp/julia-1.13.4/bin >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: libperfr
           path: dist
@@ -179,16 +192,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
       - name: Mojo
         run: |
           python -m venv /tmp/mojo
-          /tmp/mojo/bin/pip install --quiet 'mojo==1.0.*'
+          /tmp/mojo/bin/pip install --quiet --require-hashes -r .github/requirements/mojo.txt
           echo /tmp/mojo/bin >> "$GITHUB_PATH"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: libperfr
           path: dist

@@ -12,6 +12,7 @@ use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
 use crate::preflight::SetupOpts;
+use crate::share::{LoginOpts, ShareOpts};
 use crate::skill::{SkillAction, SkillEnv};
 use crate::update::UpdateOpts;
 
@@ -21,6 +22,7 @@ Examples:
   perfr serve --host 127.0.0.1
   perfr capture --pid 1234 --duration-ms 5000 --out capture.pod
   perfr slice in.perfr.zip out.perfr.zip 0 1000000000
+  perfr share capture.perfr.zip
   perfr mcp
   perfr skill install
   perfr skill install --dry-run
@@ -34,7 +36,7 @@ perfr runs on Linux, macOS, and Windows. Sampling and the scheduler need
 Linux, or an elevated Windows prompt. macOS records manual scopes and Frida hooks.";
 
 const SUBCOMMANDS: &[&str] = &[
-    "serve", "capture", "slice", "mcp", "skill", "update", "doctor", "setup", "version",
+    "serve", "capture", "slice", "share", "login", "logout", "mcp", "skill", "update", "doctor", "setup", "version",
 ];
 
 #[derive(Clone, Debug)]
@@ -122,6 +124,9 @@ pub fn command() -> Command {
         .subcommand(serve_cmd())
         .subcommand(capture_cmd())
         .subcommand(slice_cmd())
+        .subcommand(share_cmd())
+        .subcommand(login_cmd())
+        .subcommand(logout_cmd())
         .subcommand(mcp_cmd())
         .subcommand(skill_cmd())
         .subcommand(doctor_cmd())
@@ -152,6 +157,14 @@ pub fn render_top_help(color: bool) -> String {
                 ("serve", "Serve the live viewer"),
                 ("capture", "Write a capture file for one process"),
                 ("slice", "Cut a saved capture to a time window"),
+            ],
+        ),
+        (
+            "Website",
+            &[
+                ("share", "Put a capture on perfr.dev and print its link"),
+                ("login", "Keep an API token of perfr.dev for share"),
+                ("logout", "Forget that token"),
             ],
         ),
         (
@@ -243,6 +256,9 @@ fn clap_front(args: &[String]) -> Front {
         Some(("serve", sub)) => Front::Serve(serve_opts(sub)),
         Some(("capture", sub)) => Front::Capture(capture_opts(sub)),
         Some(("slice", sub)) => Front::Slice(slice_opts(sub)),
+        Some(("share", sub)) => Front::Exit(crate::share::run_share(share_opts(sub))),
+        Some(("login", sub)) => Front::Exit(crate::share::run_login(login_opts(sub))),
+        Some(("logout", sub)) => Front::Exit(crate::share::run_logout(login_opts(sub))),
         Some(("mcp", _)) => Front::Mcp,
         Some(("skill", sub)) => Front::Exit(run_skill(sub)),
         Some(("update", sub)) => Front::Exit(crate::update::run(update_opts(sub))),
@@ -293,6 +309,26 @@ fn slice_opts(matches: &ArgMatches) -> SliceOpts {
             .unwrap_or_default(),
         t0: matches.get_one::<u64>("t0").copied().unwrap_or(0),
         t1: matches.get_one::<u64>("t1").copied().unwrap_or(u64::MAX),
+    }
+}
+
+fn share_opts(matches: &ArgMatches) -> ShareOpts {
+    let text = |name: &str| matches.get_one::<String>(name).cloned();
+    ShareOpts {
+        file: text("file"),
+        name: text("name"),
+        replace: matches.get_flag("replace"),
+        unlisted: matches.get_flag("unlisted"),
+        service: text("service"),
+        site: text("site"),
+        json: matches.get_flag("json"),
+    }
+}
+
+fn login_opts(matches: &ArgMatches) -> LoginOpts {
+    LoginOpts {
+        site: matches.get_one::<String>("site").cloned(),
+        status: matches.try_get_one::<bool>("status").ok().flatten().copied().unwrap_or(false),
     }
 }
 
@@ -508,6 +544,94 @@ fn slice_cmd() -> Command {
                 .value_parser(clap::value_parser!(u64))
                 .help("Window end, nanoseconds"),
         )
+}
+
+fn site_arg() -> Arg {
+    Arg::new("site")
+        .long("site")
+        .value_name("URL")
+        .help(format!("The website [default: {}, or $PERFR_SHARE_BASE]", crate::share::DEFAULT_SITE))
+}
+
+fn share_cmd() -> Command {
+    Command::new("share")
+        .about("Put a capture on perfr.dev and print its link")
+        .after_help(
+            "FILE is a .perfr.zip (Save in the viewer, or `perfr capture`) or a\n\
+             .perfr.stream. With no FILE, the capture the service on this machine\n\
+             holds is shared, as the viewer's Share button does.\n\n\
+             The link is https://perfr.dev/<your handle>/<name>, and anyone who has\n\
+             it opens the capture in a browser. The name is the file's unless --name\n\
+             says another; `/` in it makes folders. The capture is listed in your\n\
+             public folder unless --unlisted.\n\n\
+             perfr.dev knows you by an API token: make one on\n\
+             https://perfr.dev/account and run `perfr login` once, or set\n\
+             PERFR_TOKEN. The upload is done by curl.\n\n\
+             Examples:\n  \
+             perfr share capture.perfr.zip\n  \
+             perfr share capture.perfr.zip --name runs/frame-spike\n  \
+             perfr share\n  \
+             perfr share --service http://127.0.0.1:44799 --unlisted",
+        )
+        .arg(Arg::new("file").value_name("FILE").help("The capture to share [default: the running service's]"))
+        .arg(Arg::new("name").long("name").value_name("NAME").help("What the capture is called on the website"))
+        .arg(
+            Arg::new("replace")
+                .long("replace")
+                .action(ArgAction::SetTrue)
+                .help("Take the place of the capture you already have under that name"),
+        )
+        .arg(
+            Arg::new("unlisted")
+                .long("unlisted")
+                .action(ArgAction::SetTrue)
+                .help("Leave it out of your public folder; the link still opens it"),
+        )
+        .arg(
+            Arg::new("service")
+                .long("service")
+                .value_name("URL")
+                .conflicts_with("file")
+                .help("The service whose capture is shared [default: http://127.0.0.1:44766]"),
+        )
+        .arg(site_arg())
+        .arg(
+            Arg::new("json")
+                .long("json")
+                .action(ArgAction::SetTrue)
+                .help("Print the website's answer (id, url, path, handle, listed) and not only the link"),
+        )
+}
+
+fn login_cmd() -> Command {
+    Command::new("login")
+        .about("Keep an API token of perfr.dev for share")
+        .after_help(
+            "Make a token on https://perfr.dev/account, then paste it when asked, or\n\
+             pipe it in. perfr asks the website whose it is and keeps it in a file\n\
+             only you can read (credentials.json in ~/.config/perfr, or in\n\
+             %APPDATA%\\perfr). PERFR_TOKEN, when set, is used before that file.\n\n\
+             --status reads no token: it asks the website who the kept one is, and\n\
+             exits 1 when there is none or it is not accepted.\n\n\
+             Examples:\n  \
+             perfr login\n  \
+             perfr login < token.txt\n  \
+             perfr login --status",
+        )
+        .arg(site_arg())
+        .arg(
+            Arg::new("status")
+                .long("status")
+                .action(ArgAction::SetTrue)
+                .help("Print who is signed in, and change nothing"),
+        )
+}
+
+fn logout_cmd() -> Command {
+    Command::new("logout")
+        .about("Forget that token")
+        .after_help("Removes the token from this machine. Revoke it on https://perfr.dev/account to end it.")
+        .arg(site_arg())
 }
 
 fn mcp_cmd() -> Command {
@@ -735,11 +859,11 @@ mod tests {
         assert!(!help.contains("multi-machine"), "{help}");
         assert!(!help.contains("annotation"), "{help}");
         assert!(!help.contains("capture sharing"), "{help}");
-        for heading in ["Recording", "Agents", "Maintenance"] {
+        for heading in ["Recording", "Website", "Agents", "Maintenance"] {
             assert!(help.contains(heading), "missing {heading}:\n{help}");
         }
         let order = [
-            "serve", "capture", "slice", "mcp", "skill", "doctor", "setup", "update", "version",
+            "serve", "capture", "slice", "share", "login", "logout", "mcp", "skill", "doctor", "setup", "update", "version",
         ];
         let mut at = 0;
         for name in order {
@@ -787,6 +911,31 @@ mod tests {
             assert_eq!(sub.get_one::<String>("story-dir").map(String::as_str), Some("stories"));
         }
         assert!(mcp.contains("stderr"), "{mcp}");
+        let share = render(&["share", "--help"]);
+        for flag in ["--name", "--replace", "--unlisted", "--service", "--site", "--json", "[FILE]", "perfr login", "PERFR_TOKEN"] {
+            assert!(share.contains(flag), "missing {flag}:\n{share}");
+        }
+        // A token is never an argument: every process on the machine reads those.
+        assert!(!share.contains("--token"), "{share}");
+        let parsed = command()
+            .try_get_matches_from(["perfr", "share", "a.perfr.zip", "--name", "runs/a", "--replace", "--unlisted", "--json"])
+            .unwrap();
+        let opts = share_opts(parsed.subcommand().unwrap().1);
+        assert_eq!(opts.file.as_deref(), Some("a.perfr.zip"));
+        assert_eq!(opts.name.as_deref(), Some("runs/a"));
+        assert!(opts.replace && opts.unlisted && opts.json);
+        let bare = command().try_get_matches_from(["perfr", "share"]).unwrap();
+        let opts = share_opts(bare.subcommand().unwrap().1);
+        assert!(opts.file.is_none() && opts.service.is_none() && !opts.replace && !opts.unlisted && !opts.json);
+        assert!(command().try_get_matches_from(["perfr", "share", "a.perfr.zip", "--service", "http://127.0.0.1:1"]).is_err());
+        let login = render(&["login", "--help"]);
+        assert!(login.contains("https://perfr.dev/account") && login.contains("--site"), "{login}");
+        let parsed = command().try_get_matches_from(["perfr", "logout", "--site", "http://127.0.0.1:8081"]).unwrap();
+        let opts = login_opts(parsed.subcommand().unwrap().1);
+        assert_eq!(opts.site.as_deref(), Some("http://127.0.0.1:8081"));
+        assert!(!opts.status);
+        let parsed = command().try_get_matches_from(["perfr", "login", "--status"]).unwrap();
+        assert!(login_opts(parsed.subcommand().unwrap().1).status);
         let setup = render(&["setup", "--help"]);
         assert!(setup.contains("--check"), "{setup}");
         assert!(setup.contains("--persist"), "{setup}");

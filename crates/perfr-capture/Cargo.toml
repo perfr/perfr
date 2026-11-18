@@ -24,7 +24,7 @@ perfr-live-event = { path = "../perfr-live-event" }
 # goes for parquet: only its `arrow` bridge, none of the codec features
 # (snap / brotli / lz4 / zstd / flate2), so a Parquet file is written
 # uncompressed and the dependency graph stays free of C.
-arrow-array = { version = "59", default-features = false }
+arrow-array = { version = "60", default-features = false }
 arrow-schema = { version = "59", default-features = false }
 arrow-ipc = { version = "59", default-features = false }
 parquet = { version = "59", default-features = false, features = ["arrow"] }

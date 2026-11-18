@@ -9,7 +9,8 @@
 //! Extra groups measure Y-cull, the LOD decision, a fully zoomed-out view
 //! and a lane with overlap (CPU prepare only).
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 use perfr_live_event::{kind, LiveEvent};
 use perfr_live_render::{
     choose_lod, collect_instances_layout_opts, generate_nested_scopes, stacked_layout,

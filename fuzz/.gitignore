@@ -1,0 +1,7 @@
+target
+corpus
+artifacts
+coverage
+# Copied from the workspace before a run, so the targets build the versions
+# the service ships with.
+Cargo.lock

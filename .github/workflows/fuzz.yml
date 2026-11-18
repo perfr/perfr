@@ -1,0 +1,84 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# The parsers of what perfr did not write (a capture file, a stream from
+# another machine, a trace from another tool) under libFuzzer and
+# AddressSanitizer: fuzz/README.md. Two minutes a target each week, and when
+# a target or this file changes. A week of that finds what a parser's own
+# tests did not think of; it is not a campaign.
+name: fuzz
+
+on:
+  schedule:
+    - cron: '23 4 * * 1'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/fuzz.yml'
+      - 'fuzz/**'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds to run each target for."
+        required: false
+        default: "120"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # libFuzzer's instrumentation is a nightly feature. A dated nightly, so a
+  # run is the same build every time; move it by hand, with cargo-fuzz.
+  NIGHTLY: nightly-2025-11-15
+  CARGO_FUZZ: 0.13.2
+
+jobs:
+  fuzz:
+    name: fuzz the parsers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Nightly toolchain and cargo-fuzz
+        run: |
+          rustup toolchain install "$NIGHTLY" --profile minimal
+          cargo +"$NIGHTLY" install cargo-fuzz --locked --version "$CARGO_FUZZ"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fuzz
+          key: fuzz
+      - name: Build the targets against the workspace's lock
+        # The targets are a workspace of their own. Their lock starts as the
+        # service's, so what is fuzzed is the versions that ship.
+        run: |
+          cp Cargo.lock fuzz/Cargo.lock
+          cargo +"$NIGHTLY" fuzz build
+      - name: Run each target
+        env:
+          # Through the environment, not pasted into the script.
+          SECONDS_EACH: ${{ inputs.seconds || '120' }}
+        run: |
+          seconds="$SECONDS_EACH"
+          case "$seconds" in ''|*[!0-9]*) echo "seconds must be a number"; exit 2;; esac
+          failed=0
+          for target in $(cargo +"$NIGHTLY" fuzz list); do
+            echo "::group::$target"
+            mkdir -p "fuzz/corpus/$target"
+            cargo +"$NIGHTLY" fuzz run "$target" "fuzz/corpus/$target" "fuzz/seeds/$target" -- \
+              -max_total_time="$seconds" -rss_limit_mb=4096 -print_final_stats=1 || failed=1
+            echo "::endgroup::"
+          done
+          exit "$failed"
+      - name: Keep what crashed a target
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

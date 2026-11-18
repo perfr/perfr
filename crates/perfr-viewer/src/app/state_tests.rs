@@ -4216,8 +4216,12 @@ fn the_scheduler_shows_frequency_smt_numa_and_the_power_mode() {
     let mut page = Page::viewer();
     page.drop_file("topo.perfr.stream", &topology_file());
     page.frames(3);
-    assert!(page.shows("C0 · T0"), "lanes: {:?}", page.texts.iter().filter(|t| t.contains('C') || t.contains("Core")).collect::<Vec<_>>());
-    assert!(page.shows("C0 · T1"));
+    // The core and the thread of it, each in a column of its own.
+    for text in ["C0", "C1", "T0", "T1"] {
+        assert_eq!(page.texts.iter().filter(|t| *t == text).count(), 2, "{text} on two lanes: {:?}", page.texts);
+    }
+    let threads: Vec<Rect> = (0..4).map(|cpu| page.rect_of(&format!("corethread:{cpu}")).expect("a thread on each lane")).collect();
+    assert!(threads.iter().all(|thread| thread.left() == threads[0].left()), "the threads line up: {threads:?}");
     assert!(page.shows("3.2–4.6"), "frequency stays when every core matches");
     assert!(page.shows("powersave · boost on · balanced · NPS2"), "header: {:?}", page.texts);
     assert!(page.rect_of("numa:0").is_some() && page.rect_of("numa:1").is_some(), "numa readout: {}", page.app.ui_readout);
@@ -4242,23 +4246,23 @@ fn the_scheduler_still_folds_at_its_triangle_and_opens_the_diagram_beside_it() {
     let mut page = Page::viewer();
     page.drop_file("topo.perfr.stream", &topology_file());
     page.frames(3);
-    assert!(page.shows("C0 · T0"));
+    assert!(page.shows("C0"));
     let fold = page.rect_of("sched-fold").expect("the fold triangle");
     page.click(fold.center());
     page.frames(2);
-    assert!(!page.shows("C0 · T0"), "the click on the triangle folds the track");
+    assert!(!page.shows("C0"), "the click on the triangle folds the track");
     assert!(!page.shows("socket 0"), "and does not open the diagram");
     let fold = page.rect_of("sched-fold").expect("the fold triangle");
     page.click(fold.center());
     page.frames(2);
-    assert!(page.shows("C0 · T0"), "and unfolds it");
+    assert!(page.shows("C0"), "and unfolds it");
     assert!(!page.shows("socket 0"));
     // The label beside it opens the diagram and folds nothing.
     let label = page.text_rect("Scheduler (4 cores)").expect("the header's label");
     page.click(label.center());
     page.frames(2);
     assert!(page.shows("socket 0"));
-    assert!(page.shows("C0 · T0"));
+    assert!(page.rect_of("corethread:0").is_some(), "the lanes are still there");
 }
 
 #[test]
@@ -4266,12 +4270,12 @@ fn a_lanes_tooltip_is_a_table_of_its_core_and_a_click_copies_it() {
     let mut page = Page::viewer();
     page.drop_file("topo.perfr.stream", &topology_file());
     page.frames(3);
-    let lane = page.text_rect("C1 · T0").expect("the lane of CPU 2").center();
+    let lane = page.rect_of("corethread:2").expect("the lane of CPU 2").center();
     page.frame(vec![Event::PointerMoved(lane)]);
     page.frames(2);
     assert!(page.rect_of("coretip:2:shown").is_some(), "{}", page.app.ui_readout);
     // The title, the headings, a label and its value each on their own.
-    for text in ["Core 2", "CACHES", "FREQUENCY", "POWER", "MACHINE", "Physical core", "1, thread 0", "Placement", "socket 0 · NUMA node 1", "Driver", "intel_pstate (active)", "Governor", "powersave", "click to copy"] {
+    for text in ["CPU 2", "CACHES", "FREQUENCY", "POWER", "MACHINE", "Physical core", "1, thread 0", "Placement", "socket 0 · NUMA node 1", "Driver", "intel_pstate (active)", "Governor", "powersave", "click to copy"] {
         assert!(page.shows(text), "{text:?} is not in the tooltip: {:?}", page.texts);
     }
     assert!(page.shows("L3") && page.shows("12 MB · 12-way · shared by 0-3"));
@@ -4291,7 +4295,7 @@ fn a_lanes_tooltip_is_a_table_of_its_core_and_a_click_copies_it() {
         })
         .collect();
     assert_eq!(copied.len(), 1, "{:?}", out.platform_output.commands);
-    assert!(copied[0].starts_with("Core 2\n  Physical core: 1, thread 0\n  Placement: socket 0 · NUMA node 1\nCaches\n  L3: 12 MB · 12-way · shared by 0-3\n"), "{}", copied[0]);
+    assert!(copied[0].starts_with("CPU 2\n  Physical core: 1, thread 0\n  Placement: socket 0 · NUMA node 1\nCaches\n  L3: 12 MB · 12-way · shared by 0-3\n"), "{}", copied[0]);
     assert!(
         copied[0].contains("\nPower\n  Driver: intel_pstate (active)\n  Governor: powersave\n  EPP: balance_performance\n  Scaling: 0.8–4.6 GHz\n  Boost: on (no_turbo)\n  Platform profile: balanced\nMachine\n"),
         "{}",
@@ -4310,7 +4314,7 @@ fn a_slice_says_which_lane_it_is_on_in_one_line() {
     let mut page = Page::viewer();
     page.drop_file("topo.perfr.stream", &topology_file());
     page.frames(3);
-    let lane = page.text_rect("C1 · T1").expect("the lane of CPU 3");
+    let lane = page.rect_of("corethread:3").expect("the lane of CPU 3");
     draw_as_with_a_gpu(&mut page.app);
     let over = (300..1200)
         .step_by(20)
@@ -4322,6 +4326,6 @@ fn a_slice_says_which_lane_it_is_on_in_one_line() {
         })
         .expect("a slice of CPU 3 under the pointer");
     assert!(page.shows("CPU Core activity"), "at {over:?}: {:?}", page.texts);
-    assert!(page.shows("Core: 3 (up to 4.60 GHz, 12 MB L3)"), "{:?}", page.texts.iter().filter(|t| t.contains("Core")).collect::<Vec<_>>());
+    assert!(page.shows("Core: 3 (C1 · T1, up to 4.60 GHz, 12 MB L3)"), "{:?}", page.texts.iter().filter(|t| t.contains("Core")).collect::<Vec<_>>());
     assert!(!page.shows("MACHINE"), "the rest is on the lane, not on every slice");
 }

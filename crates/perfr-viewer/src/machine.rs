@@ -48,7 +48,8 @@ pub struct DrawnGroup {
 pub struct DrawnCore {
     pub cpus: Vec<u16>,
     pub kind: u8,
-    pub core_id: Option<u16>,
+    /// The core's number as the lanes say it (`CpuTopology::core_numbers`).
+    pub number: Option<u16>,
 }
 
 pub fn drawn(topo: &CpuTopology) -> Vec<DrawnSocket> {
@@ -58,25 +59,23 @@ pub fn drawn(topo: &CpuTopology) -> Vec<DrawnSocket> {
     let mut sockets: Vec<Option<u16>> = topo.cpus.iter().map(|c| c.socket).collect();
     sockets.sort();
     sockets.dedup();
-    sockets
+    let mut sockets: Vec<DrawnSocket> = sockets
         .into_iter()
         .map(|socket| {
             let cpus: Vec<&LogicalCpu> = topo.cpus.iter().filter(|c| c.socket == socket).collect();
             let label = match socket {
-                Some(id) if sockets_len(topo) > 1 || topo.sockets > 1 => format!("socket {id}"),
                 Some(id) => format!("socket {id}"),
                 None => "socket".into(),
             };
             DrawnSocket { label, nodes: nodes_of(topo, &cpus) }
         })
-        .collect()
-}
-
-fn sockets_len(topo: &CpuTopology) -> usize {
-    let mut ids: Vec<Option<u16>> = topo.cpus.iter().map(|c| c.socket).collect();
-    ids.sort();
-    ids.dedup();
-    ids.len()
+        .collect();
+    // Each core by the number its lanes have.
+    let numbers = topo.core_numbers();
+    for core in sockets.iter_mut().flat_map(|s| &mut s.nodes).flat_map(|n| &mut n.groups).flat_map(|g| &mut g.cores) {
+        core.number = core.cpus.first().and_then(|cpu| numbers.get(cpu).copied());
+    }
+    sockets
 }
 
 fn nodes_of(topo: &CpuTopology, cpus: &[&LogicalCpu]) -> Vec<DrawnNode> {
@@ -181,7 +180,7 @@ fn cores_of(cpus: &[&LogicalCpu]) -> Vec<DrawnCore> {
             DrawnCore {
                 cpus: threads.iter().map(|c| c.cpu).collect(),
                 kind: threads.first().map(|c| c.kind).unwrap_or(0),
-                core_id: threads.first().and_then(|c| c.core_id),
+                number: None,
             }
         })
         .collect()
@@ -214,8 +213,11 @@ pub enum Bracket {
 pub struct Lane {
     /// The machine the CPU is in, as an index into [`Machines::list`].
     machine: usize,
-    /// `C0 · T1` where the capture recorded the pairing.
-    pub label: Option<String>,
+    /// The lane's name where the capture recorded the pairing, in the two
+    /// columns it is drawn in: the physical core (`C0`), counted from 0, and
+    /// the thread of it (`T1`) where the core has more than one.
+    pub core: Option<String>,
+    pub thread: Option<String>,
     /// `3.0–5.8`, base and top.
     pub freq: Option<String>,
     pub numa: Option<u16>,
@@ -268,6 +270,7 @@ impl Machines {
         self.generation += 1;
         self.lanes.clear();
         for (index, machine) in self.list.iter().enumerate() {
+            let numbers = machine.core_numbers();
             for (at, cpu) in machine.cpus.iter().enumerate() {
                 // The threads of a core are bracketed where their lanes are
                 // next to each other, which is where their numbers are.
@@ -283,9 +286,11 @@ impl Machines {
                     (false, false) => Bracket::None,
                 };
                 // A CPU number is one machine's; the first to say it keeps it.
+                let (core, thread) = machine.lane_parts(cpu.cpu, &numbers).map_or((None, None), |(core, thread)| (Some(core), thread));
                 self.lanes.entry(cpu.cpu).or_insert_with(|| Lane {
                     machine: index,
-                    label: machine.lane_label(cpu.cpu),
+                    core,
+                    thread,
                     freq: machine.freq_label(cpu.cpu),
                     numa: cpu.numa,
                     bracket,
@@ -581,8 +586,8 @@ fn paint_cores(ui: &mut egui::Ui, topo: &CpuTopology, cores: &[DrawnCore]) {
                     theme::RAIL(),
                 );
             }
-            let name = match core.core_id {
-                Some(id) => format!("C{id}"),
+            let name = match core.number {
+                Some(number) => format!("C{number}"),
                 None => "core".into(),
             };
             painter.text(
@@ -711,6 +716,7 @@ mod tests {
         assert_eq!(groups[0].cores.len(), 1);
         assert_eq!(groups[0].cores[0].cpus, vec![0, 1]);
         assert_eq!(groups[1].cores[0].cpus, vec![2, 3]);
+        assert_eq!((groups[0].cores[0].number, groups[1].cores[0].number), (Some(0), Some(1)), "the system calls the second core 8");
 
         let mut raptor = CpuTopology {
             smt: Some(true),
@@ -760,13 +766,14 @@ mod tests {
         machines.adopt(topo.clone());
         assert_ne!(machines.generation(), before);
         let lane = |cpu| machines.lane(cpu).unwrap();
-        assert_eq!(lane(0).label.as_deref(), Some("C0 · T0"));
-        assert_eq!(lane(3).label.as_deref(), Some("C1 · T1"));
-        assert_eq!(lane(4).label.as_deref(), Some("C2"));
+        let name = |cpu| (lane(cpu).core.as_deref(), lane(cpu).thread.as_deref());
+        assert_eq!(name(0), (Some("C0"), Some("T0")));
+        assert_eq!(name(3), (Some("C1"), Some("T1")));
+        assert_eq!(name(4), (Some("C2"), None));
         assert_eq!(lane(0).freq.as_deref(), Some("4.6"));
         assert_eq!([0, 1, 2, 3, 4].map(|cpu| lane(cpu).bracket), [Bracket::First, Bracket::Last, Bracket::First, Bracket::Last, Bracket::None]);
         assert_eq!((machines.tinted_node(1), machines.tinted_node(2)), (Some(0), Some(1)));
-        assert_eq!(machines.detail(4).unwrap().title, "Core 4");
+        assert_eq!(machines.detail(4).unwrap().title, "CPU 4");
         assert!(machines.detail(9).is_none());
         // The same machine again takes its place; one node is no tint.
         for cpu in &mut topo.cpus {
@@ -785,7 +792,7 @@ mod tests {
         };
         let mut machines = Machines::default();
         machines.adopt(apart);
-        assert_eq!(machines.lane(2).unwrap().label.as_deref(), Some("C0 · T1"));
+        assert_eq!((machines.lane(2).unwrap().core.as_deref(), machines.lane(2).unwrap().thread.as_deref()), (Some("C0"), Some("T1")));
         assert!((0..4).all(|cpu| machines.lane(cpu).unwrap().bracket == Bracket::None));
         machines.clear();
         assert!(machines.is_empty() && machines.lane(0).is_none());
@@ -799,5 +806,6 @@ mod tests {
         let topo = CpuTopology { sockets: 1, cpus: vec![little, big], ..CpuTopology::default() };
         let cores = &drawn(&topo)[0].nodes[0].groups[0].cores;
         assert_eq!(cores.iter().map(|core| core.cpus.clone()).collect::<Vec<_>>(), [vec![0], vec![1]]);
+        assert_eq!(cores.iter().map(|core| core.number).collect::<Vec<_>>(), [Some(0), Some(1)], "counted, not the id each cluster gives its first");
     }
 }

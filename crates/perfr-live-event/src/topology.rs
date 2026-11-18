@@ -344,7 +344,7 @@ fn policy_words(group: &PolicyGroup) -> String {
 /// table and copies [`CpuDetail::text`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CpuDetail {
-    /// `Core 30 · Efficiency core`.
+    /// `CPU 30 · Efficiency core`.
     pub title: String,
     pub groups: Vec<DetailGroup>,
 }
@@ -746,9 +746,10 @@ impl CpuTopology {
     /// this topology does not list the CPU.
     pub fn cpu_detail(&self, cpu: u16) -> Option<CpuDetail> {
         let logical = self.cpus.iter().find(|c| c.cpu == cpu)?;
-        // The number first, whatever the kind: the lane's own label may be
-        // the physical core and the thread.
-        let mut title = format!("Core {cpu}");
+        // The CPU's own number first, the one the system and a slice's
+        // tooltip use: the lane's label may be the physical core and the
+        // thread of it, which is the first row.
+        let mut title = format!("CPU {cpu}");
         match logical.kind {
             core_kind::PERFORMANCE => title.push_str(" · Performance core"),
             core_kind::EFFICIENCY => title.push_str(" · Efficiency core"),
@@ -763,14 +764,18 @@ impl CpuTopology {
         let row = |label: &str, value: String| (label.to_string(), value);
 
         let mut own = Vec::new();
-        if let Some(core) = logical.core_id {
-            own.push(row(
-                "Physical core",
-                match logical.thread {
-                    Some(thread) => format!("{core}, thread {thread}"),
-                    None => core.to_string(),
-                },
-            ));
+        if let Some(id) = logical.core_id {
+            // The number the lanes use, and the system's own where that is
+            // another.
+            let number = self.core_numbers().get(&cpu).copied().unwrap_or(id);
+            let mut value = match logical.thread {
+                Some(thread) => format!("{number}, thread {thread}"),
+                None => number.to_string(),
+            };
+            if id != number {
+                value.push_str(&format!(" (system core id {id})"));
+            }
+            own.push(row("Physical core", value));
         }
         let place: Vec<String> = [("socket", logical.socket), ("NUMA node", logical.numa), ("die", logical.die), ("cluster", logical.cluster)]
             .into_iter()
@@ -868,33 +873,59 @@ impl CpuTopology {
             machine.push(row("Nodes per socket", format!("{}{how}", self.nps)));
         }
         if !self.flags.is_empty() {
-            machine.push(row("Flags", self.flags.join(" ")));
+            // A short list of them ([`keep_flags`]), and the row says so: it is
+            // not the CPU's whole flags line.
+            machine.push(row("Flags (selected)", self.flags.join(" ")));
         }
         group("Machine", machine);
         Some(CpuDetail { title, groups })
     }
 
-    /// `C0 · T0` when this CPU is one thread of a physical core and the
-    /// machine has SMT. None when the pairing was not recorded, so the
-    /// lane keeps `Core N`. `C` and not `P`: on a hybrid part the lane's
-    /// chip is a `P` or an `E`, and an efficiency core is not `P32`.
-    pub fn lane_label(&self, cpu: u16) -> Option<String> {
+    /// What each CPU's physical core is called: the cores counted from 0 in
+    /// the order of their lowest CPU number, as `CPU number -> core number`.
+    /// Not `core_id`, which is the system's own and is not a count: the 24
+    /// cores of a 13900K are 0, 4, 8 up to 28 and then 32 to 47. A CPU with
+    /// no core id has no number.
+    pub fn core_numbers(&self) -> std::collections::HashMap<u16, u16> {
+        let mut cpus: Vec<&LogicalCpu> = self.cpus.iter().filter(|c| c.core_id.is_some()).collect();
+        cpus.sort_by_key(|c| c.cpu);
+        let mut firsts: Vec<&LogicalCpu> = Vec::new();
+        let mut numbers = std::collections::HashMap::with_capacity(cpus.len());
+        for cpu in cpus {
+            let number = firsts.iter().position(|first| first.same_core(cpu)).unwrap_or_else(|| {
+                firsts.push(cpu);
+                firsts.len() - 1
+            });
+            numbers.insert(cpu.cpu, number as u16);
+        }
+        numbers
+    }
+
+    /// A lane's name in two parts, the core and the thread of it: `C0` and
+    /// `T1`, the thread only where the core has more than one. None when
+    /// the machine has no SMT or the pairing was not recorded, so the lane
+    /// keeps `Core N`. `numbers` is [`Self::core_numbers`], worked out once
+    /// for all the lanes. `C` and not `P`: on a hybrid part the lane's chip
+    /// is a `P` or an `E`.
+    pub fn lane_parts(&self, cpu: u16, numbers: &std::collections::HashMap<u16, u16>) -> Option<(String, Option<String>)> {
         if self.smt != Some(true) {
             return None;
         }
         let logical = self.cpus.iter().find(|c| c.cpu == cpu)?;
-        let core = logical.core_id?;
-        let prefix = if self.sockets > 1 {
-            format!("S{} ", logical.socket.unwrap_or(0))
-        } else {
-            String::new()
-        };
-        let siblings = self.cpus.iter().filter(|c| c.same_core(logical)).count();
-        if siblings > 1 {
-            Some(format!("{prefix}C{core} · T{}", logical.thread.unwrap_or(0)))
-        } else {
-            Some(format!("{prefix}C{core}"))
-        }
+        let number = *numbers.get(&cpu)?;
+        let core = if self.sockets > 1 { format!("S{} C{number}", logical.socket.unwrap_or(0)) } else { format!("C{number}") };
+        let threads = numbers.values().filter(|other| **other == number).count();
+        Some((core, (threads > 1).then(|| format!("T{}", logical.thread.unwrap_or(0)))))
+    }
+
+    /// [`Self::lane_parts`] as one string: `C0 · T0`, or `C8` for a core of
+    /// one thread.
+    pub fn lane_label(&self, cpu: u16) -> Option<String> {
+        let (core, thread) = self.lane_parts(cpu, &self.core_numbers())?;
+        Some(match thread {
+            Some(thread) => format!("{core} · {thread}"),
+            None => core,
+        })
     }
 
     /// The base and top frequency as the lane prints them (`3.0–5.8`), or
@@ -1427,7 +1458,7 @@ mod tests {
         assert_eq!(topo.lane_label(1).as_deref(), Some("C0 · T1"));
         assert_eq!(topo.freq_label(0).as_deref(), Some("4.2–5.8"));
         let detail = topo.cpu_detail(0).unwrap();
-        assert_eq!(detail.title, "Core 0");
+        assert_eq!(detail.title, "CPU 0");
         assert_eq!(detail.value("Physical core"), Some("0, thread 0"));
         assert_eq!(detail.value("Placement"), Some("socket 0 · NUMA node 0 · die 0"));
         assert_eq!(detail.value("L3"), Some("96 MB · 16-way · shared by 0-15"));
@@ -1437,12 +1468,12 @@ mod tests {
         assert_eq!(detail.value("Scaling"), Some("0.4–5.8 GHz"));
         assert_eq!(detail.value("Boost"), Some("on (boost)"));
         assert_eq!(detail.value("Nodes per socket"), Some("1 (derived from the node map)"));
-        assert_eq!(detail.value("Flags"), Some("avx2 avx512f"));
+        assert_eq!(detail.value("Flags (selected)"), Some("avx2 avx512f"));
         assert_eq!(detail.groups.iter().map(|g| g.heading).collect::<Vec<_>>(), ["", "Caches", "Frequency", "Power", "Machine"]);
         // As text, for the clipboard: a heading a line, a row a line.
         let text = detail.text();
-        assert!(text.starts_with("Core 0\n  Physical core: 0, thread 0\n  Placement: socket 0 · NUMA node 0 · die 0\nCaches\n  L3: 96 MB"), "{text}");
-        assert!(text.ends_with("Machine\n  Model: AMD Ryzen 9 7950X3D 16-Core Processor\n  Microcode: 0x0a601206\n  Cache line: 64 B\n  Nodes per socket: 1 (derived from the node map)\n  Flags: avx2 avx512f"), "{text}");
+        assert!(text.starts_with("CPU 0\n  Physical core: 0, thread 0\n  Placement: socket 0 · NUMA node 0 · die 0\nCaches\n  L3: 96 MB"), "{text}");
+        assert!(text.ends_with("Machine\n  Model: AMD Ryzen 9 7950X3D 16-Core Processor\n  Microcode: 0x0a601206\n  Cache line: 64 B\n  Nodes per socket: 1 (derived from the node map)\n  Flags (selected): avx2 avx512f"), "{text}");
         assert!(topo.cpu_detail(9).is_none());
         let shifted = topo.shift_lanes(8);
         assert_eq!(shifted.cpus[0].cpu, 8);
@@ -1471,8 +1502,8 @@ mod tests {
     #[test]
     fn a_hybrid_lane_says_its_number_and_cores_numbered_alike_stay_apart() {
         // An efficiency core beside a performance core of two threads: the
-        // lane is `C2`, not a `P` beside its `E` chip, and its words begin
-        // with the lane's number.
+        // lane is `C1`, not a `P` beside its `E` chip, and its words begin
+        // with the CPU's number.
         let core = |cpu, kind, cluster, core_id, thread| LogicalCpu {
             cpu,
             kind,
@@ -1492,9 +1523,10 @@ mod tests {
             ],
             ..CpuTopology::default()
         };
-        assert_eq!(topo.lane_label(2).as_deref(), Some("C2"));
-        assert_eq!(topo.cpu_detail(2).unwrap().title, "Core 2 · Efficiency core");
-        assert_eq!(topo.cpu_detail(0).unwrap().title, "Core 0 · Performance core");
+        assert_eq!(topo.lane_label(2).as_deref(), Some("C1"));
+        assert_eq!(topo.cpu_detail(2).unwrap().title, "CPU 2 · Efficiency core");
+        assert_eq!(topo.cpu_detail(2).unwrap().value("Physical core"), Some("1, thread 0 (system core id 2)"));
+        assert_eq!(topo.cpu_detail(0).unwrap().title, "CPU 0 · Performance core");
         // Two clusters that each call their first core 0, as a device tree
         // does: two cores of one thread, not one core of two.
         let arm = CpuTopology {
@@ -1505,7 +1537,46 @@ mod tests {
         };
         assert!(!arm.cpus[0].same_core(&arm.cpus[1]));
         assert_eq!(arm.lane_label(0).as_deref(), Some("C0"));
-        assert_eq!(arm.lane_label(1).as_deref(), Some("C0"));
+        assert_eq!(arm.lane_label(1).as_deref(), Some("C1"));
+    }
+
+    #[test]
+    fn cores_are_counted_from_zero_whatever_the_system_calls_them() {
+        // A 13900K cut down: performance cores the system calls 0 and 4,
+        // two threads each, then efficiency cores 32 and 33. The lanes say
+        // C0 to C3; the system's id is in the lane's words.
+        let core = |cpu, kind, core_id, thread| LogicalCpu { cpu, kind, socket: Some(0), core_id: Some(core_id), thread: Some(thread), ..LogicalCpu::default() };
+        let topo = CpuTopology {
+            smt: Some(true),
+            sockets: 1,
+            cpus: vec![
+                core(0, core_kind::PERFORMANCE, 0, 0),
+                core(1, core_kind::PERFORMANCE, 0, 1),
+                core(2, core_kind::PERFORMANCE, 4, 0),
+                core(3, core_kind::PERFORMANCE, 4, 1),
+                core(4, core_kind::EFFICIENCY, 32, 0),
+                core(5, core_kind::EFFICIENCY, 33, 0),
+            ],
+            ..CpuTopology::default()
+        };
+        let labels: Vec<_> = (0..6).map(|cpu| topo.lane_label(cpu).unwrap()).collect();
+        assert_eq!(labels, ["C0 · T0", "C0 · T1", "C1 · T0", "C1 · T1", "C2", "C3"]);
+        let numbers = topo.core_numbers();
+        assert_eq!(topo.lane_parts(3, &numbers), Some(("C1".to_string(), Some("T1".to_string()))));
+        assert_eq!(topo.lane_parts(5, &numbers), Some(("C3".to_string(), None)));
+        assert_eq!(topo.cpu_detail(0).unwrap().value("Physical core"), Some("0, thread 0"));
+        assert_eq!(topo.cpu_detail(3).unwrap().value("Physical core"), Some("1, thread 1 (system core id 4)"));
+        assert_eq!(topo.cpu_detail(5).unwrap().value("Physical core"), Some("3, thread 0 (system core id 33)"));
+        // Siblings numbered apart, as Linux numbers an AMD part: the core
+        // is counted where its first thread is.
+        let apart = CpuTopology { smt: Some(true), sockets: 1, cpus: vec![core(0, 0, 0, 0), core(1, 0, 1, 0), core(2, 0, 0, 1), core(3, 0, 1, 1)], ..CpuTopology::default() };
+        assert_eq!((0..4).map(|cpu| apart.lane_label(cpu).unwrap()).collect::<Vec<_>>(), ["C0 · T0", "C1 · T0", "C0 · T1", "C1 · T1"]);
+        // Two sockets: the count goes on across them, under the socket.
+        let mut two = apart.clone();
+        two.sockets = 2;
+        two.cpus[1].socket = Some(1);
+        two.cpus[3].socket = Some(1);
+        assert_eq!(two.lane_label(3).as_deref(), Some("S1 C1 · T1"));
     }
 
     #[test]

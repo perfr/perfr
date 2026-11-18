@@ -5,10 +5,11 @@
 # the pip requirements under .github/requirements, and the toolchain archives
 # manual-bindings.yml checks against their publishers' hashes. Dependabot
 # moves the first two. The archives are moved by hand, hash and version
-# together.
+# together, and so is what the viewer is drawn with (see the cargo entry).
 #
-# One grouped pull request per ecosystem per week. Security updates are not
-# grouped and do not wait for the week.
+# One grouped pull request per ecosystem per week. Security updates, where
+# the repository has them switched on, are not grouped and do not wait for
+# the week.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -27,6 +28,40 @@ updates:
       cargo:
         patterns: ["*"]
         update-types: [minor, patch]
+    # What the viewer is drawn with moves by hand. A new egui or wgpu is a
+    # port, not a bump, and any edit to crates/perfr-viewer/Cargo.toml needs
+    # the client's pack rebuilt and committed with it (check-viewer-pack.py),
+    # which Dependabot cannot do. wasm-bindgen is pinned to the exact release
+    # of the wasm-bindgen program build_wasm.sh runs, and js-sys and web-sys
+    # move with it.
+    #
+    # Naming the update types keeps these out of the weekly updates only; a
+    # security update for one of them is still proposed.
+    ignore:
+      - dependency-name: "egui*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
+      - dependency-name: "eframe"
+        update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
+      - dependency-name: "epaint*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
+      - dependency-name: "wgpu*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
+      - dependency-name: "rfd"
+        update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
+      - dependency-name: "wasm-bindgen*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
+      - dependency-name: "js-sys"
+        update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
+      - dependency-name: "web-sys"
+        update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
+
+  # The fuzz targets are a workspace of their own with no lock file in the
+  # repository (the fuzz workflow copies the root's), so this speaks up only
+  # when a release falls outside what fuzz/Cargo.toml asks for.
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
 
   - package-ecosystem: pip
     directory: /.github/requirements

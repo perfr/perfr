@@ -44,7 +44,7 @@ pub(super) async fn send_frame(sink: &mut futures_util::stream::SplitSink<WebSoc
     let size = bytes.len() as f64;
     let scope = crate::scope(name);
     crate::value("ws frame bytes", size);
-    let ok = matches!(tokio::time::timeout(SEND_TIMEOUT, sink.send(Message::Binary(bytes))).await, Ok(Ok(())));
+    let ok = matches!(tokio::time::timeout(SEND_TIMEOUT, sink.send(Message::Binary(bytes.into()))).await, Ok(Ok(())));
     drop(scope);
     ok
 }

@@ -276,8 +276,8 @@ pub fn link_axum(socket: axum::extract::ws::WebSocket) -> Link {
     tokio::spawn(async move {
         while let Some(Ok(message)) = stream.next().await {
             let msg = match message {
-                Message::Text(t) => PeerMsg::Text(t),
-                Message::Binary(b) => PeerMsg::Binary(b),
+                Message::Text(t) => PeerMsg::Text(t.as_str().to_owned()),
+                Message::Binary(b) => PeerMsg::Binary(b.into()),
                 Message::Close(_) => break,
                 _ => continue,
             };
@@ -289,8 +289,8 @@ pub fn link_axum(socket: axum::extract::ws::WebSocket) -> Link {
     tokio::spawn(async move {
         while let Some(msg) = out_rx.recv().await {
             let message = match msg {
-                PeerMsg::Text(t) => Message::Text(t),
-                PeerMsg::Binary(b) => Message::Binary(b),
+                PeerMsg::Text(t) => Message::Text(t.into()),
+                PeerMsg::Binary(b) => Message::Binary(b.into()),
             };
             if sink.send(message).await.is_err() {
                 break;
@@ -299,6 +299,20 @@ pub fn link_axum(socket: axum::extract::ws::WebSocket) -> Link {
         let _ = sink.close().await;
     });
     Link { rx: in_rx, tx: out_tx }
+}
+
+/// Dials another service. The socket sends what it is given at once
+/// (`TCP_NODELAY`), as the accepting end does: see `http::peer::Accepting`.
+async fn dial(
+    url: &str,
+) -> Result<
+    (
+        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    tokio_tungstenite::tungstenite::Error,
+> {
+    tokio_tungstenite::connect_async_with_config(url, None, true).await
 }
 
 /// A link over a tokio-tungstenite WebSocket (a connection this service
@@ -314,8 +328,8 @@ where
     tokio::spawn(async move {
         while let Some(Ok(message)) = stream.next().await {
             let msg = match message {
-                Message::Text(t) => PeerMsg::Text(t),
-                Message::Binary(b) => PeerMsg::Binary(b),
+                Message::Text(t) => PeerMsg::Text(t.as_str().to_owned()),
+                Message::Binary(b) => PeerMsg::Binary(b.into()),
                 Message::Close(_) => break,
                 _ => continue,
             };
@@ -327,8 +341,8 @@ where
     tokio::spawn(async move {
         while let Some(msg) = out_rx.recv().await {
             let message = match msg {
-                PeerMsg::Text(t) => Message::Text(t),
-                PeerMsg::Binary(b) => Message::Binary(b),
+                PeerMsg::Text(t) => Message::Text(t.into()),
+                PeerMsg::Binary(b) => Message::Binary(b.into()),
             };
             if sink.send(message).await.is_err() {
                 break;
@@ -946,7 +960,7 @@ pub(crate) async fn redial(svc: Arc<LiveService>, target: String) {
     };
     let mut announced = false;
     loop {
-        match tokio_tungstenite::connect_async(url.as_str()).await {
+        match dial(url.as_str()).await {
             Ok((socket, _)) => {
                 announced = false;
                 let link = link_tungstenite(socket);
@@ -1095,7 +1109,7 @@ pub async fn join(svc: Arc<LiveService>, target: String, info: RemoteInfo) {
     };
     let mut announced = false;
     loop {
-        match tokio_tungstenite::connect_async(url.as_str()).await {
+        match dial(url.as_str()).await {
             Ok((socket, _)) => {
                 announced = false;
                 let link = link_tungstenite(socket);

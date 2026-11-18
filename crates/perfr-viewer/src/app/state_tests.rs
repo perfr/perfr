@@ -4135,3 +4135,97 @@ fn a_rail_too_narrow_for_a_cores_mark_keeps_its_percentage_clear() {
         }
     }
 }
+
+/// Four threads, two physical cores, two NUMA nodes, one frequency. The
+/// lanes still name the frequency, the threads of a core, and the power mode.
+fn topology_file() -> Vec<u8> {
+    use perfr_live_event::topology::{CpufreqPolicy, CpuTopology, LogicalCpu, NumaNode, PowerState};
+    let cpu = |cpu, numa, core, thread| LogicalCpu {
+        cpu,
+        socket: Some(0),
+        numa: Some(numa),
+        core_id: Some(core),
+        thread: Some(thread),
+        max_freq_khz: 4_600_000,
+        base_freq_khz: 3_200_000,
+        cur_freq_khz: 3_200_000,
+        l3_kb: 12_288,
+        l1d_kb: 32,
+        l1i_kb: 32,
+        l2_kb: 256,
+        ..LogicalCpu::default()
+    };
+    let topology = CpuTopology {
+        model: "Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz".into(),
+        vendor: "GenuineIntel".into(),
+        sockets: 1,
+        physical_cores: 2,
+        threads: 4,
+        smt: Some(true),
+        cache_line_bytes: 64,
+        nps: 2,
+        nps_source: "derived".into(),
+        os: "Linux".into(),
+        hostname: "fixture".into(),
+        numa: vec![
+            NumaNode { id: 0, cpus: vec![0, 1], mem_bytes: 8 << 30 },
+            NumaNode { id: 1, cpus: vec![2, 3], mem_bytes: 8 << 30 },
+        ],
+        cpus: vec![cpu(0, 0, 0, 0), cpu(1, 0, 0, 1), cpu(2, 1, 1, 0), cpu(3, 1, 1, 1)],
+        caches: vec![perfr_live_event::topology::CacheInstance {
+            level: 3,
+            kind: "unified".into(),
+            size_kb: 12_288,
+            ways: 12,
+            line: 64,
+            cpus: vec![0, 1, 2, 3],
+        }],
+        power: PowerState {
+            policies: vec![CpufreqPolicy {
+                driver: "intel_pstate".into(),
+                governor: "powersave".into(),
+                epp: "balance_performance".into(),
+                scaling_min_khz: 800_000,
+                scaling_max_khz: 4_600_000,
+                ..CpufreqPolicy::default()
+            }],
+            pstate: "intel_pstate".into(),
+            pstate_status: "active".into(),
+            turbo: Some(true),
+            turbo_source: "no_turbo".into(),
+            platform_profile: "balanced".into(),
+            ..PowerState::default()
+        },
+        ..CpuTopology::default()
+    };
+    let mut frames = vec![
+        hello(),
+        LiveFrame::CaptureStarted { pid: 100, start_ns: 1_000_000_000 },
+        LiveFrame::ProcessName { pid: 100, name: "game".into() },
+        LiveFrame::ThreadName { pid: 100, tid: 101, name: "main".into() },
+        LiveFrame::CpuTopology { topology: Box::new(topology) },
+    ];
+    let events: Vec<_> = (0..4).map(|core| LiveEvent { extra: core, ..slice(100, 101, 1_000_000_000 + u64::from(core) * 1_000) }).collect();
+    frames.push(LiveFrame::EventBatch { events });
+    frames.push(LiveFrame::CaptureFinished);
+    stream(&frames)
+}
+
+#[test]
+fn the_scheduler_shows_frequency_smt_numa_and_the_power_mode() {
+    let mut page = Page::viewer();
+    page.drop_file("topo.perfr.stream", &topology_file());
+    page.frames(3);
+    assert!(page.shows("P0 · T0"), "lanes: {:?}", page.texts.iter().filter(|t| t.contains('P') || t.contains("Core")).collect::<Vec<_>>());
+    assert!(page.shows("P0 · T1"));
+    assert!(page.shows("3.2–4.6"), "frequency stays when every core matches");
+    assert!(page.shows("powersave · boost on · balanced · NPS2"), "header: {:?}", page.texts);
+    assert!(page.rect_of("numa:0").is_some() && page.rect_of("numa:1").is_some(), "numa readout: {}", page.app.ui_readout);
+    assert!(page.rect_of("corefreq:0").is_some(), "a snapshot of the current frequency");
+    let header = page.rect_of("row:scheduler").expect("scheduler row");
+    page.click(Pos2::new(header.center().x, header.center().y));
+    page.frames(2);
+    assert!(page.shows("socket 0"), "diagram: {:?}", page.texts.iter().filter(|t| t.contains("socket") || t.contains("node") || t.contains("CPU")).collect::<Vec<_>>());
+    assert!(page.texts.iter().any(|t| t.contains("cache line 64")));
+    assert!(page.texts.iter().any(|t| t.contains("node 0")));
+}

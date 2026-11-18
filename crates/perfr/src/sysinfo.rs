@@ -118,7 +118,12 @@ pub fn system_info(capture_start_unix_ns: u64, capture_start_monotonic_ns: u64) 
 /// that is not a number or a range is left out.
 pub fn parse_cpu_list(content: &str) -> Vec<u16> {
     let mut cpus = Vec::new();
-    for part in content.trim().split(',') {
+    // A cpulist is commas and ranges ("0-3,8"). A few files are the same
+    // numbers separated by spaces; both are accepted.
+    for part in content.split(|c: char| c == ',' || c.is_whitespace()) {
+        if part.is_empty() {
+            continue;
+        }
         let (first, last) = part.split_once('-').unwrap_or((part, part));
         let (Ok(first), Ok(last)) = (first.trim().parse::<u16>(), last.trim().parse::<u16>()) else { continue };
         cpus.extend(first..=last);

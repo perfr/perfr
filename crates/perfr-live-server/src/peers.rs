@@ -734,6 +734,16 @@ impl Ingest {
                     svc.set_cpu_cores(&cores);
                 }
             }
+            // The same shift as the cores: lane `core_base + c`. A CPU that
+            // does not fit in a lane number is dropped. The machine stays a
+            // separate topology, so its sockets are not renumbered onto the
+            // hub's.
+            LiveFrame::CpuTopology { topology } => {
+                let shifted = topology.shift_lanes(self.core_base);
+                if !shifted.is_empty() {
+                    svc.adopt_cpu_topology(&shifted);
+                }
+            }
             // A track order is in the pids of the machine it was made on,
             // and is of that machine's capture alone: not this one's.
             LiveFrame::Hello { .. }

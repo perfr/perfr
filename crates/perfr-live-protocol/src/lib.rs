@@ -8,7 +8,7 @@
 //! those fields into length-prefixed frames the WASM client can consume
 //! without protobuf, ELF, or DWARF.
 
-use perfr_live_event::{CoreInfo, LiveEvent, LIVE_EVENT_SIZE};
+use perfr_live_event::{CoreInfo, CpuTopology, LiveEvent, LIVE_EVENT_SIZE};
 
 pub const MAGIC: &[u8; 4] = b"OLIV";
 pub const VERSION: u16 = 1;
@@ -43,6 +43,13 @@ pub const FRAME_TRACK_ORDER: u8 = 11;
 /// reader takes the fields it knows. A reader that does not know the frame
 /// skips it.
 pub const FRAME_CPU_CORES: u8 = 12;
+/// The captured machine, as JSON ([`CpuTopology`]): sockets, NUMA, caches,
+/// SMT pairing, power mode, and the rest of what the service could read.
+/// Sent once per machine of a capture, the way [`FRAME_CPU_CORES`] is, and
+/// omitted when nothing was read. A reader that does not know the frame
+/// skips it. A field the JSON does not carry is unknown, so an older
+/// capture still decodes and a later field does not break this reader.
+pub const FRAME_CPU_TOPOLOGY: u8 = 13;
 
 /// Sanity cap on a decoded batch, so a corrupt count cannot ask for gigabytes.
 const MAX_BATCH_EVENTS: usize = 1 << 24;
@@ -137,6 +144,11 @@ pub enum LiveFrame {
     },
     CpuCores {
         cores: Vec<CoreInfo>,
+    },
+    CpuTopology {
+        // Boxed: the machine is sent once, and leaving it inline makes every
+        // other frame of this enum carry its size.
+        topology: Box<CpuTopology>,
     },
 }
 
@@ -258,6 +270,10 @@ pub fn encode_frame(frame: &LiveFrame) -> Vec<u8> {
                 payload.extend_from_slice(&core.l3_kb.to_le_bytes());
             }
             FRAME_CPU_CORES
+        }
+        LiveFrame::CpuTopology { topology } => {
+            payload.extend_from_slice(&topology.to_json());
+            FRAME_CPU_TOPOLOGY
         }
     };
     let mut out = Vec::with_capacity(5 + payload.len());
@@ -725,6 +741,10 @@ fn decode_payload(typ: u8, payload: &[u8]) -> Result<LiveFrame, ProtocolError> {
                 .collect();
             Ok(LiveFrame::CpuCores { cores })
         }
+        FRAME_CPU_TOPOLOGY => {
+            let topology = CpuTopology::from_json(payload).map_err(|_| ProtocolError::InvalidPayload("cpu topology"))?;
+            Ok(LiveFrame::CpuTopology { topology: Box::new(topology) })
+        }
         other => Err(ProtocolError::UnknownFrame(other)),
     }
 }
@@ -870,6 +890,31 @@ mod tests {
             assert_eq!(back, frame);
             assert_eq!(used, bytes.len());
         }
+    }
+
+    #[test]
+    fn the_machines_topology_round_trips_and_an_older_core_frame_still_decodes() {
+        let mut topology = perfr_live_event::CpuTopology {
+            model: "AMD Ryzen 9 7950X3D 16-Core Processor".into(),
+            physical_cores: 16,
+            threads: 32,
+            cache_line_bytes: 64,
+            nps: 1,
+            nps_source: "derived".into(),
+            ..perfr_live_event::CpuTopology::default()
+        };
+        topology.apply_model_table();
+        let frame = LiveFrame::CpuTopology { topology: Box::new(topology.clone()) };
+        let bytes = encode_frame(&frame);
+        assert_eq!(bytes[4], FRAME_CPU_TOPOLOGY);
+        let (back, used) = decode_frame(&bytes).unwrap();
+        assert_eq!(used, bytes.len());
+        assert_eq!(back, frame);
+        // A capture from before this frame has only the core records, and
+        // they still decode to the fields that frame has always carried.
+        let cores = LiveFrame::CpuCores { cores: hybrid_cores(2) };
+        let (back, _) = decode_frame(&encode_frame(&cores)).unwrap();
+        assert_eq!(back, cores);
     }
 
     #[test]

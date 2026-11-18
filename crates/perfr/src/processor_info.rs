@@ -19,10 +19,14 @@
 
 use std::collections::BTreeMap;
 
+use perfr_live_event::topology::{CacheInstance, CpuTopology, LogicalCpu, NumaNode};
 use perfr_live_event::{core_kind, CoreInfo};
 
 const RELATION_PROCESSOR_CORE: u32 = 0;
+const RELATION_NUMA_NODE: u32 = 1;
 const RELATION_CACHE: u32 = 2;
+const RELATION_PROCESSOR_PACKAGE: u32 = 3;
+const RELATION_PROCESSOR_DIE: u32 = 5;
 /// `Relationship` and `Size`, which lead every record.
 const RECORD_HEADER: usize = 8;
 /// A `GROUP_AFFINITY` on 64-bit Windows: the mask, the group, padding.
@@ -117,6 +121,145 @@ pub fn cores_from_processor_information(bytes: &[u8]) -> Vec<CoreInfo> {
         return Vec::new();
     }
     cores
+}
+
+/// The same buffer, read for the topology and not only the lane marks.
+/// Frequencies are not in it. Die numbers are the order of the die records,
+/// not a CCD id from the silicon. A record cut short ends the walk, as
+/// [`cores_from_processor_information`] does.
+pub fn topology_from_processor_information(bytes: &[u8]) -> CpuTopology {
+    struct Group {
+        class: u8,
+        cpus: Vec<u16>,
+    }
+    let mut core_groups: Vec<Group> = Vec::new();
+    let mut packages: Vec<Vec<u16>> = Vec::new();
+    let mut dies: Vec<Vec<u16>> = Vec::new();
+    let mut caches: Vec<CacheInstance> = Vec::new();
+    let mut numa: Vec<NumaNode> = Vec::new();
+    let mut at = 0;
+    while let (Some(relationship), Some(size)) = (u32_at(bytes, at), u32_at(bytes, at + 4)) {
+        let size = size as usize;
+        let Some(record) = bytes.get(at..at.saturating_add(size)).filter(|_| size >= RECORD_HEADER) else { break };
+        match relationship {
+            RELATION_PROCESSOR_CORE | RELATION_PROCESSOR_PACKAGE | RELATION_PROCESSOR_DIE => {
+                if let (Some(&class), Some(count)) = (record.get(9), u16_at(record, 30)) {
+                    let cpus = processors(record, 32, usize::from(count));
+                    match relationship {
+                        RELATION_PROCESSOR_PACKAGE => packages.push(cpus),
+                        RELATION_PROCESSOR_DIE => dies.push(cpus),
+                        _ => core_groups.push(Group { class, cpus }),
+                    }
+                }
+            }
+            RELATION_CACHE => {
+                let level = record.get(8).copied().unwrap_or(0);
+                let ways = record.get(9).copied().unwrap_or(0);
+                let line = u16_at(record, 10).unwrap_or(0);
+                let cache_bytes = u32_at(record, 12).unwrap_or(0);
+                let kind = match u32_at(record, 16).unwrap_or(0) {
+                    1 => "instruction",
+                    2 => "data",
+                    _ => "unified",
+                };
+                let count = u16_at(record, 38).unwrap_or(1);
+                if level > 0 {
+                    caches.push(CacheInstance {
+                        level,
+                        kind: kind.into(),
+                        size_kb: cache_bytes / 1024,
+                        ways: u16::from(ways),
+                        line,
+                        cpus: processors(record, 40, usize::from(count.max(1))),
+                    });
+                }
+            }
+            RELATION_NUMA_NODE => {
+                if let Some(id) = u32_at(record, 8) {
+                    let count = u16_at(record, 30).unwrap_or(1);
+                    let node_id = u16::try_from(id).unwrap_or(u16::MAX);
+                    numa.push(NumaNode {
+                        id: node_id,
+                        cpus: processors(record, 32, usize::from(count.max(1))),
+                        mem_bytes: 0,
+                    });
+                }
+            }
+            _ => {}
+        }
+        at += size;
+    }
+    let top_class = core_groups.iter().map(|g| g.class).max().unwrap_or(0);
+    let hybrid = core_groups.iter().any(|g| g.class != top_class);
+    let mut cpus = Vec::new();
+    for (index, group) in core_groups.iter().enumerate() {
+        let socket = packages.iter().position(|p| group.cpus.iter().any(|cpu| p.contains(cpu)));
+        let die = dies.iter().position(|d| group.cpus.iter().any(|cpu| d.contains(cpu)));
+        let core_id = core_groups
+            .iter()
+            .take(index)
+            .filter(|other| {
+                let other_socket = packages.iter().position(|p| other.cpus.iter().any(|cpu| p.contains(cpu)));
+                other_socket == socket
+            })
+            .count() as u16;
+        let kind = if hybrid && group.class == top_class {
+            core_kind::PERFORMANCE
+        } else if hybrid {
+            core_kind::EFFICIENCY
+        } else {
+            core_kind::UNKNOWN
+        };
+        for (thread, cpu) in group.cpus.iter().enumerate() {
+            let mut logical = LogicalCpu {
+                cpu: *cpu,
+                kind,
+                socket: socket.map(|s| s as u16),
+                die: die.map(|d| d as u16),
+                core_id: Some(core_id),
+                thread: Some(thread as u16),
+                ..LogicalCpu::default()
+            };
+            for cache in &caches {
+                if !cache.cpus.contains(cpu) {
+                    continue;
+                }
+                match (cache.level, cache.kind.as_str()) {
+                    (1, "instruction") => logical.l1i_kb = cache.size_kb,
+                    (1, "data") => logical.l1d_kb = cache.size_kb,
+                    (2, _) => logical.l2_kb = cache.size_kb,
+                    (3, _) => logical.l3_kb = cache.size_kb,
+                    _ => {}
+                }
+            }
+            cpus.push(logical);
+        }
+    }
+    for node in &numa {
+        for cpu in &node.cpus {
+            if let Some(logical) = cpus.iter_mut().find(|c| c.cpu == *cpu) {
+                logical.numa = Some(node.id);
+            }
+        }
+    }
+    cpus.sort_by_key(|c| c.cpu);
+    let smt = if core_groups.is_empty() {
+        None
+    } else {
+        Some(core_groups.iter().any(|g| g.cpus.len() > 1))
+    };
+    let line = caches.iter().find(|c| c.level == 1 && c.line > 0).or_else(|| caches.iter().find(|c| c.line > 0)).map(|c| c.line).unwrap_or(0);
+    CpuTopology {
+        sockets: packages.len() as u16,
+        physical_cores: core_groups.len() as u16,
+        threads: cpus.len() as u16,
+        smt,
+        cache_line_bytes: line,
+        numa,
+        cpus,
+        caches,
+        ..CpuTopology::default()
+    }
 }
 
 #[cfg(test)]
@@ -232,5 +375,68 @@ mod tests {
         let mut huge = buffer;
         huge[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(cores_from_processor_information(&huge).is_empty());
+    }
+
+    fn group(relationship: u32, mask: u64) -> Vec<u8> {
+        let mut body = vec![0, 0];
+        body.extend_from_slice(&[0; 20]);
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&group_affinity(mask, 0));
+        record(relationship, &body)
+    }
+
+    fn numa(id: u32, mask: u64) -> Vec<u8> {
+        let mut body = id.to_le_bytes().to_vec();
+        body.extend_from_slice(&[0; 18]);
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&group_affinity(mask, 0));
+        record(1, &body)
+    }
+
+    #[test]
+    fn the_buffer_names_smt_siblings_caches_nodes_and_the_line_size() {
+        // One package, one die, a performance core of two threads, an
+        // efficiency core of one, an instruction cache on the first thread,
+        // a shared level 3, and one NUMA node over all three threads.
+        let mut buffer = Vec::new();
+        buffer.extend(group(3, 0b0111));
+        buffer.extend(group(5, 0b0111));
+        buffer.extend(core(1, 0b0011, 0));
+        buffer.extend(core(0, 0b0100, 0));
+        buffer.extend(cache(1, 32 << 10, 0b0001, 1));
+        // The level 1 record above is unified (type 0) in the helper. The
+        // instruction one is written out so its type is 1.
+        let mut l1 = cache(1, 32 << 10, 0b0010, 1);
+        // Type sits at record offset 16.
+        l1[16..20].copy_from_slice(&1u32.to_le_bytes());
+        buffer.extend(l1);
+        buffer.extend(cache(3, 36 << 20, 0b0111, 1));
+        buffer.extend(numa(0, 0b0111));
+        let topo = topology_from_processor_information(&buffer);
+        assert_eq!(topo.sockets, 1);
+        assert_eq!(topo.physical_cores, 2);
+        assert_eq!(topo.threads, 3);
+        assert_eq!(topo.smt, Some(true));
+        assert_eq!(topo.cache_line_bytes, 64);
+        assert_eq!(topo.cpus.len(), 3);
+        assert_eq!(topo.cpus[0].kind, core_kind::PERFORMANCE);
+        assert_eq!(topo.cpus[0].core_id, Some(0));
+        assert_eq!(topo.cpus[0].thread, Some(0));
+        assert_eq!(topo.cpus[1].thread, Some(1));
+        assert_eq!(topo.cpus[1].core_id, Some(0));
+        assert_eq!(topo.cpus[2].kind, core_kind::EFFICIENCY);
+        assert_eq!(topo.cpus[2].core_id, Some(1));
+        assert_eq!(topo.cpus[2].thread, Some(0));
+        assert!(topo.cpus.iter().all(|c| c.socket == Some(0) && c.die == Some(0) && c.numa == Some(0)));
+        assert_eq!(topo.cpus[0].l3_kb, 36_864);
+        assert_eq!(topo.numa[0].cpus, vec![0, 1, 2]);
+        assert!(topo.lane_label(0).as_deref() == Some("P0 · T0") || topo.smt == Some(true));
+        assert_eq!(topo.lane_label(0).as_deref(), Some("P0 · T0"));
+        assert_eq!(topo.lane_label(2).as_deref(), Some("P1"));
+        let marks = cores_from_processor_information(&buffer);
+        assert_eq!(marks.len(), 3);
+        assert_eq!(marks[0].kind, topo.cpus[0].kind);
+        assert_eq!(marks[0].l3_kb, topo.cpus[0].l3_kb);
+        assert!(topology_from_processor_information(&[]).is_empty());
     }
 }

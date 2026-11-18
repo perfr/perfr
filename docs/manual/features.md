@@ -280,9 +280,9 @@ opens on first load with a service and closes with its ×. Its rows:
 
 ## 4. The timeline
 
-- **Rows.** A machine row, the scheduler (one lane per core, marked with
-  the core's kind, cache or top frequency where the machine's cores
-  differ), then one row per process with its tracks under it. A thread is a track (its states,
+- **Rows.** A machine row, the scheduler (one lane per core, with the
+  core's top frequency when the capture recorded one, and a chip for kind
+  or cache where the cores differ), then one row per process with its tracks under it. A thread is a track (its states,
   samples and scopes packed under its row); a thread's async spans are a
   track of their own (`async  <tid>  <name>`), and so is each value graph
   (`service cpu %`, `service rss MiB`, `events per pass`, any `perfr_value`

@@ -7,11 +7,11 @@
 //!
 //! A capture says what it knows of each core (`CpuCores`, see
 //! [`perfr_live_event::CoreInfo`]): its kind, its top frequency, its level 3
-//! cache. A lane is marked with what tells its core from the others of the
-//! machine, and with nothing when the cores are all alike: a `P` or an `E`
-//! on a hybrid part, the cache's size where half the cores have a larger
-//! one, the top frequency where it is not the same everywhere. All of what
-//! is known of a core is in the words for its tooltip.
+//! cache. A lane shows the top frequency whenever one was recorded, including
+//! when every core has the same one. A `P` or an `E`, or the cache size, is
+//! added only where that is what differs: a hybrid part, or an X3D whose
+//! stacked cache is on some of the cores. Base frequency, NUMA, SMT and
+//! power come from `CpuTopology` and are drawn with the lanes.
 
 use perfr_live_event::{core_kind, CoreInfo};
 
@@ -75,8 +75,15 @@ impl CoreMarks {
         self.cores.binary_search_by_key(&cpu, |c| c.cpu).ok().map(|at| &self.cores[at])
     }
 
-    /// The mark of core `cpu`'s lane; none when nothing is known of the
-    /// core, or nothing tells it from the others.
+    /// The cores the capture listed, for a diagram when it sent no topology.
+    pub fn cores(&self) -> &[CoreInfo] {
+        &self.cores
+    }
+
+    /// The mark of core `cpu`'s lane. The frequency is there whenever this
+    /// core has one. The chip is there only when the cores are not all the
+    /// same kind, or not all the same cache. None when nothing was recorded
+    /// for the core.
     pub fn mark(&self, cpu: u16) -> Option<CoreMark> {
         let core = self.core(cpu)?;
         let mut mark = CoreMark::default();
@@ -87,9 +94,12 @@ impl CoreMarks {
             mark.chip = cache_size(core.l3_kb, "M", "K");
             mark.strong = core.l3_kb == self.top_cache_kb;
         }
-        if self.freqs_differ && core.max_freq_khz > 0 {
+        if core.max_freq_khz > 0 {
             mark.freq = format!("{:.1}", f64::from(core.max_freq_khz) / 1e6);
-            mark.fastest = core.max_freq_khz == self.top_freq_khz;
+            // The highest is highlighted only where the frequencies differ.
+            // On a uniform machine every core is the highest, and painting
+            // them all in the text colour would not say anything.
+            mark.fastest = self.freqs_differ && core.max_freq_khz == self.top_freq_khz;
         }
         (!mark.chip.is_empty() || !mark.freq.is_empty()).then_some(mark)
     }
@@ -192,14 +202,17 @@ mod tests {
     }
 
     #[test]
-    fn cores_that_are_all_alike_carry_no_mark_and_still_say_what_they_are() {
+    fn cores_that_are_all_alike_still_show_their_frequency_and_no_chip() {
         let m = marks(&[core(0, core_kind::UNKNOWN, 4_900_000, 16_384), core(1, core_kind::UNKNOWN, 4_900_000, 16_384)]);
-        assert_eq!(m.mark(0), None);
-        assert_eq!(m.mark(1), None);
+        assert_eq!(shown(&m, 0), "4.9");
+        assert_eq!(shown(&m, 1), "4.9");
+        assert!(m.mark(0).is_some_and(|mark| mark.chip.is_empty() && !mark.fastest));
         assert_eq!(m.describe(1).as_deref(), Some("up to 4.90 GHz, 16 MB L3"));
-        // A frequency not known on one core is not a difference.
+        // A frequency not known on one core is not a difference, and the
+        // core that has one still shows it.
         let m = marks(&[core(0, core_kind::UNKNOWN, 4_900_000, 0), core(1, core_kind::UNKNOWN, 0, 0)]);
-        assert_eq!(m.mark(0), None);
+        assert_eq!(shown(&m, 0), "4.9");
+        assert_eq!(m.mark(1), None);
         assert_eq!(m.describe(1), None);
         // A cache under a megabyte is said in kilobytes.
         let m = marks(&[core(0, core_kind::UNKNOWN, 0, 512), core(1, core_kind::UNKNOWN, 0, 2_048)]);
@@ -211,15 +224,15 @@ mod tests {
     #[test]
     fn cores_said_later_join_the_others_and_a_new_capture_starts_with_none() {
         let mut m = marks(&[core(0, core_kind::UNKNOWN, 4_900_000, 0), core(1, core_kind::UNKNOWN, 4_900_000, 0)]);
-        assert_eq!(m.mark(0), None);
+        assert_eq!(shown(&m, 0), "4.9");
         // Another machine of the capture, on the lanes after these: its
         // cores top out lower, and now the frequency tells them apart.
         m.adopt(&[core(2, core_kind::UNKNOWN, 3_600_000, 0)]);
         assert_eq!(shown(&m, 0), "4.9!");
         assert_eq!(shown(&m, 2), "3.6");
-        // A core said again is replaced.
+        // A core said again is replaced, and the frequencies match once more.
         m.adopt(&[core(2, core_kind::UNKNOWN, 4_900_000, 0)]);
-        assert_eq!(m.mark(2), None);
+        assert_eq!(shown(&m, 2), "4.9");
         m.clear();
         assert_eq!(m, CoreMarks::default());
         assert_eq!(m.describe(0), None);

@@ -36,6 +36,7 @@ mod live;
 mod local_report;
 pub mod logging;
 mod logs;
+mod machine;
 pub mod net;
 mod presets;
 mod rect_select;

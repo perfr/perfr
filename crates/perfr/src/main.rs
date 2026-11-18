@@ -56,6 +56,7 @@ mod serve;
 mod symbolize;
 #[cfg(any(test, target_os = "linux"))]
 mod sysinfo;
+mod cpu_topology;
 #[cfg(any(test, target_os = "linux"))]
 mod telemetry;
 #[cfg(target_os = "linux")]

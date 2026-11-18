@@ -27,7 +27,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use perfr_live_event::{core_kind, CoreInfo, LiveEvent};
+use perfr_live_event::{core_kind, CoreInfo, CpuTopology, LiveEvent};
 
 use crate::zipstore::read_store_zip;
 #[cfg(test)]
@@ -73,6 +73,9 @@ pub struct CaptureBundle {
     /// What each core of the captured machine is, in the order of their
     /// numbers; empty when the capture's source did not say.
     pub cores: Vec<CoreInfo>,
+    /// One entry per machine the capture recorded. Empty in a bundle
+    /// written before there was one, and when the source read nothing.
+    pub topology: Vec<CpuTopology>,
 }
 
 /// The track order a manifest carries; empty when it has none, which is
@@ -137,6 +140,21 @@ pub(crate) fn manifest_cores(manifest: &serde_json::Value) -> Vec<CoreInfo> {
     cores.sort_by_key(|core| core.cpu);
     cores.dedup_by_key(|core| core.cpu);
     cores
+}
+
+/// The machines a manifest lists. Missing, which is every bundle written
+/// before there was a list, is none. An entry that is not an object is
+/// left out; unknown keys inside one are ignored.
+pub(crate) fn manifest_topology(manifest: &serde_json::Value) -> Vec<CpuTopology> {
+    let value = &manifest["bundle"]["cpu_topology"];
+    let entries: Vec<&serde_json::Value> = if let Some(list) = value.as_array() {
+        list.iter().collect()
+    } else if value.is_object() {
+        vec![value]
+    } else {
+        return Vec::new();
+    };
+    entries.into_iter().filter_map(|entry| serde_json::from_value(entry.clone()).ok()).filter(|topo: &CpuTopology| !topo.is_empty()).collect()
 }
 
 /// The file name suffix of a bundle. The viewer tells a bundle from a zipped
@@ -220,6 +238,7 @@ impl CaptureBundle {
             frames,
             track_order: self.track_order.clone(),
             cores: self.cores.clone(),
+            topology: self.topology.clone(),
         }
     }
 
@@ -257,6 +276,7 @@ impl CaptureBundle {
                 "threads": self.threads.iter().map(|t| serde_json::json!({"pid": t.pid, "tid": t.tid, "name": t.name})).collect::<Vec<_>>(),
                 "track_order": self.track_order,
                 "cpu_cores": manifest_of_cores(&self.cores),
+                "cpu_topology": self.topology.iter().map(|topo| serde_json::to_value(topo).unwrap_or(serde_json::Value::Null)).collect::<Vec<_>>(),
             },
         })
     }
@@ -287,6 +307,11 @@ impl CaptureBundle {
         for t in &self.threads { append(LiveFrame::ThreadName { pid: t.pid, tid: t.tid, name: t.name.clone() }); }
         if !self.track_order.is_empty() { append(LiveFrame::TrackOrder { text: self.track_order.clone() }); }
         if !self.cores.is_empty() { append(LiveFrame::CpuCores { cores: self.cores.clone() }); }
+        for topology in &self.topology {
+            if !topology.is_empty() {
+                append(LiveFrame::CpuTopology { topology: Box::new(topology.clone()) });
+            }
+        }
         let mut events: Vec<LiveEvent> = self.events.iter().map(|r| r.event)
             .filter(|e| e.kind != kind::SAMPLE && !(e.kind == kind::FUNCTION_CALL && e.extra == extra::SAMPLED_FRAME)).collect();
         let periods: HashMap<(u32, u64), u64> = self.events.iter()
@@ -402,6 +427,7 @@ impl CaptureBundle {
             frames,
             track_order: manifest_track_order(&manifest),
             cores: manifest_cores(&manifest),
+            topology: manifest_topology(&manifest),
         })
     }
 }
@@ -512,6 +538,7 @@ mod tests {
                 FrameRow { id: 4, name: "nanosleep".into(), module: "libc".into(), address: 0x40 },
             ],
             track_order: "[@7]\n@71\n@70\n[@9]\n@90\n".into(),
+            topology: Vec::new(),
             cores: vec![
                 CoreInfo { cpu: 0, kind: core_kind::PERFORMANCE, max_freq_khz: 5_800_000, l3_kb: 36_864 },
                 CoreInfo { cpu: 1, kind: core_kind::EFFICIENCY, max_freq_khz: 4_300_000, l3_kb: 36_864 },
@@ -550,6 +577,23 @@ mod tests {
         let plain = CaptureBundle { cores: Vec::new(), ..sample_bundle() };
         let frames = perfr_live_protocol::decode_all(&plain.to_stream()).unwrap();
         assert!(!frames.iter().any(|f| matches!(f, perfr_live_protocol::LiveFrame::CpuCores { .. })));
+        assert!(manifest_topology(&serde_json::json!({"bundle": {"target_pid": 7}})).is_empty());
+        let mut machine = perfr_live_event::CpuTopology {
+            model: "AMD Ryzen 9 7950X3D 16-Core Processor".into(),
+            physical_cores: 16,
+            threads: 32,
+            cache_line_bytes: 64,
+            nps: 1,
+            nps_source: "derived".into(),
+            ..perfr_live_event::CpuTopology::default()
+        };
+        machine.apply_model_table();
+        let with = CaptureBundle { topology: vec![machine.clone()], ..sample_bundle() };
+        let back = CaptureBundle::from_zip(&with.to_zip().unwrap()).unwrap();
+        assert_eq!(back.topology, vec![machine.clone()]);
+        let frames = perfr_live_protocol::decode_all(&with.to_stream()).unwrap();
+        assert!(frames.iter().any(|f| matches!(f, perfr_live_protocol::LiveFrame::CpuTopology { topology } if topology.as_ref() == &machine)));
+        assert_eq!(back.slice(0, 1).topology, vec![machine]);
         // What is not a core is left out, a kind this version does not know
         // is a core of no known kind, and the cores come back in order.
         let odd = serde_json::json!({"bundle": {"cpu_cores": [

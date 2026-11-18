@@ -10,11 +10,15 @@
 //! unknown; the Windows buffer parser is tested from records written by
 //! hand, and neither the Windows calls nor `pmset` have been run here.
 
+#[cfg(any(test, target_os = "linux"))]
 use std::path::Path;
 
-use perfr_live_event::topology::{
-    accept_power_profile, keep_flags, CacheInstance, CpufreqPolicy, CpuTopology, LogicalCpu, NumaNode, PowerState,
-};
+use perfr_live_event::topology::CpuTopology;
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+use perfr_live_event::topology::{keep_flags, CacheInstance};
+#[cfg(any(test, target_os = "linux"))]
+use perfr_live_event::topology::{accept_power_profile, CpufreqPolicy, LogicalCpu, NumaNode, PowerState};
+#[cfg(any(test, target_os = "linux"))]
 use perfr_live_event::core_kind;
 
 /// This machine, at capture start. Empty when nothing could be read.
@@ -266,6 +270,7 @@ pub fn read_linux_tree(root: &Path, daemon_profile: &str) -> CpuTopology {
     topo
 }
 
+#[cfg(any(test, target_os = "linux"))]
 struct Draft {
     logical: LogicalCpu,
     driver: String,
@@ -277,6 +282,7 @@ struct Draft {
     caches: Vec<CacheInstance>,
 }
 
+#[cfg(any(test, target_os = "linux"))]
 struct Cpuinfo {
     vendor: String,
     model: String,
@@ -291,6 +297,7 @@ struct Cpuinfo {
     sockets: u16,
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn parse_cpuinfo(content: &str) -> Cpuinfo {
     let mut info = Cpuinfo {
         vendor: String::new(),
@@ -349,6 +356,7 @@ fn parse_cpuinfo(content: &str) -> Cpuinfo {
     info
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn read_numa(dir: &Path) -> Vec<NumaNode> {
     let mut ids: Vec<u16> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -374,6 +382,7 @@ fn read_numa(dir: &Path) -> Vec<NumaNode> {
         .collect()
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn read_distances(dir: &Path, nodes: &[NumaNode]) -> Vec<u16> {
     if nodes.is_empty() {
         return Vec::new();
@@ -390,6 +399,7 @@ fn read_distances(dir: &Path, nodes: &[NumaNode]) -> Vec<u16> {
     rows
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn read_policies(cpu_root: &Path) -> Vec<CpufreqPolicy> {
     let dir = cpu_root.join("cpufreq");
     let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
@@ -418,6 +428,7 @@ fn read_policies(cpu_root: &Path) -> Vec<CpufreqPolicy> {
         .collect()
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn policies_from_drafts(drafts: &[Draft]) -> Vec<CpufreqPolicy> {
     let mut out: Vec<CpufreqPolicy> = Vec::new();
     for draft in drafts {
@@ -442,6 +453,7 @@ fn policies_from_drafts(drafts: &[Draft]) -> Vec<CpufreqPolicy> {
     out
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn cache_line(caches: &[CacheInstance], alignment: u16) -> u16 {
     let mut lines: Vec<u16> = caches.iter().filter(|c| c.level <= 1 && c.line > 0).map(|c| c.line).collect();
     if lines.is_empty() {
@@ -456,6 +468,7 @@ fn cache_line(caches: &[CacheInstance], alignment: u16) -> u16 {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn cache_kind(text: &str) -> String {
     match text.trim().to_ascii_lowercase().as_str() {
         "instruction" => "instruction".into(),
@@ -465,6 +478,7 @@ fn cache_kind(text: &str) -> String {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn distinct<T: Ord>(items: impl Iterator<Item = T>) -> u16 {
     let mut v: Vec<T> = items.collect();
     v.sort();
@@ -472,6 +486,7 @@ fn distinct<T: Ord>(items: impl Iterator<Item = T>) -> u16 {
     v.len() as u16
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn cpu_ids(cpu_root: &Path) -> Vec<u16> {
     let Ok(entries) = std::fs::read_dir(cpu_root) else { return Vec::new() };
     let mut ids: Vec<u16> = entries
@@ -489,18 +504,22 @@ fn cpu_ids(cpu_root: &Path) -> Vec<u16> {
     ids
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn read_text(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn trim_text(text: &str) -> String {
     text.trim().to_string()
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn parse_u32(text: &str) -> u32 {
     text.trim().parse().unwrap_or(0)
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn parse_opt_u16(text: &str) -> Option<u16> {
     let text = text.trim();
     if text.is_empty() { None } else { text.parse().ok() }

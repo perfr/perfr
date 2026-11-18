@@ -1,0 +1,2 @@
+# The viewer smoke tests read the bundle the service writes.
+pyarrow

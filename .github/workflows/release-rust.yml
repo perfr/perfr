@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.PERFR_RELEASE_REF }}
 
@@ -98,7 +98,7 @@ jobs:
           grep -qE '(^|/)index.html$' <<<"$listing"
           grep -qE '(^|/)perfr_viewer_bg.wasm$' <<<"$listing"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: perfr-packs
           path: |
@@ -114,7 +114,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.PERFR_RELEASE_REF }}
 
@@ -124,7 +124,7 @@ jobs:
           echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
           echo "PERFR_GIT_HASH=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: perfr-packs
           path: dist/viewer-pack
@@ -151,7 +151,7 @@ jobs:
           # symbol store has nothing to key the debug file on.
           echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-Wl,--build-id=sha1" >> "$GITHUB_ENV"
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-rust-linux
       - name: Build static perfr
@@ -235,7 +235,7 @@ jobs:
             --symstore-archive "${store_top}.tar.gz" \
             --core-dir dist/perfr
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: perfr-linux-x86_64
           path: |
@@ -256,7 +256,7 @@ jobs:
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.PERFR_RELEASE_REF }}
 
@@ -266,7 +266,7 @@ jobs:
           echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
           echo "PERFR_GIT_HASH=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: perfr-packs
           path: dist/viewer-pack
@@ -286,7 +286,7 @@ jobs:
       - name: Rust toolchain
         run: rustup toolchain install 1.88.0 --profile minimal
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-rust-macos
       - name: Build universal service
@@ -349,7 +349,7 @@ jobs:
             --symstore-archive "${store_top}.tar.gz" \
             --core-dir dist/perfr
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: perfr-macos-universal
           path: |
@@ -371,7 +371,7 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.PERFR_RELEASE_REF }}
 
@@ -383,7 +383,7 @@ jobs:
           "SOURCE_DATE_EPOCH=$epoch" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
           "PERFR_GIT_HASH=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: perfr-packs
           path: dist/viewer-pack
@@ -409,7 +409,7 @@ jobs:
       - name: Rust toolchain
         run: rustup toolchain install 1.88.0 --profile minimal
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-rust-windows
       - name: Build service and SDK
@@ -469,7 +469,7 @@ jobs:
             --symstore-archive "${storeTop}.tar.gz" `
             --core-dir dist\perfr
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: perfr-windows-x86_64
           path: |
@@ -489,11 +489,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.PERFR_RELEASE_REF }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true

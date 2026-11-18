@@ -1,0 +1,2 @@
+# The Mojo toolchain, for the perfr-api binding test.
+mojo==1.0.*

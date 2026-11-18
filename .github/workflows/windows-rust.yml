@@ -47,10 +47,10 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust
         run: rustup toolchain install 1.88.0 --profile minimal
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: windows-rust-windows-2022
       - name: Test producer crates and the ETW decoders
@@ -84,7 +84,7 @@ jobs:
           .\dist\windows\PerfrTestRust.exe --seconds 1
       - name: Smoke test manual capture and restart
         run: |
-          python -m pip install --quiet pyarrow
+          python -m pip install --quiet --require-hashes -r .github/requirements/smoke.txt
           python tools/e2e/manual_service_smoke.py --service dist/windows/perfr.exe --api-lib dist/windows/libperfr.dll
       - name: Smoke test two services in one timeline
         run: python tools/e2e/multi_machine_smoke.py --service dist/windows/perfr.exe --target dist/windows/PerfrTestRust.exe
@@ -104,7 +104,7 @@ jobs:
         # unavailable" is a failure here, not the skip it is on a desk.
         run: |
           python tools/e2e/windows_etw_smoke.py --service dist/windows/perfr.exe --target dist/windows/PerfrTestRust.exe --require
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: perfr-windows-x86_64
           path: dist/windows/

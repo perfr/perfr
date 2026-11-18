@@ -40,10 +40,10 @@ jobs:
         runner: ${{ fromJSON(github.event_name == 'pull_request' && !contains(join(github.event.pull_request.labels.*.name, ','), 'full-ci') && '["ubuntu-24.04", "macos-15"]' || '["ubuntu-24.04", "macos-15", "macos-15-intel"]') }}
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust
         run: rustup toolchain install 1.88.0 --profile minimal
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: frida-rust-${{ matrix.runner }}
       - name: Fetch pinned native devkits
@@ -61,7 +61,7 @@ jobs:
       - name: Build target and install test runtime
         run: |
           python3 -m venv /tmp/perfr-frida-test
-          /tmp/perfr-frida-test/bin/pip install --only-binary=:all: pyarrow
+          /tmp/perfr-frida-test/bin/pip install --only-binary=:all: --require-hashes -r .github/requirements/smoke.txt
           # This fixture links the static API; the default header uses dlopen.
           if [ "$(uname -s)" = Darwin ]; then
             cc -O1 -g -fno-omit-frame-pointer -DPERFR_STATIC -I crates/perfr-api/include tools/e2e/frida_target.c target/debug/libperfr_api.a -lSystem -liconv -o /tmp/perfr-frida-target
@@ -117,7 +117,7 @@ jobs:
           for report in /tmp/perfr-crashes/*; do
             if [ -f "$report" ]; then cat "$report"; fi
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure() && runner.os == 'macOS'
         with:
           name: frida-crashes-${{ matrix.runner }}

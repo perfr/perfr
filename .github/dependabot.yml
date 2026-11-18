@@ -67,6 +67,12 @@ updates:
     directory: /fuzz
     schedule:
       interval: weekly
+    # It also reads the manifests of the crates the targets use by path,
+    # and proposes changes to those without the root lock file: five on its
+    # first run, none of which could build. Those crates belong to the entry
+    # above. This one moves only what fuzz/Cargo.toml names itself.
+    allow:
+      - dependency-name: "libfuzzer-sys"
 
   - package-ecosystem: pip
     directory: /.github/requirements

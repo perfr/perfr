@@ -23,7 +23,11 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: frida-rust-${{ github.ref }}
+  # A label that is not full-ci starts a run that does nothing (see the
+  # job's `if`). It gets a group of its own: in the group of the runs that
+  # do the work it would cancel one, and Dependabot labels a pull request
+  # as it opens it, so its pull requests were never tested here.
+  group: frida-rust-${{ github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'full-ci' && '-other-label' || '' }}
   cancel-in-progress: true
 jobs:
   instrumentation:

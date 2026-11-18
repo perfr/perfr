@@ -23,6 +23,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/python-wheels.yml'
+      - '.github/requirements/wheels.*'
       - 'tools/release/build_wheels.sh'
       - 'tools/frida/**'
       - 'tools/windows/**'

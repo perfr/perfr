@@ -1,0 +1,53 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# @perfr/web (web/perfr) is published with the JavaScript the TypeScript
+# compiler wrote for it, and that JavaScript is committed. This builds the
+# package with the compiler the lock file names, checks the committed
+# output is what it writes, and runs the package's tests.
+name: web-package
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'web/perfr/**'
+      - '.github/workflows/web-package.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'web/perfr/**'
+      - '.github/workflows/web-package.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web/perfr
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install what the lock file names
+        run: |
+          node --version
+          npm ci --ignore-scripts
+      - name: Build
+        run: npm run build
+      - name: Check the committed JavaScript is what the build writes
+        run: |
+          if ! git diff --exit-code -- dist; then
+            echo "::error::web/perfr/dist is not what the build writes. Run 'npm run build' in web/perfr and commit dist."
+            exit 1
+          fi
+          test -z "$(git status --porcelain -- dist)" || { git status --short -- dist; echo "::error::the build wrote files in web/perfr/dist that are not committed."; exit 1; }
+      - name: Test
+        run: npm test

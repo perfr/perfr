@@ -28,7 +28,7 @@ dependencies = ["perfr-api==0.1.7"]
 perfr = "perfr:main"
 
 [project.urls]
-Homepage = "https://github.com/perfr/perfr"
+Homepage = "https://perfr.dev"
 Source = "https://github.com/perfr/perfr/tree/main/crates/perfr/python"
 
 [tool.setuptools]

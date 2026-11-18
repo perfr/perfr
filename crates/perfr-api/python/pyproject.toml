@@ -23,7 +23,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/perfr/perfr"
+Homepage = "https://perfr.dev"
 Source = "https://github.com/perfr/perfr/tree/main/crates/perfr-api/python"
 
 [tool.setuptools]

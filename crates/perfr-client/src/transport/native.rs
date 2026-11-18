@@ -159,7 +159,7 @@ pub fn start_ws(inbox: Arc<Mutex<Inbox>>, slot: Arc<Mutex<Option<Socket>>>, http
                             let mut g = inbox.lock().unwrap_or_else(|e| e.into_inner());
                             g.bytes_in += bytes.len() as u64;
                             // A minimized native window may stop draining as well.
-                            if g.queue_frame(bytes, true) == Queued::Overflow {
+                            if g.queue_frame(bytes.into(), true) == Queued::Overflow {
                                 return Err("event stream backlog full; reconnecting".to_string());
                             }
                         }

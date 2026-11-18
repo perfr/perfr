@@ -46,13 +46,39 @@ pub(crate) struct Connection {
     pub caller: Caller,
 }
 
-impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_>> for Connection {
-    fn connect_info(target: axum::serve::IncomingStream<'_>) -> Self {
+/// The listener the service accepts on: every connection it hands over
+/// sends what it is given at once (`TCP_NODELAY`). A service linked to
+/// another reads the other's clock from how long a small message takes to
+/// come back, and a kernel that holds a small write for the answer to the
+/// one before it adds 40 ms to that, on one direction only.
+pub(crate) struct Accepting(tokio::net::TcpListener);
+
+pub(crate) fn accepting(listener: tokio::net::TcpListener) -> Accepting {
+    Accepting(listener)
+}
+
+impl axum::serve::Listener for Accepting {
+    type Io = tokio::net::TcpStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let (stream, addr) = axum::serve::Listener::accept(&mut self.0).await;
+        let _ = stream.set_nodelay(true);
+        (stream, addr)
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.0.local_addr()
+    }
+}
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, Accepting>> for Connection {
+    fn connect_info(target: axum::serve::IncomingStream<'_, Accepting>) -> Self {
         // Looked up as the connection is accepted, once for every request
         // it then carries: the caller's socket is certain to exist only
         // while the connection is new.
-        let caller = match target.local_addr() {
-            Ok(local) => caller_of(target.remote_addr(), local),
+        let caller = match target.io().local_addr() {
+            Ok(local) => caller_of(*target.remote_addr(), local),
             Err(_) => Caller::Untold,
         };
         Connection { caller }

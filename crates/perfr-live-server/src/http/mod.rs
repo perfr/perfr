@@ -52,7 +52,7 @@ pub async fn serve(service: Arc<LiveService>) -> Result<(), String> {
 /// what keeps the other accounts of this machine out.
 pub(crate) async fn serve_on(listener: TcpListener, service: Arc<LiveService>) -> Result<(), String> {
     let app = router(service).into_make_service_with_connect_info::<peer::Connection>();
-    axum::serve(listener, app)
+    axum::serve(peer::accepting(listener), app)
         .await
         .map_err(|e| format!("http server: {e}"))
 }
@@ -107,7 +107,7 @@ pub fn router(service: Arc<LiveService>) -> Router {
             "/api/capture/import",
             post(capture_import).layer(axum::extract::DefaultBodyLimit::max(IMPORT_BODY_LIMIT)),
         )
-        .route("/*path", get(static_asset))
+        .route("/{*path}", get(static_asset))
         // In front of every route, the WebSocket upgrades included: there
         // is no authentication behind this, so who may call is decided
         // here, once. See `request_allowed`.

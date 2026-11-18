@@ -115,7 +115,7 @@ where
 
     let mut metadata = ElfMetadata {
         is_64_bit: header.is_type_64(),
-        machine: header.e_machine(endian),
+        machine: header.e_machine(endian).0,
         ..Default::default()
     };
 
@@ -245,15 +245,14 @@ where
     let mut strtab_addr = None;
     let mut strtab_size = None;
     for entry in entries {
-        // d_tag is target-width, so compare as u64 rather than matching on the
-        // u32 constants.
-        let tag: u64 = entry.d_tag(endian).into();
+        // The tag is the same type whatever the target's width.
+        let tag = entry.d_tag(endian);
         let value: u64 = entry.d_val(endian).into();
-        if tag == u64::from(elf::DT_SONAME) {
+        if tag == elf::DT_SONAME {
             soname_offset = Some(value);
-        } else if tag == u64::from(elf::DT_STRTAB) {
+        } else if tag == elf::DT_STRTAB {
             strtab_addr = Some(value);
-        } else if tag == u64::from(elf::DT_STRSZ) {
+        } else if tag == elf::DT_STRSZ {
             strtab_size = Some(value);
         }
     }
@@ -361,7 +360,7 @@ where
         if segment.p_type(endian) != elf::PT_LOAD {
             continue;
         }
-        if segment.p_flags(endian) & elf::PF_X == 0 {
+        if (segment.p_flags(endian) & elf::PF_X).0 == 0 {
             continue;
         }
 
@@ -626,7 +625,7 @@ mod tests {
         let (offset, size) = section_named(&data, b".dynamic");
         let mut patched = false;
         for entry in (offset..offset + size).step_by(16) {
-            if u64_at(&data, entry) == u64::from(elf::DT_STRTAB) {
+            if u64_at(&data, entry) == elf::DT_STRTAB.0 as u64 {
                 data[entry + 8..entry + 16].copy_from_slice(&(u64::MAX - 1).to_le_bytes());
                 patched = true;
             }

@@ -44,7 +44,7 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 perfr-maps = { path = "../perfr-maps" }
 perfr-object = { path = "../perfr-object" }
-object = { version = "0.36", default-features = false, features = ["read_core", "elf", "std"] }
+object = { version = "0.41", default-features = false, features = ["read_core", "elf", "std"] }
 perfr-perf-records = { path = "../perfr-perf-records" }
 perfr-scope-ring = { path = "../perfr-scope-ring" }
 perfr-thread-states = { path = "../perfr-thread-states" }

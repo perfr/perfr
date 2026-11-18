@@ -4,26 +4,26 @@ click==8.5.1 \
     --hash=sha256:8bb5376d2006950386f8c6427613334a2acadc5f559cb80e638d00b4df957e37 \
     --hash=sha256:9bbfada76703fd1d784b83eea012e3e8c6a001a876543ef104fa56aaaeb072b4
     # via mblack
-mblack==26.5.0 \
-    --hash=sha256:072b304646c277979e6a1d19b086ef226bb7381810902e975cf1c3886d1d7883
+mblack==26.7.0 \
+    --hash=sha256:a7dcf3cf1a8439bacd0fc692eb75783b8fd315fcfd5260e0f74e8e5ba77e5133
     # via mojo
-mojo==1.0.0 \
-    --hash=sha256:69413fee96dfd43c4955ace56e4bb0f89401098daf61538a563c82571bc9d984 \
-    --hash=sha256:725d6b7f29a5a3334e3c225f35f2b709fd46151a0a31a2c22738b1937dfc83d9 \
-    --hash=sha256:a6db18b2846ec4877c5cd43a2dce1556400520dc0d4450dc8b4703dab569e9a2
+mojo==1.2.0 \
+    --hash=sha256:92e21c709072e1443b81709635583c62e17c1b32e34f0e6a89e5e8b47f9352f9 \
+    --hash=sha256:cb54942fd99be346ef273cc9beae5f692c58195dcbe3798596b2e7368d4f719c \
+    --hash=sha256:e90bcd0e3a1f6ad5306d6af1bd3a6bbcd849ddfd06c66552a4440682bf6f703a
     # via -r mojo.in
-mojo-compiler==1.0.0 \
-    --hash=sha256:3ae3eb0c58a8956f542e324f736866df0ae2f9f875e8a279cbeea961ec4e9ee8 \
-    --hash=sha256:5077ee27c0dfbbdf138a11ec12838b0d3f10148a874cf95040c9ca2332ae2622 \
-    --hash=sha256:e9e60f9638e69ca0f4be7292468523fc98a143f58dbf9024f60ed68b874a867e
+mojo-compiler==1.2.0 \
+    --hash=sha256:3ee34a3b26c6cccaa9523a0e8db8f67bea954497d782d97c9e61c3c4ecbdac7b \
+    --hash=sha256:72d6f8321a50136945598ab4b9874e9980bd03103bf93545444b4448919e48c9 \
+    --hash=sha256:bc1777d9b3cf4522ee213cc83876b1955499aec2aa8dd8a75ce477f0cd227a90
     # via mojo
-mojo-compiler-mojo-libs==1.0.0 \
-    --hash=sha256:20a92e37ecbd19e2dbb1a525612a8de4c9f266f5536def55c5e2b0786320e8b3
+mojo-compiler-mojo-libs==1.2.0 \
+    --hash=sha256:3d631f7e798c11d0029c4a892ebae1f5742751fac0c526af74b45a8ae07c3acb
     # via mojo-compiler
-mojo-lldb-libs==1.0.0 \
-    --hash=sha256:7eb1f204829f031fda8cc9ee4e7f461f1ca3ddf1c8fb509abf2eb6f02c9de4f5 \
-    --hash=sha256:b8f417c3c2c64058c1c11467086c2e64464abcd91dba938c659b49d94cc75c5b \
-    --hash=sha256:de151c87f3fb4d184a85e735eae05bf43f9a9deb4cb8f2b07cf6b59cb769d93f
+mojo-lldb-libs==1.2.0 \
+    --hash=sha256:25b9f186eef9e50d0d331b2e9666b0d550cd277f62223979bd025a8f8b90efca \
+    --hash=sha256:968d5a8e04dd18c353b0ba8fa61c1e34ae7986e9ccd882eda8cd91473e1ae91c \
+    --hash=sha256:dc290e7e56d560d9d6725a2eec7648cf69b2b15bc5d25f3c9a28d5b2441d1160
     # via mojo
 mypy-extensions==1.2.0 \
     --hash=sha256:993e7a20aa5671eb41a7132cf555af30062da99729601601b9a8382b11cae768 \

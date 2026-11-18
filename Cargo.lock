@@ -2711,7 +2711,7 @@ dependencies = [
  "libc",
  "log",
  "memmap2",
- "miniz_oxide 0.8.9",
+ "miniz_oxide 0.9.1",
  "object",
  "perfr-api",
  "perfr-build-info",
@@ -2757,7 +2757,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "bytes",
- "miniz_oxide 0.8.9",
+ "miniz_oxide 0.9.1",
  "parquet",
  "perfr-live-event",
  "perfr-live-protocol",
@@ -2872,7 +2872,7 @@ dependencies = [
 name = "perfr-live-protocol"
 version = "0.1.1"
 dependencies = [
- "miniz_oxide 0.8.9",
+ "miniz_oxide 0.9.1",
  "perfr-live-event",
  "serde",
 ]

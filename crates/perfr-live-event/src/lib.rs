@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 mod color;
 pub mod cores;
 pub mod logs;
+pub mod topology;
 pub mod dev;
 pub mod health;
 pub mod theme;
@@ -28,6 +29,7 @@ pub use color::{
 };
 pub use color::{chrome, mode as color_mode};
 pub use cores::{core_kind, CoreInfo};
+pub use topology::CpuTopology;
 
 /// Wire size of [`LiveEvent`]. Must stay 32 so C FFI and the WS stream agree.
 pub const LIVE_EVENT_SIZE: usize = 32;

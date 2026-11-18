@@ -1481,6 +1481,11 @@ pub struct PerfrLiveApp {
     /// What the capture says of its machine's cores, and the mark each
     /// scheduler lane carries for it.
     core_marks: crate::cores::CoreMarks,
+    /// The machines of the capture (`CpuTopology`). Empty when the capture
+    /// did not record one.
+    machines: Vec<perfr_live_event::CpuTopology>,
+    /// The diagram of those machines, opened from the scheduler header.
+    cpu_diagram: bool,
     trace_processes: Vec<ProcessJson>,
     /// Log window: lines in the visible range, or the lines inside a clicked
     /// scope.
@@ -2344,6 +2349,8 @@ impl PerfrLiveApp {
             trace_flows: Vec::new(),
             thread_names: HashMap::new(),
             core_marks: crate::cores::CoreMarks::default(),
+            machines: Vec::new(),
+            cpu_diagram: false,
             trace_processes: Vec::new(),
             log_ui: crate::logs::LogUi::default(),
             frame_series: None,
@@ -2985,6 +2992,8 @@ impl PerfrLiveApp {
         self.trace_flows.clear();
         self.thread_names.clear();
         self.core_marks.clear();
+        self.machines.clear();
+        self.cpu_diagram = false;
         self.trace_processes.clear();
         self.held_stream.forget();
         self.forget_share();
@@ -3063,6 +3072,8 @@ impl PerfrLiveApp {
         self.intern = InternTable::default();
         self.thread_names.clear();
         self.core_marks.clear();
+        self.machines.clear();
+        self.cpu_diagram = false;
         self.trace_processes.clear();
         self.selected = None;
         self.hover = None;
@@ -3656,6 +3667,8 @@ impl PerfrLiveApp {
         self.trace_flows.clear();
         self.thread_names.clear();
         self.core_marks.clear();
+        self.machines.clear();
+        self.cpu_diagram = false;
         self.trace_processes.clear();
         self.held_stream.trace_opened();
         self.forget_share();
@@ -4686,6 +4699,22 @@ impl PerfrLiveApp {
                 self.core_marks.adopt(&cores);
                 self.needs_repaint = true;
             }
+            LiveFrame::CpuTopology { topology } => {
+                let topology = *topology;
+                let cores = topology.core_infos();
+                if !cores.is_empty() {
+                    self.core_marks.adopt(&cores);
+                }
+                let cpus: std::collections::HashSet<u16> = topology.cpus.iter().map(|c| c.cpu).collect();
+                if let Some(slot) = self.machines.iter_mut().find(|have| {
+                    have.cpus.iter().any(|c| cpus.contains(&c.cpu)) || (cpus.is_empty() && have.model == topology.model)
+                }) {
+                    *slot = topology;
+                } else {
+                    self.machines.push(topology);
+                }
+                self.needs_repaint = true;
+            }
             LiveFrame::CaptureFinished => {
                 self.live_resort_pending = true;
                 // A live capture that just stopped stays where it was -- the
@@ -4729,6 +4758,8 @@ impl PerfrLiveApp {
                     self.log_ui.reset_capture();
                     self.thread_names.clear();
                     self.core_marks.clear();
+                    self.machines.clear();
+                    self.cpu_diagram = false;
                     self.trace_processes.clear();
                     self.hover = None;
                     self.refresh_content_bounds();
@@ -7128,9 +7159,7 @@ impl PerfrLiveApp {
                         Vec::new()
                     };
                     let copied = self.now_s - self.callstack_copied_at < 1.5;
-                    let core = (h.kind == kind::SCHEDULING_SLICE)
-                        .then(|| self.core_marks.describe(u16::from(h.extra)))
-                        .flatten();
+                    let core = (h.kind == kind::SCHEDULING_SLICE).then(|| self.core_detail(u16::from(h.extra))).flatten();
                     show_scope_tooltip(ui, &self.intern, &self.processes, &self.trace_args, h, &stack, copied, core.as_deref());
                 }
             } else {
@@ -7369,7 +7398,64 @@ impl PerfrLiveApp {
                     );
                 }
             }
+            if let RowId::Lane(key) = row.id {
+                if key.is_scheduler() && crate::machine::numa_varies(&self.machines) {
+                    let cpu = u16::from(key.extra);
+                    if let Some(node) = crate::machine::numa_of(&self.machines, cpu) {
+                        let tint = crate::machine::numa_tint(node);
+                        let painter = ui.painter();
+                        painter.rect_filled(r, 0.0, tint);
+                        painter.rect_filled(
+                            Rect::from_min_max(Pos2::new(body.left(), r.top()), Pos2::new(body.right(), r.bottom())),
+                            0.0,
+                            tint,
+                        );
+                        let mut previous = None;
+                        for other in rows.iter().rev().skip_while(|other| other.id != row.id).skip(1) {
+                            if let RowId::Lane(k) = other.id {
+                                if k.is_scheduler() {
+                                    previous = crate::machine::numa_of(&self.machines, u16::from(k.extra));
+                                    break;
+                                }
+                            }
+                        }
+                        if previous != Some(node) {
+                            painter.line_segment(
+                                [r.left_top(), Pos2::new(body.right(), r.top())],
+                                Stroke::new(1.0, Color32::from_white_alpha(48)),
+                            );
+                            // In the rail, not on the timeline: a slice that fills the
+                            // lane would cover a label drawn there.
+                            painter.text(
+                                Pos2::new(r.left() + 8.0, r.center().y),
+                                Align2::LEFT_CENTER,
+                                format!("N{node}"),
+                                FontId::new(8.0, fonts::medium()),
+                                theme::TEXT(),
+                            );
+                            if !self.in_self_pane {
+                                note_ui_rect_fmt(format_args!("numa:{node}"), r);
+                            }
+                        }
+                    }
+                }
+            }
             self.paint_tree_row(ui, head, *row, r, &core_util);
+            // The rail is too narrow for the power line to sit beside
+            // "Scheduler". It goes on the row, over the timeline, where
+            // there is room.
+            if matches!(row.id, RowId::Scheduler) {
+                let summary = crate::machine::header_line(&self.machines);
+                if !summary.is_empty() {
+                    let font = FontId::new(11.0, fonts::medium());
+                    let galley = ui.painter().layout_no_wrap(summary, font, theme::TEXT());
+                    let at = Pos2::new(body.left() + 8.0, r.center().y - galley.size().y / 2.0);
+                    ui.painter().galley(at, galley, theme::TEXT());
+                    if !self.in_self_pane {
+                        note_ui_rect("cpu-summary", Rect::from_min_size(at, Vec2::new(8.0, r.height())));
+                    }
+                }
+            }
         }
     }
 
@@ -7400,8 +7486,26 @@ impl PerfrLiveApp {
                     FontId::new(11.0, fonts::medium()),
                     theme::TEXT(),
                 );
-                let hit = ui.interact(r, ui.id().with(("sched", 0u32, 0u32)), Sense::hover());
-                hit.on_hover_text("Shows scheduling information for CPU cores");
+                let hit = ui.interact(r, ui.id().with(("sched", 0u32, 0u32)), Sense::click());
+                hit.context_menu(|ui| self.cpu_menu(ui));
+                if hit.clicked() {
+                    let x = hit.interact_pointer_pos().map(|p| p.x).unwrap_or(r.right());
+                    if x > r.left() + 28.0 {
+                        self.cpu_diagram = true;
+                    }
+                }
+                let machines = self.machines.clone();
+                let marks = self.core_marks.cores().to_vec();
+                hit.on_hover_ui(|ui| {
+                    ui.set_max_width(640.0);
+                    ui.label(egui::RichText::new("CPU").color(theme::TEXT()).size(12.0));
+                    ui.label(
+                        egui::RichText::new("Click the header to keep this open. Right-click to copy or search.")
+                            .color(theme::MUTED())
+                            .size(10.5),
+                    );
+                    crate::machine::paint_cpu_panel(ui, &machines, &marks, 320.0);
+                });
             }
             RowId::Machine(m) => {
                 let machine_label = self.machine_label(m);
@@ -7717,25 +7821,49 @@ impl PerfrLiveApp {
             RowId::Lane(key) => {
                 if key.is_scheduler() {
                     let font = FontId::new(10.5, FontFamily::Proportional);
-                    ui.painter().text(
-                        Pos2::new(r.left() + 22.0, r.center().y),
-                        Align2::LEFT_CENTER,
-                        leaf_label(key),
-                        font.clone(),
-                        theme::MUTED(),
-                    );
-                    // What the core is, after the label: in one column for
-                    // every core, so past the longest label of them.
                     let cpu = u16::from(key.extra);
+                    let label = crate::machine::lane_text(&self.machines, cpu).unwrap_or_else(|| leaf_label(key));
+                    if label.contains('·') {
+                        // The two threads of one physical core share a rail.
+                        ui.painter().rect_filled(
+                            Rect::from_min_max(Pos2::new(r.left() + 4.0, r.top() + 2.0), Pos2::new(r.left() + 6.5, r.bottom() - 2.0)),
+                            1.0,
+                            theme::ACCENT().gamma_multiply(0.55),
+                        );
+                    }
+                    ui.painter().text(Pos2::new(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, label, font.clone(), theme::MUTED());
+                    // What the core is, after the label: in one column for
+                    // every core, so past the longest label of them. The
+                    // frequency is shown even when every core has the same one.
                     let mut clear_left = r.left() + 66.0;
-                    if let Some(mark) = self.core_marks.mark(cpu) {
-                        let last = TrackStrip::scheduler_core_count_in(&self.index).saturating_sub(1);
-                        let widest = ui.painter().layout_no_wrap(format!("Core {last}"), font, theme::MUTED());
-                        let left = r.left() + 22.0 + widest.size().x + 6.0;
+                    let mut mark = self.core_marks.mark(cpu).unwrap_or_default();
+                    if let Some(freq) = crate::machine::freq_text(&self.machines, cpu) {
+                        if freq.contains('–') || mark.freq.is_empty() {
+                            mark.freq = freq;
+                        }
+                    }
+                    if !mark.chip.is_empty() || !mark.freq.is_empty() {
+                        let widest = self.widest_lane_label(ui);
+                        let left = r.left() + 22.0 + widest + 6.0;
                         // The percentage is always there; the mark has what
                         // is left of it.
                         let right = r.right() - 36.0;
                         clear_left = clear_left.max(paint_core_mark(ui.painter(), r, left, right, &mark));
+                        if let Some(ratio) = crate::machine::cur_ratio(&self.machines, cpu) {
+                            let bar = Rect::from_min_size(Pos2::new(clear_left + 4.0, r.center().y - 1.5), Vec2::new(14.0, 3.0));
+                            if bar.right() < right {
+                                ui.painter().rect_filled(bar, 1.0, theme::INPUT());
+                                ui.painter().rect_filled(
+                                    Rect::from_min_size(bar.min, Vec2::new(bar.width() * ratio, bar.height())),
+                                    1.0,
+                                    theme::MUTED(),
+                                );
+                                clear_left = bar.right();
+                                if !self.in_self_pane {
+                                    note_ui_rect_fmt(format_args!("corefreq:{cpu}"), bar);
+                                }
+                            }
+                        }
                         if !self.in_self_pane {
                             note_ui_rect_fmt(
                                 format_args!("coremark:{cpu}:{}:{}", mark.chip, mark.freq),
@@ -7748,7 +7876,7 @@ impl PerfrLiveApp {
                     // room, always the percentage.
                     let util = core_util.get(&key.extra).copied().unwrap_or(0.0);
                     paint_core_util(ui.painter(), r, clear_left, util);
-                    if let Some(what) = self.core_marks.describe(cpu) {
+                    if let Some(what) = self.core_detail(cpu) {
                         ui.interact(r, ui.id().with(("core", cpu)), Sense::hover()).on_hover_text(what);
                     }
                     return;
@@ -12160,6 +12288,66 @@ impl PerfrLiveApp {
         self.presets.open = open;
     }
 
+    /// The widest scheduler lane label, so the frequency column lines up.
+    fn widest_lane_label(&self, ui: &Ui) -> f32 {
+        let font = FontId::new(10.5, FontFamily::Proportional);
+        let mut widest = 0.0f32;
+        for row in self.tracks.rows() {
+            if let RowId::Lane(key) = row.id {
+                if key.is_scheduler() {
+                    let cpu = u16::from(key.extra);
+                    let label = crate::machine::lane_text(&self.machines, cpu).unwrap_or_else(|| format!("Core {cpu}"));
+                    widest = widest.max(ui.painter().layout_no_wrap(label, font.clone(), theme::MUTED()).size().x);
+                }
+            }
+        }
+        widest
+    }
+
+    fn core_detail(&self, cpu: u16) -> Option<String> {
+        crate::machine::cpu_detail(&self.machines, cpu).or_else(|| self.core_marks.describe(cpu))
+    }
+
+    fn cpu_menu(&mut self, ui: &mut Ui) {
+        if ui.button("Copy CPU info").clicked() {
+            ui.ctx().copy_text(crate::machine::copy_text(&self.machines, self.core_marks.cores()));
+            ui.close();
+        }
+        if let Some(url) = crate::machine::search_model(&self.machines) {
+            if ui.button("Search CPU model").clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                ui.close();
+            }
+        }
+        if let Some(url) = crate::machine::reference_url(&self.machines) {
+            if ui.button("Product page").clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                ui.close();
+            }
+        }
+    }
+
+    /// The diagram opened from the scheduler header.
+    fn cpu_window(&mut self, ctx: &Context) {
+        if !self.cpu_diagram {
+            return;
+        }
+        let mut open = self.cpu_diagram;
+        let machines = self.machines.clone();
+        let marks = self.core_marks.cores().to_vec();
+        egui::Window::new("CPU")
+            .open(&mut open)
+            .resizable(true)
+            .collapsible(false)
+            .default_width(680.0)
+            .frame(Frame::window(&ctx.style()).fill(theme::RAIL()))
+            .show(ctx, |ui| {
+                ui.set_min_width(560.0);
+                crate::machine::paint_cpu_panel(ui, &machines, &marks, 640.0);
+            });
+        self.cpu_diagram = open;
+    }
+
     /// Version, commit, build date and, on a release build, the tag.
     /// The monospace line is exactly what `perfr --version` prints.
     fn about_window(&mut self, ctx: &Context) {
@@ -12821,6 +13009,7 @@ impl eframe::App for PerfrLiveApp {
             }
             self.tweaks_window(ctx);
             self.about_window(ctx);
+            self.cpu_window(ctx);
             if self.host.share() {
                 self.maybe_resume_share();
                 self.share_window(ctx);
@@ -15226,6 +15415,7 @@ fn show_scope_tooltip(
             );
             ui.label(
                 RichText::new(match core {
+                    Some(what) if what.contains('\n') => what.to_string(),
                     Some(what) => format!("Core: {} ({what})", pick.extra),
                     None => format!("Core: {}", pick.extra),
                 })

@@ -466,6 +466,8 @@ struct CaptureNames {
     /// What each core of the captured machine is, in the order of their
     /// numbers; empty when the capture's source did not say.
     cores: Vec<perfr_live_event::CoreInfo>,
+    /// One entry per machine of the capture. Empty when none was read.
+    topology: Vec<perfr_live_event::CpuTopology>,
 }
 
 impl LiveService {
@@ -786,6 +788,63 @@ impl LiveService {
     /// numbers; empty when nothing.
     pub fn cpu_cores(&self) -> Vec<perfr_live_event::CoreInfo> {
         self.names.lock().cores.clone()
+    }
+
+    fn topology_bytes(topologies: &[perfr_live_event::CpuTopology]) -> u64 {
+        topologies
+            .iter()
+            .map(|topology| encode_frame(&LiveFrame::CpuTopology { topology: Box::new(topology.clone()) }).len() as u64)
+            .sum()
+    }
+
+    /// Replaces the capture's machines. An empty list clears them. Said
+    /// after a capture starts, once the previous names are gone.
+    pub fn set_cpu_topology(&self, topologies: &[perfr_live_event::CpuTopology]) {
+        let topologies: Vec<_> = topologies.iter().filter(|t| !t.is_empty()).cloned().collect();
+        let _feed = self.feed.read();
+        let mut names = self.names.lock();
+        if names.topology == topologies {
+            return;
+        }
+        self.names_bytes.fetch_add(Self::topology_bytes(&topologies), Ordering::Relaxed);
+        self.names_bytes.fetch_sub(Self::topology_bytes(&names.topology), Ordering::Relaxed);
+        names.topology = topologies.clone();
+        drop(names);
+        self.reserve_stream_overhead();
+        for topology in topologies {
+            self.broadcast_frame(&LiveFrame::CpuTopology { topology: Box::new(topology) });
+        }
+    }
+
+    /// Adds one machine, replacing an entry whose CPU numbers overlap.
+    /// A hub uses this for a remote whose lanes were already shifted.
+    pub fn adopt_cpu_topology(&self, topology: &perfr_live_event::CpuTopology) {
+        if topology.is_empty() {
+            return;
+        }
+        let _feed = self.feed.read();
+        let mut names = self.names.lock();
+        let cpus: std::collections::HashSet<u16> = topology.cpus.iter().map(|c| c.cpu).collect();
+        let mut next = names.topology.clone();
+        if let Some(slot) = next.iter_mut().find(|have| have.cpus.iter().any(|c| cpus.contains(&c.cpu)) || (cpus.is_empty() && have.model == topology.model)) {
+            *slot = topology.clone();
+        } else {
+            next.push(topology.clone());
+        }
+        if next == names.topology {
+            return;
+        }
+        self.names_bytes.fetch_add(Self::topology_bytes(&next), Ordering::Relaxed);
+        self.names_bytes.fetch_sub(Self::topology_bytes(&names.topology), Ordering::Relaxed);
+        names.topology = next;
+        drop(names);
+        self.reserve_stream_overhead();
+        self.broadcast_frame(&LiveFrame::CpuTopology { topology: Box::new(topology.clone()) });
+    }
+
+    /// The machines of the capture, in the order they were recorded.
+    pub fn cpu_topology(&self) -> Vec<perfr_live_event::CpuTopology> {
+        self.names.lock().topology.clone()
     }
 
     /// Forgets the names of the previous capture.
@@ -1280,6 +1339,9 @@ impl LiveService {
             }
             if !names.cores.is_empty() {
                 frames.push(encode_frame(&LiveFrame::CpuCores { cores: names.cores.clone() }));
+            }
+            for topology in &names.topology {
+                frames.push(encode_frame(&LiveFrame::CpuTopology { topology: Box::new(topology.clone()) }));
             }
         }
         let stats = self.stats();

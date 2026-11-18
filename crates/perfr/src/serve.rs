@@ -944,6 +944,7 @@ fn open_bundle(
     service.restore_track_order(&bundle.track_order);
     // And the cores of the machine it was captured on.
     service.set_cpu_cores(&bundle.cores);
+    service.set_cpu_topology(&bundle.topology);
     service.mark_capture_finished();
     service.broadcast_status();
     Ok(serde_json::json!({
@@ -1807,6 +1808,7 @@ fn capture_loop(
     // What each core is, for the scheduler's lanes. Said after the start:
     // a viewer drops what it holds of the last capture there.
     service.set_cpu_cores(&crate::sysinfo::cpu_cores());
+    service.set_cpu_topology(&[crate::cpu_topology::read_this_machine()]);
     // The machine's own state, twice a second, as the value lanes of a
     // process of their own (`health.rs`).
     let mut health = machine_health.then(|| {
@@ -3353,6 +3355,7 @@ pub fn run_on(
         // What the machine's cores are: the file is read where they cannot
         // be asked.
         bundle.cores = bundle_service.cpu_cores();
+        bundle.topology = bundle_service.cpu_topology();
         match window {
             Some((a, b)) => bundle.slice(a, b),
             None => bundle,

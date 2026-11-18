@@ -2118,3 +2118,26 @@ fn a_capture_carries_what_its_machines_cores_are_and_the_next_one_does_not() {
     assert!(cores_of(&svc.capture_stream(None)).is_empty());
     assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
 }
+
+#[test]
+fn a_capture_carries_its_machine_and_the_next_one_does_not() {
+    let svc = LiveService::new(small_cfg()).unwrap();
+    let mut machine = perfr_live_event::CpuTopology {
+        model: "Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz".into(),
+        cache_line_bytes: 64,
+        nps: 1,
+        nps_source: "derived".into(),
+        power: perfr_live_event::topology::PowerState { platform_profile: "balanced".into(), ..Default::default() },
+        ..perfr_live_event::CpuTopology::default()
+    };
+    machine.cpus.push(perfr_live_event::topology::LogicalCpu { cpu: 0, max_freq_khz: 4_600_000, ..Default::default() });
+    svc.set_cpu_topology(&[machine.clone()]);
+    let frames = decode_all(&svc.capture_stream(None)).unwrap();
+    assert!(frames.iter().any(|f| matches!(f, LiveFrame::CpuTopology { topology } if topology.model == machine.model)));
+    assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
+    svc.set_cpu_topology(&[machine.clone()]);
+    svc.clear_names();
+    assert!(svc.cpu_topology().is_empty());
+    assert!(!decode_all(&svc.capture_stream(None)).unwrap().iter().any(|f| matches!(f, LiveFrame::CpuTopology { .. })));
+    assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
+}

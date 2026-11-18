@@ -59,6 +59,24 @@ extern "system" {
     fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> i32;
     fn GetLogicalProcessorInformation(buffer: *mut LogicalProcessorInformation, length: *mut u32) -> i32;
     fn GetLogicalProcessorInformationEx(relationship: u32, buffer: *mut u8, length: *mut u32) -> i32;
+    fn LoadLibraryA(name: *const i8) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const i8) -> *mut c_void;
+    fn FreeLibrary(module: Handle) -> i32;
+}
+
+#[repr(C)]
+struct Guid {
+    data1: u32,
+    data2: u16,
+    data3: u16,
+    data4: [u8; 8],
+}
+
+#[link(name = "powrprof")]
+extern "system" {
+    fn PowerGetActiveScheme(user: *mut c_void, guid: *mut *mut Guid) -> u32;
+    fn PowerReadFriendlyName(root: *mut c_void, scheme: *const Guid, subgroup: *const Guid, setting: *const Guid, buffer: *mut u8, size: *mut u32) -> u32;
+    fn PowerReadACValueIndex(root: *mut c_void, scheme: *const Guid, subgroup: *const Guid, setting: *const Guid, index: *mut u32) -> u32;
 }
 
 #[link(name = "ntdll")]
@@ -406,6 +424,118 @@ pub fn cpu_cores() -> Vec<perfr_live_event::CoreInfo> {
     crate::processor_info::cores_from_processor_information(&buffer)
 }
 
+/// Topology, brand, memory and the active power plan. The processor-info
+/// buffer is what has been parsed against records written by hand; the
+/// power calls and `GetLogicalProcessorInformationEx` itself have not been
+/// run on a Windows machine. Per-node memory is not read: the buffer has
+/// no size, and the available-bytes call is not the installed size.
+pub fn machine_topology() -> perfr_live_event::CpuTopology {
+    const RELATION_ALL: u32 = 0xffff;
+    let mut length: u32 = 0;
+    unsafe { GetLogicalProcessorInformationEx(RELATION_ALL, std::ptr::null_mut(), &mut length) };
+    let mut buffer = vec![0u8; length as usize];
+    let mut topo = if buffer.is_empty() || unsafe { GetLogicalProcessorInformationEx(RELATION_ALL, buffer.as_mut_ptr(), &mut length) } == 0 {
+        perfr_live_event::CpuTopology::default()
+    } else {
+        buffer.truncate(length as usize);
+        crate::processor_info::topology_from_processor_information(&buffer)
+    };
+    topo.model = cpu_brand();
+    let lower = topo.model.to_ascii_lowercase();
+    if lower.contains("amd") {
+        topo.vendor = "AuthenticAMD".into();
+    } else if lower.contains("intel") {
+        topo.vendor = "GenuineIntel".into();
+    }
+    let mut version: OsVersionInfoW = unsafe { std::mem::zeroed() };
+    version.size = std::mem::size_of::<OsVersionInfoW>() as u32;
+    unsafe { RtlGetVersion(&mut version) };
+    topo.os = "Windows".into();
+    topo.kernel = format!("{}.{}.{}", version.major, version.minor, version.build);
+    let mut memory: MemoryStatusEx = unsafe { std::mem::zeroed() };
+    memory.length = std::mem::size_of::<MemoryStatusEx>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut memory) } != 0 {
+        topo.ram_bytes = memory.total_phys;
+    }
+    topo.hostname = hostname().unwrap_or_default();
+    fill_power(&mut topo);
+    topo.apply_model_table();
+    topo
+}
+
+fn guid_text(guid: &Guid) -> String {
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        guid.data1, guid.data2, guid.data3, guid.data4[0], guid.data4[1], guid.data4[2], guid.data4[3], guid.data4[4], guid.data4[5], guid.data4[6], guid.data4[7]
+    )
+}
+
+fn friendly_name(scheme: &Guid) -> String {
+    let mut size = 0u32;
+    let _ = unsafe { PowerReadFriendlyName(std::ptr::null_mut(), scheme, std::ptr::null(), std::ptr::null(), std::ptr::null_mut(), &mut size) };
+    if size < 2 || size > 2048 {
+        return String::new();
+    }
+    let mut buffer = vec![0u8; size as usize];
+    if unsafe { PowerReadFriendlyName(std::ptr::null_mut(), scheme, std::ptr::null(), std::ptr::null(), buffer.as_mut_ptr(), &mut size) } != 0 {
+        return String::new();
+    }
+    let words: Vec<u16> = buffer.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|w| *w != 0).collect();
+    String::from_utf16_lossy(&words).trim().to_string()
+}
+
+/// Active scheme, overlay and the AC processor-boost index. Each call is
+/// skipped when it fails, and the overlay export is looked up by name so an
+/// older powrprof without it still loads.
+fn fill_power(topo: &mut perfr_live_event::CpuTopology) {
+    let mut scheme_ptr: *mut Guid = std::ptr::null_mut();
+    if unsafe { PowerGetActiveScheme(std::ptr::null_mut(), &mut scheme_ptr) } != 0 || scheme_ptr.is_null() {
+        return;
+    }
+    let scheme = unsafe { *scheme_ptr };
+    unsafe { LocalFree(scheme_ptr.cast()) };
+    let guid = guid_text(&scheme);
+    let friendly = friendly_name(&scheme);
+    topo.power.plan = if !friendly.is_empty() {
+        friendly
+    } else {
+        perfr_live_event::topology::known_power_plan(&guid).unwrap_or("").to_string()
+    };
+    topo.power.plan_guid = guid;
+    // PROCESSOR_SETTINGS and PERFBOOSTMODE, the AC value index.
+    let subgroup = Guid { data1: 0x5453_3251, data2: 0x82be, data3: 0x4824, data4: [0x96, 0xc1, 0x47, 0xb6, 0x0b, 0x74, 0x0d, 0x00] };
+    let boost = Guid { data1: 0xbe33_7238, data2: 0x0d82, data3: 0x4146, data4: [0xa9, 0x60, 0x4f, 0x37, 0x49, 0xd4, 0x70, 0xc7] };
+    let mut index = 0u32;
+    if unsafe { PowerReadACValueIndex(std::ptr::null_mut(), &scheme, &subgroup, &boost, &mut index) } == 0 {
+        topo.power.boost_mode = perfr_live_event::topology::boost_mode_name(index);
+    }
+    unsafe {
+        let lib = LoadLibraryA(c"powrprof.dll".as_ptr());
+        if lib.is_null() {
+            return;
+        }
+        let sym = GetProcAddress(lib, c"PowerGetActualOverlayScheme".as_ptr());
+        if !sym.is_null() {
+            type Overlay = unsafe extern "system" fn(*mut Guid) -> u32;
+            let overlay: Overlay = std::mem::transmute(sym);
+            let mut got = Guid { data1: 0, data2: 0, data3: 0, data4: [0; 8] };
+            if overlay(&mut got) == 0 {
+                let text = guid_text(&got);
+                let name = friendly_name(&got);
+                topo.power.overlay = if !name.is_empty() {
+                    name
+                } else {
+                    perfr_live_event::topology::known_overlay(&text).unwrap_or("").to_string()
+                };
+                if topo.power.overlay.is_empty() {
+                    topo.power.overlay = text;
+                }
+            }
+        }
+        FreeLibrary(lib);
+    }
+}
+
 /// The `SystemInfo` event for this machine.
 pub fn system_info(capture_start_unix_ns: u64, capture_start_monotonic_ns: u64) -> perfr_wire::Event {
     // SAFETY: zeroed structures sized by their own length fields.
@@ -713,6 +843,7 @@ pub fn capture_loop(
     // What each core is, for the scheduler's lanes. Said after the start:
     // a viewer drops what it holds of the last capture there.
     service.set_cpu_cores(&cpu_cores());
+    service.set_cpu_topology(&[machine_topology()]);
     {
         let mut early: Vec<LiveEvent> = Vec::new();
         scopes.drain_now(crate::now_monotonic_ns(), &mut early);

@@ -65,6 +65,7 @@ extern "system" {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Guid {
     data1: u32,
     data2: u16,

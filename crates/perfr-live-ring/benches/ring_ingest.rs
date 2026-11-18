@@ -4,7 +4,8 @@
 
 //! Ingest-rate and wrap-cost benches. Numbers come from `cargo bench`, not docs.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 use perfr_live_event::{kind, LiveEvent, LIVE_EVENT_SIZE};
 use perfr_live_ring::EventRing;
 

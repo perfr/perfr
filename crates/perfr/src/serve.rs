@@ -1807,8 +1807,7 @@ fn capture_loop(
     service.mark_capture_started(target_pid.max(0) as u32, capture_start_ns);
     // What each core is, for the scheduler's lanes. Said after the start:
     // a viewer drops what it holds of the last capture there.
-    service.set_cpu_cores(&crate::sysinfo::cpu_cores());
-    service.set_cpu_topology(&[crate::cpu_topology::read_this_machine()]);
+    crate::cpu_topology::record(&service);
     // The machine's own state, twice a second, as the value lanes of a
     // process of their own (`health.rs`).
     let mut health = machine_health.then(|| {

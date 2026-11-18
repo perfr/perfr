@@ -250,7 +250,7 @@ pub fn capture_loop(
     service.mark_capture_started(target_pid.max(0) as u32, capture_start_ns);
     // No scheduler lanes on macOS. The topology is still the capture's
     // record of the machine, for a file opened somewhere that draws one.
-    service.set_cpu_topology(&[crate::cpu_topology::read_this_machine()]);
+    crate::cpu_topology::record(&service);
     let has_target = target_pid > 0;
     // Written before anything runs through a hook, as the other two loops
     // do: if a hook takes the target down, this names what was armed.
@@ -392,7 +392,7 @@ pub(super) fn capture_file(args: crate::Args) -> Result<(), String> {
     let _ = timer.join();
     let (_, events) = service.ring().snapshot();
     let (threads, processes) = service.capture_names();
-    let bundle = crate::names::capture_bundle(
+    let mut bundle = crate::names::capture_bundle(
         &events,
         &service.intern.lock(),
         &store,
@@ -400,6 +400,9 @@ pub(super) fn capture_file(args: crate::Args) -> Result<(), String> {
         &processes,
         pid.max(0) as u32,
     );
+    // What the machine is: the file is read where it cannot be asked.
+    bundle.cores = service.cpu_cores();
+    bundle.topology = service.cpu_topology();
     std::fs::write(&output, bundle.to_zip().map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     log::info!(

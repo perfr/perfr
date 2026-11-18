@@ -4216,16 +4216,112 @@ fn the_scheduler_shows_frequency_smt_numa_and_the_power_mode() {
     let mut page = Page::viewer();
     page.drop_file("topo.perfr.stream", &topology_file());
     page.frames(3);
-    assert!(page.shows("P0 · T0"), "lanes: {:?}", page.texts.iter().filter(|t| t.contains('P') || t.contains("Core")).collect::<Vec<_>>());
-    assert!(page.shows("P0 · T1"));
+    assert!(page.shows("C0 · T0"), "lanes: {:?}", page.texts.iter().filter(|t| t.contains('C') || t.contains("Core")).collect::<Vec<_>>());
+    assert!(page.shows("C0 · T1"));
     assert!(page.shows("3.2–4.6"), "frequency stays when every core matches");
     assert!(page.shows("powersave · boost on · balanced · NPS2"), "header: {:?}", page.texts);
     assert!(page.rect_of("numa:0").is_some() && page.rect_of("numa:1").is_some(), "numa readout: {}", page.app.ui_readout);
-    assert!(page.rect_of("corefreq:0").is_some(), "a snapshot of the current frequency");
+    // The two threads of a core are bracketed: one bracket from the first
+    // lane's top to the second's bottom, and the next core's under it.
+    let pair = |label: &str| page.rect_of(label).unwrap_or_else(|| panic!("{label}: {}", page.app.ui_readout));
+    assert!(pair("corepair:0:First").bottom() >= pair("corepair:1:Last").top(), "one line across the two lanes");
+    assert!(pair("corepair:1:Last").bottom() < pair("corepair:2:First").top());
+    // Nothing on a lane but its label, its frequency and its load: the one
+    // reading of the current frequency is in the tooltip, in words.
+    assert!(!page.labels().iter().any(|label| label.starts_with("corefreq")));
     let header = page.rect_of("row:scheduler").expect("scheduler row");
     page.click(Pos2::new(header.center().x, header.center().y));
     page.frames(2);
     assert!(page.shows("socket 0"), "diagram: {:?}", page.texts.iter().filter(|t| t.contains("socket") || t.contains("node") || t.contains("CPU")).collect::<Vec<_>>());
     assert!(page.texts.iter().any(|t| t.contains("cache line 64")));
     assert!(page.texts.iter().any(|t| t.contains("node 0")));
+}
+
+#[test]
+fn the_scheduler_still_folds_at_its_triangle_and_opens_the_diagram_beside_it() {
+    let mut page = Page::viewer();
+    page.drop_file("topo.perfr.stream", &topology_file());
+    page.frames(3);
+    assert!(page.shows("C0 · T0"));
+    let fold = page.rect_of("sched-fold").expect("the fold triangle");
+    page.click(fold.center());
+    page.frames(2);
+    assert!(!page.shows("C0 · T0"), "the click on the triangle folds the track");
+    assert!(!page.shows("socket 0"), "and does not open the diagram");
+    let fold = page.rect_of("sched-fold").expect("the fold triangle");
+    page.click(fold.center());
+    page.frames(2);
+    assert!(page.shows("C0 · T0"), "and unfolds it");
+    assert!(!page.shows("socket 0"));
+    // The label beside it opens the diagram and folds nothing.
+    let label = page.text_rect("Scheduler (4 cores)").expect("the header's label");
+    page.click(label.center());
+    page.frames(2);
+    assert!(page.shows("socket 0"));
+    assert!(page.shows("C0 · T0"));
+}
+
+#[test]
+fn a_lanes_tooltip_is_a_table_of_its_core_and_a_click_copies_it() {
+    let mut page = Page::viewer();
+    page.drop_file("topo.perfr.stream", &topology_file());
+    page.frames(3);
+    let lane = page.text_rect("C1 · T0").expect("the lane of CPU 2").center();
+    page.frame(vec![Event::PointerMoved(lane)]);
+    page.frames(2);
+    assert!(page.rect_of("coretip:2:shown").is_some(), "{}", page.app.ui_readout);
+    // The title, the headings, a label and its value each on their own.
+    for text in ["Core 2", "CACHES", "FREQUENCY", "POWER", "MACHINE", "Physical core", "1, thread 0", "Placement", "socket 0 · NUMA node 1", "Driver", "intel_pstate (active)", "Governor", "powersave", "click to copy"] {
+        assert!(page.shows(text), "{text:?} is not in the tooltip: {:?}", page.texts);
+    }
+    assert!(page.shows("L3") && page.shows("12 MB · 12-way · shared by 0-3"));
+    assert!(page.shows("3.20 GHz (one reading, not a trace)"));
+    // The lane's own policy, said once, and not a line per CPU.
+    assert_eq!(page.texts.iter().filter(|t| t.contains("powersave")).count(), 2, "the tooltip and the scheduler's power line");
+    // A click copies the same words.
+    page.frame(vec![pointer_button(lane, true)]);
+    let out = page.frame(vec![pointer_button(lane, false)]);
+    let copied: Vec<&str> = out
+        .platform_output
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            egui::OutputCommand::CopyText(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(copied.len(), 1, "{:?}", out.platform_output.commands);
+    assert!(copied[0].starts_with("Core 2\n  Physical core: 1, thread 0\n  Placement: socket 0 · NUMA node 1\nCaches\n  L3: 12 MB · 12-way · shared by 0-3\n"), "{}", copied[0]);
+    assert!(
+        copied[0].contains("\nPower\n  Driver: intel_pstate (active)\n  Governor: powersave\n  EPP: balance_performance\n  Scaling: 0.8–4.6 GHz\n  Boost: on (no_turbo)\n  Platform profile: balanced\nMachine\n"),
+        "{}",
+        copied[0]
+    );
+    page.frames(2);
+    assert!(page.rect_of("coretip:2:copied").is_some(), "{}", page.app.ui_readout);
+    assert!(page.shows("copied to the clipboard") && !page.shows("click to copy"));
+    // And the note goes back after a moment.
+    page.frames(120);
+    assert!(page.shows("click to copy"));
+}
+
+#[test]
+fn a_slice_says_which_lane_it_is_on_in_one_line() {
+    let mut page = Page::viewer();
+    page.drop_file("topo.perfr.stream", &topology_file());
+    page.frames(3);
+    let lane = page.text_rect("C1 · T1").expect("the lane of CPU 3");
+    draw_as_with_a_gpu(&mut page.app);
+    let over = (300..1200)
+        .step_by(20)
+        .map(|x| Pos2::new(x as f32, lane.center().y))
+        .find(|at| {
+            page.frame(vec![Event::PointerMoved(*at)]);
+            page.frames(2);
+            page.app.hover.is_some_and(|h| h.kind == kind::SCHEDULING_SLICE)
+        })
+        .expect("a slice of CPU 3 under the pointer");
+    assert!(page.shows("CPU Core activity"), "at {over:?}: {:?}", page.texts);
+    assert!(page.shows("Core: 3 (up to 4.60 GHz, 12 MB L3)"), "{:?}", page.texts.iter().filter(|t| t.contains("Core")).collect::<Vec<_>>());
+    assert!(!page.shows("MACHINE"), "the rest is on the lane, not on every slice");
 }

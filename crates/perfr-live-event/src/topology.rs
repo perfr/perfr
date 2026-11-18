@@ -78,6 +78,20 @@ pub struct LogicalCpu {
     pub l3_kb: u32,
 }
 
+impl LogicalCpu {
+    /// Whether `other` is a thread of the physical core this CPU is one of.
+    /// A core id alone does not say: a device tree numbers the cores of each
+    /// cluster from zero, and each socket numbers its own. The threads of
+    /// one core share all four.
+    pub fn same_core(&self, other: &LogicalCpu) -> bool {
+        self.core_id.is_some()
+            && self.core_id == other.core_id
+            && self.socket == other.socket
+            && self.die == other.die
+            && self.cluster == other.cluster
+    }
+}
+
 /// One NUMA node and the logical CPUs the kernel places on it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NumaNode {
@@ -217,6 +231,152 @@ impl PowerState {
     }
 }
 
+/// The CPUs under one setting of cpufreq: the policies that say the same,
+/// taken together.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PolicyGroup {
+    pub cpus: Vec<u16>,
+    pub driver: String,
+    pub governor: String,
+    pub epp: String,
+    pub scaling_min_khz: u32,
+    pub scaling_max_khz: u32,
+}
+
+impl PowerState {
+    /// The policy CPU `cpu` is under. A lone policy that lists no CPU is
+    /// every CPU's.
+    pub fn policy_of(&self, cpu: u16) -> Option<&CpufreqPolicy> {
+        self.policies.iter().find(|p| p.cpus.contains(&cpu)).or(match self.policies.as_slice() {
+            [only] if only.cpus.is_empty() => Some(only),
+            _ => None,
+        })
+    }
+
+    /// The policies, with those that differ only in their CPUs as one, in
+    /// the order each setting first appears.
+    pub fn policy_groups(&self) -> Vec<PolicyGroup> {
+        let mut groups: Vec<PolicyGroup> = Vec::new();
+        for policy in &self.policies {
+            let same = |g: &PolicyGroup| {
+                g.driver == policy.driver
+                    && g.governor == policy.governor
+                    && g.epp == policy.epp
+                    && g.scaling_min_khz == policy.scaling_min_khz
+                    && g.scaling_max_khz == policy.scaling_max_khz
+            };
+            match groups.iter_mut().find(|g| same(g)) {
+                Some(group) => group.cpus.extend(&policy.cpus),
+                None => groups.push(PolicyGroup {
+                    cpus: policy.cpus.clone(),
+                    driver: policy.driver.clone(),
+                    governor: policy.governor.clone(),
+                    epp: policy.epp.clone(),
+                    scaling_min_khz: policy.scaling_min_khz,
+                    scaling_max_khz: policy.scaling_max_khz,
+                }),
+            }
+        }
+        groups
+    }
+
+    /// What holds for the whole machine, as labelled values in the order
+    /// they are shown: everything but the cpufreq policies.
+    pub fn machine_rows(&self) -> Vec<(&'static str, String)> {
+        let on_off = |on: bool| if on { "on" } else { "off" }.to_string();
+        let mut rows: Vec<(&'static str, String)> = Vec::new();
+        if !self.pstate.is_empty() {
+            let status = if self.pstate_status.is_empty() { String::new() } else { format!(" {}", self.pstate_status) };
+            rows.push(("P-state driver", format!("{}{status}", self.pstate)));
+        }
+        if let Some(turbo) = self.turbo {
+            rows.push(("Boost", format!("{} ({})", on_off(turbo), source_or(self.turbo_source.as_str(), "turbo"))));
+        }
+        if !self.platform_profile.is_empty() {
+            rows.push(("Platform profile", self.platform_profile.clone()));
+        }
+        if !self.daemon_profile.is_empty() {
+            rows.push(("Power-profiles-daemon", self.daemon_profile.clone()));
+        }
+        if !self.plan.is_empty() || !self.plan_guid.is_empty() {
+            let name = if self.plan.is_empty() { self.plan_guid.clone() } else { self.plan.clone() };
+            let guid = if self.plan_guid.is_empty() || self.plan == self.plan_guid { String::new() } else { format!(" ({})", self.plan_guid) };
+            rows.push(("Plan", format!("{name}{guid}")));
+        }
+        if !self.overlay.is_empty() {
+            rows.push(("Overlay", self.overlay.clone()));
+        }
+        if !self.boost_mode.is_empty() {
+            rows.push(("Processor boost", self.boost_mode.clone()));
+        }
+        if let Some(low) = self.low_power {
+            rows.push(("Low power mode", on_off(low)));
+        }
+        if let Some(high) = self.high_power {
+            rows.push(("High power mode", on_off(high)));
+        }
+        if let Some(on_ac) = self.on_ac {
+            rows.push(("Power source", if on_ac { "AC" } else { "battery" }.to_string()));
+        }
+        rows
+    }
+}
+
+/// One cpufreq setting in words: `intel_pstate powersave, EPP performance,
+/// scaling 0.8–5.5 GHz`.
+fn policy_words(group: &PolicyGroup) -> String {
+    let mut bits: Vec<String> = Vec::new();
+    let name = [group.driver.as_str(), group.governor.as_str()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
+    if !name.is_empty() {
+        bits.push(name);
+    }
+    if !group.epp.is_empty() {
+        bits.push(format!("EPP {}", group.epp));
+    }
+    if group.scaling_min_khz > 0 || group.scaling_max_khz > 0 {
+        bits.push(format!("scaling {}–{} GHz", ghz_short(group.scaling_min_khz), ghz_short(group.scaling_max_khz)));
+    }
+    bits.join(", ")
+}
+
+/// What is recorded of one logical CPU, in the order it is read: a title,
+/// then labelled values under headings. The viewer draws the groups as a
+/// table and copies [`CpuDetail::text`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CpuDetail {
+    /// `Core 30 · Efficiency core`.
+    pub title: String,
+    pub groups: Vec<DetailGroup>,
+}
+
+/// The rows under one heading. The first group of a detail has no heading:
+/// it is the core's own place in the machine, under the title.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DetailGroup {
+    pub heading: &'static str,
+    pub rows: Vec<(String, String)>,
+}
+
+impl CpuDetail {
+    /// The detail as plain text, for the clipboard: the title, each heading
+    /// on a line of its own, and a `label: value` line per row under it.
+    pub fn text(&self) -> String {
+        let mut lines = vec![self.title.clone()];
+        for group in &self.groups {
+            if !group.heading.is_empty() {
+                lines.push(group.heading.to_string());
+            }
+            lines.extend(group.rows.iter().map(|(label, value)| format!("  {label}: {value}")));
+        }
+        lines.join("\n")
+    }
+
+    /// The value of the row labelled `label`, wherever it is.
+    pub fn value(&self, label: &str) -> Option<&str> {
+        self.groups.iter().flat_map(|g| &g.rows).find(|(have, _)| have == label).map(|(_, value)| value.as_str())
+    }
+}
+
 /// The captured machine. One value per machine of a capture; a hub that
 /// joined another machine keeps each one, with that machine's CPU numbers
 /// shifted onto the lanes it draws as.
@@ -282,12 +442,6 @@ pub struct CpuTopology {
     pub layout: LayoutNote,
     #[serde(default, skip_serializing_if = "PowerState::is_empty")]
     pub power: PowerState,
-    /// A product page, set only when the model string and the core and
-    /// thread counts matched one table entry that has a URL. Empty
-    /// otherwise, including when the layout sentence matched but the URL
-    /// was not one that had been checked.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub reference_url: String,
 }
 
 impl CpuTopology {
@@ -358,7 +512,29 @@ impl CpuTopology {
         out
     }
 
-    /// Fill [`Self::layout`] and [`Self::reference_url`] from the model
+    /// Whether `other` is the machine this one is, so that it takes this
+    /// one's place and does not stand beside it. The machines of a capture
+    /// never share a lane, so a CPU number in both is one machine. With no
+    /// CPU listed on either side (a Mac) the hostname and the model have to
+    /// agree: two Macs of one model are two machines.
+    pub fn same_machine(&self, other: &CpuTopology) -> bool {
+        if self.cpus.is_empty() && other.cpus.is_empty() {
+            return self.hostname == other.hostname && self.model == other.model;
+        }
+        self.cpus.iter().any(|mine| other.cpus.iter().any(|theirs| theirs.cpu == mine.cpu))
+    }
+
+    /// The product page of this machine's part, from this build's own table:
+    /// the model string has to contain the entry's token and the core and
+    /// thread counts have to be the entry's, and the entry has to have a
+    /// page that was checked. Never a URL the capture carries. A capture is
+    /// a file from anywhere, and a link in it would open whatever its writer
+    /// chose.
+    pub fn product_page(&self) -> Option<&'static str> {
+        lookup_model(&self.model, self.physical_cores, self.threads).map(|known| known.url).filter(|url| !url.is_empty())
+    }
+
+    /// Fill [`Self::layout`] from the model
     /// table when the model string and the counts agree. Measured fields
     /// are not changed. A layout note that is already `measured` is kept
     /// and the table's sentence is appended, so a perf-level list is not
@@ -376,9 +552,6 @@ impl CpuTopology {
         }
         self.layout.ccds = known.ccds;
         self.layout.memory_channels = known.memory_channels;
-        if !known.url.is_empty() {
-            self.reference_url = known.url.to_string();
-        }
     }
 
     pub fn to_json(&self) -> Vec<u8> {
@@ -499,24 +672,7 @@ impl CpuTopology {
         if !self.caches.is_empty() {
             lines.push("Caches:".into());
             for cache in &self.caches {
-                let mut line = format!("  L{} {}", cache.level, cache_kind_word(&cache.kind));
-                if cache.size_kb > 0 {
-                    line.push_str(&format!(" {}", kib_text(cache.size_kb)));
-                }
-                if cache.ways == 0xFF {
-                    line.push_str(", fully associative");
-                } else if cache.ways > 0 {
-                    line.push_str(&format!(", {}-way", cache.ways));
-                }
-                if cache.line > 0 {
-                    line.push_str(&format!(", line {} B", cache.line));
-                }
-                if cache.cpus.is_empty() {
-                    line.push_str(", sharing not recorded");
-                } else {
-                    line.push_str(&format!(", shared by {}", cpu_span(&cache.cpus)));
-                }
-                lines.push(line);
+                lines.push(format!("  {}", cache_line(cache)));
             }
         }
         if !self.microcode.is_empty() {
@@ -547,10 +703,7 @@ impl CpuTopology {
         if !host.is_empty() {
             lines.push(host);
         }
-        let power = self.power_text();
-        if !power.is_empty() {
-            lines.push(format!("Power: {power}"));
-        }
+        lines.extend(self.power_lines());
         if !self.layout.summary.is_empty() {
             let tag = match self.layout.source.as_str() {
                 "lookup" => "From a model table, not measured",
@@ -560,126 +713,75 @@ impl CpuTopology {
             };
             lines.push(format!("{tag}: {}", self.layout.summary));
         }
-        if !self.reference_url.is_empty() {
-            lines.push(self.reference_url.clone());
+        if let Some(page) = self.product_page() {
+            lines.push(page.to_string());
         }
         lines.join("\n")
     }
 
-    fn power_text(&self) -> String {
-        let p = &self.power;
-        let mut bits: Vec<String> = Vec::new();
-        if !p.pstate.is_empty() {
-            let status = if p.pstate_status.is_empty() { String::new() } else { format!(" {}", p.pstate_status) };
-            bits.push(format!("{}{status}", p.pstate));
+    /// The power mode as the summary's lines: what holds for the machine on
+    /// one, then one for each set of CPUs under the same cpufreq policy. A
+    /// machine has a policy per CPU; thirty-two of them that say the same
+    /// are one line.
+    fn power_lines(&self) -> Vec<String> {
+        let mut bits: Vec<String> = self.power.machine_rows().into_iter().map(|(label, value)| format!("{} {value}", label.to_lowercase())).collect();
+        let groups = self.power.policy_groups();
+        if let [only] = groups.as_slice() {
+            bits.insert(usize::from(!self.power.pstate.is_empty()), policy_words(only));
         }
-        for policy in &p.policies {
-            let mut one = String::new();
-            if !policy.driver.is_empty() {
-                one.push_str(&policy.driver);
-            }
-            if !policy.governor.is_empty() {
-                if !one.is_empty() {
-                    one.push(' ');
-                }
-                one.push_str(&policy.governor);
-            }
-            if !policy.epp.is_empty() {
-                one.push_str(&format!(" EPP {}", policy.epp));
-            }
-            if policy.scaling_min_khz > 0 || policy.scaling_max_khz > 0 {
-                one.push_str(&format!(
-                    " scaling {}–{} GHz",
-                    ghz_short(policy.scaling_min_khz),
-                    ghz_short(policy.scaling_max_khz)
-                ));
-            }
-            if !policy.cpus.is_empty() && p.policies.len() > 1 {
-                one.push_str(&format!(" ({})", cpu_span(&policy.cpus)));
-            }
-            if !one.is_empty() {
-                bits.push(one);
+        if bits.is_empty() && groups.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = vec![format!("Power: {}", bits.join("; ")).trim_end().to_string()];
+        if groups.len() > 1 {
+            for group in &groups {
+                lines.push(format!("  cpus {}: {}", cpu_span(&group.cpus), policy_words(group)));
             }
         }
-        match p.turbo {
-            Some(true) => bits.push(format!("boost on ({})", source_or(p.turbo_source.as_str(), "turbo"))),
-            Some(false) => bits.push(format!("boost off ({})", source_or(p.turbo_source.as_str(), "turbo"))),
-            None => {}
-        }
-        if !p.platform_profile.is_empty() {
-            bits.push(format!("platform profile {}", p.platform_profile));
-        }
-        if !p.daemon_profile.is_empty() {
-            bits.push(format!("power-profiles-daemon {}", p.daemon_profile));
-        }
-        if !p.plan.is_empty() || !p.plan_guid.is_empty() {
-            let name = if p.plan.is_empty() { p.plan_guid.clone() } else { p.plan.clone() };
-            let guid = if p.plan_guid.is_empty() || p.plan == p.plan_guid {
-                String::new()
-            } else {
-                format!(" ({})", p.plan_guid)
-            };
-            bits.push(format!("plan {name}{guid}"));
-        }
-        if !p.overlay.is_empty() {
-            bits.push(format!("overlay {}", p.overlay));
-        }
-        if !p.boost_mode.is_empty() {
-            bits.push(format!("processor boost {}", p.boost_mode));
-        }
-        match p.low_power {
-            Some(true) => bits.push("low power mode on".into()),
-            Some(false) => bits.push("low power mode off".into()),
-            None => {}
-        }
-        match p.high_power {
-            Some(true) => bits.push("high power mode on".into()),
-            Some(false) => bits.push("high power mode off".into()),
-            None => {}
-        }
-        match p.on_ac {
-            Some(true) => bits.push("AC".into()),
-            Some(false) => bits.push("battery".into()),
-            None => {}
-        }
-        bits.join("; ")
+        lines
     }
 
-    /// Everything recorded about one logical CPU, for a lane's tooltip.
-    /// None when this topology does not list the CPU and has nothing else
-    /// worth attaching to every lane.
-    pub fn cpu_detail(&self, cpu: u16) -> Option<String> {
+    /// Everything recorded of one logical CPU, for its lane's tooltip: its
+    /// own facts first, then what holds for the whole machine. None when
+    /// this topology does not list the CPU.
+    pub fn cpu_detail(&self, cpu: u16) -> Option<CpuDetail> {
         let logical = self.cpus.iter().find(|c| c.cpu == cpu)?;
-        let mut lines: Vec<String> = Vec::new();
-        let mut head = match logical.kind {
-            core_kind::PERFORMANCE => "Performance core".to_string(),
-            core_kind::EFFICIENCY => "Efficiency core".to_string(),
-            _ => format!("Core {cpu}"),
+        // The number first, whatever the kind: the lane's own label may be
+        // the physical core and the thread.
+        let mut title = format!("Core {cpu}");
+        match logical.kind {
+            core_kind::PERFORMANCE => title.push_str(" · Performance core"),
+            core_kind::EFFICIENCY => title.push_str(" · Efficiency core"),
+            _ => {}
+        }
+        let mut groups: Vec<DetailGroup> = Vec::new();
+        let mut group = |heading: &'static str, rows: Vec<(String, String)>| {
+            if !rows.is_empty() {
+                groups.push(DetailGroup { heading, rows });
+            }
         };
+        let row = |label: &str, value: String| (label.to_string(), value);
+
+        let mut own = Vec::new();
         if let Some(core) = logical.core_id {
-            let thread = match logical.thread {
-                Some(t) => format!(", thread {t}"),
-                None => String::new(),
-            };
-            head.push_str(&format!(" (physical core {core}{thread})"));
+            own.push(row(
+                "Physical core",
+                match logical.thread {
+                    Some(thread) => format!("{core}, thread {thread}"),
+                    None => core.to_string(),
+                },
+            ));
         }
-        lines.push(head);
-        let mut place: Vec<String> = Vec::new();
-        if let Some(socket) = logical.socket {
-            place.push(format!("socket {socket}"));
-        }
-        if let Some(node) = logical.numa {
-            place.push(format!("NUMA node {node}"));
-        }
-        if let Some(die) = logical.die {
-            place.push(format!("die {die}"));
-        }
-        if let Some(cluster) = logical.cluster {
-            place.push(format!("cluster {cluster}"));
-        }
+        let place: Vec<String> = [("socket", logical.socket), ("NUMA node", logical.numa), ("die", logical.die), ("cluster", logical.cluster)]
+            .into_iter()
+            .filter_map(|(what, id)| Some(format!("{what} {}", id?)))
+            .collect();
         if !place.is_empty() {
-            lines.push(place.join(", "));
+            own.push(row("Placement", place.join(" · ")));
         }
+        group("", own);
+
+        let mut caches = Vec::new();
         for cache in &self.caches {
             if !cache.cpus.is_empty() && !cache.cpus.contains(&cpu) {
                 continue;
@@ -687,53 +789,95 @@ impl CpuTopology {
             if cache.cpus.is_empty() && logical_has_own_cache(logical, cache.level, &cache.kind) {
                 continue;
             }
-            lines.push(cache_line(cache));
+            let label = match cache.kind.as_str() {
+                "unified" | "" => format!("L{}", cache.level),
+                kind => format!("L{} {kind}", cache.level),
+            };
+            let mut bits = Vec::new();
+            if cache.size_kb > 0 {
+                bits.push(kib_text(cache.size_kb));
+            }
+            if cache.ways == 0xFF {
+                bits.push("fully associative".into());
+            } else if cache.ways > 0 {
+                bits.push(format!("{}-way", cache.ways));
+            }
+            // The line is the machine's, said once below, unless this
+            // cache's is another.
+            if cache.line > 0 && cache.line != self.cache_line_bytes {
+                bits.push(format!("line {} B", cache.line));
+            }
+            bits.push(match cache.cpus.as_slice() {
+                [] => "sharing not recorded".into(),
+                [_] => "this CPU only".into(),
+                cpus => format!("shared by {}", cpu_span(cpus)),
+            });
+            caches.push((label, bits.join(" · ")));
         }
-        let mut freq: Vec<String> = Vec::new();
-        if logical.min_freq_khz > 0 {
-            freq.push(format!("min {}", ghz(logical.min_freq_khz)));
-        }
-        if logical.base_freq_khz > 0 {
-            freq.push(format!("base {}", ghz(logical.base_freq_khz)));
-        }
-        if logical.max_freq_khz > 0 {
-            freq.push(format!("max {}", ghz(logical.max_freq_khz)));
-        }
-        if !freq.is_empty() {
-            lines.push(format!("{} GHz", freq.join(", ")));
+        group("Caches", caches);
+
+        let mut freq = Vec::new();
+        let range: Vec<String> = [("min", logical.min_freq_khz), ("base", logical.base_freq_khz), ("max", logical.max_freq_khz)]
+            .into_iter()
+            .filter(|(_, khz)| *khz > 0)
+            .map(|(what, khz)| format!("{what} {}", ghz(khz)))
+            .collect();
+        if !range.is_empty() {
+            freq.push(row("Range", format!("{} GHz", range.join(" · "))));
         }
         if logical.cur_freq_khz > 0 {
-            lines.push(format!(
-                "{} GHz at capture start (scaling_cur_freq, not a trace over the capture)",
-                ghz(logical.cur_freq_khz)
-            ));
+            freq.push(row("At capture start", format!("{} GHz (one reading, not a trace)", ghz(logical.cur_freq_khz))));
+        }
+        group("Frequency", freq);
+
+        // One driver row: the policy's, with the P-state driver's status
+        // where that is the same driver, which it is wherever there is one.
+        let mut power = Vec::new();
+        let policy = self.power.policy_of(cpu);
+        let driver = policy.map(|p| p.driver.as_str()).filter(|d| !d.is_empty()).unwrap_or(self.power.pstate.as_str());
+        if !driver.is_empty() {
+            let status = if self.power.pstate_status.is_empty() { String::new() } else { format!(" ({})", self.power.pstate_status) };
+            power.push(row("Driver", format!("{driver}{status}")));
+        }
+        if let Some(policy) = policy {
+            if !policy.governor.is_empty() {
+                power.push(row("Governor", policy.governor.clone()));
+            }
+            if !policy.epp.is_empty() {
+                power.push(row("EPP", policy.epp.clone()));
+            }
+            if policy.scaling_min_khz > 0 || policy.scaling_max_khz > 0 {
+                power.push(row("Scaling", format!("{}–{} GHz", ghz_short(policy.scaling_min_khz), ghz_short(policy.scaling_max_khz))));
+            }
+        }
+        power.extend(self.power.machine_rows().into_iter().filter(|(label, _)| *label != "P-state driver").map(|(label, value)| row(label, value)));
+        group("Power", power);
+
+        let mut machine = Vec::new();
+        if !self.model.is_empty() {
+            machine.push(row("Model", self.model.clone()));
+        }
+        if !self.microcode.is_empty() {
+            machine.push(row("Microcode", self.microcode.clone()));
         }
         if self.cache_line_bytes > 0 {
-            lines.push(format!("Cache line {} B", self.cache_line_bytes));
+            machine.push(row("Cache line", format!("{} B", self.cache_line_bytes)));
         }
         if self.nps > 0 {
             let how = if self.nps_source.is_empty() { "" } else { " (derived from the node map)" };
-            lines.push(format!("NPS {}{how}", self.nps));
-        }
-        if !self.microcode.is_empty() {
-            lines.push(format!("Microcode {}", self.microcode));
+            machine.push(row("Nodes per socket", format!("{}{how}", self.nps)));
         }
         if !self.flags.is_empty() {
-            lines.push(self.flags.join(" "));
+            machine.push(row("Flags", self.flags.join(" ")));
         }
-        let power = self.power_text();
-        if !power.is_empty() {
-            lines.push(format!("Power: {power}"));
-        }
-        if !self.model.is_empty() {
-            lines.push(self.model.clone());
-        }
-        Some(lines.join("\n"))
+        group("Machine", machine);
+        Some(CpuDetail { title, groups })
     }
 
-    /// `P0 · T0` when this CPU is one thread of a physical core and the
+    /// `C0 · T0` when this CPU is one thread of a physical core and the
     /// machine has SMT. None when the pairing was not recorded, so the
-    /// lane keeps `Core N`.
+    /// lane keeps `Core N`. `C` and not `P`: on a hybrid part the lane's
+    /// chip is a `P` or an `E`, and an efficiency core is not `P32`.
     pub fn lane_label(&self, cpu: u16) -> Option<String> {
         if self.smt != Some(true) {
             return None;
@@ -745,11 +889,11 @@ impl CpuTopology {
         } else {
             String::new()
         };
-        let siblings = self.cpus.iter().filter(|c| c.socket == logical.socket && c.core_id == Some(core)).count();
+        let siblings = self.cpus.iter().filter(|c| c.same_core(logical)).count();
         if siblings > 1 {
-            Some(format!("{prefix}P{core} · T{}", logical.thread.unwrap_or(0)))
+            Some(format!("{prefix}C{core} · T{}", logical.thread.unwrap_or(0)))
         } else {
-            Some(format!("{prefix}P{core}"))
+            Some(format!("{prefix}C{core}"))
         }
     }
 
@@ -769,14 +913,15 @@ impl CpuTopology {
             Some(ghz_short(logical.base_freq_khz))
         }
     }
+}
 
-    /// Current frequency over the top, for the small bar. None without both.
-    pub fn cur_ratio(&self, cpu: u16) -> Option<f32> {
-        let logical = self.cpus.iter().find(|c| c.cpu == cpu)?;
-        if logical.cur_freq_khz == 0 || logical.max_freq_khz == 0 {
-            return None;
-        }
-        Some((logical.cur_freq_khz as f32 / logical.max_freq_khz as f32).clamp(0.0, 1.0))
+/// Puts `topology` among the machines of a capture: in the place of the
+/// entry for the same machine ([`CpuTopology::same_machine`]), or after the
+/// others. The service and the viewer keep the same list by the same rule.
+pub fn adopt_machine(machines: &mut Vec<CpuTopology>, topology: CpuTopology) {
+    match machines.iter_mut().find(|have| have.same_machine(&topology)) {
+        Some(slot) => *slot = topology,
+        None => machines.push(topology),
     }
 }
 
@@ -790,6 +935,7 @@ fn logical_has_own_cache(cpu: &LogicalCpu, level: u8, kind: &str) -> bool {
     }
 }
 
+/// One cache in words: `L3 unified 96 MB, 16-way, line 64 B, shared by 0-15`.
 fn cache_line(cache: &CacheInstance) -> String {
     let mut line = format!("L{} {}", cache.level, cache_kind_word(&cache.kind));
     if cache.size_kb > 0 {
@@ -973,7 +1119,8 @@ struct KnownModel {
 }
 
 /// Product pages that were opened and layouts that are the published
-/// core counts of those parts. A model matches only when its string
+/// core counts of those parts. The pages are the only links the viewer
+/// opens for a machine ([`CpuTopology::product_page`]). A model matches only when its string
 /// contains the token and the captured core and thread counts are the
 /// ones listed here. A VM that reports the host's name and its own smaller
 /// counts does not match.
@@ -1235,7 +1382,8 @@ mod tests {
         assert!(topo.layout.summary.contains("two CCDs"));
         assert_eq!(topo.layout.ccds, 2);
         assert_eq!(topo.layout.memory_channels, 2);
-        assert!(topo.reference_url.contains("amd.com"));
+        assert!(topo.product_page().is_some_and(|page| page.starts_with("https://www.amd.com/")));
+        assert!(topo.summary().ends_with(topo.product_page().unwrap()));
         assert!(topo.summary().contains("From a model table, not measured"));
         assert!(topo.header_line().contains("powersave"));
         assert!(topo.header_line().contains("NPS1"));
@@ -1245,14 +1393,13 @@ mod tests {
         small.physical_cores = 2;
         small.threads = 4;
         small.layout = LayoutNote::default();
-        small.reference_url.clear();
         small.apply_model_table();
         assert!(small.layout.summary.is_empty(), "a smaller machine that wears the name is not given the part's dies");
-        assert!(small.reference_url.is_empty());
+        assert_eq!(small.product_page(), None);
 
         let mut unnamed = CpuTopology { model: "AMD Custom 0000".into(), physical_cores: 16, threads: 32, ..CpuTopology::default() };
         unnamed.apply_model_table();
-        assert!(unnamed.reference_url.is_empty());
+        assert_eq!(unnamed.product_page(), None);
         assert!(unnamed.layout.summary.is_empty());
 
         let mut epyc = CpuTopology {
@@ -1264,7 +1411,7 @@ mod tests {
         epyc.apply_model_table();
         assert_eq!(epyc.layout.ccds, 12);
         assert_eq!(epyc.layout.memory_channels, 12);
-        assert!(epyc.reference_url.is_empty(), "no product page was checked for this part");
+        assert_eq!(epyc.product_page(), None, "no product page was checked for this part");
         assert!(epyc.layout.summary.contains("not taken from this table"));
 
         let mut no_counts = CpuTopology { model: epyc.model.clone(), ..CpuTopology::default() };
@@ -1276,22 +1423,165 @@ mod tests {
     fn a_lane_is_named_for_its_physical_core_and_says_what_was_recorded() {
         let mut topo = ryzen();
         topo.cpus.push(LogicalCpu { cpu: 1, thread: Some(1), ..topo.cpus[0].clone() });
-        assert_eq!(topo.lane_label(0).as_deref(), Some("P0 · T0"));
-        assert_eq!(topo.lane_label(1).as_deref(), Some("P0 · T1"));
+        assert_eq!(topo.lane_label(0).as_deref(), Some("C0 · T0"));
+        assert_eq!(topo.lane_label(1).as_deref(), Some("C0 · T1"));
         assert_eq!(topo.freq_label(0).as_deref(), Some("4.2–5.8"));
-        assert_eq!(topo.cur_ratio(0), Some(4_200_000.0 / 5_750_000.0));
         let detail = topo.cpu_detail(0).unwrap();
-        assert!(detail.contains("physical core 0, thread 0"));
-        assert!(detail.contains("NUMA node 0"));
-        assert!(detail.contains("96 MB"));
-        assert!(detail.contains("not a trace"));
-        assert!(detail.contains("NPS 1"));
-        assert!(detail.contains("avx512f"));
+        assert_eq!(detail.title, "Core 0");
+        assert_eq!(detail.value("Physical core"), Some("0, thread 0"));
+        assert_eq!(detail.value("Placement"), Some("socket 0 · NUMA node 0 · die 0"));
+        assert_eq!(detail.value("L3"), Some("96 MB · 16-way · shared by 0-15"));
+        assert_eq!(detail.value("Range"), Some("min 0.40 · base 4.20 · max 5.75 GHz"));
+        assert_eq!(detail.value("At capture start"), Some("4.20 GHz (one reading, not a trace)"));
+        assert_eq!(detail.value("Governor"), Some("powersave"));
+        assert_eq!(detail.value("Scaling"), Some("0.4–5.8 GHz"));
+        assert_eq!(detail.value("Boost"), Some("on (boost)"));
+        assert_eq!(detail.value("Nodes per socket"), Some("1 (derived from the node map)"));
+        assert_eq!(detail.value("Flags"), Some("avx2 avx512f"));
+        assert_eq!(detail.groups.iter().map(|g| g.heading).collect::<Vec<_>>(), ["", "Caches", "Frequency", "Power", "Machine"]);
+        // As text, for the clipboard: a heading a line, a row a line.
+        let text = detail.text();
+        assert!(text.starts_with("Core 0\n  Physical core: 0, thread 0\n  Placement: socket 0 · NUMA node 0 · die 0\nCaches\n  L3: 96 MB"), "{text}");
+        assert!(text.ends_with("Machine\n  Model: AMD Ryzen 9 7950X3D 16-Core Processor\n  Microcode: 0x0a601206\n  Cache line: 64 B\n  Nodes per socket: 1 (derived from the node map)\n  Flags: avx2 avx512f"), "{text}");
         assert!(topo.cpu_detail(9).is_none());
         let shifted = topo.shift_lanes(8);
         assert_eq!(shifted.cpus[0].cpu, 8);
-        assert_eq!(shifted.lane_label(8).as_deref(), Some("P0 · T0"));
+        assert_eq!(shifted.lane_label(8).as_deref(), Some("C0 · T0"));
         assert!(shifted.shift_lanes(300).cpus.is_empty());
+    }
+
+    #[test]
+    fn a_link_in_a_capture_is_not_the_page_that_opens() {
+        // A file from anywhere: it names a part this build knows and says
+        // where its page is. The page is this build's, and a part this
+        // build has no page for has none whatever the file says.
+        let crafted = br#"{"model":"AMD Ryzen 9 7950X3D 16-Core Processor","physical_cores":16,"threads":32,"reference_url":"javascript:alert(1)"}"#;
+        let topo = CpuTopology::from_json(crafted).unwrap();
+        assert!(topo.product_page().unwrap().starts_with("https://www.amd.com/"));
+        assert!(!topo.summary().contains("javascript"));
+        assert!(!String::from_utf8(topo.to_json()).unwrap().contains("javascript"));
+        let unknown = br#"{"model":"x","physical_cores":4,"threads":8,"reference_url":"https://example.invalid/phish"}"#;
+        let topo = CpuTopology::from_json(unknown).unwrap();
+        assert_eq!(topo.product_page(), None);
+        assert!(!topo.summary().contains("example.invalid"));
+        // Every page in the table is an https one.
+        assert!(KNOWN_MODELS.iter().all(|known| known.url.is_empty() || known.url.starts_with("https://")));
+    }
+
+    #[test]
+    fn a_hybrid_lane_says_its_number_and_cores_numbered_alike_stay_apart() {
+        // An efficiency core beside a performance core of two threads: the
+        // lane is `C2`, not a `P` beside its `E` chip, and its words begin
+        // with the lane's number.
+        let core = |cpu, kind, cluster, core_id, thread| LogicalCpu {
+            cpu,
+            kind,
+            socket: Some(0),
+            cluster,
+            core_id: Some(core_id),
+            thread: Some(thread),
+            ..LogicalCpu::default()
+        };
+        let topo = CpuTopology {
+            smt: Some(true),
+            sockets: 1,
+            cpus: vec![
+                core(0, core_kind::PERFORMANCE, None, 0, 0),
+                core(1, core_kind::PERFORMANCE, None, 0, 1),
+                core(2, core_kind::EFFICIENCY, None, 2, 0),
+            ],
+            ..CpuTopology::default()
+        };
+        assert_eq!(topo.lane_label(2).as_deref(), Some("C2"));
+        assert_eq!(topo.cpu_detail(2).unwrap().title, "Core 2 · Efficiency core");
+        assert_eq!(topo.cpu_detail(0).unwrap().title, "Core 0 · Performance core");
+        // Two clusters that each call their first core 0, as a device tree
+        // does: two cores of one thread, not one core of two.
+        let arm = CpuTopology {
+            smt: Some(true),
+            sockets: 1,
+            cpus: vec![core(0, core_kind::EFFICIENCY, Some(0), 0, 0), core(1, core_kind::PERFORMANCE, Some(1), 0, 0)],
+            ..CpuTopology::default()
+        };
+        assert!(!arm.cpus[0].same_core(&arm.cpus[1]));
+        assert_eq!(arm.lane_label(0).as_deref(), Some("C0"));
+        assert_eq!(arm.lane_label(1).as_deref(), Some("C0"));
+    }
+
+    #[test]
+    fn a_machine_said_again_takes_its_own_place_and_another_stands_beside_it() {
+        let mut machines = Vec::new();
+        let local = ryzen();
+        adopt_machine(&mut machines, local.clone());
+        // The same machine again, with something more known of it.
+        let mut again = local.clone();
+        again.power.daemon_profile = "performance".into();
+        adopt_machine(&mut machines, again.clone());
+        assert_eq!(machines, [again.clone()]);
+        // Another machine of the same model on the lanes after this one's.
+        let remote = CpuTopology { hostname: "render-01".into(), ..local.shift_lanes(32) };
+        adopt_machine(&mut machines, remote.clone());
+        assert_eq!(machines, [again.clone(), remote.clone()]);
+        // Two Macs of one model list no CPU: the hostname tells them apart,
+        // and neither takes the place of a machine that lists its CPUs.
+        let mac = |host: &str| CpuTopology { model: "Apple M3 Max".into(), hostname: host.into(), threads: 16, ..CpuTopology::default() };
+        adopt_machine(&mut machines, mac("studio-a"));
+        adopt_machine(&mut machines, mac("studio-b"));
+        adopt_machine(&mut machines, CpuTopology { ram_bytes: 64 << 30, ..mac("studio-a") });
+        assert_eq!(machines.len(), 4);
+        assert_eq!(machines[0], again);
+        assert_eq!(machines[2].ram_bytes, 64 << 30);
+        assert_eq!(machines[3].hostname, "studio-b");
+    }
+
+    #[test]
+    fn a_policy_for_every_cpu_is_said_once_for_the_cpus_that_share_it() {
+        // A hybrid part under intel_pstate: a policy per CPU, the same
+        // words for each of the performance threads and for each of the
+        // efficiency cores.
+        let policy = |cpu: u16, max: u32| CpufreqPolicy {
+            cpus: vec![cpu],
+            driver: "intel_pstate".into(),
+            governor: "powersave".into(),
+            epp: "performance".into(),
+            scaling_min_khz: 800_000,
+            scaling_max_khz: max,
+        };
+        let topo = CpuTopology {
+            model: "13th Gen Intel(R) Core(TM) i9-13900KF".into(),
+            cpus: (0..32).map(|cpu| LogicalCpu { cpu, ..LogicalCpu::default() }).collect(),
+            power: PowerState {
+                policies: (0..32).map(|cpu| policy(cpu, if cpu < 16 { 5_500_000 } else { 4_300_000 })).collect(),
+                pstate: "intel_pstate".into(),
+                pstate_status: "active".into(),
+                turbo: Some(true),
+                turbo_source: "no_turbo".into(),
+                daemon_profile: "performance".into(),
+                ..PowerState::default()
+            },
+            ..CpuTopology::default()
+        };
+        let summary = topo.summary();
+        assert!(
+            summary.contains(
+                "Power: p-state driver intel_pstate active; boost on (no_turbo); power-profiles-daemon performance\n  cpus 0-15: intel_pstate powersave, EPP performance, scaling 0.8–5.5 GHz\n  cpus 16-31: intel_pstate powersave, EPP performance, scaling 0.8–4.3 GHz"
+            ),
+            "{summary}"
+        );
+        assert_eq!(summary.matches("intel_pstate powersave").count(), 2);
+        // A lane says its own policy and no other CPU's.
+        let detail = topo.cpu_detail(30).unwrap();
+        assert_eq!(detail.value("Scaling"), Some("0.8–4.3 GHz"));
+        assert_eq!(detail.value("EPP"), Some("performance"));
+        assert_eq!(detail.value("Driver"), Some("intel_pstate (active)"));
+        assert_eq!(detail.value("P-state driver"), None);
+        assert_eq!(detail.value("Power-profiles-daemon"), Some("performance"));
+        assert_eq!(detail.text().matches("powersave").count(), 1);
+        // One setting for the whole machine goes on the power line itself.
+        let mut uniform = topo.clone();
+        uniform.power.policies = vec![CpufreqPolicy { cpus: Vec::new(), ..policy(0, 5_500_000) }];
+        assert!(uniform.summary().contains("Power: p-state driver intel_pstate active; intel_pstate powersave, EPP performance, scaling 0.8–5.5 GHz; boost on (no_turbo)"), "{}", uniform.summary());
+        assert_eq!(uniform.cpu_detail(7).unwrap().value("Governor"), Some("powersave"));
     }
 
     #[test]

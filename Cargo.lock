@@ -3143,7 +3143,6 @@ dependencies = [
  "miniz_oxide 0.8.9",
  "perfr-live-event",
  "serde",
- "serde_json",
 ]
 
 [[package]]

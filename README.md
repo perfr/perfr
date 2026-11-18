@@ -6,7 +6,7 @@ found in the LICENSE file.
 
 # perfr
 
-<img width="3756" height="2098" alt="image" src="https://github.com/user-attachments/assets/12da6754-6ea7-46a7-8101-1186b240c344" />
+<img width="3756" height="2098" alt="image" src="https://github.com/user-attachments/assets/e5fd48a5-295c-45a0-9ab0-3ba933c47468" />
 
 Profile a running program with no code change. The Rust service runs on Linux,
 macOS and Windows. The viewer is a web page, so any browser on any device can

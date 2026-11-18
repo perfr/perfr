@@ -1,0 +1,7 @@
+55d0c0a00000-55d0c0a02000 r--p 00000000 08:02 1048602                    /usr/bin/app
+55d0c0a02000-55d0c0a07000 r-xp 00002000 08:02 1048602                    /usr/bin/app
+7f3a1c000000-7f3a1c021000 rw-p 00000000 00:00 0 
+7f3a1e400000-7f3a1e428000 r--p 00000000 08:02 2097301                    /usr/lib/x86_64-linux-gnu/libc.so.6
+7f3a1e428000-7f3a1e5b0000 r-xp 00028000 08:02 2097301                    /usr/lib/x86_64-linux-gnu/libc.so.6 (deleted)
+7ffc1b2e0000-7ffc1b301000 rw-p 00000000 00:00 0                          [stack]
+7ffc1b3b7000-7ffc1b3b9000 r-xp 00000000 00:00 0                          [vdso]

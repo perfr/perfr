@@ -1,0 +1,66 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Fuzz targets for the code that reads what perfr did not write: a capture
+# file, a stream from another machine, a trace from another tool. See the
+# README beside this file.
+[package]
+name = "perfr-fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "BSD-2-Clause"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+perfr-capture = { path = "../crates/perfr-capture" }
+perfr-live-chrome = { path = "../crates/perfr-live-chrome" }
+perfr-live-event = { path = "../crates/perfr-live-event" }
+perfr-live-protocol = { path = "../crates/perfr-live-protocol" }
+perfr-maps = { path = "../crates/perfr-maps" }
+
+# A workspace of its own: libFuzzer and the sanitizers are a nightly build,
+# and `cargo build --workspace` at the root must not meet them.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "live_stream"
+path = "fuzz_targets/live_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bundle"
+path = "fuzz_targets/bundle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chrome_trace"
+path = "fuzz_targets/chrome_trace.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cpu_topology"
+path = "fuzz_targets/cpu_topology.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proc_maps"
+path = "fuzz_targets/proc_maps.rs"
+test = false
+doc = false
+bench = false

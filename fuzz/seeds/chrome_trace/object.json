@@ -1,0 +1,1 @@
+{"traceEvents":[{"name":"frame","cat":"app","ph":"X","ts":1000,"dur":250,"pid":7,"tid":8,"args":{"n":1}},{"name":"load","ph":"B","ts":1300,"pid":7,"tid":8},{"name":"load","ph":"E","ts":1500,"pid":7,"tid":8},{"name":"thread_name","ph":"M","pid":7,"tid":8,"args":{"name":"main"}},{"name":"fps","ph":"C","ts":1600,"pid":7,"args":{"fps":60}}],"displayTimeUnit":"ms"}

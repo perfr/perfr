@@ -12,5 +12,5 @@ workspace = true
 perfr-live-event = { path = "../perfr-live-event" }
 # Pure-Rust deflate, for the optional compressed batch frame. No C, so the
 # service stays a static musl binary and the viewer's WASM inflates it too.
-miniz_oxide = "0.8"
+miniz_oxide = "0.9"
 serde = { workspace = true }

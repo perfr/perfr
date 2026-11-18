@@ -17,10 +17,8 @@
 //! frequency, which is not what a core reaches. The frequency is left
 //! unknown.
 
-use std::collections::BTreeMap;
-
+use perfr_live_event::core_kind;
 use perfr_live_event::topology::{CacheInstance, CpuTopology, LogicalCpu, NumaNode};
-use perfr_live_event::{core_kind, CoreInfo};
 
 const RELATION_PROCESSOR_CORE: u32 = 0;
 const RELATION_NUMA_NODE: u32 = 1;
@@ -62,71 +60,14 @@ fn processors(record: &[u8], at: usize, count: usize) -> Vec<u16> {
     cpus
 }
 
-/// The cores a `GetLogicalProcessorInformationEx(RelationAll)` buffer tells
-/// of, in the order of their numbers: the kind from the efficiency classes
-/// when the machine has more than one, and the size of the level 3 cache.
-/// Nothing when the buffer tells neither, and nothing past a record that is
-/// cut short.
-pub fn cores_from_processor_information(bytes: &[u8]) -> Vec<CoreInfo> {
-    let mut classes: BTreeMap<u16, u8> = BTreeMap::new();
-    let mut caches: BTreeMap<u16, u32> = BTreeMap::new();
-    let mut at = 0;
-    while let (Some(relationship), Some(size)) = (u32_at(bytes, at), u32_at(bytes, at + 4)) {
-        let size = size as usize;
-        let Some(record) = bytes.get(at..at.saturating_add(size)).filter(|_| size >= RECORD_HEADER) else { break };
-        match relationship {
-            // PROCESSOR_RELATIONSHIP: Flags, EfficiencyClass, 20 reserved
-            // bytes, GroupCount, GroupMask[].
-            RELATION_PROCESSOR_CORE => {
-                if let (Some(&class), Some(count)) = (record.get(9), u16_at(record, 30)) {
-                    for cpu in processors(record, 32, usize::from(count)) {
-                        classes.insert(cpu, class);
-                    }
-                }
-            }
-            // CACHE_RELATIONSHIP: Level, Associativity, LineSize, CacheSize,
-            // Type, 18 reserved bytes, GroupCount, GroupMask[]. Before
-            // Windows 10 20H2 the count's two bytes were reserved and zero,
-            // with one mask after them.
-            RELATION_CACHE => {
-                if let (Some(&3), Some(cache_bytes), Some(count)) = (record.get(8), u32_at(record, 12), u16_at(record, 38)) {
-                    for cpu in processors(record, 40, usize::from(count.max(1))) {
-                        caches.insert(cpu, cache_bytes / 1024);
-                    }
-                }
-            }
-            _ => {}
-        }
-        at += size;
-    }
-    let top_class = classes.values().copied().max().unwrap_or(0);
-    let hybrid = classes.values().any(|&class| class != top_class);
-    let mut cpus: Vec<u16> = classes.keys().chain(caches.keys()).copied().collect();
-    cpus.sort_unstable();
-    cpus.dedup();
-    let cores: Vec<CoreInfo> = cpus
-        .into_iter()
-        .map(|cpu| CoreInfo {
-            cpu,
-            kind: match classes.get(&cpu) {
-                Some(&class) if hybrid && class == top_class => core_kind::PERFORMANCE,
-                Some(_) if hybrid => core_kind::EFFICIENCY,
-                _ => core_kind::UNKNOWN,
-            },
-            max_freq_khz: 0,
-            l3_kb: caches.get(&cpu).copied().unwrap_or(0),
-        })
-        .collect();
-    if cores.iter().all(|c| c.kind == core_kind::UNKNOWN && c.l3_kb == 0) {
-        return Vec::new();
-    }
-    cores
-}
-
-/// The same buffer, read for the topology and not only the lane marks.
+/// What a `GetLogicalProcessorInformationEx(RelationAll)` buffer tells of
+/// the machine. The lane marks are [`CpuTopology::core_infos`] of it: the
+/// kind from the efficiency classes when the machine has more than one, and
+/// the size of the level 3 cache.
+///
 /// Frequencies are not in it. Die numbers are the order of the die records,
-/// not a CCD id from the silicon. A record cut short ends the walk, as
-/// [`cores_from_processor_information`] does.
+/// not a CCD id from the silicon. A record cut short ends the walk, and a
+/// record too short for its own fields is passed over.
 pub fn topology_from_processor_information(bytes: &[u8]) -> CpuTopology {
     struct Group {
         class: u8,
@@ -142,6 +83,8 @@ pub fn topology_from_processor_information(bytes: &[u8]) -> CpuTopology {
         let size = size as usize;
         let Some(record) = bytes.get(at..at.saturating_add(size)).filter(|_| size >= RECORD_HEADER) else { break };
         match relationship {
+            // PROCESSOR_RELATIONSHIP: Flags, EfficiencyClass, 20 reserved
+            // bytes, GroupCount, GroupMask[].
             RELATION_PROCESSOR_CORE | RELATION_PROCESSOR_PACKAGE | RELATION_PROCESSOR_DIE => {
                 if let (Some(&class), Some(count)) = (record.get(9), u16_at(record, 30)) {
                     let cpus = processors(record, 32, usize::from(count));
@@ -152,26 +95,29 @@ pub fn topology_from_processor_information(bytes: &[u8]) -> CpuTopology {
                     }
                 }
             }
+            // CACHE_RELATIONSHIP: Level, Associativity, LineSize, CacheSize,
+            // Type, 18 reserved bytes, GroupCount, GroupMask[]. Before
+            // Windows 10 20H2 the count's two bytes were reserved and zero,
+            // with one mask after them.
             RELATION_CACHE => {
-                let level = record.get(8).copied().unwrap_or(0);
-                let ways = record.get(9).copied().unwrap_or(0);
-                let line = u16_at(record, 10).unwrap_or(0);
-                let cache_bytes = u32_at(record, 12).unwrap_or(0);
-                let kind = match u32_at(record, 16).unwrap_or(0) {
-                    1 => "instruction",
-                    2 => "data",
-                    _ => "unified",
-                };
-                let count = u16_at(record, 38).unwrap_or(1);
-                if level > 0 {
-                    caches.push(CacheInstance {
-                        level,
-                        kind: kind.into(),
-                        size_kb: cache_bytes / 1024,
-                        ways: u16::from(ways),
-                        line,
-                        cpus: processors(record, 40, usize::from(count.max(1))),
-                    });
+                if let (Some(&level), Some(&ways), Some(line), Some(cache_bytes), Some(kind), Some(count)) =
+                    (record.get(8), record.get(9), u16_at(record, 10), u32_at(record, 12), u32_at(record, 16), u16_at(record, 38))
+                {
+                    let kind = match kind {
+                        1 => "instruction",
+                        2 => "data",
+                        _ => "unified",
+                    };
+                    if level > 0 {
+                        caches.push(CacheInstance {
+                            level,
+                            kind: kind.into(),
+                            size_kb: cache_bytes / 1024,
+                            ways: u16::from(ways),
+                            line,
+                            cpus: processors(record, 40, usize::from(count.max(1))),
+                        });
+                    }
                 }
             }
             RELATION_NUMA_NODE => {
@@ -265,6 +211,12 @@ pub fn topology_from_processor_information(bytes: &[u8]) -> CpuTopology {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use perfr_live_event::CoreInfo;
+
+    /// The lane marks of a buffer.
+    fn cores_from_processor_information(bytes: &[u8]) -> Vec<CoreInfo> {
+        topology_from_processor_information(bytes).core_infos()
+    }
 
     fn group_affinity(mask: u64, group: u16) -> Vec<u8> {
         let mut bytes = mask.to_le_bytes().to_vec();
@@ -430,13 +382,18 @@ mod tests {
         assert!(topo.cpus.iter().all(|c| c.socket == Some(0) && c.die == Some(0) && c.numa == Some(0)));
         assert_eq!(topo.cpus[0].l3_kb, 36_864);
         assert_eq!(topo.numa[0].cpus, vec![0, 1, 2]);
-        assert!(topo.lane_label(0).as_deref() == Some("P0 · T0") || topo.smt == Some(true));
-        assert_eq!(topo.lane_label(0).as_deref(), Some("P0 · T0"));
-        assert_eq!(topo.lane_label(2).as_deref(), Some("P1"));
+        assert_eq!(topo.lane_label(0).as_deref(), Some("C0 · T0"));
+        assert_eq!(topo.lane_label(2).as_deref(), Some("C1"));
         let marks = cores_from_processor_information(&buffer);
         assert_eq!(marks.len(), 3);
         assert_eq!(marks[0].kind, topo.cpus[0].kind);
         assert_eq!(marks[0].l3_kb, topo.cpus[0].l3_kb);
         assert!(topology_from_processor_information(&[]).is_empty());
+        // Cut anywhere, the buffer gives what its whole records say and
+        // never a cache with no size or a panic.
+        for cut in 0..buffer.len() {
+            let cut = topology_from_processor_information(&buffer[..cut]);
+            assert!(cut.caches.iter().all(|cache| cache.size_kb > 0 && !cache.cpus.is_empty()));
+        }
     }
 }

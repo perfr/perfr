@@ -33,8 +33,8 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use perfr_live_event::kind;
 use perfr_live_protocol::{
-    decode_all, LiveFrame, FRAME_EVENT_BATCH, FRAME_EVENT_BATCH_DEFLATE, FRAME_EVENT_BATCH_PACKED,
-    FRAME_INTERNED_STRING, FRAME_PROCESS_NAME, FRAME_THREAD_NAME,
+    decode_all, LiveFrame, FRAME_CPU_CORES, FRAME_CPU_TOPOLOGY, FRAME_EVENT_BATCH, FRAME_EVENT_BATCH_DEFLATE,
+    FRAME_EVENT_BATCH_PACKED, FRAME_INTERNED_STRING, FRAME_PROCESS_NAME, FRAME_THREAD_NAME,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -970,8 +970,9 @@ pub(crate) async fn redial(svc: Arc<LiveService>, target: String) {
 // ---------------------------------------------------------------------------
 
 /// Only these frames leave a remote: the names, strings and events a late
-/// viewer would need. Status, hello and the capture marks are the remote's
-/// own business.
+/// viewer would need, and what the remote's machine is, which the hub draws
+/// on the lanes it gave that machine. Status, hello, the capture marks and
+/// the track order are the remote's own business.
 fn forwarded(bytes: &[u8]) -> bool {
     matches!(
         bytes.get(4).copied(),
@@ -981,6 +982,8 @@ fn forwarded(bytes: &[u8]) -> bool {
             | Some(FRAME_INTERNED_STRING)
             | Some(FRAME_THREAD_NAME)
             | Some(FRAME_PROCESS_NAME)
+            | Some(FRAME_CPU_CORES)
+            | Some(FRAME_CPU_TOPOLOGY)
     )
 }
 
@@ -1394,6 +1397,13 @@ mod tests {
         assert!(forwarded(&encode_event_batch_with(&[LiveEvent::default()], WireFormat::Deflate)));
         assert!(!forwarded(&encode_frame(&LiveFrame::CaptureFinished)));
         assert!(!forwarded(&encode_frame(&LiveFrame::Hello { version: 1, event_size: 32 })));
+        assert!(!forwarded(&encode_frame(&LiveFrame::TrackOrder { text: "[@7]\n".into() })));
+        // What the remote's machine is: the hub has lanes for its cores and
+        // nothing else to mark them with.
+        let core = perfr_live_event::CoreInfo { cpu: 0, kind: perfr_live_event::core_kind::PERFORMANCE, max_freq_khz: 5_800_000, l3_kb: 36_864 };
+        assert!(forwarded(&encode_frame(&LiveFrame::CpuCores { cores: vec![core] })));
+        let machine = perfr_live_event::CpuTopology { model: "render box".into(), ..Default::default() };
+        assert!(forwarded(&encode_frame(&LiveFrame::CpuTopology { topology: Box::new(machine) })));
     }
 
     #[test]
@@ -1475,6 +1485,31 @@ mod tests {
         let drift = events[0].start_ns as i64 - now as i64;
         assert!(drift.abs() < slack, "stamp moved by {drift} ns on one clock");
         assert_eq!(hub.names.lock().processes.get(&((1 << 24) | 1234)).map(String::as_str), Some("game @box-b"));
+        // Each says its machine as its capture starts, the remote first
+        // here: its machine crosses the link, onto the lanes the hub gave
+        // it, and the hub's own stands beside it whichever came first.
+        let base = u16::try_from(hub.peers.list()[0].core_base).unwrap();
+        let machine = |host: &str| perfr_live_event::CpuTopology {
+            model: "AMD Ryzen 9 7950X3D 16-Core Processor".into(),
+            hostname: host.into(),
+            cpus: (0..2).map(|cpu| perfr_live_event::topology::LogicalCpu { cpu, max_freq_khz: 5_750_000, ..Default::default() }).collect(),
+            ..Default::default()
+        };
+        let theirs = machine("box-b");
+        remote.set_cpu_cores(&theirs.core_infos());
+        remote.adopt_cpu_topology(&theirs);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while hub.cpu_topology().is_empty() || hub.cpu_cores().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "the remote's machine never reached the hub");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let ours = machine("hub");
+        hub.set_cpu_cores(&ours.core_infos());
+        hub.adopt_cpu_topology(&ours);
+        let machines = hub.cpu_topology();
+        assert_eq!(machines.iter().map(|m| m.hostname.as_str()).collect::<Vec<_>>(), ["box-b", "hub"]);
+        assert_eq!(machines[0].cpus.iter().map(|c| c.cpu).collect::<Vec<_>>(), [base, base + 1]);
+        assert_eq!(hub.cpu_cores().iter().map(|c| c.cpu).collect::<Vec<_>>(), [0, 1, base, base + 1]);
         // A start on the hub reaches the remote, which has no capture hooks
         // here: the demo producer stands in and marks the capture.
         hub.peers.send_start(Some((1, 1234)));

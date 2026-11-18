@@ -797,8 +797,10 @@ impl LiveService {
             .sum()
     }
 
-    /// Replaces the capture's machines. An empty list clears them. Said
-    /// after a capture starts, once the previous names are gone.
+    /// Replaces the capture's machines. An empty list clears them. For a
+    /// capture that is opened, which says all of its machines at once; one
+    /// that is being recorded adds each as it is known
+    /// ([`Self::adopt_cpu_topology`]).
     pub fn set_cpu_topology(&self, topologies: &[perfr_live_event::CpuTopology]) {
         let topologies: Vec<_> = topologies.iter().filter(|t| !t.is_empty()).cloned().collect();
         let _feed = self.feed.read();
@@ -816,21 +818,20 @@ impl LiveService {
         }
     }
 
-    /// Adds one machine, replacing an entry whose CPU numbers overlap.
-    /// A hub uses this for a remote whose lanes were already shifted.
+    /// Adds one machine to the capture's, in the place of what was said of
+    /// the same machine before (`CpuTopology::same_machine`) and beside the
+    /// others. A capture says its own machine this way after it starts, and
+    /// a hub each remote's, its lanes already shifted: whichever is said
+    /// first, both are kept. A viewer keeps its list by the same rule, so
+    /// the one frame is all it is sent.
     pub fn adopt_cpu_topology(&self, topology: &perfr_live_event::CpuTopology) {
         if topology.is_empty() {
             return;
         }
         let _feed = self.feed.read();
         let mut names = self.names.lock();
-        let cpus: std::collections::HashSet<u16> = topology.cpus.iter().map(|c| c.cpu).collect();
         let mut next = names.topology.clone();
-        if let Some(slot) = next.iter_mut().find(|have| have.cpus.iter().any(|c| cpus.contains(&c.cpu)) || (cpus.is_empty() && have.model == topology.model)) {
-            *slot = topology.clone();
-        } else {
-            next.push(topology.clone());
-        }
+        perfr_live_event::topology::adopt_machine(&mut next, topology.clone());
         if next == names.topology {
             return;
         }
@@ -840,6 +841,23 @@ impl LiveService {
         drop(names);
         self.reserve_stream_overhead();
         self.broadcast_frame(&LiveFrame::CpuTopology { topology: Box::new(topology.clone()) });
+    }
+
+    /// Which capture the service holds, for [`Self::amend_cpu_topology`]:
+    /// read once the capture has marked its start.
+    pub fn capture_token(&self) -> (u64, u64) {
+        (self.capture_starts(), self.capture_start_ns())
+    }
+
+    /// What became known of a machine after its capture began, from a thread
+    /// that had to wait for it: adopted when the service still holds the
+    /// capture `token` was read in, and dropped when another has started, a
+    /// file was opened or the capture was cleared since. The machine of one
+    /// capture is not said into the next.
+    pub fn amend_cpu_topology(&self, token: (u64, u64), topology: &perfr_live_event::CpuTopology) {
+        if token.1 != 0 && self.capture_token() == token {
+            self.adopt_cpu_topology(topology);
+        }
     }
 
     /// The machines of the capture, in the order they were recorded.

@@ -9,9 +9,17 @@
 //! Windows and macOS fill what those systems report and leave the rest
 //! unknown; the Windows buffer parser is tested from records written by
 //! hand, and neither the Windows calls nor `pmset` have been run here.
+//!
+//! The lane marks ([`perfr_live_event::CoreInfo`]) are read from the same
+//! walk: [`CpuTopology::core_infos`] of what this module returns.
+//!
+//! What only another program can say (`powerprofilesctl`, `pmset`) is asked
+//! on a thread of its own, after the capture has the rest: a capture does
+//! not wait on a D-Bus call to start.
 
 #[cfg(any(test, target_os = "linux"))]
 use std::path::Path;
+use std::sync::Arc;
 
 use perfr_live_event::topology::CpuTopology;
 #[cfg(any(test, target_os = "linux", target_os = "macos"))]
@@ -20,12 +28,14 @@ use perfr_live_event::topology::{keep_flags, CacheInstance};
 use perfr_live_event::topology::{accept_power_profile, CpufreqPolicy, LogicalCpu, NumaNode, PowerState};
 #[cfg(any(test, target_os = "linux"))]
 use perfr_live_event::core_kind;
+use perfr_live_server::LiveService;
 
-/// This machine, at capture start. Empty when nothing could be read.
+/// This machine, as the system itself says it when asked. No other program
+/// is run: see [`ask_programs`]. Empty when nothing could be read.
 pub fn read_this_machine() -> CpuTopology {
     #[cfg(target_os = "linux")]
     {
-        read_linux_tree(Path::new("/"), &power_profiles_daemon())
+        read_linux_tree(Path::new("/"), "")
     }
     #[cfg(target_os = "windows")]
     {
@@ -41,32 +51,179 @@ pub fn read_this_machine() -> CpuTopology {
     }
 }
 
-/// `powerprofilesctl get`, when that program is installed and prints a
-/// profile name. A missing program or a usage message is an empty string,
-/// not a failure: the platform profile is a separate file.
-#[cfg(target_os = "linux")]
-fn power_profiles_daemon() -> String {
-    let Ok(out) = std::process::Command::new("powerprofilesctl").arg("get").output() else {
-        return String::new();
-    };
-    if !out.status.success() {
-        return String::new();
-    }
-    accept_power_profile(&String::from_utf8_lossy(&out.stdout))
+/// Says what this machine is to the capture that has just started: the lane
+/// marks and the topology, from one read. Called after the start, where a
+/// viewer drops what it holds of the last capture.
+///
+/// The machine is added to the capture's, not put in their place: on a hub
+/// a remote may have said its own already. What another program has to be
+/// asked for follows from a thread of its own.
+pub fn record(service: &Arc<LiveService>) {
+    let machine = read_this_machine();
+    service.set_cpu_cores(&machine.core_infos());
+    service.adopt_cpu_topology(&machine);
+    ask_programs_later(service, machine);
 }
 
-/// `root` is a filesystem root: `proc/cpuinfo`, `sys/devices/system/cpu`,
-/// `sys/devices/system/node`, `sys/firmware/acpi/platform_profile`.
+/// How long a program asked for the power mode may take. `powerprofilesctl`
+/// answers in about a tenth of a second; one that has not by now is waiting
+/// on a bus that is not answering.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const PROGRAM_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Asks the programs on a thread of its own and says the machine again with
+/// what they answered. The capture it was asked for may be over by then, and
+/// another begun or a file opened: the service drops an answer that is not
+/// for the capture it holds.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn ask_programs_later(service: &Arc<LiveService>, mut machine: CpuTopology) {
+    let capture = service.capture_token();
+    let service = service.clone();
+    let asked = std::thread::Builder::new().name("perfr-power".into()).spawn(move || {
+        if ask_programs(&mut machine) {
+            service.amend_cpu_topology(capture, &machine);
+        }
+    });
+    if let Err(error) = asked {
+        log::debug!("the power mode was not asked for: {error}");
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn ask_programs_later(_service: &Arc<LiveService>, _machine: CpuTopology) {}
+
+/// Fills what only another program says, and tells whether anything was
+/// filled. Each program is given [`PROGRAM_LIMIT`] and no longer.
+///
+/// Linux: `powerprofilesctl get`, when that program is installed and prints
+/// a profile name. A missing program or a usage message is nothing, not a
+/// failure: the platform profile is a file, and is already read.
+#[cfg(target_os = "linux")]
+fn ask_programs(machine: &mut CpuTopology) -> bool {
+    let profile = run_bounded("powerprofilesctl", &["get"], PROGRAM_LIMIT).map(|text| accept_power_profile(&text)).unwrap_or_default();
+    if profile.is_empty() || profile == machine.power.daemon_profile {
+        return false;
+    }
+    machine.power.daemon_profile = profile;
+    true
+}
+
+/// macOS: `pmset -g` and `pmset -g batt`, for low power, high power and AC
+/// or battery.
+#[cfg(target_os = "macos")]
+fn ask_programs(machine: &mut CpuTopology) -> bool {
+    let mut text = String::new();
+    for args in [&["-g"][..], &["-g", "batt"][..]] {
+        if let Some(out) = run_bounded("pmset", args, PROGRAM_LIMIT) {
+            text.push_str(&out);
+            text.push('\n');
+        }
+    }
+    let (low, high, on_ac) = perfr_live_event::topology::parse_pmset(&text);
+    if (low, high, on_ac) == (machine.power.low_power, machine.power.high_power, machine.power.on_ac) {
+        return false;
+    }
+    machine.power.low_power = low;
+    machine.power.high_power = high;
+    machine.power.on_ac = on_ac;
+    true
+}
+
+/// What `program` printed, when it ran, succeeded and was done within
+/// `limit`. A program still running at the limit is killed. The output is
+/// read after the exit, so a program that fills its pipe before it exits
+/// runs into the limit: these print a line or a page.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn run_bounded(program: &str, args: &[&str], limit: std::time::Duration) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut text = String::new();
+                child.stdout.take()?.read_to_string(&mut text).ok()?;
+                return status.success().then_some(text);
+            }
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(5)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// `root` is a filesystem root: `proc/cpuinfo`, `sys/devices` (see
+/// [`read_devices`]), `sys/firmware/acpi/platform_profile`.
 /// `daemon_profile` is what `powerprofilesctl get` printed, or empty.
 #[cfg(any(test, target_os = "linux"))]
 pub fn read_linux_tree(root: &Path, daemon_profile: &str) -> CpuTopology {
-    let cpuinfo = read_text(&root.join("proc/cpuinfo"));
-    let info = parse_cpuinfo(&cpuinfo);
-    let cpu_root = root.join("sys/devices/system/cpu");
+    let info = parse_cpuinfo(&read_text(&root.join("proc/cpuinfo")));
+    let mut topo = read_devices(&root.join("sys/devices"));
+    topo.vendor = info.vendor;
+    topo.model = info.model;
+    topo.family = info.family;
+    topo.model_id = info.model_id;
+    topo.stepping = info.stepping;
+    topo.microcode = info.microcode;
+    topo.flags = info.flags;
+    // What sysfs did not say, as cpuinfo counts it.
+    if topo.sockets == 0 {
+        topo.sockets = info.sockets;
+    }
+    if topo.physical_cores == 0 {
+        topo.physical_cores = info.physical_cores;
+    }
+    if topo.threads == 0 {
+        topo.threads = info.threads;
+    }
+    if topo.cache_line_bytes == 0 {
+        topo.cache_line_bytes = info.cache_alignment;
+    }
+    topo.kernel = trim_text(&read_text(&root.join("proc/sys/kernel/osrelease")));
+    topo.hostname = trim_text(&read_text(&root.join("proc/sys/kernel/hostname")));
+    topo.ram_bytes = crate::sysinfo::parse_meminfo_total_bytes(&read_text(&root.join("proc/meminfo")));
+    if topo.ram_bytes == 0 {
+        topo.ram_bytes = topo.numa.iter().map(|n| n.mem_bytes).sum();
+    }
+    topo.power.platform_profile = trim_text(&read_text(&root.join("sys/firmware/acpi/platform_profile")));
+    topo.power.daemon_profile = accept_power_profile(daemon_profile);
+    if topo.sockets > 0 && !topo.numa.is_empty() && topo.numa.len() % usize::from(topo.sockets) == 0 {
+        let nps = topo.numa.len() / usize::from(topo.sockets);
+        if nps > 0 && nps <= usize::from(u8::MAX) {
+            topo.nps = nps as u8;
+            topo.nps_source = "derived".into();
+        }
+    }
+    let anything = !topo.model.is_empty() || !topo.cpus.is_empty() || !topo.kernel.is_empty() || topo.ram_bytes > 0;
+    if anything {
+        topo.os = "Linux".into();
+    }
+    topo.apply_model_table();
+    topo
+}
+
+/// What the sysfs tree at `devices` (`/sys/devices`) says of the machine:
+/// one logical CPU per online `system/cpu/cpuN`, the caches, the nodes of
+/// `system/node`, and cpufreq.
+///
+/// A CPU's kind is what the kernel's hybrid PMUs say (`cpu_core/cpus` and
+/// `cpu_atom/cpus` on Intel, with `cpu_lowpower` among the efficiency
+/// cores), or else the capacities of an asymmetric machine
+/// (`cpu_capacity`, big.LITTLE): the cores of the highest capacity are the
+/// performance cores. The top frequency is `cpufreq/cpuinfo_max_freq`, and
+/// the level 3 is the size of the `cache/index*` whose level is 3. These
+/// are the files a tool that pins a game to "the fast cores" reads.
+#[cfg(any(test, target_os = "linux"))]
+pub fn read_devices(devices: &Path) -> CpuTopology {
+    let cpu_root = devices.join("system/cpu");
     let ids = cpu_ids(&cpu_root);
-    let performance = crate::sysinfo::parse_cpu_list(&read_text(&root.join("sys/devices/cpu_core/cpus")));
-    let mut efficiency = crate::sysinfo::parse_cpu_list(&read_text(&root.join("sys/devices/cpu_atom/cpus")));
-    efficiency.extend(crate::sysinfo::parse_cpu_list(&read_text(&root.join("sys/devices/cpu_lowpower/cpus"))));
+    let performance = crate::sysinfo::parse_cpu_list(&read_text(&devices.join("cpu_core/cpus")));
+    let mut efficiency = crate::sysinfo::parse_cpu_list(&read_text(&devices.join("cpu_atom/cpus")));
+    efficiency.extend(crate::sysinfo::parse_cpu_list(&read_text(&devices.join("cpu_lowpower/cpus"))));
     let hybrid = !performance.is_empty() && !efficiency.is_empty();
 
     let mut drafts: Vec<Draft> = Vec::new();
@@ -162,10 +319,9 @@ pub fn read_linux_tree(root: &Path, daemon_profile: &str) -> CpuTopology {
         } else {
             core_kind::UNKNOWN
         };
-        let mut sibs = draft.siblings.clone();
-        sibs.sort_unstable();
-        sibs.dedup();
-        draft.logical.thread = sibs.iter().position(|c| *c == cpu).map(|i| i as u16);
+        draft.siblings.sort_unstable();
+        draft.siblings.dedup();
+        draft.logical.thread = draft.siblings.iter().position(|c| *c == cpu).map(|i| i as u16);
     }
 
     let mut caches: Vec<CacheInstance> = Vec::new();
@@ -181,7 +337,7 @@ pub fn read_linux_tree(root: &Path, daemon_profile: &str) -> CpuTopology {
     }
     caches.sort_by(|a, b| (a.level, &a.kind, a.cpus.first().copied().unwrap_or(0)).cmp(&(b.level, &b.kind, b.cpus.first().copied().unwrap_or(0))));
 
-    let numa = read_numa(&root.join("sys/devices/system/node"));
+    let numa = read_numa(&devices.join("system/node"));
     for node in &numa {
         for cpu in &node.cpus {
             if let Some(draft) = drafts.iter_mut().find(|d| d.logical.cpu == *cpu) {
@@ -189,19 +345,14 @@ pub fn read_linux_tree(root: &Path, daemon_profile: &str) -> CpuTopology {
             }
         }
     }
-    let distances = read_distances(&root.join("sys/devices/system/node"), &numa);
+    let distances = read_distances(&devices.join("system/node"), &numa);
 
     let mut policies = read_policies(&cpu_root);
     if policies.is_empty() {
         policies = policies_from_drafts(&drafts);
     }
 
-    let mut power = PowerState {
-        policies,
-        platform_profile: trim_text(&read_text(&root.join("sys/firmware/acpi/platform_profile"))),
-        daemon_profile: accept_power_profile(daemon_profile),
-        ..PowerState::default()
-    };
+    let mut power = PowerState { policies, ..PowerState::default() };
     let intel = trim_text(&read_text(&cpu_root.join("intel_pstate/status")));
     let amd = trim_text(&read_text(&cpu_root.join("amd_pstate/status")));
     if !intel.is_empty() {
@@ -223,51 +374,25 @@ pub fn read_linux_tree(root: &Path, daemon_profile: &str) -> CpuTopology {
         }
     }
 
+    // A physical core is the CPUs the kernel lists as each other's
+    // siblings. Not a count of core ids: a device tree numbers the cores of
+    // each cluster from zero, so two cores of one socket can share an id.
+    let physical = if saw_siblings { distinct(drafts.iter().filter_map(|d| d.siblings.first().copied())) } else { 0 };
     let mut cpus: Vec<LogicalCpu> = drafts.into_iter().map(|d| d.logical).collect();
     cpus.sort_by_key(|c| c.cpu);
-    let sockets = distinct(cpus.iter().filter_map(|c| c.socket));
-    let physical = distinct(cpus.iter().filter_map(|c| c.core_id.map(|id| (c.socket.unwrap_or(0), id))));
-    let line = cache_line(&caches, info.cache_alignment);
-    let mut topo = CpuTopology {
-        vendor: info.vendor,
-        model: info.model,
-        family: info.family,
-        model_id: info.model_id,
-        stepping: info.stepping,
-        sockets: if sockets > 0 { sockets } else { info.sockets },
-        physical_cores: if physical > 0 { physical } else { info.physical_cores },
-        threads: if !cpus.is_empty() { cpus.len() as u16 } else { info.threads },
+    CpuTopology {
+        sockets: distinct(cpus.iter().filter_map(|c| c.socket)),
+        physical_cores: physical,
+        threads: cpus.len() as u16,
         smt: if any_long_siblings { Some(true) } else if saw_siblings { Some(false) } else { None },
-        cache_line_bytes: line,
-        microcode: info.microcode,
-        flags: info.flags,
-        kernel: trim_text(&read_text(&root.join("proc/sys/kernel/osrelease"))),
-        os: String::new(),
-        hostname: trim_text(&read_text(&root.join("proc/sys/kernel/hostname"))),
-        ram_bytes: crate::sysinfo::parse_meminfo_total_bytes(&read_text(&root.join("proc/meminfo"))),
+        cache_line_bytes: cache_line(&caches),
         numa,
         distances,
         cpus,
         caches,
         power,
         ..CpuTopology::default()
-    };
-    if topo.ram_bytes == 0 {
-        topo.ram_bytes = topo.numa.iter().map(|n| n.mem_bytes).sum();
     }
-    if topo.sockets > 0 && !topo.numa.is_empty() && topo.numa.len() % usize::from(topo.sockets) == 0 {
-        let nps = topo.numa.len() / usize::from(topo.sockets);
-        if nps > 0 && nps <= usize::from(u8::MAX) {
-            topo.nps = nps as u8;
-            topo.nps_source = "derived".into();
-        }
-    }
-    let anything = !topo.model.is_empty() || !topo.cpus.is_empty() || !topo.kernel.is_empty() || topo.ram_bytes > 0;
-    if anything {
-        topo.os = "Linux".into();
-    }
-    topo.apply_model_table();
-    topo
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -376,10 +501,20 @@ fn read_numa(dir: &Path) -> Vec<NumaNode> {
             NumaNode {
                 id,
                 cpus: crate::sysinfo::parse_cpu_list(&read_text(&node.join("cpulist"))),
-                mem_bytes: crate::sysinfo::parse_meminfo_total_bytes(&read_text(&node.join("meminfo"))),
+                mem_bytes: node_mem_total_bytes(&read_text(&node.join("meminfo"))),
             }
         })
         .collect()
+}
+
+/// A node's `MemTotal`, in bytes. A node's `meminfo` is `/proc/meminfo`
+/// with the node before each key: `Node 0 MemTotal:       96346812 kB`.
+#[cfg(any(test, target_os = "linux"))]
+fn node_mem_total_bytes(content: &str) -> u64 {
+    content
+        .lines()
+        .find_map(|line| line.split_once("MemTotal:")?.1.split_whitespace().next()?.parse::<u64>().ok())
+        .map_or(0, |kb| kb.saturating_mul(1024))
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -454,18 +589,14 @@ fn policies_from_drafts(drafts: &[Draft]) -> Vec<CpufreqPolicy> {
 }
 
 #[cfg(any(test, target_os = "linux"))]
-fn cache_line(caches: &[CacheInstance], alignment: u16) -> u16 {
+fn cache_line(caches: &[CacheInstance]) -> u16 {
     let mut lines: Vec<u16> = caches.iter().filter(|c| c.level <= 1 && c.line > 0).map(|c| c.line).collect();
     if lines.is_empty() {
         lines = caches.iter().filter(|c| c.line > 0).map(|c| c.line).collect();
     }
     lines.sort_unstable();
     lines.dedup();
-    match lines.as_slice() {
-        [one] => *one,
-        [first, ..] => *first,
-        [] => alignment,
-    }
+    lines.first().copied().unwrap_or(0)
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -486,19 +617,28 @@ fn distinct<T: Ord>(items: impl Iterator<Item = T>) -> u16 {
     v.len() as u16
 }
 
+/// The CPUs that are online, in the order of their numbers. A CPU taken
+/// offline, and the second thread of every core under `nosmt`, keeps its
+/// `cpuN` directory with no topology, no cache and no cpufreq in it: it is
+/// not a thread of the machine as it ran. `online` is the kernel's list;
+/// without it, every `cpuN` whose own `online` does not read 0.
 #[cfg(any(test, target_os = "linux"))]
 fn cpu_ids(cpu_root: &Path) -> Vec<u16> {
-    let Ok(entries) = std::fs::read_dir(cpu_root) else { return Vec::new() };
-    let mut ids: Vec<u16> = entries
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_str()?.strip_prefix("cpu")?.to_string();
-            if name.is_empty() || !name.chars().all(|c| c.is_ascii_digit()) {
-                return None;
-            }
-            name.parse().ok()
-        })
-        .collect();
+    let mut ids = crate::sysinfo::parse_cpu_list(&read_text(&cpu_root.join("online")));
+    if ids.is_empty() {
+        let Ok(entries) = std::fs::read_dir(cpu_root) else { return Vec::new() };
+        ids = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_str()?.strip_prefix("cpu")?.to_string();
+                if name.is_empty() || !name.chars().all(|c| c.is_ascii_digit()) {
+                    return None;
+                }
+                name.parse().ok()
+            })
+            .filter(|cpu: &u16| read_text(&cpu_root.join(format!("cpu{cpu}/online"))).trim() != "0")
+            .collect();
+    }
     ids.sort_unstable();
     ids.dedup();
     ids
@@ -525,7 +665,7 @@ fn parse_opt_u16(text: &str) -> Option<u16> {
     if text.is_empty() { None } else { text.parse().ok() }
 }
 
-/// `pmset` on this Mac, or an empty topology when it is not macOS.
+/// This Mac, from sysctl. `pmset` is asked afterwards ([`ask_programs`]).
 #[cfg(target_os = "macos")]
 fn read_macos() -> CpuTopology {
     fn sysctl_raw(name: &std::ffi::CStr) -> Vec<u8> {
@@ -560,8 +700,7 @@ fn read_macos() -> CpuTopology {
         std::ffi::CString::new(name).unwrap_or_else(|_| std::ffi::CString::new("").unwrap())
     }
 
-    let mut topo = CpuTopology::default();
-    topo.model = sysctl_string(c"machdep.cpu.brand_string");
+    let mut topo = CpuTopology { model: sysctl_string(c"machdep.cpu.brand_string"), ..CpuTopology::default() };
     if topo.model.is_empty() {
         topo.model = sysctl_string(c"hw.model");
     }
@@ -631,28 +770,8 @@ fn read_macos() -> CpuTopology {
             topo.layout.summary = format!("perf levels ({})", notes.join("; "));
         }
     }
-    if let Some(text) = pmset_text() {
-        let (low, high, on_ac) = perfr_live_event::topology::parse_pmset(&text);
-        topo.power.low_power = low;
-        topo.power.high_power = high;
-        topo.power.on_ac = on_ac;
-    }
     topo.apply_model_table();
     topo
-}
-
-#[cfg(target_os = "macos")]
-fn pmset_text() -> Option<String> {
-    let settings = std::process::Command::new("pmset").arg("-g").output().ok();
-    let battery = std::process::Command::new("pmset").args(["-g", "batt"]).output().ok();
-    let mut text = String::new();
-    for out in [settings, battery].into_iter().flatten() {
-        if out.status.success() {
-            text.push_str(&String::from_utf8_lossy(&out.stdout));
-            text.push('\n');
-        }
-    }
-    (!text.trim().is_empty()).then_some(text)
 }
 
 #[cfg(test)]
@@ -750,7 +869,7 @@ mod tests {
         tree.file("sys/devices/system/cpu/intel_pstate/no_turbo", "0\n");
         tree.file("sys/firmware/acpi/platform_profile", "balanced\n");
         tree.file("sys/devices/system/node/node0/cpulist", "0-3\n");
-        tree.file("sys/devices/system/node/node0/meminfo", "MemTotal:       16777216 kB\n");
+        tree.file("sys/devices/system/node/node0/meminfo", "Node 0 MemTotal:       16777216 kB\nNode 0 MemFree:         1234567 kB\n");
         tree.file("sys/devices/system/node/node0/distance", "10\n");
         let topo = read_linux_tree(&tree.0, "balanced\n");
         assert_eq!(topo.model, model);
@@ -765,12 +884,14 @@ mod tests {
         assert_eq!(topo.cache_line_bytes, 64);
         assert_eq!(topo.nps, 1);
         assert_eq!(topo.nps_source, "derived");
+        assert_eq!(topo.numa[0].mem_bytes, 16_777_216 * 1024, "a node's meminfo names the node before the key");
+        assert!(topo.summary().contains("NUMA node 0: cpus 0-3, 16.0 GB"));
         assert!(topo.cpus.iter().all(|c| c.kind == core_kind::UNKNOWN));
         assert!(topo.cpus.iter().all(|c| c.max_freq_khz == 4_600_000 && c.l3_kb == 12_288));
-        assert_eq!(topo.lane_label(0).as_deref(), Some("P0 · T0"));
-        assert_eq!(topo.lane_label(1).as_deref(), Some("P0 · T1"));
+        assert_eq!(topo.lane_label(0).as_deref(), Some("C0 · T0"));
+        assert_eq!(topo.lane_label(1).as_deref(), Some("C0 · T1"));
         assert_eq!(topo.freq_label(0).as_deref(), Some("3.2–4.6"));
-        assert_eq!(topo.cur_ratio(2).map(|r| (r * 100.0).round() as i32), Some(70));
+        assert_eq!(topo.cpus[2].cur_freq_khz, 3_200_000);
         assert_eq!(topo.power.pstate_status, "active");
         assert_eq!(topo.power.turbo, Some(true));
         assert_eq!(topo.power.policies[0].governor, "powersave");
@@ -782,7 +903,7 @@ mod tests {
         assert!(topo.header_line().contains("NPS1"));
         assert!(topo.summary().contains("cache line 64 B"));
         assert!(topo.layout.summary.is_empty());
-        assert!(topo.reference_url.is_empty());
+        assert_eq!(topo.product_page(), None);
         let l1i = topo.caches.iter().find(|c| c.level == 1 && c.kind == "instruction").unwrap();
         assert_eq!(l1i.ways, 8);
         assert_eq!(l1i.line, 64);
@@ -812,19 +933,19 @@ mod tests {
         tree.file("sys/devices/system/cpu/intel_pstate/no_turbo", "0\n");
         tree.file("sys/devices/system/node/node0/cpulist", "0-5\n");
         tree.file("sys/devices/system/node/node0/distance", "10\n");
-        tree.file("sys/devices/system/node/node0/meminfo", "MemTotal: 32000000 kB\n");
+        tree.file("sys/devices/system/node/node0/meminfo", "Node 0 MemTotal: 32000000 kB\n");
         let topo = read_linux_tree(&tree.0, "");
         assert!(topo.cpus[..4].iter().all(|c| c.kind == core_kind::PERFORMANCE));
         assert!(topo.cpus[4..].iter().all(|c| c.kind == core_kind::EFFICIENCY));
-        assert_eq!(topo.lane_label(0).as_deref(), Some("P0 · T0"));
-        assert_eq!(topo.lane_label(1).as_deref(), Some("P0 · T1"));
-        assert_eq!(topo.lane_label(4).as_deref(), Some("P2"));
+        assert_eq!(topo.lane_label(0).as_deref(), Some("C0 · T0"));
+        assert_eq!(topo.lane_label(1).as_deref(), Some("C0 · T1"));
+        assert_eq!(topo.lane_label(4).as_deref(), Some("C2"));
         assert_eq!(topo.smt, Some(true));
         assert_eq!(topo.physical_cores, 4);
         assert!(topo.layout.summary.is_empty(), "four cores are not a 13900K's 24, so the table stays out");
-        assert!(topo.reference_url.is_empty());
+        assert_eq!(topo.product_page(), None);
         assert_eq!(topo.power.turbo, Some(true));
-        assert!(topo.cpu_detail(4).unwrap().contains("Efficiency core"));
+        assert_eq!(topo.cpu_detail(4).unwrap().title, "Core 4 · Efficiency core");
     }
 
     #[test]
@@ -848,7 +969,7 @@ mod tests {
         tree.file("sys/devices/system/cpu/cpufreq/boost", "1\n");
         tree.file("sys/devices/system/node/node0/cpulist", "0-3\n");
         tree.file("sys/devices/system/node/node0/distance", "10\n");
-        tree.file("sys/devices/system/node/node0/meminfo", "MemTotal: 64000000 kB\n");
+        tree.file("sys/devices/system/node/node0/meminfo", "Node 0 MemTotal: 64000000 kB\n");
         let topo = read_linux_tree(&tree.0, "nope\n");
         assert_eq!(topo.power.daemon_profile, "");
         assert_eq!(topo.power.pstate, "amd_pstate");
@@ -858,7 +979,7 @@ mod tests {
         assert_eq!(topo.cpus[0].l3_kb, 98_304);
         assert_eq!(topo.cpus[2].die, Some(1));
         assert_eq!(topo.cpus[2].l3_kb, 32_768);
-        assert_eq!(topo.lane_label(3).as_deref(), Some("P8 · T1"));
+        assert_eq!(topo.lane_label(3).as_deref(), Some("C8 · T1"));
         let mut l3s: Vec<_> = topo.caches.iter().filter(|c| c.level == 3).map(|c| c.size_kb).collect();
         l3s.sort_unstable();
         assert_eq!(l3s, vec![32_768, 98_304]);
@@ -893,11 +1014,12 @@ mod tests {
             }
             tree.file(&format!("sys/devices/system/node/node{node}/cpulist"), &format!("{node}\n"));
             tree.file(&format!("sys/devices/system/node/node{node}/distance"), &format!("{}\n", distance.join(" ")));
-            tree.file(&format!("sys/devices/system/node/node{node}/meminfo"), "MemTotal:       32000000 kB\n");
+            tree.file(&format!("sys/devices/system/node/node{node}/meminfo"), &format!("Node {node} MemTotal:       32000000 kB\n"));
         }
         let topo = read_linux_tree(&tree.0, "");
         assert_eq!(topo.sockets, 2);
         assert_eq!(topo.numa.len(), 8);
+        assert!(topo.numa.iter().all(|node| node.mem_bytes == 32_000_000 * 1024));
         assert_eq!(topo.nps, 4);
         assert_eq!(topo.nps_source, "derived");
         assert_eq!(topo.distances.len(), 64);
@@ -920,5 +1042,171 @@ mod tests {
     fn an_empty_tree_is_an_empty_machine() {
         let tree = Tree::new("empty");
         assert!(read_linux_tree(&tree.0, "").is_empty());
+    }
+
+    #[test]
+    fn cpus_that_are_offline_are_not_threads_of_the_machine() {
+        // Two cores of two threads, booted with `nosmt`: the second thread
+        // of each keeps its directory, with `online` and nothing else.
+        let tree = Tree::new("nosmt");
+        let model = "AMD Ryzen 5 5600X 6-Core Processor";
+        let mut cpuinfo = String::new();
+        for (cpu, core) in [(0u16, 0u32), (1, 1)] {
+            cpuinfo.push_str(&cpuinfo_block(cpu, "AuthenticAMD", model, 25, 33, 0, "0xa201016", 0, core, "avx2"));
+        }
+        common_head(&tree, &cpuinfo, 16_000_000);
+        for (cpu, core) in [(0u16, 0u16), (1, 1)] {
+            add_cpu(&tree, cpu, 0, 0, core, &cpu.to_string(), "4650000", "3700000", "2200000", "3700000", "32768K", "0-1", &cpu.to_string());
+        }
+        for cpu in [2u16, 3] {
+            tree.file(&format!("sys/devices/system/cpu/cpu{cpu}/online"), "0\n");
+        }
+        tree.file("sys/devices/system/cpu/online", "0-1\n");
+        tree.file("sys/devices/system/cpu/offline", "2-3\n");
+        let topo = read_linux_tree(&tree.0, "");
+        assert_eq!(topo.cpus.iter().map(|c| c.cpu).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!((topo.sockets, topo.physical_cores, topo.threads), (1, 2, 2));
+        assert_eq!(topo.smt, Some(false));
+        assert!(topo.cpus.iter().all(|c| c.socket == Some(0)), "no CPU without a socket to draw as a second one");
+        // A tree with no list of its own: each CPU's `online` says.
+        std::fs::remove_file(tree.0.join("sys/devices/system/cpu/online")).unwrap();
+        let topo = read_linux_tree(&tree.0, "");
+        assert_eq!(topo.cpus.iter().map(|c| c.cpu).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(topo.threads, 2);
+    }
+
+    #[test]
+    fn cores_are_counted_by_their_siblings_where_clusters_number_them_alike() {
+        // A big.LITTLE part as a device tree describes it: one package, two
+        // clusters, and each cluster's first core is core 0.
+        let tree = Tree::new("clusters");
+        for (cpu, cluster, capacity) in [(0u16, 0u16, "430"), (1, 0, "430"), (2, 1, "1024"), (3, 1, "1024")] {
+            let dir = format!("sys/devices/system/cpu/cpu{cpu}");
+            tree.file(&format!("{dir}/topology/physical_package_id"), "0\n");
+            tree.file(&format!("{dir}/topology/cluster_id"), &format!("{cluster}\n"));
+            tree.file(&format!("{dir}/topology/core_id"), &format!("{}\n", cpu % 2));
+            tree.file(&format!("{dir}/topology/core_cpus_list"), &format!("{cpu}\n"));
+            tree.file(&format!("{dir}/cpu_capacity"), &format!("{capacity}\n"));
+        }
+        let topo = read_devices(&tree.0.join("sys/devices"));
+        assert_eq!((topo.sockets, topo.physical_cores, topo.threads), (1, 4, 4));
+        assert_eq!(topo.smt, Some(false));
+        assert_eq!(topo.cpus[0].kind, core_kind::EFFICIENCY);
+        assert_eq!(topo.cpus[2].kind, core_kind::PERFORMANCE);
+        assert!(!topo.cpus[0].same_core(&topo.cpus[2]), "core 0 of one cluster is not core 0 of the other");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_program_is_asked_for_no_longer_than_its_limit() {
+        use std::time::{Duration, Instant};
+        assert_eq!(run_bounded("sh", &["-c", "echo balanced"], Duration::from_secs(10)).as_deref(), Some("balanced\n"));
+        // One that fails, and one that is not there, say nothing.
+        assert_eq!(run_bounded("sh", &["-c", "echo no; exit 3"], Duration::from_secs(10)), None);
+        assert_eq!(run_bounded("perfr-no-such-program", &[], Duration::from_secs(10)), None);
+        // One that hangs is given up on and killed.
+        let began = Instant::now();
+        assert_eq!(run_bounded("sh", &["-c", "sleep 30"], Duration::from_millis(50)), None);
+        assert!(began.elapsed() < Duration::from_secs(5), "waited {:?}", began.elapsed());
+    }
+
+    /// The lane marks of a tree of `devices`' files.
+    fn marks(name: &str, files: &[(String, &str)]) -> Vec<perfr_live_event::CoreInfo> {
+        let tree = Tree::new(name);
+        for (path, content) in files {
+            tree.file(path, content);
+        }
+        read_devices(&tree.0).core_infos()
+    }
+
+    /// One core's files: its top frequency and its caches, a level 2 at
+    /// `index2` and the level 3 at `index3`.
+    fn core_files(cpu: u16, max_freq: &'static str, l3: &'static str) -> Vec<(String, &'static str)> {
+        let dir = format!("system/cpu/cpu{cpu}");
+        vec![
+            (format!("{dir}/cpufreq/cpuinfo_max_freq"), max_freq),
+            (format!("{dir}/cache/index2/level"), "2\n"),
+            (format!("{dir}/cache/index2/size"), "2048K\n"),
+            (format!("{dir}/cache/index3/level"), "3\n"),
+            (format!("{dir}/cache/index3/size"), l3),
+        ]
+    }
+
+    fn mark(cpu: u16, kind: u8, max_freq_khz: u32, l3_kb: u32) -> perfr_live_event::CoreInfo {
+        perfr_live_event::CoreInfo { cpu, kind, max_freq_khz, l3_kb }
+    }
+
+    #[test]
+    fn a_hybrid_machine_tells_its_performance_cores_from_its_efficiency_cores() {
+        // Two P-cores, one of them favoured with a higher top frequency,
+        // and two E-cores, as a 13th generation Core lays them out. cpu10
+        // is listed after cpu2 by name and is the last by number.
+        let mut files = Vec::new();
+        files.extend(core_files(0, "5500000\n", "36864K\n"));
+        files.extend(core_files(1, "5800000\n", "36864K\n"));
+        files.extend(core_files(2, "4300000\n", "36864K\n"));
+        files.extend(core_files(10, "4300000\n", "36864K\n"));
+        files.push(("cpu_core/cpus".into(), "0-1\n"));
+        files.push(("cpu_atom/cpus".into(), "2,10\n"));
+        // What is in the directory beside the cores.
+        files.push(("system/cpu/cpufreq/policy0/scaling_governor".into(), "powersave\n"));
+        files.push(("system/cpu/online".into(), "0-2,10\n"));
+        assert_eq!(
+            marks("hybrid", &files),
+            [
+                mark(0, core_kind::PERFORMANCE, 5_500_000, 36_864),
+                mark(1, core_kind::PERFORMANCE, 5_800_000, 36_864),
+                mark(2, core_kind::EFFICIENCY, 4_300_000, 36_864),
+                mark(10, core_kind::EFFICIENCY, 4_300_000, 36_864),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_machine_of_one_kind_of_core_names_no_kind_and_keeps_what_differs() {
+        // An X3D Ryzen: the stacked cache on the first core, the higher
+        // frequency on the second, and no kind for the kernel to name.
+        let mut files = Vec::new();
+        files.extend(core_files(0, "5050000\n", "98304K\n"));
+        files.extend(core_files(1, "5759000\n", "32768K\n"));
+        assert_eq!(marks("x3d-marks", &files), [mark(0, core_kind::UNKNOWN, 5_050_000, 98_304), mark(1, core_kind::UNKNOWN, 5_759_000, 32_768)]);
+    }
+
+    #[test]
+    fn the_capacities_of_an_asymmetric_machine_name_its_big_and_little_cores() {
+        let files = vec![
+            ("system/cpu/cpu0/cpu_capacity".to_string(), "430\n"),
+            ("system/cpu/cpu0/cpufreq/cpuinfo_max_freq".to_string(), "1800000\n"),
+            ("system/cpu/cpu1/cpu_capacity".to_string(), "1024\n"),
+            ("system/cpu/cpu1/cpufreq/cpuinfo_max_freq".to_string(), "2400000\n"),
+        ];
+        assert_eq!(marks("biglittle", &files), [mark(0, core_kind::EFFICIENCY, 1_800_000, 0), mark(1, core_kind::PERFORMANCE, 2_400_000, 0)]);
+        // The same capacity everywhere is one kind of core, not named.
+        let files = vec![
+            ("system/cpu/cpu0/cpu_capacity".to_string(), "1024\n"),
+            ("system/cpu/cpu0/cpufreq/cpuinfo_max_freq".to_string(), "2400000\n"),
+            ("system/cpu/cpu1/cpu_capacity".to_string(), "1024\n"),
+            ("system/cpu/cpu1/cpufreq/cpuinfo_max_freq".to_string(), "2400000\n"),
+        ];
+        assert!(marks("symmetric", &files).iter().all(|c| c.kind == core_kind::UNKNOWN));
+    }
+
+    #[test]
+    fn a_machine_that_tells_nothing_of_its_cores_has_none_to_show() {
+        // A container: the cores are there, with no frequency and no cache.
+        let files = vec![("system/cpu/cpu0/online".to_string(), "1\n"), ("system/cpu/cpu1/online".to_string(), "1\n")];
+        assert!(marks("bare", &files).is_empty());
+        assert!(read_devices(std::path::Path::new("/nonexistent/perfr")).core_infos().is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_marks_are_this_machines_or_none() {
+        let cores = read_this_machine().core_infos();
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        // One entry per CPU that is online, in order; a restricted affinity
+        // makes `threads` the smaller of the two.
+        assert!(cores.is_empty() || cores.len() >= threads, "{} cores for {threads} threads", cores.len());
+        assert!(cores.windows(2).all(|w| w[0].cpu < w[1].cpu));
     }
 }

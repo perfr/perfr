@@ -407,10 +407,16 @@ fn cpu_topology() -> (u32, u32) {
     (cores.max(1), logical.max(1))
 }
 
-/// What each core of this machine is, for the viewer's scheduler lanes: its
-/// kind where the machine has more than one, and its level 3 cache. Empty
-/// when Windows tells neither. See `processor_info`.
-pub fn cpu_cores() -> Vec<perfr_live_event::CoreInfo> {
+/// Topology, brand, memory and the active power plan. The processor-info
+/// buffer is what has been parsed against records written by hand; the
+/// power calls and `GetLogicalProcessorInformationEx` itself have not been
+/// run on a Windows machine. Per-node memory is not read: the buffer has
+/// no size, and the available-bytes call is not the installed size.
+///
+/// The lane marks are this buffer's too: `CpuTopology::core_infos` of what
+/// this returns, the kind where the machine has more than one and the level
+/// 3 cache. See `processor_info`.
+pub fn machine_topology() -> perfr_live_event::CpuTopology {
     const RELATION_ALL: u32 = 0xffff;
     let mut length: u32 = 0;
     // SAFETY: a size query, which fails and says the size.
@@ -418,23 +424,6 @@ pub fn cpu_cores() -> Vec<perfr_live_event::CoreInfo> {
     let mut buffer = vec![0u8; length as usize];
     // SAFETY: a buffer of the size the query asked for; the call writes at
     // most `length` bytes and says how many.
-    if buffer.is_empty() || unsafe { GetLogicalProcessorInformationEx(RELATION_ALL, buffer.as_mut_ptr(), &mut length) } == 0 {
-        return Vec::new();
-    }
-    buffer.truncate(length as usize);
-    crate::processor_info::cores_from_processor_information(&buffer)
-}
-
-/// Topology, brand, memory and the active power plan. The processor-info
-/// buffer is what has been parsed against records written by hand; the
-/// power calls and `GetLogicalProcessorInformationEx` itself have not been
-/// run on a Windows machine. Per-node memory is not read: the buffer has
-/// no size, and the available-bytes call is not the installed size.
-pub fn machine_topology() -> perfr_live_event::CpuTopology {
-    const RELATION_ALL: u32 = 0xffff;
-    let mut length: u32 = 0;
-    unsafe { GetLogicalProcessorInformationEx(RELATION_ALL, std::ptr::null_mut(), &mut length) };
-    let mut buffer = vec![0u8; length as usize];
     let mut topo = if buffer.is_empty() || unsafe { GetLogicalProcessorInformationEx(RELATION_ALL, buffer.as_mut_ptr(), &mut length) } == 0 {
         perfr_live_event::CpuTopology::default()
     } else {
@@ -474,7 +463,7 @@ fn guid_text(guid: &Guid) -> String {
 fn friendly_name(scheme: &Guid) -> String {
     let mut size = 0u32;
     let _ = unsafe { PowerReadFriendlyName(std::ptr::null_mut(), scheme, std::ptr::null(), std::ptr::null(), std::ptr::null_mut(), &mut size) };
-    if size < 2 || size > 2048 {
+    if !(2..=2048).contains(&size) {
         return String::new();
     }
     let mut buffer = vec![0u8; size as usize];
@@ -843,8 +832,7 @@ pub fn capture_loop(
     service.mark_capture_started(target_pid.max(0) as u32, capture_start_ns);
     // What each core is, for the scheduler's lanes. Said after the start:
     // a viewer drops what it holds of the last capture there.
-    service.set_cpu_cores(&cpu_cores());
-    service.set_cpu_topology(&[machine_topology()]);
+    crate::cpu_topology::record(&service);
     {
         let mut early: Vec<LiveEvent> = Vec::new();
         scopes.drain_now(crate::now_monotonic_ns(), &mut early);
@@ -1189,7 +1177,10 @@ pub(super) fn capture_file(args: crate::Args) -> Result<(), String> {
     let _ = timer.join();
     let (_, events) = service.ring().snapshot();
     let (threads, processes) = service.capture_names();
-    let bundle = crate::names::capture_bundle(&events, &service.intern.lock(), &store, &threads, &processes, pid.max(0) as u32);
+    let mut bundle = crate::names::capture_bundle(&events, &service.intern.lock(), &store, &threads, &processes, pid.max(0) as u32);
+    // What the machine is: the file is read where it cannot be asked.
+    bundle.cores = service.cpu_cores();
+    bundle.topology = service.cpu_topology();
     std::fs::write(&output, bundle.to_zip().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     log::info!("wrote {} events to {output}", events.len());
     Ok(())
@@ -1249,7 +1240,7 @@ mod tests {
         assert!(lan_interfaces().iter().all(|i| !i.addr.is_loopback()));
         // The cores are none (a machine that tells nothing) or one for each
         // logical processor, in order.
-        let cores = super::cpu_cores();
+        let cores = super::machine_topology().core_infos();
         assert!(cores.is_empty() || cores.len() == cpu_threads as usize, "{} cores for {cpu_threads} threads", cores.len());
         assert!(cores.windows(2).all(|w| w[0].cpu < w[1].cpu));
     }

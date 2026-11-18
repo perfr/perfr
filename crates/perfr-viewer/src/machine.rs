@@ -9,9 +9,15 @@
 //! they share, and the logical threads of each physical core. A sentence
 //! that came from the model table is drawn as text and says so. Nothing
 //! here invents a CCD a capture did not record.
+//!
+//! [`Machines`] is the capture's machines with what the lanes draw of them
+//! worked out when a machine is said. A lane is painted every frame and a
+//! machine is said once: nothing here is searched for per lane.
 
-use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
-use perfr_live_event::topology::{kib_text, CpuTopology, LogicalCpu};
+use std::collections::HashMap;
+
+use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
+use perfr_live_event::topology::{kib_text, CpuDetail, CpuTopology, LogicalCpu};
 use perfr_live_event::{core_kind, CoreInfo};
 
 use crate::fonts;
@@ -161,9 +167,8 @@ fn shared_l3_kb(cpus: &[&LogicalCpu]) -> Option<u32> {
 }
 
 fn cores_of(cpus: &[&LogicalCpu]) -> Vec<DrawnCore> {
-    let mut keys: Vec<(Option<u16>, Option<u16>)> = Vec::new();
+    let mut keys: Vec<CoreKey> = Vec::new();
     for cpu in cpus {
-        // A CPU with no core id is its own core.
         let key = core_key(cpu);
         if !keys.contains(&key) {
             keys.push(key);
@@ -182,110 +187,264 @@ fn cores_of(cpus: &[&LogicalCpu]) -> Vec<DrawnCore> {
         .collect()
 }
 
-fn core_key(cpu: &LogicalCpu) -> (Option<u16>, Option<u16>) {
-    if cpu.core_id.is_some() { (cpu.socket, cpu.core_id) } else { (Some(cpu.cpu), None) }
+/// Which physical core a CPU is a thread of. A CPU with no core id is its
+/// own core; with one, the socket, die and cluster go with it, as in
+/// [`LogicalCpu::same_core`]: clusters and sockets each number their own.
+type CoreKey = (Option<u16>, Option<u16>, Option<u16>, Option<u16>, Option<u16>);
+
+fn core_key(cpu: &LogicalCpu) -> CoreKey {
+    if cpu.core_id.is_some() { (None, cpu.socket, cpu.die, cpu.cluster, cpu.core_id) } else { (Some(cpu.cpu), None, None, None, None) }
 }
 
-/// A lane mark's frequency, preferring the topology's base-and-top form.
-pub fn freq_text(machines: &[CpuTopology], cpu: u16) -> Option<String> {
-    machines.iter().find_map(|m| m.freq_label(cpu))
+/// Where a lane stands among the lanes of its physical core, when they are
+/// next to each other: the bracket in the rail that joins them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Bracket {
+    /// The core has one thread, or its threads' lanes are not adjacent:
+    /// the label says the pairing and no bracket could.
+    #[default]
+    None,
+    First,
+    Middle,
+    Last,
 }
 
-pub fn cur_ratio(machines: &[CpuTopology], cpu: u16) -> Option<f32> {
-    machines.iter().find_map(|m| m.cur_ratio(cpu))
+/// What a scheduler lane draws of its CPU.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Lane {
+    /// The machine the CPU is in, as an index into [`Machines::list`].
+    machine: usize,
+    /// `C0 · T1` where the capture recorded the pairing.
+    pub label: Option<String>,
+    /// `3.0–5.8`, base and top.
+    pub freq: Option<String>,
+    pub numa: Option<u16>,
+    pub bracket: Bracket,
 }
 
-pub fn lane_text(machines: &[CpuTopology], cpu: u16) -> Option<String> {
-    machines.iter().find_map(|m| m.lane_label(cpu))
+/// The machines of the capture (`CpuTopology`), and what its lanes and its
+/// diagram draw of them. Empty when the capture did not record one.
+#[derive(Default)]
+pub struct Machines {
+    list: Vec<CpuTopology>,
+    lanes: HashMap<u16, Lane>,
+    drawn: Vec<Vec<DrawnSocket>>,
+    numa_varies: bool,
+    header: String,
+    generation: u64,
 }
 
-pub fn numa_of(machines: &[CpuTopology], cpu: u16) -> Option<u16> {
-    machines.iter().find_map(|m| m.cpus.iter().find(|c| c.cpu == cpu).and_then(|c| c.numa))
-}
-
-pub fn numa_count(machines: &[CpuTopology]) -> usize {
-    let mut ids: Vec<u16> = machines.iter().flat_map(|m| m.cpus.iter().filter_map(|c| c.numa)).collect();
-    ids.sort_unstable();
-    ids.dedup();
-    ids.len()
-}
-
-/// More than one node is what makes a tint mean something.
-pub fn numa_varies(machines: &[CpuTopology]) -> bool {
-    numa_count(machines) > 1
-}
-
-pub fn header_line(machines: &[CpuTopology]) -> String {
-    let mut parts: Vec<String> = machines.iter().map(|m| m.header_line()).filter(|l| !l.is_empty()).collect();
-    parts.dedup();
-    parts.join("  ·  ")
-}
-
-pub fn cpu_detail(machines: &[CpuTopology], cpu: u16) -> Option<String> {
-    machines.iter().find_map(|m| m.cpu_detail(cpu))
-}
-
-pub fn copy_text(machines: &[CpuTopology], marks: &[CoreInfo]) -> String {
-    if !machines.is_empty() {
-        return machines.iter().map(|m| m.summary()).collect::<Vec<_>>().join("\n\n");
+impl Machines {
+    /// Takes a machine as the capture says it: in the place of what was
+    /// said of the same machine before, or beside the others.
+    pub fn adopt(&mut self, topology: CpuTopology) {
+        perfr_live_event::topology::adopt_machine(&mut self.list, topology);
+        self.rebuild();
     }
-    if marks.is_empty() {
-        return "This capture has no CPU topology.".into();
+
+    pub fn clear(&mut self) {
+        if !self.list.is_empty() {
+            self.list.clear();
+            self.rebuild();
+        }
     }
-    let mut lines = vec!["Lane marks only. This capture has no topology frame.".to_string()];
-    for core in marks {
-        let mut line = format!("Core {}", core.cpu);
-        match core.kind {
-            core_kind::PERFORMANCE => line.push_str(" performance"),
-            core_kind::EFFICIENCY => line.push_str(" efficiency"),
-            _ => {}
-        }
-        if core.max_freq_khz > 0 {
-            line.push_str(&format!(" up to {:.2} GHz", f64::from(core.max_freq_khz) / 1e6));
-        }
-        if core.l3_kb > 0 {
-            line.push_str(&format!(" L3 {}", kib_text(core.l3_kb)));
-        }
-        lines.push(line);
+
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
     }
-    lines.join("\n")
+
+    #[cfg(test)]
+    pub fn list(&self) -> &[CpuTopology] {
+        &self.list
+    }
+
+    /// Changes whenever the machines do. What is measured from them (the
+    /// width of the widest lane label) is kept under it.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn rebuild(&mut self) {
+        self.generation += 1;
+        self.lanes.clear();
+        for (index, machine) in self.list.iter().enumerate() {
+            for (at, cpu) in machine.cpus.iter().enumerate() {
+                // The threads of a core are bracketed where their lanes are
+                // next to each other, which is where their numbers are.
+                let beside = |other: Option<&LogicalCpu>, number: Option<u16>| {
+                    machine.smt == Some(true) && other.is_some_and(|other| Some(other.cpu) == number && other.same_core(cpu))
+                };
+                let above = beside(at.checked_sub(1).and_then(|i| machine.cpus.get(i)), cpu.cpu.checked_sub(1));
+                let below = beside(machine.cpus.get(at + 1), cpu.cpu.checked_add(1));
+                let bracket = match (above, below) {
+                    (false, true) => Bracket::First,
+                    (true, true) => Bracket::Middle,
+                    (true, false) => Bracket::Last,
+                    (false, false) => Bracket::None,
+                };
+                // A CPU number is one machine's; the first to say it keeps it.
+                self.lanes.entry(cpu.cpu).or_insert_with(|| Lane {
+                    machine: index,
+                    label: machine.lane_label(cpu.cpu),
+                    freq: machine.freq_label(cpu.cpu),
+                    numa: cpu.numa,
+                    bracket,
+                });
+            }
+        }
+        self.drawn = self.list.iter().map(drawn).collect();
+        // More than one node is what makes a tint mean something.
+        let mut nodes: Vec<u16> = self.lanes.values().filter_map(|lane| lane.numa).collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        self.numa_varies = nodes.len() > 1;
+        let mut parts: Vec<String> = self.list.iter().map(|m| m.header_line()).filter(|l| !l.is_empty()).collect();
+        parts.dedup();
+        self.header = parts.join("  ·  ");
+    }
+
+    /// What the lane of CPU `cpu` draws; none when no machine lists it.
+    pub fn lane(&self, cpu: u16) -> Option<&Lane> {
+        self.lanes.get(&cpu)
+    }
+
+    /// The NUMA node of `cpu`'s lane, where the capture has more than one
+    /// node: the lanes are tinted by it.
+    pub fn tinted_node(&self, cpu: u16) -> Option<u16> {
+        if !self.numa_varies {
+            return None;
+        }
+        self.lanes.get(&cpu)?.numa
+    }
+
+    /// The power line of the scheduler row.
+    pub fn header_line(&self) -> &str {
+        &self.header
+    }
+
+    /// Everything recorded of `cpu`, for the lane's tooltip. Built when it
+    /// is asked for, which is when the pointer is on the lane.
+    pub fn detail(&self, cpu: u16) -> Option<CpuDetail> {
+        self.list.get(self.lanes.get(&cpu)?.machine)?.cpu_detail(cpu)
+    }
+
+    pub fn copy_text(&self, marks: &[CoreInfo]) -> String {
+        if !self.list.is_empty() {
+            return self.list.iter().map(|m| m.summary()).collect::<Vec<_>>().join("\n\n");
+        }
+        if marks.is_empty() {
+            return "This capture has no CPU topology.".into();
+        }
+        let mut lines = vec!["Lane marks only. This capture has no topology frame.".to_string()];
+        for core in marks {
+            let mut line = format!("Core {}", core.cpu);
+            match core.kind {
+                core_kind::PERFORMANCE => line.push_str(" performance"),
+                core_kind::EFFICIENCY => line.push_str(" efficiency"),
+                _ => {}
+            }
+            if core.max_freq_khz > 0 {
+                line.push_str(&format!(" up to {:.2} GHz", f64::from(core.max_freq_khz) / 1e6));
+            }
+            if core.l3_kb > 0 {
+                line.push_str(&format!(" L3 {}", kib_text(core.l3_kb)));
+            }
+            lines.push(line);
+        }
+        lines.join("\n")
+    }
+
+    /// A web search for the first machine's model string.
+    pub fn search_model(&self) -> Option<String> {
+        self.list.iter().find_map(|m| perfr_live_event::topology::search_url(&m.model))
+    }
+
+    /// The product page of the first machine that has one in this build's
+    /// table. Never a link out of the capture: see
+    /// [`CpuTopology::product_page`].
+    pub fn product_page(&self) -> Option<&'static str> {
+        self.list.iter().find_map(|m| m.product_page())
+    }
 }
 
-pub fn search_model(machines: &[CpuTopology]) -> Option<String> {
-    machines.iter().find_map(|m| perfr_live_event::topology::search_url(&m.model))
-}
-
-pub fn reference_url(machines: &[CpuTopology]) -> Option<String> {
-    machines.iter().find_map(|m| (!m.reference_url.is_empty()).then(|| m.reference_url.clone()))
-}
-
-/// A quiet tint, one per node, cycling four. Visible against the rail and
-/// not a second colour scheme.
+/// A quiet tint, one per node, cycling four: a wash over the rail, deeper
+/// on a light scheme, where a pale wash would not show.
 pub fn numa_tint(node: u16) -> Color32 {
-    const TINTS: [(u8, u8, u8); 4] = [(0x5E, 0x81, 0xAC), (0xA3, 0xBE, 0x8C), (0xEB, 0xCB, 0x8B), (0xB4, 0x8E, 0xAD)];
-    let (r, g, b) = TINTS[usize::from(node) % TINTS.len()];
-    Color32::from_rgba_unmultiplied(r, g, b, 28)
+    const ON_DARK: [(u8, u8, u8); 4] = [(0x5E, 0x81, 0xAC), (0xA3, 0xBE, 0x8C), (0xEB, 0xCB, 0x8B), (0xB4, 0x8E, 0xAD)];
+    const ON_LIGHT: [(u8, u8, u8); 4] = [(0x1F, 0x5F, 0xA8), (0x3F, 0x7D, 0x2A), (0xA8, 0x6F, 0x00), (0x7F, 0x3F, 0x8C)];
+    let light = perfr_live_event::theme::active().light;
+    let (r, g, b) = if light { ON_LIGHT } else { ON_DARK }[usize::from(node) % 4];
+    Color32::from_rgba_unmultiplied(r, g, b, if light { 34 } else { 28 })
+}
+
+/// The line between the lanes of two nodes, and the hairlines of the
+/// diagram: the scheme's muted text, thinned.
+pub fn divider() -> Color32 {
+    theme::MUTED().gamma_multiply(0.5)
+}
+
+/// A core's detail as a table: the title, then each group's rows with the
+/// labels in one column. `note` is the last line, for what a click does.
+pub fn paint_detail(ui: &mut egui::Ui, detail: &CpuDetail, note: Option<(&str, Color32)>) {
+    const LABEL_W: f32 = 128.0;
+    ui.spacing_mut().item_spacing = Vec2::new(8.0, 2.0);
+    ui.label(RichText::new(&detail.title).family(fonts::medium()).size(12.5).color(theme::TEXT()));
+    for group in &detail.groups {
+        if !group.heading.is_empty() {
+            ui.add_space(5.0);
+            ui.label(RichText::new(group.heading.to_uppercase()).family(fonts::medium()).size(9.0).color(theme::ACCENT()));
+        }
+        for (label, value) in &group.rows {
+            ui.horizontal_top(|ui| {
+                let (cell, _) = ui.allocate_exact_size(Vec2::new(LABEL_W, 14.0), Sense::hover());
+                ui.painter().text(cell.left_center(), Align2::LEFT_CENTER, label, FontId::new(11.0, egui::FontFamily::Proportional), theme::MUTED());
+                ui.add(egui::Label::new(RichText::new(value).size(11.0).color(theme::TEXT())).wrap());
+            });
+        }
+    }
+    if let Some((note, color)) = note {
+        ui.add_space(5.0);
+        ui.label(RichText::new(note).font(FontId::monospace(10.5)).color(color));
+    }
+}
+
+/// A lane's tooltip, at the pointer for as long as it is on the lane: the
+/// core's detail, and whether a click has just copied it.
+pub fn show_core_tooltip(ui: &egui::Ui, detail: &CpuDetail, copied: bool) {
+    let _ = egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("perfr-core-tip"), egui::PopupAnchor::Pointer)
+        .at_pointer()
+        .gap(8.0)
+        .show(|ui| {
+            ui.set_max_width(470.0);
+            let note = if copied { ("copied to the clipboard", theme::ACCENT()) } else { ("click to copy", theme::MUTED()) };
+            paint_detail(ui, detail, Some(note));
+        });
 }
 
 /// The diagram, in a window or under the scheduler header's hover.
-pub fn paint_cpu_panel(ui: &mut egui::Ui, machines: &[CpuTopology], marks: &[CoreInfo], max_height: f32) {
+pub fn paint_cpu_panel(ui: &mut egui::Ui, machines: &Machines, marks: &[CoreInfo], max_height: f32) {
     if machines.is_empty() && marks.is_empty() {
         ui.label(egui::RichText::new("This capture has no CPU topology.").color(theme::MUTED()).size(12.0));
         return;
     }
-    let owned = if machines.is_empty() { vec![from_marks(marks)] } else { Vec::new() };
-    let shown: &[CpuTopology] = if machines.is_empty() { &owned } else { machines };
     egui::ScrollArea::vertical().max_height(max_height).auto_shrink([false, true]).show(ui, |ui| {
-        for (i, machine) in shown.iter().enumerate() {
+        if machines.is_empty() {
+            // A capture from before the topology frame: its lane marks, as
+            // the one machine they are of.
+            let machine = from_marks(marks);
+            paint_machine(ui, &machine, &drawn(&machine));
+            return;
+        }
+        for (i, (machine, sockets)) in machines.list.iter().zip(&machines.drawn).enumerate() {
             if i > 0 {
                 ui.add_space(10.0);
             }
-            paint_machine(ui, machine);
+            paint_machine(ui, machine, sockets);
         }
     });
 }
 
-fn paint_machine(ui: &mut egui::Ui, topo: &CpuTopology) {
+fn paint_machine(ui: &mut egui::Ui, topo: &CpuTopology, sockets: &[DrawnSocket]) {
     let title = if topo.model.is_empty() { "CPU".to_string() } else { topo.model.clone() };
     ui.label(egui::RichText::new(title).color(theme::TEXT()).size(14.0).strong());
     let mut bits: Vec<String> = Vec::new();
@@ -331,11 +490,10 @@ fn paint_machine(ui: &mut egui::Ui, topo: &CpuTopology) {
         ui.label(egui::RichText::new(host.join("  ·  ")).color(theme::MUTED()).size(10.5));
     }
     ui.add_space(6.0);
-    let sockets = drawn(topo);
     if sockets.is_empty() {
         ui.label(egui::RichText::new("No per-CPU topology was recorded.").color(theme::MUTED()).size(11.0));
     }
-    for socket in &sockets {
+    for socket in sockets {
         let socket_rect = ui.scope(|ui| {
             ui.label(egui::RichText::new(&socket.label).color(theme::TEXT()).size(12.0));
             for node in &socket.nodes {
@@ -359,7 +517,7 @@ fn paint_machine(ui: &mut egui::Ui, topo: &CpuTopology) {
         ui.painter().rect_stroke(
             socket_rect.response.rect.expand(3.0),
             6.0,
-            Stroke::new(1.0, theme::MUTED().gamma_multiply(0.55)),
+            Stroke::new(1.0, divider()),
             StrokeKind::Outside,
         );
         ui.add_space(8.0);
@@ -405,7 +563,7 @@ fn paint_cores(ui: &mut egui::Ui, topo: &CpuTopology, cores: &[DrawnCore]) {
                 painter.rect_stroke(
                     Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.top() + 18.0)).shrink(1.0),
                     3.0,
-                    Stroke::new(1.0, theme::MUTED().gamma_multiply(0.7)),
+                    Stroke::new(1.0, divider()),
                     StrokeKind::Inside,
                 );
             }
@@ -418,11 +576,13 @@ fn paint_cores(ui: &mut egui::Ui, topo: &CpuTopology, cores: &[DrawnCore]) {
                     Align2::CENTER_CENTER,
                     format!("{cpu}"),
                     FontId::new(8.0, fonts::medium()),
-                    Color32::from_rgb(0x2E, 0x34, 0x40),
+                    // The number is cut out of the cell in the colour
+                    // behind it, which reads on a dark scheme and a light.
+                    theme::RAIL(),
                 );
             }
             let name = match core.core_id {
-                Some(id) => format!("P{id}"),
+                Some(id) => format!("C{id}"),
                 None => "core".into(),
             };
             painter.text(
@@ -432,22 +592,25 @@ fn paint_cores(ui: &mut egui::Ui, topo: &CpuTopology, cores: &[DrawnCore]) {
                 FontId::new(8.5, fonts::medium()),
                 theme::MUTED(),
             );
-            if let Some(detail) = topo.cpu_detail(core.cpus[0]) {
-                let text = if core.cpus.len() > 1 {
-                    format!("{detail}\n\nshares this core with CPU {}", core.cpus[1])
-                } else {
-                    detail
-                };
-                response.on_hover_text(text);
-            }
+            // Built when the pointer is on the core, not for each core of
+            // each frame.
+            response.on_hover_ui(|ui| {
+                let Some(detail) = topo.cpu_detail(core.cpus[0]) else { return };
+                ui.set_max_width(470.0);
+                let others: Vec<String> = core.cpus[1..].iter().map(|cpu| format!("CPU {cpu}")).collect();
+                let shares = (!others.is_empty()).then(|| format!("shares this core with {}", others.join(", ")));
+                paint_detail(ui, &detail, shares.as_deref().map(|text| (text, theme::MUTED())));
+            });
         }
     });
 }
 
+/// The colours the lanes' chips have: the stronger kind in the accent, the
+/// other and a core of no known kind muted. A machine has kinds or it has
+/// none, so the two muted ones never stand side by side.
 fn kind_fill(kind: u8) -> Color32 {
     match kind {
         core_kind::PERFORMANCE => theme::ACCENT(),
-        core_kind::EFFICIENCY => Color32::from_rgb(0xA3, 0xBE, 0x8C),
         _ => theme::MUTED(),
     }
 }
@@ -574,5 +737,67 @@ mod tests {
         assert_eq!(groups[0].cores[0].cpus, vec![0, 1]);
         assert_eq!(groups[0].cores[1].cpus, vec![4]);
         assert_eq!(groups[0].cores[1].kind, core_kind::EFFICIENCY);
+    }
+
+    #[test]
+    fn the_lanes_are_worked_out_when_a_machine_is_said() {
+        let mut machines = Machines::default();
+        assert!(machines.is_empty() && machines.lane(0).is_none() && machines.header_line().is_empty());
+        // Two cores of two threads on two nodes, the threads of a core
+        // numbered together; and a core with one thread after them.
+        let mut topo = CpuTopology {
+            sockets: 1,
+            smt: Some(true),
+            hostname: "box".into(),
+            cpus: vec![cpu(0, 0, 0, 0, 0, 0, 0), cpu(1, 0, 0, 0, 1, 0, 0), cpu(2, 0, 0, 1, 0, 0, 0), cpu(3, 0, 0, 1, 1, 0, 0), cpu(4, 0, 0, 2, 0, 0, 0)],
+            ..CpuTopology::default()
+        };
+        for (at, node) in [0u16, 0, 1, 1, 1].into_iter().enumerate() {
+            topo.cpus[at].numa = Some(node);
+            topo.cpus[at].max_freq_khz = 4_600_000;
+        }
+        let before = machines.generation();
+        machines.adopt(topo.clone());
+        assert_ne!(machines.generation(), before);
+        let lane = |cpu| machines.lane(cpu).unwrap();
+        assert_eq!(lane(0).label.as_deref(), Some("C0 · T0"));
+        assert_eq!(lane(3).label.as_deref(), Some("C1 · T1"));
+        assert_eq!(lane(4).label.as_deref(), Some("C2"));
+        assert_eq!(lane(0).freq.as_deref(), Some("4.6"));
+        assert_eq!([0, 1, 2, 3, 4].map(|cpu| lane(cpu).bracket), [Bracket::First, Bracket::Last, Bracket::First, Bracket::Last, Bracket::None]);
+        assert_eq!((machines.tinted_node(1), machines.tinted_node(2)), (Some(0), Some(1)));
+        assert_eq!(machines.detail(4).unwrap().title, "Core 4");
+        assert!(machines.detail(9).is_none());
+        // The same machine again takes its place; one node is no tint.
+        for cpu in &mut topo.cpus {
+            cpu.numa = Some(0);
+        }
+        machines.adopt(topo.clone());
+        assert_eq!(machines.list().len(), 1);
+        assert_eq!(machines.tinted_node(2), None);
+        // Siblings numbered apart, as Linux numbers an AMD part: the label
+        // says the pairing and no bracket joins lanes that are not adjacent.
+        let apart = CpuTopology {
+            sockets: 1,
+            smt: Some(true),
+            cpus: vec![cpu(0, 0, 0, 0, 0, 0, 0), cpu(1, 0, 0, 1, 0, 0, 0), cpu(2, 0, 0, 0, 1, 0, 0), cpu(3, 0, 0, 1, 1, 0, 0)],
+            ..CpuTopology::default()
+        };
+        let mut machines = Machines::default();
+        machines.adopt(apart);
+        assert_eq!(machines.lane(2).unwrap().label.as_deref(), Some("C0 · T1"));
+        assert!((0..4).all(|cpu| machines.lane(cpu).unwrap().bracket == Bracket::None));
+        machines.clear();
+        assert!(machines.is_empty() && machines.lane(0).is_none());
+    }
+
+    #[test]
+    fn cores_numbered_alike_in_two_clusters_are_drawn_apart() {
+        let mut little = cpu(0, 0, 0, 0, 0, core_kind::EFFICIENCY, 0);
+        let mut big = cpu(1, 0, 0, 0, 0, core_kind::PERFORMANCE, 0);
+        (little.cluster, big.cluster) = (Some(0), Some(1));
+        let topo = CpuTopology { sockets: 1, cpus: vec![little, big], ..CpuTopology::default() };
+        let cores = &drawn(&topo)[0].nodes[0].groups[0].cores;
+        assert_eq!(cores.iter().map(|core| core.cpus.clone()).collect::<Vec<_>>(), [vec![0], vec![1]]);
     }
 }

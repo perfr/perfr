@@ -2141,3 +2141,46 @@ fn a_capture_carries_its_machine_and_the_next_one_does_not() {
     assert!(!decode_all(&svc.capture_stream(None)).unwrap().iter().any(|f| matches!(f, LiveFrame::CpuTopology { .. })));
     assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
 }
+
+#[test]
+fn a_machine_said_after_the_start_joins_the_others_and_a_late_answer_is_not_said_into_the_next_capture() {
+    let svc = LiveService::new(small_cfg()).unwrap();
+    let machine = |host: &str, first: u16| perfr_live_event::CpuTopology {
+        model: "AMD Ryzen 9 7950X3D 16-Core Processor".into(),
+        hostname: host.into(),
+        cpus: (first..first + 2).map(|cpu| perfr_live_event::topology::LogicalCpu { cpu, max_freq_khz: 5_750_000, ..Default::default() }).collect(),
+        ..Default::default()
+    };
+    svc.mark_capture_started(7, 1_000);
+    let token = svc.capture_token();
+    // A remote's machine is there before the hub has read its own: the
+    // hub's joins it and does not take its place.
+    let remote = machine("render-01", 32);
+    svc.adopt_cpu_topology(&remote);
+    let mut local = machine("hub", 0);
+    svc.adopt_cpu_topology(&local);
+    assert_eq!(svc.cpu_topology(), [remote.clone(), local.clone()]);
+    // What a program said of the hub a moment later takes the hub's place.
+    local.power.daemon_profile = "performance".into();
+    svc.amend_cpu_topology(token, &local);
+    assert_eq!(svc.cpu_topology(), [remote.clone(), local.clone()]);
+    assert_eq!(svc.capture_stream(None).len() as u64, svc.stream_bytes());
+    // A viewer that kept each frame as it was sent holds the same two.
+    let mut viewer = Vec::new();
+    for frame in decode_all(&svc.capture_stream(None)).unwrap() {
+        if let LiveFrame::CpuTopology { topology } = frame {
+            perfr_live_event::topology::adopt_machine(&mut viewer, *topology);
+        }
+    }
+    assert_eq!(viewer, svc.cpu_topology());
+    // The next capture: an answer still on its way for the last one is
+    // dropped, and so is one for a capture that was cleared.
+    svc.clear_names();
+    svc.mark_capture_started(7, 2_000);
+    svc.amend_cpu_topology(token, &local);
+    assert!(svc.cpu_topology().is_empty());
+    let token = svc.capture_token();
+    svc.clear_capture().unwrap();
+    svc.amend_cpu_topology(token, &local);
+    assert!(svc.cpu_topology().is_empty());
+}

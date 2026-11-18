@@ -14,11 +14,11 @@
 //! the file reading so it can be tested against fixture text rather than
 //! whatever this machine happens to be.
 //!
-//! The viewer is told one more thing, per capture: what each core is (its
-//! kind, its top frequency, its level 3 cache), so the scheduler's lanes
-//! can say which of them a thread ran on. See [`cpu_cores`].
+//! The viewer is told one more thing, per capture: what each core is and
+//! how the machine is laid out, so the scheduler's lanes can say which of
+//! them a thread ran on. That is `cpu_topology`, which uses the list and
+//! size parsers here.
 
-use perfr_live_event::{core_kind, CoreInfo};
 use perfr_wire::Event;
 
 /// Parsed `/proc/cpuinfo`: the model string, physical cores, and logical
@@ -141,85 +141,6 @@ pub fn parse_cache_size_kb(content: &str) -> u32 {
         _ => (text, 1),
     };
     digits.parse::<u32>().ok().and_then(|n| n.checked_mul(scale)).unwrap_or(0)
-}
-
-/// What each core of the machine is, from the sysfs tree at `devices`
-/// (`/sys/devices`): one entry per `system/cpu/cpuN`, in the order of their
-/// numbers. Nothing when no core has anything to tell, as in a container
-/// with no cpufreq and no cache directory.
-///
-/// The kind is what the kernel's hybrid PMUs say (`cpu_core/cpus` and
-/// `cpu_atom/cpus` on Intel, with `cpu_lowpower` among the efficiency
-/// cores), or else the capacities of an asymmetric machine
-/// (`cpu_capacity`, big.LITTLE): the cores of the highest capacity are the
-/// performance cores. The top frequency is `cpufreq/cpuinfo_max_freq`, and
-/// the cache is the size of the `cache/index*` whose level is 3. These are
-/// the files a tool that pins a game to "the fast cores" reads.
-pub fn cpu_cores_from_sysfs(devices: &std::path::Path) -> Vec<CoreInfo> {
-    let read = |path: std::path::PathBuf| std::fs::read_to_string(path).unwrap_or_default();
-    let cpu_dir = devices.join("system/cpu");
-    let Ok(entries) = std::fs::read_dir(&cpu_dir) else { return Vec::new() };
-    let mut cpus: Vec<u16> = entries
-        .flatten()
-        .filter_map(|entry| entry.file_name().to_str()?.strip_prefix("cpu")?.parse().ok())
-        .collect();
-    cpus.sort_unstable();
-    cpus.dedup();
-
-    let performance = parse_cpu_list(&read(devices.join("cpu_core/cpus")));
-    let mut efficiency = parse_cpu_list(&read(devices.join("cpu_atom/cpus")));
-    efficiency.extend(parse_cpu_list(&read(devices.join("cpu_lowpower/cpus"))));
-    let hybrid = !performance.is_empty() && !efficiency.is_empty();
-    let capacities: Vec<u32> = cpus
-        .iter()
-        .map(|cpu| read(cpu_dir.join(format!("cpu{cpu}/cpu_capacity"))).trim().parse().unwrap_or(0))
-        .collect();
-    let top_capacity = capacities.iter().copied().max().unwrap_or(0);
-    let asymmetric = capacities.iter().any(|&c| c != 0 && c != top_capacity);
-
-    let cores: Vec<CoreInfo> = cpus
-        .iter()
-        .zip(&capacities)
-        .map(|(&cpu, &capacity)| {
-            let dir = cpu_dir.join(format!("cpu{cpu}"));
-            let kind = if hybrid {
-                if performance.contains(&cpu) {
-                    core_kind::PERFORMANCE
-                } else if efficiency.contains(&cpu) {
-                    core_kind::EFFICIENCY
-                } else {
-                    core_kind::UNKNOWN
-                }
-            } else if asymmetric && capacity != 0 {
-                if capacity == top_capacity { core_kind::PERFORMANCE } else { core_kind::EFFICIENCY }
-            } else {
-                core_kind::UNKNOWN
-            };
-            let l3_kb = (0..10)
-                .map(|index| dir.join(format!("cache/index{index}")))
-                .find(|cache| read(cache.join("level")).trim() == "3")
-                .map(|cache| parse_cache_size_kb(&read(cache.join("size"))))
-                .unwrap_or(0);
-            CoreInfo {
-                cpu,
-                kind,
-                max_freq_khz: read(dir.join("cpufreq/cpuinfo_max_freq")).trim().parse().unwrap_or(0),
-                l3_kb,
-            }
-        })
-        .collect();
-    if cores.iter().all(|c| c.kind == core_kind::UNKNOWN && c.max_freq_khz == 0 && c.l3_kb == 0) {
-        return Vec::new();
-    }
-    cores
-}
-
-/// What each core of this machine is, for the viewer's scheduler lanes;
-/// empty where the system does not say. Windows has its own
-/// (`windows::cpu_cores`); macOS has no scheduler track to mark.
-#[cfg(target_os = "linux")]
-pub fn cpu_cores() -> Vec<CoreInfo> {
-    cpu_cores_from_sysfs(std::path::Path::new("/sys/devices"))
 }
 
 // The Windows file capture does not write a SystemInfo event yet; the
@@ -382,135 +303,6 @@ core id\t\t: 0
         assert_eq!(parse_cache_size_kb("96M"), 98_304);
         assert_eq!(parse_cache_size_kb("512"), 512);
         assert_eq!(parse_cache_size_kb("big"), 0);
-    }
-
-    /// A sysfs tree in a fresh directory: `(path under devices, content)`.
-    struct Sysfs(std::path::PathBuf);
-
-    impl Sysfs {
-        fn new(name: &str, files: &[(String, &str)]) -> Sysfs {
-            let dir = std::env::temp_dir().join(format!("perfr-sysfs-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            for (path, content) in files {
-                let path = dir.join(path);
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                std::fs::write(path, content).unwrap();
-            }
-            Sysfs(dir)
-        }
-    }
-
-    impl Drop for Sysfs {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// One core's files: its top frequency and its caches, a level 2 at
-    /// `index2` and the level 3 at `index3`.
-    fn core_files(cpu: u16, max_freq: &'static str, l3: &'static str) -> Vec<(String, &'static str)> {
-        let dir = format!("system/cpu/cpu{cpu}");
-        vec![
-            (format!("{dir}/cpufreq/cpuinfo_max_freq"), max_freq),
-            (format!("{dir}/cache/index2/level"), "2\n"),
-            (format!("{dir}/cache/index2/size"), "2048K\n"),
-            (format!("{dir}/cache/index3/level"), "3\n"),
-            (format!("{dir}/cache/index3/size"), l3),
-        ]
-    }
-
-    #[test]
-    fn a_hybrid_machine_tells_its_performance_cores_from_its_efficiency_cores() {
-        // Two P-cores, one of them favoured with a higher top frequency,
-        // and two E-cores, as a 13th generation Core lays them out. cpu10
-        // is listed after cpu2 by name and is the last by number.
-        let mut files = Vec::new();
-        files.extend(core_files(0, "5500000\n", "36864K\n"));
-        files.extend(core_files(1, "5800000\n", "36864K\n"));
-        files.extend(core_files(2, "4300000\n", "36864K\n"));
-        files.extend(core_files(10, "4300000\n", "36864K\n"));
-        files.push(("cpu_core/cpus".into(), "0-1\n"));
-        files.push(("cpu_atom/cpus".into(), "2,10\n"));
-        // What is in the directory beside the cores.
-        files.push(("system/cpu/cpufreq/policy0/scaling_governor".into(), "powersave\n"));
-        files.push(("system/cpu/online".into(), "0-2,10\n"));
-        let sysfs = Sysfs::new("hybrid", &files);
-        assert_eq!(
-            cpu_cores_from_sysfs(&sysfs.0),
-            [
-                CoreInfo { cpu: 0, kind: core_kind::PERFORMANCE, max_freq_khz: 5_500_000, l3_kb: 36_864 },
-                CoreInfo { cpu: 1, kind: core_kind::PERFORMANCE, max_freq_khz: 5_800_000, l3_kb: 36_864 },
-                CoreInfo { cpu: 2, kind: core_kind::EFFICIENCY, max_freq_khz: 4_300_000, l3_kb: 36_864 },
-                CoreInfo { cpu: 10, kind: core_kind::EFFICIENCY, max_freq_khz: 4_300_000, l3_kb: 36_864 },
-            ]
-        );
-    }
-
-    #[test]
-    fn a_machine_of_one_kind_of_core_names_no_kind_and_keeps_what_differs() {
-        // An X3D Ryzen: the stacked cache on the first core, the higher
-        // frequency on the second, and no kind for the kernel to name.
-        let mut files = Vec::new();
-        files.extend(core_files(0, "5050000\n", "98304K\n"));
-        files.extend(core_files(1, "5759000\n", "32768K\n"));
-        let sysfs = Sysfs::new("x3d", &files);
-        assert_eq!(
-            cpu_cores_from_sysfs(&sysfs.0),
-            [
-                CoreInfo { cpu: 0, kind: core_kind::UNKNOWN, max_freq_khz: 5_050_000, l3_kb: 98_304 },
-                CoreInfo { cpu: 1, kind: core_kind::UNKNOWN, max_freq_khz: 5_759_000, l3_kb: 32_768 },
-            ]
-        );
-    }
-
-    #[test]
-    fn the_capacities_of_an_asymmetric_machine_name_its_big_and_little_cores() {
-        let files = vec![
-            ("system/cpu/cpu0/cpu_capacity".to_string(), "430\n"),
-            ("system/cpu/cpu0/cpufreq/cpuinfo_max_freq".to_string(), "1800000\n"),
-            ("system/cpu/cpu1/cpu_capacity".to_string(), "1024\n"),
-            ("system/cpu/cpu1/cpufreq/cpuinfo_max_freq".to_string(), "2400000\n"),
-        ];
-        let sysfs = Sysfs::new("biglittle", &files);
-        assert_eq!(
-            cpu_cores_from_sysfs(&sysfs.0),
-            [
-                CoreInfo { cpu: 0, kind: core_kind::EFFICIENCY, max_freq_khz: 1_800_000, l3_kb: 0 },
-                CoreInfo { cpu: 1, kind: core_kind::PERFORMANCE, max_freq_khz: 2_400_000, l3_kb: 0 },
-            ]
-        );
-        // The same capacity everywhere is one kind of core, not named.
-        let files = vec![
-            ("system/cpu/cpu0/cpu_capacity".to_string(), "1024\n"),
-            ("system/cpu/cpu0/cpufreq/cpuinfo_max_freq".to_string(), "2400000\n"),
-            ("system/cpu/cpu1/cpu_capacity".to_string(), "1024\n"),
-            ("system/cpu/cpu1/cpufreq/cpuinfo_max_freq".to_string(), "2400000\n"),
-        ];
-        let sysfs = Sysfs::new("symmetric", &files);
-        assert!(cpu_cores_from_sysfs(&sysfs.0).iter().all(|c| c.kind == core_kind::UNKNOWN));
-    }
-
-    #[test]
-    fn a_machine_that_tells_nothing_of_its_cores_has_none_to_show() {
-        // A container: the cores are there, with no frequency and no cache.
-        let files = vec![
-            ("system/cpu/cpu0/online".to_string(), "1\n"),
-            ("system/cpu/cpu1/online".to_string(), "1\n"),
-        ];
-        let sysfs = Sysfs::new("bare", &files);
-        assert!(cpu_cores_from_sysfs(&sysfs.0).is_empty());
-        assert!(cpu_cores_from_sysfs(std::path::Path::new("/nonexistent/perfr")).is_empty());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn cpu_cores_are_this_machines_or_none() {
-        let cores = cpu_cores();
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        // One entry per CPU the kernel lists, in order; a restricted
-        // affinity makes `threads` the smaller of the two.
-        assert!(cores.is_empty() || cores.len() >= threads, "{} cores for {threads} threads", cores.len());
-        assert!(cores.windows(2).all(|w| w[0].cpu < w[1].cpu));
     }
 
     #[test]

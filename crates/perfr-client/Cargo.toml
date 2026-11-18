@@ -84,7 +84,7 @@ features = [
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"], optional = true }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"], optional = true }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"], optional = true }
 futures-util = { version = "0.3", features = ["sink"], optional = true }
 
 [[example]]

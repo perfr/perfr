@@ -70,6 +70,7 @@ mod build_info;
 mod cli;
 mod preflight;
 mod skill;
+mod share;
 mod update;
 
 #[cfg(target_os = "linux")]

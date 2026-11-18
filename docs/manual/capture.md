@@ -101,3 +101,19 @@ Select a time range on the timeline, then use **Save → Selected slice (.perfr.
 The file keeps overlapping scopes whole, samples within the selected range,
 their callstack frames, and thread/process names. The selected window is stored
 in the archive alongside the retained events' full bounds.
+
+## Share from the terminal
+
+`perfr share` puts a capture on perfr.dev and prints its link, as the **Share** button does from the viewer. Anyone who has the link opens the capture in a browser.
+
+```
+perfr share capture.perfr.zip                      # a saved capture
+perfr share capture.perfr.zip --name runs/spike    # under another name, in a folder
+perfr share                                        # the capture the service on this machine holds
+```
+
+The file is a `.perfr.zip` or a `.perfr.stream`. The link is `https://perfr.dev/<your handle>/<name>`: the name is the file's unless `--name` gives one, and a name you already use is refused unless `--replace` is passed. `--unlisted` leaves the capture out of your public folder. `--json` prints the website's whole answer (`id`, `url`, `path`, `handle`, `listed`) for a script. `--service <url>` shares the capture of a service on another port.
+
+The website knows you by an API token. Make one on [perfr.dev/account](https://perfr.dev/account), then run `perfr login` once and paste it: perfr asks the website whose it is and keeps it in a file only you can read (`credentials.json` in `~/.config/perfr`, or in `%APPDATA%\perfr`). `PERFR_TOKEN` is used first when it is set. `perfr login --status` says who is signed in, and `perfr logout` forgets the token; revoke it on the account page to end it. The upload is done by `curl`.
+
+A `.perfr.zip` is read by a second service that perfr starts on a spare port of this machine and stops when the file is read. The one you are recording with is left alone.

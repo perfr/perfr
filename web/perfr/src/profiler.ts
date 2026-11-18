@@ -280,7 +280,9 @@ export class Profiler {
 
   async exportBlob(): Promise<Blob> {
     const bytes = await this.exportStream();
-    return new Blob([bytes], { type: "application/octet-stream" });
+    // The bytes are a copy out of the recorder's memory, never a view of a
+    // shared buffer, which is the one kind of view a Blob does not take.
+    return new Blob([bytes as BlobPart], { type: "application/octet-stream" });
   }
 
   async download(filename = "capture.perfr.stream"): Promise<void> {

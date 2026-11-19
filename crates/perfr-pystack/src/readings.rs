@@ -26,6 +26,10 @@ const MAX_FRAMES: usize = 128;
 /// name that never existed; this is what bounds how many of those are kept.
 const MAX_SYMBOLS: usize = 1 << 18;
 
+/// How sure the readings can get of a thread's outermost frame, in readings
+/// that agreed; see [`Inner::is_torn`].
+const ROOT_TRUST: i8 = 16;
+
 /// GIL spans held back while only one thread has been seen holding it.
 const MAX_PENDING_SPANS: usize = 4096;
 
@@ -117,6 +121,9 @@ pub struct Stats {
     pub readings: u64,
     /// Readings that failed part-way: the target changed what was being read.
     pub failed: u64,
+    /// Stacks of single threads, in readings that otherwise succeeded, that
+    /// stopped short of the thread's outermost frame and were dropped.
+    pub torn: u64,
     /// Time between readings now. It grows when one reading costs more than
     /// a fifth of it, so the reader never takes more than a fifth of a core.
     pub period_ns: u64,
@@ -212,6 +219,9 @@ struct Inner {
     /// nearly every frame of every reading.
     symbol_ids: HashMap<Box<str>, HashMap<Box<str>, Vec<(i32, u32)>>>,
     threads: HashMap<u32, VecDeque<Reading>>,
+    /// Each thread's outermost frame and how many readings in a row, up to
+    /// [`ROOT_TRUST`], have had it there.
+    roots: HashMap<u32, (u32, i8)>,
     gil: Gil,
     names: HashMap<u32, String>,
     renamed: Vec<u32>,
@@ -272,6 +282,38 @@ impl Inner {
         id
     }
 
+    /// Whether a stack whose outermost frame is `root` stops short of the
+    /// bottom of its thread's stack.
+    ///
+    /// The target is not paused, and a frame is linked to its caller a
+    /// moment after it becomes the thread's current frame (a generator's is
+    /// linked each time it is resumed, and unlinked each time it yields). A
+    /// read in that moment follows the chain from the innermost frame and
+    /// finds its end at once: a stack of one or two frames that is not the
+    /// thread's stack, and would be joined to a sample as if it were.
+    ///
+    /// What gives it away is where it ends. A thread's outermost Python
+    /// frame is the same for as long as the thread lives (`<module>`, or
+    /// `Thread._bootstrap`), so a stack that ends anywhere else is torn.
+    /// The outermost frame is learnt by majority: each reading that agrees
+    /// adds to its standing, each that does not takes away, and a thread
+    /// that really has a new one (an id reused by another thread, or a
+    /// thread C code calls different Python functions on) is believed once
+    /// the old one's standing is spent, within [`ROOT_TRUST`] readings.
+    fn is_torn(&mut self, tid: u32, root: u32) -> bool {
+        let known = self.roots.entry(tid).or_insert((root, 0));
+        if known.0 == root {
+            known.1 = (known.1 + 1).min(ROOT_TRUST);
+            return false;
+        }
+        known.1 -= 1;
+        if known.1 < 0 {
+            *known = (root, 1);
+            return false;
+        }
+        true
+    }
+
     /// How far from a sample a reading may be and still be joined to it, and
     /// how far apart two readings may be and still bracket a GIL hand-over.
     fn tolerance_ns(&self) -> u64 {
@@ -287,6 +329,7 @@ impl Readings {
                 symbols: Vec::new(),
                 symbol_ids: HashMap::new(),
                 threads: HashMap::new(),
+                roots: HashMap::new(),
                 gil: Gil::default(),
                 names: HashMap::new(),
                 renamed: Vec::new(),
@@ -338,6 +381,16 @@ impl Readings {
                     entry: raw.entry,
                 });
             }
+            // The outermost frame as it was read, not as the depth limit
+            // left it.
+            if let Some(outermost) = thread.frames.last() {
+                let root = inner.symbol_id(outermost);
+                if inner.is_torn(thread.tid, root) {
+                    inner.stats.torn += 1;
+                    inner.scratch = scratch;
+                    continue;
+                }
+            }
             let list = inner.threads.entry(thread.tid).or_default();
             // A thread in the same place as last time, which is most threads
             // most of the time, shares that reading's stack.
@@ -358,6 +411,8 @@ impl Readings {
             }
             !list.is_empty()
         });
+        let threads_kept = &inner.threads;
+        inner.roots.retain(|tid, _| threads_kept.contains_key(tid));
         let (period_ns, stall_ns) = (inner.stats.period_ns, inner.tolerance_ns());
         inner.gil.note(time_ns, holder, period_ns, stall_ns);
         if inner.stats.readings == 0 {
@@ -432,6 +487,52 @@ impl Readings {
                 steady: false,
             },
             (None, None) => Near::default(),
+        }
+    }
+
+    /// The distinct stacks `tid` was read in within the same reach of
+    /// `time_ns` as [`near`](Self::near) has, nearest first, at most `max`.
+    /// For a sample the two readings beside it do not explain: a call from C
+    /// into Python that happens thousands of times a second (a generator
+    /// being drained, a key function) is on the stack in some readings and
+    /// not in others, and the two nearest may both have missed it.
+    pub fn around(&self, tid: u32, time_ns: u64, max: usize, out: &mut Vec<Arc<[Frame]>>) {
+        out.clear();
+        let inner = self.lock();
+        let Some(list) = inner.threads.get(&tid) else {
+            return;
+        };
+        let tolerance = inner.tolerance_ns();
+        let middle = list.partition_point(|reading| reading.time_ns < time_ns);
+        // Walk outwards from the sample, taking whichever side is nearer.
+        let (mut before, mut after) = (middle, middle);
+        while out.len() < max {
+            let earlier = before
+                .checked_sub(1)
+                .and_then(|i| list.get(i))
+                .map(|r| time_ns - r.time_ns);
+            let later = list.get(after).map(|r| r.time_ns - time_ns);
+            let reading = match (earlier, later) {
+                (Some(e), Some(l)) if e <= l && e <= tolerance => {
+                    before -= 1;
+                    &list[before]
+                }
+                (_, Some(l)) if l <= tolerance => {
+                    after += 1;
+                    &list[after - 1]
+                }
+                (Some(e), _) if e <= tolerance => {
+                    before -= 1;
+                    &list[before]
+                }
+                _ => break,
+            };
+            if !out
+                .iter()
+                .any(|known| Arc::ptr_eq(known, &reading.stack) || known[..] == reading.stack[..])
+            {
+                out.push(reading.stack.clone());
+            }
         }
     }
 
@@ -566,14 +667,27 @@ mod tests {
     #[test]
     fn a_sample_gets_the_reading_nearest_to_it_and_the_one_on_the_other_side() {
         let readings = Readings::new(MS);
-        readings.record(10 * MS, &[thread(1, false, vec![frame("a", "f.py", 1)])]);
-        readings.record(11 * MS, &[thread(1, false, vec![frame("b", "f.py", 2)])]);
+        let main = frame("main", "f.py", 9);
+        readings.record(
+            10 * MS,
+            &[thread(1, false, vec![frame("a", "f.py", 1), main])],
+        );
+        readings.record(
+            11 * MS,
+            &[thread(1, false, vec![frame("b", "f.py", 2), main])],
+        );
         let near = readings.near(1, 10 * MS + 300_000);
-        assert_eq!(names(&readings, &near.nearest.unwrap()), ["a (f.py:1)"]);
-        assert_eq!(names(&readings, &near.other.unwrap()), ["b (f.py:2)"]);
+        assert_eq!(
+            names(&readings, &near.nearest.unwrap()),
+            ["a (f.py:1)", "main (f.py:9)"]
+        );
+        assert_eq!(
+            names(&readings, &near.other.unwrap()),
+            ["b (f.py:2)", "main (f.py:9)"]
+        );
         assert!(!near.steady);
         let near = readings.near(1, 10 * MS + 700_000);
-        assert_eq!(names(&readings, &near.nearest.unwrap()), ["b (f.py:2)"]);
+        assert_eq!(names(&readings, &near.nearest.unwrap())[0], "b (f.py:2)");
     }
 
     #[test]
@@ -590,6 +704,38 @@ mod tests {
             readings.near(1, 12 * MS).nearest.unwrap(),
         );
         assert!(Arc::ptr_eq(&first, &last));
+    }
+
+    #[test]
+    fn the_stacks_around_a_sample_come_nearest_first_each_once_and_only_from_close_by() {
+        let readings = Readings::new(MS);
+        let stack = |name: &'static str| vec![frame(name, "f.py", 1), frame("main", "f.py", 9)];
+        for (at, name) in [
+            (1, "far"),
+            (10, "a"),
+            (11, "b"),
+            (12, "a"),
+            (13, "c"),
+            (14, "d"),
+        ] {
+            readings.record(at * MS, &[thread(1, false, stack(name))]);
+        }
+        let mut around = Vec::new();
+        let named = |around: &Vec<Arc<[Frame]>>| -> Vec<String> {
+            around
+                .iter()
+                .map(|s| readings.symbol(s[0].symbol).unwrap().name[..1].to_string())
+                .collect()
+        };
+        // From 11.9 ms: 12 (a), 11 (b), 13 (c), 10 (a again, not repeated), 14 (d). Not 1 ms.
+        readings.around(1, 11 * MS + 900_000, 8, &mut around);
+        assert_eq!(named(&around), ["a", "b", "c", "d"]);
+        readings.around(1, 11 * MS + 900_000, 2, &mut around);
+        assert_eq!(named(&around), ["a", "b"]);
+        readings.around(2, 11 * MS, 8, &mut around);
+        assert!(around.is_empty());
+        readings.around(1, 40 * MS, 8, &mut around);
+        assert!(around.is_empty());
     }
 
     #[test]
@@ -621,6 +767,89 @@ mod tests {
         assert!(readings.near(1, MS).is_empty(), "older than two seconds");
         assert!(readings.near(2, MS).is_empty());
         assert!(!readings.near(1, 1900 * MS).is_empty());
+    }
+
+    #[test]
+    fn a_stack_that_stops_short_of_the_threads_outermost_frame_is_torn_and_dropped() {
+        let readings = Readings::new(MS);
+        let whole = || {
+            vec![
+                frame("genexpr", "g.py", 2),
+                frame("squares", "g.py", 1),
+                frame("<module>", "g.py", 9),
+            ]
+        };
+        let no_generator = || vec![frame("squares", "g.py", 1), frame("<module>", "g.py", 9)];
+        // Read while the generator's frame was not yet linked to its caller.
+        let torn = || vec![frame("genexpr", "g.py", 2)];
+        readings.record(10 * MS, &[thread(1, false, whole())]);
+        readings.record(11 * MS, &[thread(1, false, no_generator())]);
+        readings.record(12 * MS, &[thread(1, false, torn())]);
+        readings.record(13 * MS, &[thread(1, false, whole())]);
+        assert_eq!(readings.stats().torn, 1);
+        // The sample at the torn reading's instant gets its neighbours.
+        let near = readings.near(1, 12 * MS);
+        assert_eq!(near.nearest.unwrap().len(), 2);
+        let mut around = Vec::new();
+        readings.around(1, 12 * MS, 8, &mut around);
+        assert!(
+            around.iter().all(|stack| stack.len() >= 2),
+            "the torn stack is among those around"
+        );
+        // A thread with no Python frames is not torn.
+        readings.record(14 * MS, &[thread(1, false, vec![])]);
+        assert_eq!(readings.stats().torn, 1);
+    }
+
+    #[test]
+    fn a_new_outermost_frame_is_believed_once_it_has_outlasted_the_old_one() {
+        let readings = Readings::new(MS);
+        let on = |at: u64, root: &'static str| {
+            readings.record(
+                at * MS,
+                &[thread(
+                    1,
+                    false,
+                    vec![frame("f", "a.py", 3), frame(root, "a.py", 1)],
+                )],
+            )
+        };
+        // The interpreter starts in one module and settles in another; or
+        // the kernel gave a new thread an old thread's id.
+        for at in 0..3 {
+            on(at, "site");
+        }
+        for at in 3..10 {
+            on(at, "<module>");
+        }
+        // Three readings had built `site` a standing of three: three of the
+        // new one are dropped, the fourth is believed, and so are the rest.
+        assert_eq!(readings.stats().torn, 3);
+        assert!(
+            readings.near(1, 4 * MS).nearest.is_some(),
+            "the old one's readings are still there"
+        );
+        let stack = readings.near(1, 9 * MS).nearest.unwrap();
+        assert_eq!(
+            readings.symbol(stack[1].symbol).unwrap().name,
+            "<module> (a.py:1)"
+        );
+        // A first reading that was itself torn is taken for the thread's
+        // stack, and costs the one good reading it takes to outvote it.
+        let readings = Readings::new(MS);
+        readings.record(MS, &[thread(1, false, vec![frame("genexpr", "g.py", 2)])]);
+        for at in 2..6 {
+            readings.record(
+                at * MS,
+                &[thread(
+                    1,
+                    false,
+                    vec![frame("f", "g.py", 3), frame("<module>", "g.py", 1)],
+                )],
+            );
+        }
+        assert_eq!(readings.stats().torn, 1);
+        assert_eq!(readings.near(1, 5 * MS).nearest.unwrap().len(), 2);
     }
 
     #[test]

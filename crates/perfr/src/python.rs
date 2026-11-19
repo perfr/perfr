@@ -52,6 +52,10 @@ struct Counters {
     /// than the native stack: the reading and the sample were on either
     /// side of a call from C into Python, or of its return.
     apart: u64,
+    /// Of the merged ones, those whose innermost call into Python was not in
+    /// either reading beside the sample and was found in one a little
+    /// further away, under the same callers.
+    completed: u64,
     /// Samples with interpreter frames and no reading close enough.
     no_reading: u64,
     /// Samples in the interpreter that no reading had a Python frame for.
@@ -73,6 +77,7 @@ pub(crate) struct PythonStacks {
     kinds: Vec<Native>,
     merged: Vec<Merged>,
     candidate: Vec<Merged>,
+    around: Vec<Arc<[perfr_pystack::Frame]>>,
     ids: Vec<u32>,
     spans: Vec<perfr_pystack::GilSpan>,
 }
@@ -129,6 +134,7 @@ impl PythonStacks {
             kinds: Vec::new(),
             merged: Vec::new(),
             candidate: Vec::new(),
+            around: Vec::new(),
             ids: Vec::new(),
             spans: Vec::new(),
         }
@@ -182,8 +188,11 @@ impl PythonStacks {
     /// the native stack. A sample with nothing to place is left as it was
     /// and counted. The result is cut to `max_frames`, which
     /// loses outermost frames like a native stack deeper than that does.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn merge(
         &mut self,
+        tid: u32,
+        time_ns: u64,
         frames: &mut Vec<u32>,
         whole: bool,
         near: &Near,
@@ -218,12 +227,20 @@ impl PythonStacks {
                 }
             }
         }
-        let Some(apart) = best else {
+        let Some(mut apart) = best else {
             // A thread with no Python frames that is not in the interpreter
             // either is simply not running Python.
             self.counters.unplaced += u64::from(has_eval || any_frames);
             return;
         };
+        if apart > 0 {
+            if let Some(nearest) = &near.nearest {
+                if self.complete(tid, time_ns, whole, nearest) {
+                    apart = 0;
+                    self.counters.completed += 1;
+                }
+            }
+        }
         let merged = std::mem::take(&mut self.merged);
         self.ids.clear();
         for frame in merged.iter().take(max_frames) {
@@ -238,6 +255,36 @@ impl PythonStacks {
         self.counters.merged += 1;
         self.counters.steady += u64::from(near.steady);
         self.counters.apart += u64::from(apart > 0);
+    }
+
+    /// For a sample whose native stack is in a call from C into Python that
+    /// neither reading beside it caught: looks a little further for a
+    /// reading that is `nearest` with more Python called under it, and fits
+    /// the native stack exactly. A generator being drained by `sum`, or a
+    /// key function called by `sorted`, is entered and left thousands of
+    /// times a second, so half the readings have it and half do not; under
+    /// the same callers, within milliseconds, it is the same call. Leaves
+    /// the merge in `self.merged` and returns true when one is found.
+    fn complete(
+        &mut self,
+        tid: u32,
+        time_ns: u64,
+        whole: bool,
+        nearest: &Arc<[perfr_pystack::Frame]>,
+    ) -> bool {
+        let mut around = std::mem::take(&mut self.around);
+        self.readings.around(tid, time_ns, 12, &mut around);
+        let found = around.iter().any(|stack| {
+            stack.len() > nearest.len()
+                && stack[stack.len() - nearest.len()..] == nearest[..]
+                && perfr_pystack::merge(&self.kinds, whole, stack, &mut self.candidate) == Some(0)
+        });
+        if found {
+            std::mem::swap(&mut self.merged, &mut self.candidate);
+        }
+        around.clear();
+        self.around = around;
+        found
     }
 
     /// Once a pass: says what the reader found, hands Python's thread names
@@ -343,18 +390,22 @@ impl PythonStacks {
             0.0
         };
         log::info!(
-            "Python stacks: {} readings of {} thread(s) at {rate:.0} per second, {} failed and were dropped",
+            "Python stacks: {} readings of {} thread(s) at {rate:.0} per second; \
+             {} failed and {} stack(s) were read torn, and were dropped",
             stats.readings,
             stats.threads,
-            stats.failed
+            stats.failed,
+            stats.torn
         );
         let c = &self.counters;
         log::info!(
             "{} sample(s) carry Python frames: {} between two readings of the same stack, \
+             {} with their innermost call into Python taken from a reading a little further away, \
              {} with a Python stack a call deeper or shallower than the native one. \
              {} kept the interpreter's frames: {} had no reading close enough, {} no Python frame to place",
             c.merged,
             c.steady,
+            c.completed,
             c.apart,
             c.no_reading + c.unplaced,
             c.no_reading,
@@ -450,7 +501,7 @@ mod tests {
             let mut ids = self.native(frames);
             let near = self.python.near(tid, at_ns);
             self.python
-                .merge(&mut ids, whole, &near, &mut self.names, 64);
+                .merge(tid, at_ns, &mut ids, whole, &near, &mut self.names, 64);
             self.named(&ids)
         }
 
@@ -526,11 +577,20 @@ mod tests {
         let mut rig = Rig::new();
         // Nearest: two runs, against a native stack with one eval frame.
         // The other side: one run, a different function.
-        rig.read(10, 7, &[("key", 5, true), ("rank", 3, true)]);
-        rig.read(11, 7, &[("crunch", 3, true)]);
+        rig.read(
+            10,
+            7,
+            &[("key", 5, true), ("rank", 3, false), ("main", 1, true)],
+        );
+        rig.read(11, 7, &[("crunch", 3, false), ("main", 1, true)]);
         assert_eq!(
             rig.merged(7, 10 * MS + 100_000, true, &NATIVE),
-            ["PyLong_FromLong", "crunch (w.py:3)", "start_thread"]
+            [
+                "PyLong_FromLong",
+                "crunch (w.py:3)",
+                "main (w.py:1)",
+                "start_thread"
+            ]
         );
         assert_eq!(rig.python.counters.apart, 0);
     }
@@ -550,6 +610,62 @@ mod tests {
             (rig.python.counters.merged, rig.python.counters.apart),
             (1, 1)
         );
+    }
+
+    #[test]
+    fn a_call_into_python_both_neighbours_missed_is_taken_from_a_reading_a_little_further_away() {
+        let mut rig = Rig::new();
+        // sum() draining a generator: the generator is on the stack in some
+        // readings and not in others. The sample is in it; the two readings
+        // beside the sample are not.
+        let native = [
+            "python3.14!_PyEval_EvalFrameDefault",
+            "python3.14!gen_iternext",
+            "python3.14!builtin_sum",
+            "python3.14!_PyEval_EvalFrameDefault",
+            "libc.so.6!__libc_start_main",
+        ];
+        rig.read(8, 7, &[("genexpr", 2, true), ("squares", 1, true)]);
+        rig.read(10, 7, &[("squares", 1, true)]);
+        rig.read(11, 7, &[("squares", 1, true)]);
+        assert_eq!(
+            rig.merged(7, 10 * MS + 400_000, true, &native),
+            ["genexpr (w.py:2)", "squares (w.py:1)", "__libc_start_main"]
+        );
+        let c = &rig.python.counters;
+        assert_eq!((c.merged, c.completed, c.apart), (1, 1, 0));
+    }
+
+    #[test]
+    fn a_call_into_python_seen_only_under_other_callers_is_not_borrowed() {
+        let mut rig = Rig::new();
+        let native = [
+            "python3.14!_PyEval_EvalFrameDefault",
+            "python3.14!gen_iternext",
+            "python3.14!_PyEval_EvalFrameDefault",
+            "libc.so.6!__libc_start_main",
+        ];
+        // A generator, but under another function than the one the thread
+        // is in around the sample.
+        rig.read(
+            8,
+            7,
+            &[("genexpr", 2, true), ("pairs", 5, false), ("main", 9, true)],
+        );
+        rig.read(10, 7, &[("squares", 1, false), ("main", 9, true)]);
+        rig.read(11, 7, &[("squares", 1, false), ("main", 9, true)]);
+        assert_eq!(
+            rig.merged(7, 10 * MS + 400_000, true, &native),
+            [
+                "_PyEval_EvalFrameDefault",
+                "gen_iternext",
+                "squares (w.py:1)",
+                "main (w.py:9)",
+                "__libc_start_main"
+            ]
+        );
+        let c = &rig.python.counters;
+        assert_eq!((c.merged, c.completed, c.apart), (1, 0, 1));
     }
 
     #[test]
@@ -608,7 +724,8 @@ mod tests {
         rig.read(10, 7, &[("c", 3, false), ("b", 2, false), ("a", 1, true)]);
         let mut ids = rig.native(&NATIVE);
         let near = rig.python.near(7, 10 * MS);
-        rig.python.merge(&mut ids, true, &near, &mut rig.names, 3);
+        rig.python
+            .merge(7, 10 * MS, &mut ids, true, &near, &mut rig.names, 3);
         assert_eq!(
             rig.named(&ids),
             ["PyLong_FromLong", "c (w.py:3)", "b (w.py:2)"]

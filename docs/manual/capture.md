@@ -92,16 +92,19 @@ The kernel takes the native sample at one instant. The Python stack is read by a
 
 - A sample takes the reading of its thread nearest to it in time, from the one before and the one after. A reading more than three reading periods away (5 ms at least) is not used.
 - The native stack says how many times the interpreter was entered from C, and the Python stack says the same of itself. Where they agree, each run of Python frames takes the place of its eval frame. Where they differ, a callback from C into Python began or ended between the sample and the reading: the stacks are paired from the root, an eval frame with no Python function stays as `_PyEval_EvalFrameDefault`, and a Python function with no eval frame is left out. If the other reading is closer in shape, it is used instead.
-- A reading that fails, because the target changed what was being read, is dropped. Nothing is made up for it.
+- A sample whose native stack is in a call from C into Python that neither reading beside it caught looks a little further: a reading within the same reach that is the nearest one with more Python called under it, and fits the native stack exactly, supplies that call. A generator drained by `sum`, or a key function called by `sorted`, is entered and left thousands of times a second, so some readings have it and some do not; under the same callers, within milliseconds, it is the same call.
+- A reading that fails, because the target changed what was being read, is dropped. So is one thread's stack when it stops short of that thread's outermost frame: read in the instant a frame was being linked to its caller, it is one or two frames that are not the thread's stack. A thread's outermost Python frame does not change while it lives, which is how these are told. Nothing is made up for either.
 
 What cannot be checked is the inside of a run. Python calling Python does not move the native stack, so in code that calls many small functions the innermost Python frames of one sample are those of a moment up to half a millisecond earlier or later. Over a report this evens out: each function gets its share. For one sample it is the limit of reading from outside, and it is why a native leaf can now and then sit under a Python function that did not call it.
 
 When the capture stops the service log says how it went:
 
 ```
-Python stacks: 3875 readings of 7 thread(s) at 974 per second, 1 failed and were dropped
-3929 sample(s) carry Python frames: 322 between two readings of the same stack, 176 with a Python stack a call deeper or shallower than the native one. 7 kept the interpreter's frames: 7 had no reading close enough, 0 no Python frame to place
+Python stacks: 3913 readings of 7 thread(s) at 983 per second; 1 failed and 4 stack(s) were read torn, and were dropped
+3929 sample(s) carry Python frames: 249 between two readings of the same stack, 6 with their innermost call into Python taken from a reading a little further away, 163 with a Python stack a call deeper or shallower than the native one. 2 kept the interpreter's frames: 2 had no reading close enough, 0 no Python frame to place
 ```
+
+Code that hands generators and callbacks to C all the time is the hard case. A loop of `sum(i * i for i in range(n))` and `sorted(..., key=...)` had 16% of its stacks read torn, and 6% of its samples kept one `_PyEval_EvalFrameDefault` for a call into Python that no reading nearby explained; the rest named the generator or the key function.
 
 ### Limits
 

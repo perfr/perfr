@@ -28,6 +28,8 @@
 //! away, and from memory the target is writing. So:
 //!
 //! - A reading that fails is dropped and counted; nothing is made up for it.
+//!   So is one thread's stack that stops short of the thread's outermost
+//!   frame: it was read while a frame was being linked to its caller.
 //! - A reading is only joined to a sample of the same thread taken close to
 //!   it ([`Readings::near`]): there is one on either side, and the nearer is
 //!   used unless the other is closer in shape to the native stack.

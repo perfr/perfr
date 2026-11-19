@@ -102,9 +102,10 @@ Either way:
 
 - Python functions in the stack samples, Python's thread names and a GIL
   row, by sampling, on Linux and Windows: see the first fallback above.
-  macOS does not read them. The Windows reader was not captured end to end
-  on a Windows machine; CI's `windows-rust` job runs it against the runner's
-  Python.
+  macOS does not read them. CI's `windows-rust` job read CPython 3.12.10
+  (`python_stacks.py`: functions, thread names, GIL spans, CPU time still
+  moving). A capture that joins those readings to the kernel's stack samples
+  was not run on a Windows machine.
 
 **Planned (tracked, needs a `--with-dtrace` Python with the function probes,
 privileges, and a GPU to build and verify):**

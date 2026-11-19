@@ -213,7 +213,8 @@ opens on first load with a service and closes with its ×. Its rows:
   `python-stacks` (`tools/test-programs/PerfrPythonStacks`); that suite is
   Linux. The reader has a test of its own: a `python3` child on Linux, and
   `python_stacks.py` on Windows
-  (`crates/perfr-pystack/tests/reader.rs`, run by `windows-rust`).
+  (`crates/perfr-pystack/tests/reader.rs`). `windows-rust` ran that test
+  on CPython 3.12.10.
 - **UNWIND** is a two-way switch, **DWARF** or **FP**. **HOOKS** is another:
   **Frida** (the default) or **Uprobes**. Frida's note reads "requires
   permission to attach to the target". Uprobes reads "requires Linux

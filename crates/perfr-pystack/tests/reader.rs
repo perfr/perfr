@@ -2,12 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The reader against a real interpreter: a `python3` child running a small
-//! program of known shape. Skipped, with a line saying so, on a machine with
-//! no `python3`; a child may always be read by its parent, so no privilege
-//! is needed.
+//! The reader against a real interpreter. On Linux, a `python3` child running
+//! a small program of known shape. On Windows, the program in
+//! `tools/test-programs/PerfrPythonStacks/python_stacks.py`. Skipped, with a
+//! line saying so, on a machine with no Python; a child may always be read
+//! by its parent, so no privilege is needed.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "windows"))]
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -15,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use perfr_pystack::{Reader, State};
 
+#[cfg(target_os = "linux")]
 const PROGRAM: &str = r#"
 import sys, threading, time
 
@@ -42,8 +44,10 @@ print("ready", flush=True)
 outer_work()
 "#;
 
+#[cfg(target_os = "linux")]
 struct Python(Child);
 
+#[cfg(target_os = "linux")]
 impl Drop for Python {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -52,6 +56,7 @@ impl Drop for Python {
 }
 
 /// Starts the program and waits until its threads are running.
+#[cfg(target_os = "linux")]
 fn start_python() -> Option<Python> {
     let mut child = match Command::new("python3")
         .args(["-I", "-c", PROGRAM])
@@ -82,6 +87,7 @@ fn monotonic_ns() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_nanos() as u64 + 1
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_python_program_is_read_without_pausing_it() {
     let Some(python) = start_python() else { return };
@@ -224,11 +230,273 @@ fn a_python_program_is_read_without_pausing_it() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_process_that_is_not_python_is_given_up_on_with_a_reason() {
     // `sleep` has no interpreter to find. The reader looks for ten seconds
     // before saying so; stopping it sooner must not hang.
     let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+    let mut reader = Reader::start(child.id() as i32, 1_000_000, monotonic_ns).unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(reader.readings().state(), State::Looking);
+    let started = Instant::now();
+    reader.stop();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "stopping took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(reader.readings().stats().readings, 0);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// The process's CPU time in 100 ns units, for telling a suspended process
+/// from one that kept running.
+#[cfg(windows)]
+fn cpu_100ns(pid: u32) -> Option<u64> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut core::ffi::c_void;
+        fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
+        fn GetProcessTimes(
+            process: *mut core::ffi::c_void,
+            creation: *mut u64,
+            exit: *mut u64,
+            kernel: *mut u64,
+            user: *mut u64,
+        ) -> i32;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    // SAFETY: the handle is checked and closed; the four FILETIMEs are ours.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let (mut creation, mut exit, mut kernel, mut user) = (0, 0, 0, 0);
+        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+        CloseHandle(handle);
+        (ok != 0).then_some(kernel.saturating_add(user))
+    }
+}
+
+/// Whether `tid` is a thread of `pid` right now.
+#[cfg(windows)]
+fn thread_in_process(pid: u32, tid: u32) -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenThread(access: u32, inherit: i32, tid: u32) -> *mut core::ffi::c_void;
+        fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
+        fn GetProcessIdOfThread(thread: *mut core::ffi::c_void) -> u32;
+    }
+    const THREAD_QUERY_LIMITED_INFORMATION: u32 = 0x0800;
+    // SAFETY: the handle is checked and closed.
+    unsafe {
+        let handle = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, tid);
+        if handle.is_null() {
+            return false;
+        }
+        let owner = GetProcessIdOfThread(handle);
+        CloseHandle(handle);
+        owner == pid
+    }
+}
+
+#[cfg(windows)]
+struct WinPython(Child);
+
+#[cfg(windows)]
+impl Drop for WinPython {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// `python_stacks.py --plain`, once a Python is found. `None` when this
+/// machine has no Python; a script that starts and does not announce itself
+/// is a failure, not a skip.
+#[cfg(windows)]
+fn start_python_stacks() -> Option<WinPython> {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/test-programs/PerfrPythonStacks/python_stacks.py");
+    let launchers: &[(&str, &[&str])] = &[("python", &[]), ("python3", &[]), ("py", &["-3"])];
+    let mut command = None;
+    for (bin, args) in launchers {
+        let found = Command::new(bin)
+            .args(*args)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if found {
+            let mut cmd = Command::new(bin);
+            cmd.args(*args);
+            command = Some(cmd);
+            break;
+        }
+    }
+    let Some(mut command) = command else {
+        let _ = writeln!(
+            std::io::stderr(),
+            "skipped: no python, python3 or py -3 on PATH"
+        );
+        return None;
+    };
+    let mut child = command
+        .arg(&script)
+        .arg("--plain")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("python could not be started ({error})"));
+    let mut line = String::new();
+    let _ = BufReader::new(child.stdout.take().unwrap()).read_line(&mut line);
+    if !line.starts_with("pid=") {
+        let mut err = String::new();
+        if let Some(stderr) = child.stderr.as_mut() {
+            let _ = std::io::Read::read_to_string(stderr, &mut err);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("python_stacks.py did not announce its pid: {line:?}; stderr: {err}");
+    }
+    Some(WinPython(child))
+}
+
+#[cfg(windows)]
+#[test]
+fn python_stacks_py_is_read_without_suspending_it() {
+    let Some(python) = start_python_stacks() else {
+        return;
+    };
+    let pid = python.0.id();
+    let before = cpu_100ns(pid).expect("the child's cpu time");
+    let mut reader = Reader::start(pid as i32, 1_000_000, monotonic_ns).unwrap();
+    let readings = reader.readings().clone();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while readings.stats().readings < 300 {
+        if let State::Stopped { why } = readings.state() {
+            panic!("the reader stopped: {why}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no readings after 20 s; state {:?}",
+            readings.state()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let State::Reading { version } = readings.state() else {
+        panic!("not reading: {:?}", readings.state())
+    };
+    assert!(version.starts_with('3'), "{version}");
+    eprintln!("read Python {version} from pid {pid}");
+
+    let names = readings.take_thread_names();
+    let tid_of = |wanted: &str| {
+        names
+            .iter()
+            .find(|(_, name)| name == wanted)
+            .map(|(tid, _)| *tid)
+    };
+    for wanted in [
+        "MainThread",
+        "report-builder",
+        "fibonacci",
+        "sleeper",
+        "pool-feeder",
+    ] {
+        let tid = tid_of(wanted).unwrap_or_else(|| panic!("no {wanted} among {names:?}"));
+        assert!(
+            thread_in_process(pid, tid),
+            "{wanted}'s id {tid} is not a thread of pid {pid}: {names:?}"
+        );
+    }
+    // On Windows the main thread's id is not the process's.
+    assert_ne!(tid_of("MainThread"), Some(pid), "{names:?}");
+
+    let stats = readings.stats();
+    let frames_of = |tid: u32| -> Vec<String> {
+        let stack = readings
+            .near(tid, stats.last_ns)
+            .nearest
+            .unwrap_or_else(|| panic!("no reading of thread {tid}"));
+        stack
+            .iter()
+            .map(|frame| readings.symbol(frame.symbol).unwrap().name)
+            .collect()
+    };
+    let builder = frames_of(tid_of("report-builder").unwrap());
+    assert!(
+        builder
+            .iter()
+            .any(|name| name.starts_with("worker_loop (python_stacks.py:")),
+        "{builder:?}"
+    );
+    assert!(
+        builder.iter().any(|name| {
+            name.starts_with("crunch (python_stacks.py:")
+                || name.starts_with("build_report (python_stacks.py:")
+        }),
+        "{builder:?}"
+    );
+    let fib = frames_of(tid_of("fibonacci").unwrap());
+    assert!(
+        fib.iter()
+            .any(|name| name.starts_with("fib (python_stacks.py:")),
+        "{fib:?}"
+    );
+
+    let mut spans = Vec::new();
+    readings.take_gil_spans(&mut spans);
+    assert!(spans.len() >= 4, "{} GIL spans", spans.len());
+    assert!(spans.iter().all(|span| span.end_ns > span.start_ns));
+    assert!(
+        spans
+            .windows(2)
+            .all(|pair| pair[0].end_ns <= pair[1].start_ns),
+        "spans overlap"
+    );
+    assert!(
+        stats.failed * 20 <= stats.readings,
+        "{} of {} readings failed",
+        stats.failed,
+        stats.readings
+    );
+
+    let after = cpu_100ns(pid).expect("the child's cpu time");
+    // Ten milliseconds of CPU, in 100 ns units. A process suspended for the
+    // whole read stays at the first figure.
+    assert!(
+        after.saturating_sub(before) >= 100_000,
+        "cpu time did not move ({before} -> {after} in 100 ns units); the target may have been suspended"
+    );
+
+    reader.stop();
+    let stopped = readings.stats().readings;
+    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!(
+        readings.stats().readings,
+        stopped,
+        "a stopped reader reads no more"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_process_that_is_not_python_is_given_up_on_with_a_reason() {
+    // ping has no interpreter. The reader looks for ten seconds before
+    // saying so; stopping it sooner must not hang.
+    let mut child = Command::new("ping")
+        .args(["-n", "30", "127.0.0.1"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
     let mut reader = Reader::start(child.id() as i32, 1_000_000, monotonic_ns).unwrap();
     std::thread::sleep(Duration::from_millis(400));
     assert_eq!(reader.readings().state(), State::Looking);

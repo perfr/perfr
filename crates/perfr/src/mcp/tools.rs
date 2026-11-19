@@ -73,8 +73,9 @@ impl Platform {
 
     /// Windows: the kernel logger gives sampling, the scheduler and thread
     /// states (with an elevated prompt); Frida hooks and manual scopes
-    /// need no privilege. Kernel uprobes are Linux, and auto-profiling
-    /// rides on them.
+    /// need no privilege. Python stacks are read the same way as on Linux,
+    /// without suspending the target. Kernel uprobes are Linux, and
+    /// auto-profiling rides on them.
     pub fn windows() -> Self {
         Self {
             name: "windows",
@@ -82,7 +83,7 @@ impl Platform {
             scheduler: true,
             kernel_uprobes: false,
             auto_profile: false,
-            python_stacks: false,
+            python_stacks: true,
             disassembly: true,
             dynamic_hooks: true,
         }
@@ -290,7 +291,7 @@ impl Mcp {
                     "detail": "Frida hooks a running process with no rebuild. kernel_uprobes is Linux-only and needs root or CAP_SYS_ADMIN; it is never the default.",
                 },
                 "auto_profile": feature(p.auto_profile, "The service chooses hooks from samples and prunes them to a budget. Linux only, off unless requested."),
-                "python_stacks": feature(p.python_stacks, "When the target is a Python program, its Python functions are in the sampling report and the call stacks, each named `function (file.py:line)` with its source file as the module, among the native frames under and around them. Read with py-spy, without pausing the target. Linux only, automatic."),
+                "python_stacks": feature(p.python_stacks, "When the target is a Python program, its Python functions are in the sampling report and the call stacks, each named `function (file.py:line)` with its source file as the module, among the native frames under and around them. Read with py-spy, without pausing or suspending the target. Linux and Windows, automatic."),
                 "disassembly": feature(p.disassembly, "Disassembly next to source. Linux and Windows (no source lines from a PDB yet)."),
                 "function_stats": feature(true, "Count, total, average, min, max and standard deviation for hooks and manual scopes."),
             },

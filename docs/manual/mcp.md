@@ -99,7 +99,7 @@ Call `perfr_capabilities` first. It reports the platform, whether the service is
 | `perfr_start_capture` | Start. Installs the armed hooks. Replaces the previous capture |
 | `perfr_stop_capture` | Stop. The events stay until the next start |
 | `perfr_capture_status` | Running or not, event count, instrumentation line |
-| `perfr_sampling_report` | Hottest sampled functions, one page. For a Python target on a Linux service these include its Python functions, named `function (file.py:line)` |
+| `perfr_sampling_report` | Hottest sampled functions, one page. For a Python target on a Linux or Windows service these include its Python functions, named `function (file.py:line)` |
 | `perfr_callstacks` | Hottest distinct stacks, outermost frame first, Python and native frames together for a Python target |
 | `perfr_function_stats` | Count, total, average, min, max, stddev for hooks and manual scopes, and frame times for a program that marks its frames (`kind` `frame`) |
 | `perfr_logs` | Log lines in a time range, or those logged inside a named scope, folded with counts |

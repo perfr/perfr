@@ -50,7 +50,7 @@ mod procs;
 mod report;
 mod scope_index;
 mod selfstat;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod python;
 mod python_usdt;
 mod scopes;

@@ -215,10 +215,10 @@ pub(crate) struct FrameNames {
     /// The ids of the Python interpreter's eval function, under each name it
     /// was sampled by (it has a `.cold` part): the frames a Python stack
     /// takes the place of, see `python.rs`.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     python_eval: Vec<u32>,
     /// The ids of every other frame inside the interpreter's own image.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     python_image: std::collections::HashSet<u32>,
 }
 
@@ -231,16 +231,16 @@ impl FrameNames {
             ids: HashMap::new(),
             next: FRAME_NAME_ID_BASE,
             overflowed: false,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             python_eval: Vec::new(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             python_image: std::collections::HashSet::new(),
         }
     }
 
     /// What a frame id is to a Python stack: the interpreter's eval
     /// function, another frame of the interpreter, or anything else.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) fn python_kind(&self, id: u32) -> perfr_pystack::Native {
         if self.python_eval.contains(&id) {
             perfr_pystack::Native::Eval
@@ -251,7 +251,7 @@ impl FrameNames {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) fn id_for(&mut self, name: &str) -> u32 {
         self.id_for_frame(&crate::symbolize::ResolvedFrame {
             name: name.to_string(),
@@ -304,7 +304,7 @@ impl FrameNames {
             },
         );
         self.ids.insert(frame.name.clone(), id);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         if perfr_pystack::is_eval_frame(&frame.name) {
             self.python_eval.push(id);
         } else if perfr_pystack::is_python_image(&frame.module) {

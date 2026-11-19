@@ -19,6 +19,7 @@ log = "0.4"
 
 # py-spy reads the interpreter's own structures out of the target's memory.
 # Without its `cli` feature it is the library alone, and without `unwind` it
-# links no libunwind: the native half of a stack is perfr's own.
-[target.'cfg(target_os = "linux")'.dependencies]
+# links no libunwind: the native half of a stack is perfr's own. Linux and
+# Windows both sample, so both link it; macOS does not sample.
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 py-spy = { version = "0.4.3", default-features = false }

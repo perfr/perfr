@@ -18,6 +18,7 @@ how to check it.
 | Manual scopes (`perfr.h`, the `perfr-api` crate, `perfr_api.py`) | Yes, no privilege | A file-backed shared mapping per process under `%LOCALAPPDATA%\perfr\scopes` |
 | Function hooks (Frida) | Yes, no privilege | `perfr-hook.exe` injects `libperfr.dll`; control over a named pipe |
 | Call-stack sampling, 1 kHz | Yes, elevated prompt | The NT Kernel Logger's sampled profile with stack walks |
+| Python stacks | Yes | py-spy reads the interpreter out of the target without suspending it, and the Python frames are joined to the kernel's walk. The process's owner can be read without elevation; another user, an elevated target or a protected process needs the same elevated prompt as the kernel logger. See the manual's Python programs |
 | Scheduler (context switches, core lanes) | Yes, elevated prompt | `CSwitch` events |
 | Thread states | Yes, elevated prompt | `CSwitch` old-thread state, `ReadyThread`, thread start; initial states from a system snapshot |
 | Symbols | Yes | PDB (via the module's CodeView record), export table, exception table |

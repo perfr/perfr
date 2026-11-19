@@ -197,21 +197,23 @@ opens on first load with a service and closes with its ×. Its rows:
   from that pass on, as C++ perfr reacts to PERF_RECORD_FORK. A slow
   scan of the thread list is the safety net and logs if it ever finds
   a thread no fork record announced.
-- **Python** (a COLLECT toggle, on by default, Linux services): when the
-  target has a Python interpreter mapped, its Python stacks are read from
-  outside with py-spy, about a thousand times a second and without pausing
-  it, and joined to the stack samples. A Python function is then a frame
-  like any other, named `function (file.py:line)` with its source file as
-  the module, in the Flat report, the trees, the flame graph, a sample's
-  callstack and the saved capture; the interpreter's frames between one
-  Python function and the next are left out and what runs under the
-  innermost one is kept. The threads take the names Python gives them, and
-  once the GIL has changed hands a **GIL** row of the process shows who held
-  it. What a merged stack can claim, the limits and the measured cost are in
+- **Python** (a COLLECT toggle, on by default, Linux and Windows
+  services): when the target has a Python interpreter mapped, its Python
+  stacks are read from outside with py-spy, about a thousand times a second
+  and without pausing or suspending it, and joined to the stack samples. A
+  Python function is then a frame like any other, named
+  `function (file.py:line)` with its source file as the module, in the Flat
+  report, the trees, the flame graph, a sample's callstack and the saved
+  capture; the interpreter's frames between one Python function and the
+  next are left out and what runs under the innermost one is kept. The
+  threads take the names Python gives them, and once the GIL has changed
+  hands a **GIL** row of the process shows who held it. What a merged stack
+  can claim, the limits and the measured cost (Linux only) are in
   [Capture](capture.html#python-programs). The e2e scenario is
-  `python-stacks` (`tools/test-programs/PerfrPythonStacks`), and the reader
-  has a test of its own against a `python3` child
-  (`crates/perfr-pystack/tests/reader.rs`).
+  `python-stacks` (`tools/test-programs/PerfrPythonStacks`); that suite is
+  Linux. The reader has a test of its own: a `python3` child on Linux, and
+  `python_stacks.py` on Windows
+  (`crates/perfr-pystack/tests/reader.rs`, run by `windows-rust`).
 - **UNWIND** is a two-way switch, **DWARF** or **FP**. **HOOKS** is another:
   **Frida** (the default) or **Uprobes**. Frida's note reads "requires
   permission to attach to the target". Uprobes reads "requires Linux

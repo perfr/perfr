@@ -55,11 +55,11 @@ Sampling and the scheduler are recorded on Linux, and on Windows when the servic
 
 ### A Python target
 
-When `perfr_capabilities` lists `python_stacks` as supported (a Linux service), the report and the call stacks of a Python program name its Python functions: `crunch (app.py:10)` is the function `crunch` defined at line 10 of `app.py`, and its `module` is that file. Native frames are in the same stacks: what the interpreter or a C extension does under a Python function is listed under it. Nothing has to be asked for; the service does it when the target has a Python interpreter mapped.
+When `perfr_capabilities` lists `python_stacks` as supported (a Linux or Windows service), the report and the call stacks of a Python program name its Python functions: `crunch (app.py:10)` is the function `crunch` defined at line 10 of `app.py`, and its `module` is that file. Native frames are in the same stacks: what the interpreter or a C extension does under a Python function is listed under it. Nothing has to be asked for; the service does it when the target has a Python interpreter mapped. On Windows that is `python.exe`, `pythonw.exe` or `python3x.dll` among the loaded modules.
 
 - A Python function has `function_id` 0 and cannot be hooked. `perfr_search_functions` lists native functions only. To time one Python function exactly, the program has to mark it itself with the `perfr-api` package (`perfr.scope`).
 - The Python frames of a sample are read up to half a millisecond from the sample. Shares over a report are sound. Do not read one stack as proof that a Python function called the native frame under it.
-- A report of a Python program that names `_PyEval_EvalFrameDefault` and no Python function means the stacks were not read. The usual cause is that the service may not read the target's memory, which is the permission attaching needs. The perfr-setup skill has the checks.
+- A report of a Python program that names `_PyEval_EvalFrameDefault` and no Python function means the stacks were not read, or on Windows that the eval function's name was not in the DLL's PDB or export table so the frames could not be placed. The usual cause of nothing being read is that the service may not read the target's memory. On Linux that is the permission attaching needs; the perfr-setup skill has the checks. On Windows the process's owner can open it, and another user's, an elevated, or a protected process needs the service started from a prompt opened with Run as administrator (`PROCESS_VM_READ`). The reader does not suspend the target.
 
 ## One-shot capture
 

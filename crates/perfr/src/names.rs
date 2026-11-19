@@ -84,7 +84,7 @@ impl NameSync {
     /// A name the program's runtime has for a thread: Python's
     /// `threading.Thread.name`. It is sent with the next refresh, in place
     /// of a kernel name that says no more than the process's does.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub fn prefer_thread_name(&mut self, pid: u32, tid: u32, name: String) {
         self.preferred.insert((pid, tid), name);
     }
@@ -118,6 +118,7 @@ impl NameSync {
         mut on_thread: impl FnMut(u32, u32, &str),
     ) -> usize {
         let mut sent = 0;
+        let mut seen = HashSet::new();
         for &pid in pids {
             if let Some(name) = read_process(pid) {
                 if self.processes.get(&pid) != Some(&name) {
@@ -127,6 +128,7 @@ impl NameSync {
                 }
             }
             for (tid, comm) in read_threads(pid) {
+                seen.insert((pid, tid));
                 let name = shown_thread_name(
                     comm,
                     self.processes.get(&pid).map(String::as_str),
@@ -137,6 +139,22 @@ impl NameSync {
                     self.threads.insert((pid, tid), name);
                     sent += 1;
                 }
+            }
+        }
+        // A thread the kernel has no name for is absent from that list. On
+        // Windows before 3.14 that is every Python thread: nothing called
+        // SetThreadDescription, so the runtime's name is the only one.
+        let unnamed: Vec<(u32, u32, String)> = self
+            .preferred
+            .iter()
+            .filter(|((pid, tid), _)| pids.contains(pid) && !seen.contains(&(*pid, *tid)))
+            .map(|(&(pid, tid), name)| (pid, tid, name.clone()))
+            .collect();
+        for (pid, tid, name) in unnamed {
+            if self.threads.get(&(pid, tid)) != Some(&name) {
+                on_thread(pid, tid, &name);
+                self.threads.insert((pid, tid), name);
+                sent += 1;
             }
         }
         sent
@@ -255,6 +273,36 @@ mod tests {
         // (a C extension's own thread, prctl) is the more specific one.
         assert_eq!(shown("grpc_global_tim", Some("Thread-3")), "grpc_global_tim");
         assert_eq!(shown("python3", None), "python3");
+    }
+
+    #[test]
+    fn a_runtime_name_is_sent_when_the_kernel_has_no_name_for_the_thread() {
+        let mut names = NameSync::default();
+        names.prefer_thread_name(4, 11, "report-builder".to_string());
+        let mut sent = Vec::new();
+        names.refresh_with(
+            &[4],
+            |_| Some("python.exe".to_string()),
+            |_| vec![(12, "python.exe".to_string())],
+            |_, _| {},
+            |_, tid, name| sent.push((tid, name.to_string())),
+        );
+        assert_eq!(
+            sent,
+            [
+                (12, "python.exe".to_string()),
+                (11, "report-builder".to_string())
+            ]
+        );
+        sent.clear();
+        names.refresh_with(
+            &[4],
+            |_| Some("python.exe".to_string()),
+            |_| vec![(12, "python.exe".to_string())],
+            |_, _| {},
+            |_, tid, name| sent.push((tid, name.to_string())),
+        );
+        assert!(sent.is_empty(), "a second refresh sends nothing new: {sent:?}");
     }
 
     #[test]

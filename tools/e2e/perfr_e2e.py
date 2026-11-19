@@ -629,6 +629,9 @@ GIL_TID = 0x00FE611A
 
 @scenario("python-stacks", "A Python program: its functions in the samples, Python's thread names, a row for the GIL, and its own scopes")
 def python_stacks(run):
+    # This suite starts target/release/perfr, reads /proc and is not run on
+    # Windows (windows-rust runs its own smokes). The Windows check of the
+    # reader is crates/perfr-pystack/tests/reader.rs, against this same program.
     program = os.path.join(REPO, "tools/test-programs/PerfrPythonStacks/python_stacks.py")
     # The program is instrumented by hand as well: its scopes and the
     # samples' Python frames are in one capture.

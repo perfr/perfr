@@ -11,7 +11,9 @@
 //! by `perfr-etw`, feeds the same `ContextSwitchManager` and
 //! `ThreadStateManager` the perf rings feed on Linux, and its stack walks
 //! are the samples -- already unwound by the kernel, so there is no
-//! unwinder here, only the symbolizer.
+//! unwinder here, only the symbolizer. A Python target's own functions are
+//! read beside that walk (`python.rs`), the same way as on Linux, and
+//! joined where the walk has the interpreter's eval function.
 //!
 //! The kernel logger needs an elevated token. Without one the capture still
 //! runs with everything that needs no privilege -- manual scopes, Frida
@@ -30,6 +32,7 @@ use perfr_live_event::{kind, LiveEvent};
 use perfr_live_server::{LiveService, ServerConfig};
 
 use crate::hook_journal::ArmedHook;
+use crate::python::PythonStacks;
 use crate::report::{SampleStore, StoredSample};
 use crate::scopes::ScopeSource;
 use crate::serve::{scheduling_events, started_in_capture, FrameNames, SymbolState};
@@ -672,8 +675,66 @@ fn open_etw(sampling: bool, focus: &[u32], capture_start_ns: u64) -> Result<Etw,
     Ok(Etw { session, consumer, feed, samples, newest: 0, events: Vec::with_capacity(4096), lost_notices: 0 })
 }
 
+/// A sample held until the Python reading after it exists, and until the
+/// symbols can name it. `near` is filled once the reading exists: the
+/// readings are kept for two seconds, and a symbol load can take longer.
+struct ParkedSample {
+    sample: perfr_etw::Sample,
+    time_ns: u64,
+    near: Option<perfr_pystack::Near>,
+}
+
+fn park_samples(parked: &mut Vec<ParkedSample>, incoming: &mut Vec<perfr_etw::Sample>, clock: perfr_etw::QpcClock) {
+    for sample in incoming.drain(..) {
+        let time_ns = clock.to_ns(sample.timestamp);
+        parked.push(ParkedSample { sample, time_ns, near: None });
+    }
+}
+
+/// Fetches the Python stacks around a sample once it is old enough that the
+/// reading after it has been taken. `horizon_ns` of `u64::MAX` fetches now.
+fn stamp_python(parked: &mut [ParkedSample], horizon_ns: u64, python: Option<&PythonStacks>) {
+    for parked in parked {
+        if parked.time_ns > horizon_ns || parked.near.is_some() {
+            continue;
+        }
+        parked.near = Some(python.map(|python| python.near(parked.sample.tid, parked.time_ns)).unwrap_or_default());
+    }
+}
+
+/// Names the parked samples whose Python reading has been fetched, once the
+/// symbols are in. Returns how many were pushed.
+#[allow(clippy::too_many_arguments)]
+fn emit_parked(
+    parked: &mut Vec<ParkedSample>,
+    symbols_ready: bool,
+    symbolizer: &Symbolizer,
+    pc_ids: &mut crate::report::FastMap<u64, u32>,
+    names: &mut FrameNames,
+    store: &SampleStore,
+    period_ns: u64,
+    batch: &mut Vec<LiveEvent>,
+    mut python: Option<&mut PythonStacks>,
+) -> u64 {
+    let mut emitted = 0;
+    let mut index = 0;
+    while index < parked.len() {
+        if parked[index].near.is_none() || !symbols_ready {
+            index += 1;
+            continue;
+        }
+        let ready = parked.swap_remove(index);
+        let near = ready.near.unwrap_or_default();
+        push_sample(&ready.sample, ready.time_ns, symbolizer, pc_ids, names, store, period_ns, batch, python.as_deref_mut(), &near);
+        emitted += 1;
+    }
+    emitted
+}
+
 /// One sample's events: a tick on the thread's sample bar, then its frames
-/// outermost first, and the row the report counts.
+/// outermost first, and the row the report counts. In a Python program the
+/// interpreter's eval frames give way to the Python functions they were
+/// running, when `near` has a stack of the thread that fits.
 #[allow(clippy::too_many_arguments)]
 fn push_sample(
     sample: &perfr_etw::Sample,
@@ -684,8 +745,10 @@ fn push_sample(
     store: &SampleStore,
     period_ns: u64,
     batch: &mut Vec<LiveEvent>,
+    python: Option<&mut PythonStacks>,
+    near: &perfr_pystack::Near,
 ) {
-    let frame_ids: Vec<u32> = {
+    let mut frame_ids: Vec<u32> = {
         let _symbolize = perfr_api::scope("symbolize");
         sample
             .frames
@@ -703,6 +766,12 @@ fn push_sample(
             })
             .collect()
     };
+    // The kernel's walk is the user stack it could read, leaf to the thread's
+    // start. A walk it cut at its frame cap is not marked; pairing from the
+    // root leaves an unmatched outer Python run out rather than appending one.
+    if let Some(python) = python {
+        python.merge(sample.tid, time_ns, &mut frame_ids, true, near, names, u8::MAX as usize);
+    }
     batch.push(LiveEvent {
         start_ns: time_ns,
         duration_ns: period_ns,
@@ -808,7 +877,7 @@ pub fn capture_loop(
     _symbols: Arc<Mutex<SymbolState>>,
     // The health track reads Linux's /proc and /sys (`health.rs`).
     _machine_health: bool,
-    _python_stacks: Option<bool>,
+    python_stacks: Option<bool>,
 ) {
     if gpu_helper.is_some() {
         log::warn!("GPU helper capture is not supported on Windows");
@@ -830,6 +899,11 @@ pub fn capture_loop(
     });
     const SAMPLE_HZ: u64 = 1000;
     let period_ns = 1_000_000_000 / SAMPLE_HZ;
+    // In a Python program a native stack is the interpreter. Its Python
+    // stacks are read alongside and joined to the samples (`python.rs`).
+    // Started whether or not the kernel logger opened: Python's thread
+    // names and the GIL row need no samples.
+    let mut python = PythonStacks::start(target_pid, period_ns, python_stacks);
     service.mark_capture_started(target_pid.max(0) as u32, capture_start_ns);
     // What each core is, for the scheduler's lanes. Said after the start:
     // a viewer drops what it holds of the last capture there.
@@ -862,7 +936,7 @@ pub fn capture_loop(
             })
             .expect("spawn symbolizer thread");
     }
-    let mut held: Vec<perfr_etw::Sample> = Vec::new();
+    let mut parked: Vec<ParkedSample> = Vec::new();
 
     let mut focus: Vec<u32> = visible.pids();
     focus.push(self_pid);
@@ -1002,16 +1076,20 @@ pub fn capture_loop(
                 let _samples = perfr_api::scope("read samples");
                 sample_out.clear();
                 etw.samples.drain_settled(etw.newest, &mut sample_out);
-                if symbols_ready {
-                    let clock = etw.session.clock();
-                    for sample in held.drain(..).chain(sample_out.drain(..)) {
-                        push_sample(&sample, clock.to_ns(sample.timestamp), &symbolizer, &mut pc_ids, &mut names, &store, period_ns, &mut batch);
-                        samples_pushed += 1;
-                    }
-                } else {
-                    held.append(&mut sample_out);
-                }
+                let clock = etw.session.clock();
+                park_samples(&mut parked, &mut sample_out, clock);
             }
+        }
+        if has_target {
+            // A sample waits for the Python reading that follows it. The
+            // kernel's own settle is longer than that wait; this is what
+            // keeps a sample that arrives early from being named first.
+            let horizon = python.as_ref().map(|python| python.horizon_ns(crate::now_monotonic_ns())).unwrap_or(u64::MAX);
+            stamp_python(&mut parked, horizon, python.as_ref());
+            samples_pushed += emit_parked(&mut parked, symbols_ready, &symbolizer, &mut pc_ids, &mut names, &store, period_ns, &mut batch, python.as_mut());
+        }
+        if let Some(python) = python.as_mut() {
+            python.pump(&service, &mut names, &mut comm_names, &mut batch);
         }
         {
             let _drain = perfr_api::scope("drain scope rings");
@@ -1073,8 +1151,9 @@ pub fn capture_loop(
         }
         sample_out.clear();
         etw.samples.drain_all(&mut sample_out);
-        held.append(&mut sample_out);
-        if has_target && !held.is_empty() {
+        let clock = etw.session.clock();
+        park_samples(&mut parked, &mut sample_out, clock);
+        if has_target && !parked.is_empty() {
             if !symbols_ready {
                 let _wait = perfr_api::scope("wait for symbols");
                 match symbolizer_rx.recv_timeout(Duration::from_secs(10)) {
@@ -1085,11 +1164,10 @@ pub fn capture_loop(
                     Err(_) => log::warn!("symbols were still loading when the capture stopped; its samples are named by address"),
                 }
             }
-            let clock = etw.session.clock();
-            for sample in held.drain(..) {
-                push_sample(&sample, clock.to_ns(sample.timestamp), &symbolizer, &mut pc_ids, &mut names, &store, period_ns, &mut batch);
-                samples_pushed += 1;
-            }
+            // The capture is over: name what is left with the reading it has,
+            // the one before it when the one after was never taken.
+            stamp_python(&mut parked, u64::MAX, python.as_ref());
+            samples_pushed += emit_parked(&mut parked, true, &symbolizer, &mut pc_ids, &mut names, &store, period_ns, &mut batch, python.as_mut());
         }
         let feed_stats = etw.feed.stats();
         log::info!(
@@ -1125,6 +1203,12 @@ pub fn capture_loop(
     scope_batch.clear();
     scopes.finish(drain_ns, &mut scope_batch);
     batch.extend(scope_batch.iter().copied().filter(|e| started_in_capture(e, capture_start_ns)));
+    // Every sample has been joined to its Python stack: the reader can go,
+    // push the last GIL span, and say what it saw. Before the last name
+    // refresh, so a thread the kernel never named still gets Python's name.
+    if let Some(python) = python.as_mut() {
+        python.finish(&service, &mut names, &mut comm_names, &mut batch);
+    }
     comm_names.refresh(&visible.pids(), |p, n| service.set_process_name(p, n), |p, t, n| service.set_thread_name(p, t, n));
     service.push_events(&batch);
     log::info!(

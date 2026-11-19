@@ -6045,7 +6045,7 @@ impl PerfrLiveApp {
                 .on_hover_text(
                     "When the target is a Python program: its Python functions in the callstack samples, \
                      the names Python gives its threads, and a row for who holds the GIL. \
-                     Read from outside, without pausing it (Linux services)",
+                     Read from outside, without pausing or suspending it (Linux and Windows services)",
                 )
                 .clicked()
             {

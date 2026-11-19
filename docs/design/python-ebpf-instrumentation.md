@@ -101,7 +101,10 @@ Either way:
 **Built 2026-11-19:**
 
 - Python functions in the stack samples, Python's thread names and a GIL
-  row, by sampling: see the first fallback above.
+  row, by sampling, on Linux and Windows: see the first fallback above.
+  macOS does not read them. The Windows reader was not captured end to end
+  on a Windows machine; CI's `windows-rust` job runs it against the runner's
+  Python.
 
 **Planned (tracked, needs a `--with-dtrace` Python with the function probes,
 privileges, and a GPU to build and verify):**

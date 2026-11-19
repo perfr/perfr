@@ -45,19 +45,22 @@
 //!   to half a period earlier or later. Over a report that evens out; for one
 //!   sample it is the limit of reading from outside.
 //!
-//! Everything but the reader is plain data and runs on any platform; the
-//! reader is Linux, where perfr samples.
+//! Everything but the reader is plain data and runs on any platform. The
+//! reader is Linux and Windows, where perfr samples. On Windows it asks
+//! py-spy not to lock the process, so the target is never suspended; the
+//! handle py-spy opens still carries `PROCESS_SUSPEND_RESUME` because that
+//! is how the library opens a process.
 
 mod merge;
 mod readings;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod reader;
 
 pub use merge::{is_eval_frame, merge, Merged, Native};
 pub use readings::{Frame, GilSpan, Near, RawFrame, Readings, State, Stats, Symbol, ThreadReading};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub use reader::Reader;
 
 /// Whether a mapped file is the Python interpreter or its shared library, by
@@ -66,7 +69,7 @@ pub use reader::Reader;
 /// under its own name is not recognised by this; it can still be read when
 /// asked for outright.
 pub fn is_python_image(path: &str) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path);
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
     let rest = match name.strip_prefix("libpython") {
         Some(rest) => rest,
         None => match name.strip_prefix("python") {
@@ -76,7 +79,8 @@ pub fn is_python_image(path: &str) -> bool {
     };
     // What may follow: a version, a build suffix (`t`, `d`, `m`, `dm`), and
     // for the library `.so` and its version. `python-config` and
-    // `pythonista` are not interpreters.
+    // `pythonista` are not interpreters. Windows adds `pythonw.exe` (the
+    // windowed launcher) and `python314_d.dll` (a debug build).
     let bytes = rest.as_bytes();
     let mut at = 0;
     while at < bytes.len()
@@ -86,6 +90,8 @@ pub fn is_python_image(path: &str) -> bool {
         at += 1;
     }
     let tail = rest[at..].trim_start_matches(['t', 'd', 'm', 'u']);
+    let tail = tail.strip_prefix("_d").unwrap_or(tail);
+    let tail = if tail == "w.exe" { ".exe" } else { tail };
     tail.is_empty() || tail.starts_with(".so") || tail == ".exe" || tail == ".dll"
 }
 
@@ -120,6 +126,12 @@ mod tests {
             "/home/a/.pyenv/versions/3.10.4/bin/python3.10m",
             "C:/Python312/python.exe",
             "python312.dll",
+            "C:\\Python314\\python.exe",
+            "C:\\Python314\\pythonw.exe",
+            "C:\\Python314\\python314.dll",
+            "C:\\Python314\\python314_d.dll",
+            "C:\\Python314\\python3.dll",
+            "C:\\Python314\\libpython3.14.dll",
         ] {
             assert!(is_python_image(yes), "{yes}");
         }
@@ -128,6 +140,8 @@ mod tests {
             "/usr/bin/pythonista",
             "/usr/lib/libpythonic.so",
             "/usr/bin/bash",
+            "C:\\Windows\\py.exe",
+            "C:\\Python314\\python3.zip",
             "",
         ] {
             assert!(!is_python_image(no), "{no}");

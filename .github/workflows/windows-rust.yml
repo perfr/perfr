@@ -62,6 +62,10 @@ jobs:
         run: cargo +1.88.0 test --locked -p perfr-etw --test live -- --nocapture
       - name: Test service
         run: cargo +1.88.0 test --locked -p perfr
+      - name: Test the Python stack reader against the runner's Python
+        # --nocapture: the test prints the CPython version it read, which is
+        # the version this job actually exercised. No Python on PATH skips.
+        run: cargo +1.88.0 test --locked -p perfr-pystack -- --nocapture
       - name: Test Frida helper and agent
         # The devkit download is bounded in the script; this bounds the step
         # so a hang fails in minutes, not at the job's 90.

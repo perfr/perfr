@@ -82,10 +82,37 @@ pub(crate) struct PythonStacks {
     spans: Vec<perfr_pystack::GilSpan>,
 }
 
-/// Whether `pid` has a Python interpreter mapped.
+/// Whether `pid` has a Python interpreter mapped. Linux reads
+/// `/proc/<pid>/maps` (an executable mapping). Windows reads the loaded
+/// module list: `python.exe`, `pythonw.exe`, `python3x.dll` and the rest
+/// [`perfr_pystack::is_python_image`] recognises. A program that links the
+/// interpreter under its own name is not recognised by either.
 fn is_python(pid: i32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/maps"))
-        .is_ok_and(|maps| perfr_pystack::maps_show_python(&maps))
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/maps"))
+            .is_ok_and(|maps| perfr_pystack::maps_show_python(&maps))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        pid > 0
+            && crate::windows::modules_of(pid as u32)
+                .iter()
+                .any(|module| perfr_pystack::is_python_image(&module.path))
+    }
+}
+
+/// Whether the target is still running, for the log line that would
+/// otherwise announce a reader that stopped because the process exited.
+fn target_alive(pid: i32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::hook_journal::process_alive(pid)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        crate::windows::process_alive(pid)
+    }
 }
 
 impl PythonStacks {
@@ -307,11 +334,20 @@ impl PythonStacks {
                 }
                 // A target that exited is the capture's own news, said by
                 // the capture loop.
-                State::Stopped { .. } if !crate::hook_journal::process_alive(self.pid) => {}
+                State::Stopped { .. } if !target_alive(self.pid) => {}
                 State::Stopped { why } => {
                     let hint = if why.starts_with("this process may not read") {
-                        " Reading another process's memory needs the permission attaching to it does: \
-                         see `perfr doctor`."
+                        #[cfg(target_os = "linux")]
+                        {
+                            " Reading another process's memory needs the permission attaching to it does: \
+                             see `perfr doctor`."
+                        }
+                        #[cfg(target_os = "windows")]
+                        {
+                            " Reading another process's memory needs PROCESS_VM_READ. The process's owner \
+                             can open it; another user's process, an elevated one, or a protected one needs \
+                             an elevated prompt (Run as administrator). The reader does not suspend the target."
+                        }
                     } else {
                         ""
                     };

@@ -790,10 +790,10 @@ extension and CUDA. One capture, full stack: Python wrapper -> C extension ->
 GPU kernel. Select functions from a sampling report or edit the list in perfr.
 
 **Status: landing page + discovery built (2026-09-10); sampled Python stacks
-built (2026-11-19); probe attach/capture planned.** A capture of a Python
+built (2026-11-19), on Windows as well as Linux (2026-11-19); probe attach/capture planned.** A capture of a Python
 program now carries its Python functions in the stack samples, Python's
 thread names and a GIL row: py-spy reads the stacks from outside, without
-pausing the target, and they are joined to the native samples
+pausing or suspending the target, and they are joined to the native samples
 (`crates/perfr-pystack`, `crates/perfr/src/python.rs`, "Python programs" in
 `docs/manual/capture.md`). Scopes from the USDT probes are still to do.
 The homepage features the angle with a diagram (`perfr-web/index.html`), and

@@ -60,5 +60,7 @@ perfr-unwind = { path = "../perfr-unwind" }
 perfr-pystack = { path = "../perfr-pystack" }
 
 # The kernel logger: scheduler, thread states and stack samples on Windows.
+# Python stacks use the same crate as Linux.
 [target.'cfg(windows)'.dependencies]
 perfr-etw = { path = "../perfr-etw" }
+perfr-pystack = { path = "../perfr-pystack" }

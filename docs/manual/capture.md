@@ -59,7 +59,7 @@ Every graph of the track starts at zero. The percentages that are a share of a w
 
 ## Python programs
 
-A stack sample of a Python program, unwound like any other, is the interpreter: `_PyEval_EvalFrameDefault` in every stack and not one function of the program. With **Python** on (the default) a Linux service that is asked to capture a process with a Python interpreter mapped (`python3.x`, or `libpython3.x.so` in a program that embeds it) also reads the program's Python stacks, and the capture has three more things in it. Nothing is installed in the target, imported by it or passed to it, and it is not restarted.
+A stack sample of a Python program, unwound like any other, is the interpreter: `_PyEval_EvalFrameDefault` in every stack and not one function of the program. With **Python** on (the default) a Linux or Windows service that is asked to capture a process with a Python interpreter mapped also reads the program's Python stacks, and the capture has three more things in it. On Linux that mapping is `python3.x` or `libpython3.x.so`. On Windows it is a loaded module: `python.exe`, `pythonw.exe`, `python3x.dll`, `python3.dll` or `libpython3.x.dll`. Nothing is installed in the target, imported by it or passed to it, and it is not restarted.
 
 **Python functions in the samples.** Each is named `function (file.py:line)`: the qualified name, the source file relative to the `sys.path` entry it was imported from, and the line of its `def`. Its module is that file. It is a frame like any other: a row of the Flat report, a node of the call trees and the flame graph, a line of a sample's callstack, and a name in the saved capture. It has no hook box, because there is no native function to hook.
 
@@ -73,13 +73,13 @@ The native frames are still there, where they say something:
 
 So a thread's stack reads `start_thread`, `Thread.run (threading.py:1013)`, `worker_loop (app.py:39)`, `crunch (app.py:10)`, `_Py_Dealloc`.
 
-**Thread names.** A thread the program named with `threading.Thread(name=...)`, or that a pool named, has that name on the rail. Before Python 3.14 the kernel is never told those names and every thread reads `python3`; from 3.14 it is told the first fifteen bytes. Python's name is used when the kernel's adds nothing to it. A thread named for the kernel as something else keeps that name.
+**Thread names.** A thread the program named with `threading.Thread(name=...)`, or that a pool named, has that name on the rail. Before Python 3.14 the kernel is never told those names: on Linux every thread reads `python3`, and on Windows a thread with no description would read `thread <id>`. From 3.14 Linux is told the first fifteen bytes and Windows is told the name in full (`SetThreadDescription`). Python's name is used when the kernel's adds nothing to it, and when the kernel has no name at all. A thread named for the kernel as something else keeps that name.
 
 **The GIL.** Once the lock has changed hands, the process has a row called **GIL**, captioned `held by`. Each scope on it is a stretch one thread was seen holding the lock on every reading; it is named after that thread and drawn in that thread's colour, the colour of the chip beside the thread's name on the rail. The row shows the hand-overs; the Live tab's statistics for those names are how often and for how long each thread held it. A program whose GIL is only ever held by one thread gets no row: that thread's state bar already says when it ran.
 
 ### How it is read, and what that costs
 
-The service reads the interpreter's own frame objects out of the target's memory with [py-spy](https://github.com/benfred/py-spy) 0.4.3, as a library, about a thousand times a second. The target is never paused and never traced: a paused target would show in the capture as its own scheduling, and only one tracer may hold a process, which would rule out hooks. Each reading has every Python thread's stack, which thread holds the GIL, and the thread names.
+The service reads the interpreter's own frame objects out of the target's memory with [py-spy](https://github.com/benfred/py-spy) 0.4.3, as a library, about a thousand times a second. The target is never paused and never suspended, and never traced: a paused target would show in the capture as its own scheduling, and only one tracer may hold a process, which would rule out hooks. On Windows py-spy opens the process with `PROCESS_SUSPEND_RESUME` among the other rights, and this reader never calls the suspend. Each reading has every Python thread's stack, which thread holds the GIL, and the thread names. The cost below was measured on Linux; it has not been measured on Windows.
 
 Measured on the machine this was written on (a 32-thread x86-64 desktop, Python 3.14.4):
 
@@ -88,7 +88,7 @@ Measured on the machine this was written on (a 32-thread x86-64 desktop, Python 
 
 ### What a merged stack can claim
 
-The kernel takes the native sample at one instant. The Python stack is read by another thread at another instant, up to half a millisecond away. The two are joined like this:
+The kernel takes the native sample at one instant. On Windows that sample is a `StackWalk`, already unwound, and it is held about 100 ms for the user half of a split walk to arrive, which is longer than the wait for the Python reading after it. The Python stack is read by another thread at another instant, up to half a millisecond away on Linux and within that settle on Windows. The two are joined like this:
 
 - A sample takes the reading of its thread nearest to it in time, from the one before and the one after. A reading more than three reading periods away (5 ms at least) is not used.
 - The native stack says how many times the interpreter was entered from C, and the Python stack says the same of itself. Where they agree, each run of Python frames takes the place of its eval frame. Where they differ, a callback from C into Python began or ended between the sample and the reading: the stacks are paired from the root, an eval frame with no Python function stays as `_PyEval_EvalFrameDefault`, and a Python function with no eval frame is left out. If the other reading is closer in shape, it is used instead.
@@ -108,10 +108,11 @@ Code that hands generators and callbacks to C all the time is the hard case. A l
 
 ### Limits
 
-- Linux services only. The reader is not built into the macOS and Windows services.
-- CPython, the versions py-spy 0.4.3 knows: 2.3 to 2.7 and 3.3 to 3.15. PyPy and other interpreters are not read. Tested here on 3.14.4 only; a free-threaded build (no GIL) has not been tried.
-- The service must be allowed to read the target's memory, which is the permission attaching to it needs (`perfr doctor`). When it is not, the log says so and the samples keep the interpreter's own frames.
-- The interpreter's `_PyEval_EvalFrameDefault` must be found by name in the native stack for the Python frames to be placed. It is one of CPython's exported symbols and is in the dynamic symbol table of Ubuntu's build, the one this was tried on; with a build that hides it the log's last line reports no merged samples.
+- Linux and Windows services. The macOS service does not read Python stacks.
+- On Windows the kernel's walk is treated as the whole user stack. A walk the kernel cut at its frame cap is not marked; an unmatched outer Python run is left out, which is the rule for a whole stack. Nothing is appended to fill a gap.
+- CPython, the versions py-spy 0.4.3 knows: 2.3 to 2.7 and 3.3 to 3.15. PyPy and other interpreters are not read. The capture described above was taken on Linux with 3.14.4. The Windows reader is exercised in CI (`windows-rust`) by `crates/perfr-pystack/tests/reader.rs` against `tools/test-programs/PerfrPythonStacks/python_stacks.py` and that runner's `python`; the test prints the version it read. A capture on Windows with the samples, the GIL row and the timeline together was not run for this change. A free-threaded build has not been tried on either platform.
+- The service must be allowed to read the target's memory. On Linux that is the permission attaching needs (`perfr doctor`). On Windows the open asks for `PROCESS_VM_READ`, `PROCESS_QUERY_INFORMATION` and `PROCESS_SUSPEND_RESUME`. The process's owner can open it. Another user's process, an elevated target, or a protected one needs an elevated prompt (Run as administrator). A capture that records samples is already elevated, because the kernel logger needs it. When the open is refused the log says so and the samples keep the interpreter's own frames.
+- The interpreter's `_PyEval_EvalFrameDefault` must be found by name in the native stack for the Python frames to be placed. On Linux it is in the dynamic symbol table of Ubuntu's build, the one the capture above was taken with. On Windows the symbolizer takes the name from a PDB beside the DLL, else from that DLL's export table. The frames live in the versioned `python3x.dll`, not in `python3.dll` (the stable-ABI stub, which does not export this function). A build that hides the name and ships no PDB leaves the interpreter's frames, and the log's last line reports no merged samples. That Windows export was not checked against a DLL in this change.
 - Functions, not lines: a row is a function, named with the line it is defined at.
 - Only the target process. The workers of `multiprocessing` are other processes and are not read.
 - A program that links the interpreter statically under its own name is not recognised. `"python_stacks": true` in the capture request tries anyway.

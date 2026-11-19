@@ -74,7 +74,7 @@ What the rows mean:
 - tracefs (`/sys/kernel/tracing` or `/sys/kernel/debug/tracing`) has to be readable for scheduler tracepoints and thread states. It is a root-only filesystem: root reads it, and so does `CAP_DAC_READ_SEARCH`, which reads any file. `CAP_PERFMON` does not, and no sysctl does. `perfr setup` leaves it as it is unless run with `--uprobes`.
 - Uprobes need `CAP_SYS_ADMIN`. Frida is the default hook engine and does not. A kernel built without `CONFIG_UPROBE_EVENTS` has no uprobe PMU; switch hooks to Frida. There is no sysctl that adds the PMU.
 - `kernel.yama.ptrace_scope` above 0 blocks Frida from attaching to a process that is not a child. `sudo sysctl -w kernel.yama.ptrace_scope=0`, or `CAP_SYS_PTRACE`.
-- On Windows, sampling and the scheduler come from the kernel logger and need a token from **Run as administrator**. Manual scopes and Frida hooks do not. A normal prompt of an administrator account is not elevated.
+- On Windows, sampling and the scheduler come from the kernel logger and need a token from **Run as administrator**. Manual scopes and Frida hooks do not. A normal prompt of an administrator account is not elevated. Python stacks need `PROCESS_VM_READ` on the target. The owner's own unelevated processes can be read without that token; another user's process, an elevated one, or a protected one cannot. The reader does not suspend the target.
 - On macOS this build records manual scopes and Frida hooks. Attach needs a task port. `sudo perfr` is the practical grant. SIP and the hardened runtime can still refuse system processes. This build does not sample through dtrace.
 
 `CAP_SYS_ADMIN` is root in all but name. Say that before a setcap that includes it.

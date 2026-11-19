@@ -1525,7 +1525,7 @@ fn name_sample(
             .collect()
     };
     if let Some(python) = python {
-        python.merge(&mut frame_ids, whole, near, names, MAX_SAMPLE_FRAMES);
+        python.merge(tid, time, &mut frame_ids, whole, near, names, MAX_SAMPLE_FRAMES);
     }
     // One tick on the thread's sample bar, named by the leaf
     // frame so hovering it says what was running without a

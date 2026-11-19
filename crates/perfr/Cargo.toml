@@ -57,6 +57,7 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 perfr-perf-ring = { path = "../perfr-perf-ring" }
 perfr-unwind = { path = "../perfr-unwind" }
+perfr-pystack = { path = "../perfr-pystack" }
 
 # The kernel logger: scheduler, thread states and stack samples on Windows.
 [target.'cfg(windows)'.dependencies]

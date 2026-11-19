@@ -85,6 +85,18 @@ Clear, and opening a `.perfr.zip`, are refused until you stop:
 
 Opening a Chrome or Perfetto trace is different. The viewer stops the capture itself, then replaces the timeline. If a live capture ends the moment you open a `.json` trace, that is this path, not a crash.
 
+## A Python program shows only the interpreter
+
+The report of a Python target should name its Python functions (`crunch (app.py:10)`). When every stack is `_PyEval_EvalFrameDefault` instead:
+
+- The service log has a line that starts `the Python stacks of pid ... are not being read:` with the reason. The usual one is that the service may not read the target's memory: that needs the same permission as attaching to it. `kernel.yama.ptrace_scope` of 1 allows it only for a process the service started; `perfr doctor` reports the value and `perfr setup` can lower it or grant `cap_sys_ptrace`.
+- No line at all about Python: the service did not take the target for a Python program. It looks for `python3.x` or `libpython3.x.so` among the target's mapped files. A program with the interpreter linked in under its own name needs `"python_stacks": true` in the capture request.
+- **Python** is off in Settings, COLLECT.
+- The service is not a Linux one. The macOS and Windows services do not read Python stacks.
+- The interpreter is not CPython, or is a version py-spy 0.4.3 does not know (it knows 2.3 to 2.7 and 3.3 to 3.15). The log line gives py-spy's own reason.
+
+Some samples keeping the interpreter's frames is expected: the last line of the capture's log counts them and says why. See [Python programs](capture.html#python-programs).
+
 ## The timeline stays empty
 
 - No process selected, and **CSW** / **States** off, and nothing in the target calling `perfr.h`: there is nothing to draw. Turn on Sample or CSW, or [instrument the code](index.html#instrument-your-code).

@@ -29,6 +29,8 @@ use crate::thread_state::{Focus, ThreadStateTracer};
 use crate::hooks::{HookSpec, MAX_HOOKS};
 #[cfg(target_os = "linux")]
 use crate::uprobes::UprobeSession;
+#[cfg(target_os = "linux")]
+use crate::python::PythonStacks;
 #[cfg(target_os = "macos")]
 use crate::macos::capture_loop;
 #[cfg(target_os = "windows")]
@@ -210,16 +212,47 @@ pub(crate) struct FrameNames {
     next: u32,
     /// The range ran out and the shared id has been named.
     overflowed: bool,
+    /// The ids of the Python interpreter's eval function, under each name it
+    /// was sampled by (it has a `.cold` part): the frames a Python stack
+    /// takes the place of, see `python.rs`.
+    #[cfg(target_os = "linux")]
+    python_eval: Vec<u32>,
+    /// The ids of every other frame inside the interpreter's own image.
+    #[cfg(target_os = "linux")]
+    python_image: std::collections::HashSet<u32>,
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 impl FrameNames {
     pub(crate) fn new(service: Arc<LiveService>, store: Arc<SampleStore>) -> FrameNames {
-        FrameNames { service, store, ids: HashMap::new(), next: FRAME_NAME_ID_BASE, overflowed: false }
+        FrameNames {
+            service,
+            store,
+            ids: HashMap::new(),
+            next: FRAME_NAME_ID_BASE,
+            overflowed: false,
+            #[cfg(target_os = "linux")]
+            python_eval: Vec::new(),
+            #[cfg(target_os = "linux")]
+            python_image: std::collections::HashSet::new(),
+        }
+    }
+
+    /// What a frame id is to a Python stack: the interpreter's eval
+    /// function, another frame of the interpreter, or anything else.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn python_kind(&self, id: u32) -> perfr_pystack::Native {
+        if self.python_eval.contains(&id) {
+            perfr_pystack::Native::Eval
+        } else if self.python_image.contains(&id) {
+            perfr_pystack::Native::Interpreter
+        } else {
+            perfr_pystack::Native::Other
+        }
     }
 
     #[cfg(target_os = "linux")]
-    fn id_for(&mut self, name: &str) -> u32 {
+    pub(crate) fn id_for(&mut self, name: &str) -> u32 {
         self.id_for_frame(&crate::symbolize::ResolvedFrame {
             name: name.to_string(),
             module: String::new(),
@@ -271,6 +304,12 @@ impl FrameNames {
             },
         );
         self.ids.insert(frame.name.clone(), id);
+        #[cfg(target_os = "linux")]
+        if perfr_pystack::is_eval_frame(&frame.name) {
+            self.python_eval.push(id);
+        } else if perfr_pystack::is_python_image(&frame.module) {
+            self.python_image.insert(id);
+        }
         id
     }
 }
@@ -668,6 +707,11 @@ struct StartRequest {
     /// reads twice a second, and it can only explain a stall if it was on
     /// when the stall happened.
     machine_health: bool,
+    /// Python frames in the samples of a Python program, the names Python
+    /// gives its threads, and the GIL row (`python.rs`). Absent means when
+    /// the target has a Python interpreter mapped; `true` tries regardless,
+    /// for one linked into a program under another name.
+    python_stacks: Option<bool>,
 }
 
 impl StartRequest {
@@ -696,6 +740,7 @@ impl StartRequest {
             uprobe_duplicate_filter: flag("uprobe_duplicate_filter").unwrap_or(true),
             max_hook_calls_per_s: value.get("max_hook_calls_per_s").and_then(|v| v.as_u64()),
             machine_health: flag("machine_health").unwrap_or(true),
+            python_stacks: flag("python_stacks"),
         }
     }
 
@@ -1129,6 +1174,11 @@ struct UnnamedSample {
     time: u64,
     tid: u32,
     frames: Vec<u64>,
+    /// The unwind reached the root of the stack.
+    whole: bool,
+    /// The thread's Python stacks around the sample, fetched when it was
+    /// unwound: they are not kept as long as a symbol load can take.
+    python: perfr_pystack::Near,
 }
 
 /// How many unwound samples may wait for the symbols. A few hundred bytes
@@ -1198,8 +1248,20 @@ fn drain_samples(
     horizon_ns: u64,
     returns: Option<&UprobeSession>,
     scratch: &mut SampleScratch,
+    mut python: Option<&mut PythonStacks>,
 ) {
-    name_waiting_samples(symbolizer, named_through_ns, pc_ids, names, store, target_pid, period_ns, batch, scratch);
+    name_waiting_samples(
+        symbolizer,
+        named_through_ns,
+        pc_ids,
+        names,
+        store,
+        target_pid,
+        period_ns,
+        batch,
+        scratch,
+        python.as_deref_mut(),
+    );
     // Samples the reorder horizon has caught up to.
     let mut i = 0;
     while i < scratch.held.len() {
@@ -1226,6 +1288,7 @@ fn drain_samples(
             returns,
             &mut scratch.unnamed,
             &mut scratch.frames,
+            python.as_deref_mut(),
         );
         if scratch.pool.len() < STACK_POOL_MAX {
             held.stack.clear();
@@ -1289,6 +1352,7 @@ fn drain_samples(
                     returns,
                     &mut scratch.unnamed,
                     &mut scratch.frames,
+                    python.as_deref_mut(),
                 );
             } else {
                 let mut owned = scratch.pool.pop().unwrap_or_default();
@@ -1327,12 +1391,27 @@ fn name_waiting_samples(
     period_ns: u64,
     batch: &mut Vec<LiveEvent>,
     scratch: &mut SampleScratch,
+    mut python: Option<&mut PythonStacks>,
 ) {
     scratch.unnamed.retain(|sample| {
         if sample.time > named_through_ns {
             return true;
         }
-        name_sample(sample.time, sample.tid, &sample.frames, symbolizer, pc_ids, names, store, target_pid, period_ns, batch);
+        name_sample(
+            sample.time,
+            sample.tid,
+            &sample.frames,
+            sample.whole,
+            &sample.python,
+            symbolizer,
+            pc_ids,
+            names,
+            store,
+            target_pid,
+            period_ns,
+            batch,
+            python.as_deref_mut(),
+        );
         false
     });
 }
@@ -1364,6 +1443,7 @@ fn push_sample(
     returns: Option<&UprobeSession>,
     unnamed: &mut Vec<UnnamedSample>,
     frames: &mut Vec<u64>,
+    python: Option<&mut PythonStacks>,
 ) {
     #[cfg(target_arch = "x86_64")]
     let start = StartRegs { ip: regs[8], sp: regs[7], frame_pointer: regs[6], link: 0 };
@@ -1373,6 +1453,7 @@ fn push_sample(
         session.patch_user_stack(tid as i32, start.sp, time, stack);
     }
     // frames[0] is the sampled pc.
+    let mut whole = false;
     match unwinder {
         Some(unwinder) => {
             let end = {
@@ -1380,7 +1461,10 @@ fn push_sample(
                 unwinder.unwind_into(start, start.sp, stack, MAX_SAMPLE_FRAMES, frames)
             };
             match end {
-                UnwindEnd::Root => counters.unwound_whole += 1,
+                UnwindEnd::Root => {
+                    whole = true;
+                    counters.unwound_whole += 1
+                }
                 UnwindEnd::Truncated => counters.unwound_cut += 1,
                 UnwindEnd::Failed(_) => counters.unwind_failed += 1,
             }
@@ -1391,10 +1475,12 @@ fn push_sample(
             counters.not_unwound += 1;
         }
     }
+    // The thread's Python stacks around this instant, while they are kept.
+    let near = python.as_ref().map(|python| python.near(tid, time)).unwrap_or_default();
     if time <= named_through_ns {
-        name_sample(time, tid, frames, symbolizer, pc_ids, names, store, target_pid, period_ns, batch);
+        name_sample(time, tid, frames, whole, &near, symbolizer, pc_ids, names, store, target_pid, period_ns, batch, python);
     } else if unnamed.len() < MAX_UNNAMED_SAMPLES {
-        unnamed.push(UnnamedSample { time, tid, frames: frames.clone() });
+        unnamed.push(UnnamedSample { time, tid, frames: frames.clone(), whole, python: near });
     } else {
         if counters.named_early == 0 {
             log::warn!(
@@ -1403,18 +1489,23 @@ fn push_sample(
             );
         }
         counters.named_early += 1;
-        name_sample(time, tid, frames, symbolizer, pc_ids, names, store, target_pid, period_ns, batch);
+        name_sample(time, tid, frames, whole, &near, symbolizer, pc_ids, names, store, target_pid, period_ns, batch, python);
     }
 }
 
 /// Push the timeline events of one unwound sample: `frames` are its pcs,
-/// innermost first.
+/// innermost first. In a Python program the interpreter's eval frames give
+/// way to the Python functions they were running, when `near` has a Python
+/// stack of the thread that fits (`python.rs`); `whole` is whether the
+/// unwind reached the root.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn name_sample(
     time: u64,
     tid: u32,
     frames: &[u64],
+    whole: bool,
+    near: &perfr_pystack::Near,
     symbolizer: &Symbolizer,
     pc_ids: &mut crate::report::FastMap<u64, u32>,
     names: &mut FrameNames,
@@ -1422,16 +1513,20 @@ fn name_sample(
     target_pid: i32,
     period_ns: u64,
     batch: &mut Vec<LiveEvent>,
+    python: Option<&mut PythonStacks>,
 ) {
     // Innermost-first ids, for the report's self/inclusive
     // counts; the timeline spans below want them reversed.
-    let frame_ids: Vec<u32> = {
+    let mut frame_ids: Vec<u32> = {
         let _symbolize = perfr_api::scope("symbolize");
         frames
             .iter()
             .map(|pc| *pc_ids.entry(*pc).or_insert_with(|| names.id_for_frame(&symbolizer.resolve_frame(*pc))))
             .collect()
     };
+    if let Some(python) = python {
+        python.merge(&mut frame_ids, whole, near, names, MAX_SAMPLE_FRAMES);
+    }
     // One tick on the thread's sample bar, named by the leaf
     // frame so hovering it says what was running without a
     // lookup. Drawn as an instant: see LiveEvent::end_ns.
@@ -1772,6 +1867,7 @@ fn capture_loop(
     capture_start_ns: u64,
     symbols: Arc<Mutex<SymbolState>>,
     machine_health: bool,
+    python_stacks: Option<bool>,
 ) {
     // The hook specs the engines arm; the armed set also carries each hook's
     // size and safety verdict, kept for the crash journal.
@@ -1946,6 +2042,11 @@ fn capture_loop(
     const THREAD_SCAN_EVERY_NS: u64 = 2_000_000_000;
     let mut last_thread_scan_ns: u64 = crate::now_monotonic_ns();
     let sampling_works = !threads.is_empty();
+    // In a Python program a native stack is the interpreter; its Python
+    // stacks are read alongside and joined to the samples (`python.rs`).
+    // Started whether or not the sampling rings opened: Python's thread
+    // names and the GIL row need no samples.
+    let mut python = PythonStacks::start(target_pid, period_ns, python_stacks);
     if has_target && threads.is_empty() {
         log::warn!("no sampling rings for pid {target_pid} (permissions?)");
     }
@@ -2609,10 +2710,15 @@ fn capture_loop(
                 sample_flags,
                 &mut samples,
                 &mut batch,
-                sample_horizon,
+                // A sample waits for the Python reading that follows it.
+                sample_horizon.min(python.as_ref().map_or(u64::MAX, |python| python.horizon_ns(probe_now_ns))),
                 uprobes.as_ref(),
                 &mut sample_scratch,
+                python.as_mut(),
             );
+        }
+        if let Some(python) = python.as_mut() {
+            python.pump(&service, &mut names, &mut comm_names, &mut batch);
         }
         retire_dead_threads(&mut threads);
         drop(_samples);
@@ -2924,6 +3030,7 @@ fn capture_loop(
             u64::MAX,
             uprobes.as_ref(),
             &mut sample_scratch,
+            python.as_mut(),
         );
         if named_through_ns != u64::MAX {
             // Modules mapped in the last pass have no load under way yet.
@@ -2954,8 +3061,18 @@ fn capture_loop(
                 period_ns,
                 &mut tail,
                 &mut sample_scratch,
+                python.as_mut(),
             );
         }
+        if !tail.is_empty() {
+            service.push_events(&tail);
+        }
+    }
+    // Every sample has been joined to its Python stack: the reader can go,
+    // push the last GIL span, and say what it saw.
+    if let Some(python) = python.as_mut() {
+        let mut tail: Vec<LiveEvent> = Vec::new();
+        python.finish(&service, &mut names, &mut comm_names, &mut tail);
         if !tail.is_empty() {
             service.push_events(&tail);
         }
@@ -3532,6 +3649,7 @@ pub fn run_on(
             let show_all_processes = request.show_all_processes;
             let uprobe_duplicate_filter = request.uprobe_duplicate_filter;
             let machine_health = request.machine_health;
+            let python_stacks = request.python_stacks;
             let max_hook_calls_per_s = request.max_hook_calls_per_s(&start_service);
             let mut hooks = Vec::new();
             // Per-hook size and safety verdict, in the same order as `hooks`,
@@ -3669,6 +3787,7 @@ pub fn run_on(
                         capture_start_ns,
                         symbols,
                         machine_health,
+                        python_stacks,
                     );
                     // However the capture ended: its hook journal has done
                     // its job unless a crash report now points at it.
@@ -4342,6 +4461,7 @@ mod tests {
                 horizon_ns,
                 None,
                 &mut self.scratch,
+                None,
             );
             batch
         }
@@ -4511,7 +4631,13 @@ mod tests {
     fn a_symbol_load_that_never_ends_does_not_hold_samples_without_bound() {
         let mut rig = SampleRig::new(&[4001]);
         rig.scratch.unnamed = (0..MAX_UNNAMED_SAMPLES as u64)
-            .map(|i| UnnamedSample { time: 1_000 + i, tid: 4001, frames: Vec::new() })
+            .map(|i| UnnamedSample {
+                time: 1_000 + i,
+                tid: 4001,
+                frames: Vec::new(),
+                whole: false,
+                python: perfr_pystack::Near::default(),
+            })
             .collect();
         assert!(rig.ring(4001).publish(&stack_sample_record(4001, 900_000, 0x401000, &[0u8; 64])));
         let batch = rig.drain_with(0, u64::MAX);
@@ -4689,6 +4815,7 @@ mod tests {
             uprobe_duplicate_filter: true,
             max_hook_calls_per_s: None,
             machine_health: true,
+            python_stacks: None,
         };
         // What the server sends: its typed body, as JSON.
         let full = perfr_live_server::http::StartBody {
@@ -4706,6 +4833,7 @@ mod tests {
             max_hook_calls_per_s: Some(5),
             auto_profile: true,
             machine_health: false,
+            python_stacks: Some(false),
         };
         assert_eq!(
             StartRequest::parse(&full.to_json()),
@@ -4716,9 +4844,14 @@ mod tests {
                 uprobe_duplicate_filter: false,
                 max_hook_calls_per_s: Some(5),
                 machine_health: false,
+                python_stacks: Some(false),
                 ..request(4242)
             }
         );
+        // Python stacks are asked for outright, refused, or left to what
+        // the target is.
+        assert_eq!(StartRequest::parse(r#"{"pid":7,"python_stacks":true}"#).python_stacks, Some(true));
+        assert_eq!(StartRequest::parse(r#"{"pid":7,"python_stacks":"yes"}"#).python_stacks, None);
         // What an older viewer sends, and what is not a request at all.
         assert_eq!(StartRequest::parse(r#"{"pid":7}"#), request(7));
         for not_a_request in ["not json at all", "", "[]", r#"{"pid":"7"}"#] {

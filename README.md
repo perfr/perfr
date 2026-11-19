@@ -151,7 +151,7 @@ limits.
 
 | | |
 |---|---|
-| Linux x86-64 | Sampling at a fixed 1 kHz with DWARF unwinding, scheduler, thread states, Frida hooks, manual scopes, disassembly. Auto-profiling uses the kernel hook engine and needs root or `CAP_SYS_ADMIN`. The release binary is static musl, about 25 MB with the viewer embedded. |
+| Linux x86-64 | Sampling at a fixed 1 kHz with DWARF unwinding, a Python program's own functions in its samples (read from outside with py-spy, nothing added to the program), scheduler, thread states, Frida hooks, manual scopes, disassembly. Auto-profiling uses the kernel hook engine and needs root or `CAP_SYS_ADMIN`. The release binary is static musl, about 25 MB with the viewer embedded. |
 | Linux arm64 | The service compiles. It is not run in CI, and the published static binary is x86-64 only. |
 | macOS (Intel and Apple silicon) | Manual scopes and Frida function hooks. Native tests pass on both architectures. Attaching needs a task port; code signing, the hardened runtime, and SIP can refuse it. Shared-cache images whose symbols Frida cannot read may be missing from the function list. No call-stack sampling, scheduler, thread states, live disassembly, GPU lanes, or auto-profiling. The release binary is universal and ad-hoc signed, not notarized. |
 | Windows x86-64 | Sampling at a fixed 1 kHz with the kernel's stack walks, scheduler, thread states, Frida hooks, manual scopes, disassembly (no source lines yet), symbols from PDBs and export tables. The scheduler, thread states and sampling come from the NT Kernel Logger (ETW) and need an elevated prompt; scopes and hooks do not. No auto-profiling, kernel hook engine, or GPU lanes. The release binaries link the C runtime statically and are not code-signed. |

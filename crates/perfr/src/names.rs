@@ -62,9 +62,33 @@ pub fn thread_ids(pid: u32) -> Vec<u32> {
 pub struct NameSync {
     threads: HashMap<(u32, u32), String>,
     processes: HashMap<u32, String>,
+    /// What the program's own runtime calls a thread, see
+    /// [`prefer_thread_name`](Self::prefer_thread_name).
+    preferred: HashMap<(u32, u32), String>,
+}
+
+/// The name to show for a thread the kernel calls `comm`, in a process it
+/// calls `process`, when the program's runtime calls it `preferred`. The
+/// runtime's name wins when the kernel's adds nothing to it: the thread was
+/// never named for the kernel and still has the process's name, or the
+/// kernel's name is the runtime's cut to the fifteen bytes a `comm` holds.
+/// A thread the program named for the kernel as something else keeps that.
+fn shown_thread_name(comm: String, process: Option<&str>, preferred: Option<&String>) -> String {
+    match preferred {
+        Some(preferred) if process == Some(comm.as_str()) || preferred.starts_with(&comm) => preferred.clone(),
+        _ => comm,
+    }
 }
 
 impl NameSync {
+    /// A name the program's runtime has for a thread: Python's
+    /// `threading.Thread.name`. It is sent with the next refresh, in place
+    /// of a kernel name that says no more than the process's does.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn prefer_thread_name(&mut self, pid: u32, tid: u32, name: String) {
+        self.preferred.insert((pid, tid), name);
+    }
+
     /// Reads the names of `pids` and their threads from `/proc` and calls
     /// `on_process` / `on_thread` for every name not sent before (or
     /// changed since). Returns how many names went out.
@@ -102,7 +126,12 @@ impl NameSync {
                     sent += 1;
                 }
             }
-            for (tid, name) in read_threads(pid) {
+            for (tid, comm) in read_threads(pid) {
+                let name = shown_thread_name(
+                    comm,
+                    self.processes.get(&pid).map(String::as_str),
+                    self.preferred.get(&(pid, tid)),
+                );
                 if self.threads.get(&(pid, tid)) != Some(&name) {
                     on_thread(pid, tid, &name);
                     self.threads.insert((pid, tid), name);
@@ -210,6 +239,48 @@ mod tests {
     use super::*;
     use crate::report::{FrameInfo, StoredSample};
     use perfr_live_event::kind;
+
+    #[test]
+    fn a_runtimes_name_for_a_thread_is_shown_when_the_kernels_says_no_more() {
+        let shown = |comm: &str, preferred: Option<&str>| {
+            shown_thread_name(comm.to_string(), Some("python3"), preferred.map(str::to_string).as_ref())
+        };
+        // Never named for the kernel: it still has the process's name.
+        assert_eq!(shown("python3", Some("worker-0")), "worker-0");
+        assert_eq!(shown("python3", Some("MainThread")), "MainThread");
+        // Python 3.14 names the thread for the kernel too, cut to 15 bytes.
+        assert_eq!(shown("ThreadPoolExecu", Some("ThreadPoolExecutor-0_3")), "ThreadPoolExecutor-0_3");
+        assert_eq!(shown("worker-0", Some("worker-0")), "worker-0");
+        // A name the program set for the kernel that is not the runtime's
+        // (a C extension's own thread, prctl) is the more specific one.
+        assert_eq!(shown("grpc_global_tim", Some("Thread-3")), "grpc_global_tim");
+        assert_eq!(shown("python3", None), "python3");
+    }
+
+    #[test]
+    fn a_preferred_name_goes_out_once_and_again_only_when_it_changes() {
+        let mut sync = NameSync::default();
+        let sent = std::cell::RefCell::new(Vec::new());
+        let refresh = |sync: &mut NameSync| {
+            sync.refresh_with(
+                &[5],
+                |_| Some("python3".to_string()),
+                |_| vec![(6, "python3".to_string())],
+                |_, _| {},
+                |_, tid, name| sent.borrow_mut().push((tid, name.to_string())),
+            );
+        };
+        refresh(&mut sync);
+        sync.prefer_thread_name(5, 6, "worker-0".to_string());
+        refresh(&mut sync);
+        refresh(&mut sync);
+        sync.prefer_thread_name(5, 6, "worker-0 (draining)".to_string());
+        refresh(&mut sync);
+        assert_eq!(
+            *sent.borrow(),
+            [(6, "python3".to_string()), (6, "worker-0".to_string()), (6, "worker-0 (draining)".to_string())]
+        );
+    }
 
     #[test]
     fn this_process_names_itself_and_its_threads() {

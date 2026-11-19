@@ -197,6 +197,21 @@ opens on first load with a service and closes with its ×. Its rows:
   from that pass on, as C++ perfr reacts to PERF_RECORD_FORK. A slow
   scan of the thread list is the safety net and logs if it ever finds
   a thread no fork record announced.
+- **Python** (a COLLECT toggle, on by default, Linux services): when the
+  target has a Python interpreter mapped, its Python stacks are read from
+  outside with py-spy, about a thousand times a second and without pausing
+  it, and joined to the stack samples. A Python function is then a frame
+  like any other, named `function (file.py:line)` with its source file as
+  the module, in the Flat report, the trees, the flame graph, a sample's
+  callstack and the saved capture; the interpreter's frames between one
+  Python function and the next are left out and what runs under the
+  innermost one is kept. The threads take the names Python gives them, and
+  once the GIL has changed hands a **GIL** row of the process shows who held
+  it. What a merged stack can claim, the limits and the measured cost are in
+  [Capture](capture.html#python-programs). The e2e scenario is
+  `python-stacks` (`tools/test-programs/PerfrPythonStacks`), and the reader
+  has a test of its own against a `python3` child
+  (`crates/perfr-pystack/tests/reader.rs`).
 - **UNWIND** is a two-way switch, **DWARF** or **FP**. **HOOKS** is another:
   **Frida** (the default) or **Uprobes**. Frida's note reads "requires
   permission to attach to the target". Uprobes reads "requires Linux
@@ -735,6 +750,7 @@ in the URL opens a tab on load.
 | `06-report-modules.png` | report-tabs | Modules |
 | `07-api-rust.png` .. `10-api-python.png` | api-* | Manual instrumentation from each language |
 | `11-self-instrumentation.png` | self-instrumentation | The service's own scopes |
+| `57-python-stacks.png`, `58-python-rows.png` | python-stacks | A Python program while it is captured, and once stopped: the GIL row and Python's names for the threads |
 | `12-thread-focus.png` | thread-focus | A focused thread and its chip |
 | `13-scope-menu.png` | scope-report | The right-click menu on a scope |
 | `14-scope-report.png` | scope-report | The report over one scope's instances |

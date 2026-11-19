@@ -50,6 +50,8 @@ mod procs;
 mod report;
 mod scope_index;
 mod selfstat;
+#[cfg(target_os = "linux")]
+mod python;
 mod python_usdt;
 mod scopes;
 mod serve;

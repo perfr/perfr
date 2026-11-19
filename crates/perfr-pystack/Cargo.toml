@@ -1,0 +1,24 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+[package]
+name = "perfr-pystack"
+version = "0.1.0"
+description = "Python call stacks of a running process, read with py-spy, and how they join a native stack"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+log = "0.4"
+
+# py-spy reads the interpreter's own structures out of the target's memory.
+# Without its `cli` feature it is the library alone, and without `unwind` it
+# links no libunwind: the native half of a stack is perfr's own.
+[target.'cfg(target_os = "linux")'.dependencies]
+py-spy = { version = "0.4.3", default-features = false }

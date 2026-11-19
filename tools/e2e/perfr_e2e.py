@@ -517,8 +517,9 @@ def report_tabs(run):
 # values, a name long enough to spill -- so their captures look alike and the
 # documentation can show any of them.
 
-def _build_app(lang):
-    """Returns the argv to launch the test app for `lang`, building it first."""
+def _api_library():
+    """Points the programs that load perfr's API at run time to the tree's
+    library, building it first."""
     # PerfrTestC, PerfrTestCpp and the Python package do not link the API:
     # perfr.h and perfr_api load libperfr at run time, by default from
     # beside the perfr on PATH. The suite's service is not on PATH, so
@@ -532,6 +533,11 @@ def _build_app(lang):
                         os.path.join(REPO, "target/release"), "--agent-only"],
                        cwd=REPO, check=True)
     os.environ.setdefault("PERFR_LIB", lib)
+
+
+def _build_app(lang):
+    """Returns the argv to launch the test app for `lang`, building it first."""
+    _api_library()
     if lang == "rust":
         binary = os.path.join(REPO, "target/release/PerfrTestRust")
         if not os.path.exists(binary):
@@ -621,9 +627,12 @@ def _thread_names(stream):
 GIL_TID = 0x00FE611A
 
 
-@scenario("python-stacks", "A Python program: its functions in the samples, Python's thread names, and a row for the GIL")
+@scenario("python-stacks", "A Python program: its functions in the samples, Python's thread names, a row for the GIL, and its own scopes")
 def python_stacks(run):
     program = os.path.join(REPO, "tools/test-programs/PerfrPythonStacks/python_stacks.py")
+    # The program is instrumented by hand as well: its scopes and the
+    # samples' Python frames are in one capture.
+    _api_library()
     app = Target([sys.executable, program])
     try:
         time.sleep(1.0)
@@ -677,11 +686,21 @@ def python_stacks(run):
         for wanted in ("MainThread", "report-builder", "fibonacci", "sleeper", "pool_0", "pool_1"):
             check(wanted in mine, f"no thread named {wanted!r}; the process's threads are {sorted(mine)}")
         check(names.get((app.pid, GIL_TID)) == "GIL", f"no GIL row; the process's rows are {sorted(mine)}")
+        # What the program says of itself with perfr's Python API, beside
+        # what the samples found: its scopes, and the main thread's turns as
+        # frames.
+        stats = run.service.get(f"/api/functions/stats?pid={app.pid}")["rows"]
+        scopes = {r["name"]: r["count"] for r in stats if r["kind"] == "scope"}
+        for wanted in ("turn", "crunch", "build report", "rank", "render", "fib(20)", "pool job", "wake"):
+            check(scopes.get(wanted, 0) >= 10, f"scope {wanted!r} was seen {scopes.get(wanted, 0)} times; scopes: {scopes}")
+        frames = [r for r in stats if r["kind"] == "frame"]
+        check(frames and frames[0]["count"] >= 20, f"the main thread's turns are not frames: {frames}")
         if run.chrome is not None:
             run.open_viewer("?collapse=scheduler")
             check(f"row:thread:{app.pid}:{GIL_TID}" in run.ui(), "the viewer shows no GIL row")
             run.shot("58-python-rows", settle=2.0)
-        return f"{report['samples']} samples, {merged} with Python frames, {kept} without"
+        return (f"{report['samples']} samples, {merged} with Python frames, {kept} without, "
+                f"{sum(scopes.values())} scopes of its own")
     finally:
         app.stop()
 

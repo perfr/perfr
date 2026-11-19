@@ -75,7 +75,7 @@ So a thread's stack reads `start_thread`, `Thread.run (threading.py:1013)`, `wor
 
 **Thread names.** A thread the program named with `threading.Thread(name=...)`, or that a pool named, has that name on the rail. Before Python 3.14 the kernel is never told those names and every thread reads `python3`; from 3.14 it is told the first fifteen bytes. Python's name is used when the kernel's adds nothing to it. A thread named for the kernel as something else keeps that name.
 
-**The GIL.** Once the lock has changed hands, the process has a row called **GIL**, captioned `held by`. Each scope on it is a stretch one thread was seen holding the lock on every reading, and is named after that thread. The row shows the hand-overs; the Live tab's statistics for those names are how often and for how long each thread held it. A program whose GIL is only ever held by one thread gets no row: that thread's state bar already says when it ran.
+**The GIL.** Once the lock has changed hands, the process has a row called **GIL**, captioned `held by`. Each scope on it is a stretch one thread was seen holding the lock on every reading; it is named after that thread and drawn in that thread's colour, the colour of the chip beside the thread's name on the rail. The row shows the hand-overs; the Live tab's statistics for those names are how often and for how long each thread held it. A program whose GIL is only ever held by one thread gets no row: that thread's state bar already says when it ran.
 
 ### How it is read, and what that costs
 

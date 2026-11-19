@@ -227,6 +227,13 @@ pub fn event_color_hashed(
     if pad == mode::MANUAL_API {
         return material_index_to_argb(extra);
     }
+    // A span of a Python program's GIL row, in the colour of the thread that
+    // held the lock: the full one, as that thread's chip on the rail.
+    if kind_id == kind::API_SCOPE && crate::python::is_gil_tid(tid) {
+        if let Some(holder) = crate::python::holder_color_id(tid, extra) {
+            return thread_scope_color(holder, 1);
+        }
+    }
     match kind_id {
         // Before the name-based arms: a sample tick carries the leaf frame's
         // name_id so hovering it says what was running, and colouring by that

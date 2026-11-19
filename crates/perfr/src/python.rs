@@ -350,7 +350,8 @@ impl PythonStacks {
                 pid: self.pid as u32,
                 kind: kind::API_SCOPE,
                 depth: 0,
-                extra: 0,
+                // The holder's colour: the span is drawn as its thread is.
+                extra: perfr_live_event::python::holder_extra(span.tid),
                 _pad: 0,
                 name_id,
             });
@@ -780,6 +781,14 @@ mod tests {
                 ("worker-1".to_string(), 115, 10),
                 ("worker-0".to_string(), 125, 5)
             ]
+        );
+        // Each span says whose colour it is drawn in: its holder's.
+        let holders: Vec<u8> = batch.iter().map(|e| e.extra).collect();
+        let extra = perfr_live_event::python::holder_extra;
+        assert_eq!(holders, [extra(11), extra(12), extra(11)]);
+        assert_eq!(
+            batch[1].color_rgba(),
+            perfr_live_event::thread_scope_color(12, 1)
         );
         let (threads, _) = rig.service.capture_names();
         assert!(threads

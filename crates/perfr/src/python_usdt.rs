@@ -222,8 +222,10 @@ pub fn print_probes(target: &str) -> i32 {
         PyInstrumentation::Sampling => {
             println!(
                 "\nfunction__entry/function__return: ABSENT -- this Python was not built \
-                 with the per-function probes. perfr falls back to sampled call stacks \
-                 for the Python side (native and CUDA instrumentation are unaffected)."
+                 with the per-function probes. A capture still shows its Python \
+                 functions: they are read into the stack samples from outside (see \
+                 \"Python programs\" in the manual). Native and CUDA instrumentation \
+                 are unaffected."
             );
         }
     }

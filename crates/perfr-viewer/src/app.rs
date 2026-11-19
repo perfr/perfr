@@ -1391,6 +1391,9 @@ pub struct PerfrLiveApp {
     /// The Node Health track: the machine's CPU, memory, pressure, disks,
     /// network and GPU, sampled by the service twice a second.
     opt_health: bool,
+    /// Python frames, thread names and the GIL row when the target is a
+    /// Python program.
+    opt_python: bool,
     sample_period_ms: String,
     unwind_dwarf: bool,
     user_space_hooks: bool,
@@ -2264,6 +2267,7 @@ impl PerfrLiveApp {
             opt_thread_states: true,
             opt_sampling: true,
             opt_health: true,
+            opt_python: true,
             sample_period_ms: "1.0".into(),
             unwind_dwarf: true,
             user_space_hooks: true,
@@ -3959,6 +3963,7 @@ impl PerfrLiveApp {
             uprobe_duplicate_filter: self.uprobe_duplicate_filter,
             auto_profile: self.auto_profile,
             machine_health: self.opt_health,
+            python_stacks: self.opt_python,
         }
     }
 
@@ -6036,6 +6041,16 @@ impl PerfrLiveApp {
             {
                 self.opt_health = !self.opt_health;
             }
+            if pill(ui, "Python", self.opt_python)
+                .on_hover_text(
+                    "When the target is a Python program: its Python functions in the callstack samples, \
+                     the names Python gives its threads, and a row for who holds the GIL. \
+                     Read from outside, without pausing it (Linux services)",
+                )
+                .clicked()
+            {
+                self.opt_python = !self.opt_python;
+            }
             ui.add(
                 egui::TextEdit::singleline(&mut self.sample_period_ms)
                     .id_salt("perfr_sample_ms")
@@ -7735,10 +7750,17 @@ impl PerfrLiveApp {
                 let label_r = Rect::from_min_size(name_pos, galley.size());
                 painter.galley(name_pos, galley, theme::TEXT());
                 if health_group.is_none() {
+                    // The GIL row is not a thread: where a thread says its
+                    // id, it says what its scopes are named after.
+                    let caption = if perfr_live_event::python::is_gil_tid(th.tid) {
+                        perfr_live_event::python::GIL_ROW_CAPTION.to_string()
+                    } else {
+                        th.tid.to_string()
+                    };
                     painter.text(
                         Pos2::new(text_left, title.center().y + 1.0),
                         Align2::LEFT_TOP,
-                        th.tid.to_string(),
+                        caption,
                         FontId::monospace(9.0),
                         theme::MUTED(),
                     );

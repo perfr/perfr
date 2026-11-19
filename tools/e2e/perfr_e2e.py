@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -600,6 +601,89 @@ def api_cpp(run):
 @scenario("api-python", "PerfrTestPython: every instrumentation call, from Python over ctypes")
 def api_python(run):
     return _instrumented_app(run, "python", 10)
+
+
+def _thread_names(stream):
+    """The thread names a saved stream carries, by (pid, tid): its frames of
+    kind 7, each a length, the kind, then pid, tid, a length and the name."""
+    names, at = {}, 0
+    while at + 5 <= len(stream):
+        size, kind = int.from_bytes(stream[at:at + 4], "little"), stream[at + 4]
+        payload = stream[at + 5:at + 5 + size]
+        at += 5 + size
+        if kind == 7:
+            pid, tid, length = struct.unpack_from("<III", payload, 0)
+            names[(pid, tid)] = payload[12:12 + length].decode("utf-8", "replace")
+    return names
+
+
+# The thread id of the GIL row: `perfr_live_event::python::GIL_TID`.
+GIL_TID = 0x00FE611A
+
+
+@scenario("python-stacks", "A Python program: its functions in the samples, Python's thread names, and a row for the GIL")
+def python_stacks(run):
+    program = os.path.join(REPO, "tools/test-programs/PerfrPythonStacks/python_stacks.py")
+    app = Target([sys.executable, program])
+    try:
+        time.sleep(1.0)
+        run.service.post("/api/capture/start", {"pid": app.pid})
+        time.sleep(5.0)
+        run.open_viewer("?collapse=scheduler")
+        run.shot("57-python-stacks", settle=3.0)
+        run.service.post("/api/capture/stop")
+        time.sleep(2.0)
+        check_capture_clock(run.service)
+
+        # The report names the program's own functions, with the file and
+        # the line each is defined at, and its file as the module.
+        report = run.service.get("/api/sampling/report?start_ns=0&end_ns=18446744073709551615")
+        check_at_least(report["samples"], 1000, "callstack samples")
+        rows = report["functions"]
+
+        def row(prefix):
+            found = [f for f in rows if f["name"].startswith(prefix)]
+            check(found, f"no {prefix!r} in the report; top rows were {[f['name'] for f in rows[:8]]}")
+            return found[0]
+
+        for function in ("crunch", "fib", "build_report", "worker_loop", "Report.ranked", "Thread.run"):
+            row(function + " (")
+        crunch = row("crunch (python_stacks.py:")
+        check(crunch["module"] == "python_stacks.py", f"crunch's module is {crunch['module']!r}")
+        check(crunch["function_id"] == 0, "a Python function was given an id to hook it by")
+        check_at_least(crunch["inclusive_percent"], 10.0, "crunch's share of the samples")
+        check_at_least(row("worker_loop (")["inclusive_percent"], 25.0, "worker_loop's share of the samples")
+        # A callback from C keeps its place under the function that asked for it.
+        tree = json.dumps(run.service.get("/api/sampling/tree?mode=bottom_up"))
+        check("<lambda> (python_stacks.py:" in tree, "the key function of sorted() is in no stack")
+        # The interpreter's eval function is what the Python frames replaced.
+        evals = [f for f in rows if f["name"].startswith("_PyEval_EvalFrameDefault")]
+        left = sum(f["inclusive_percent"] for f in evals)
+        check(left < 10.0, f"_PyEval_EvalFrameDefault is still in {left:.1f}% of the samples")
+
+        # What the service says of how samples and readings met.
+        log = run.service.stderr_text()
+        said = re.findall(r"(\d+) sample\(s\) carry Python frames.* (\d+) kept the interpreter's frames", log)
+        check(said, f"no summary of the Python stacks in the log; tail: {log[-600:]}")
+        merged, kept = (int(n) for n in said[-1])
+        check(merged >= 20 * kept, f"{kept} samples kept the interpreter's frames against {merged} merged")
+        check("TracerPid:\t0" in open(f"/proc/{app.pid}/status").read(), "the target is being traced")
+
+        # Python's names for its threads, and the row for the GIL.
+        stream = run.service.get("/api/capture/export?format=stream")
+        check(isinstance(stream, bytes) and len(stream) > 1000, "the stream export is empty")
+        names = _thread_names(stream)
+        mine = {name for (pid, _tid), name in names.items() if pid == app.pid}
+        for wanted in ("MainThread", "report-builder", "fibonacci", "sleeper", "pool_0", "pool_1"):
+            check(wanted in mine, f"no thread named {wanted!r}; the process's threads are {sorted(mine)}")
+        check(names.get((app.pid, GIL_TID)) == "GIL", f"no GIL row; the process's rows are {sorted(mine)}")
+        if run.chrome is not None:
+            run.open_viewer("?collapse=scheduler")
+            check(f"row:thread:{app.pid}:{GIL_TID}" in run.ui(), "the viewer shows no GIL row")
+            run.shot("58-python-rows", settle=2.0)
+        return f"{report['samples']} samples, {merged} with Python frames, {kept} without"
+    finally:
+        app.stop()
 
 
 @scenario("frame-marks", "A program's frame marks: the strip of frame times, a click on a bar, the bands")

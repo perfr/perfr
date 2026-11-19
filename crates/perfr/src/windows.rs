@@ -808,6 +808,7 @@ pub fn capture_loop(
     _symbols: Arc<Mutex<SymbolState>>,
     // The health track reads Linux's /proc and /sys (`health.rs`).
     _machine_health: bool,
+    _python_stacks: Option<bool>,
 ) {
     if gpu_helper.is_some() {
         log::warn!("GPU helper capture is not supported on Windows");
@@ -1173,6 +1174,7 @@ pub(super) fn capture_file(args: crate::Args) -> Result<(), String> {
         capture_start_ns,
         Arc::new(Mutex::new(SymbolState::default())),
         false,
+        None,
     );
     let _ = timer.join();
     let (_, events) = service.ring().snapshot();

@@ -49,9 +49,19 @@ static SINK: Mutex<Sink> = Mutex::new(Sink { file: None, backlog: Vec::new(), ba
 struct Logger;
 static LOGGER: Logger = Logger;
 
+/// py-spy narrates through the same `log` facade: each step of finding the
+/// interpreter at info, and at warn each frame of a stack it read while the
+/// target was changing it, a thousand readings a second. What the capture
+/// has to say about Python is said by `python.rs`, from the reader's state
+/// and counts; of the library's own lines only an error is kept.
+fn is_library_chatter(metadata: &log::Metadata) -> bool {
+    let target = metadata.target();
+    (target.starts_with("py_spy") || target.starts_with("remoteprocess")) && metadata.level() > log::Level::Error
+}
+
 impl log::Log for Logger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::max_level()
+        metadata.level() <= log::max_level() && !is_library_chatter(metadata)
     }
 
     fn log(&self, record: &log::Record) {

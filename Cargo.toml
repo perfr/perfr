@@ -41,6 +41,7 @@ members = [
     "crates/perfr-object",
     "crates/perfr-perf-records",
     "crates/perfr-perf-ring",
+    "crates/perfr-pystack",
     "crates/perfr-pod-dump",
     "crates/perfr-scope-ring",
     "crates/perfr",

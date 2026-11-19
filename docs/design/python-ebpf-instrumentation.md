@@ -74,6 +74,11 @@ Either way:
 
 - **No function probes** (the common case above): degrade to sampled call
   stacks for the Python side; native + CUDA instrumentation are unaffected.
+  **Built 2026-11-19**: a capture of a Python program reads its Python
+  stacks with py-spy and joins them to the native samples
+  (`crates/perfr-pystack`, `crates/perfr/src/python.rs`; "Python programs"
+  in [the manual](../manual/capture.md)). That is the sampled half of this
+  document, for every CPython, with no probes at all.
 - **Not a dtrace build / no `.note.stapsdt`:** sampling.
 - **Windows:** no out-of-process USDT/uprobe story yet (eBPF-for-Windows lacks
   uprobe/USDT support) — sampling.
@@ -92,6 +97,11 @@ Either way:
 - CLI: `perfr --python-probes <pid | path>` prints the probes and the
   degrade decision.
 - The **landing-page** section featuring the angle (`perfr-web/index.html`).
+
+**Built 2026-11-19:**
+
+- Python functions in the stack samples, Python's thread names and a GIL
+  row, by sampling: see the first fallback above.
 
 **Planned (tracked, needs a `--with-dtrace` Python with the function probes,
 privileges, and a GPU to build and verify):**

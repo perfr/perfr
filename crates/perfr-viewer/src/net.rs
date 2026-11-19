@@ -286,6 +286,10 @@ pub struct CaptureStart {
     pub uprobe_duplicate_filter: bool,
     pub auto_profile: bool,
     pub machine_health: bool,
+    /// Python frames, thread names and the GIL row for a Python target. On
+    /// leaves it to the service, which does it when the target is one; off
+    /// is sent as a refusal.
+    pub python_stacks: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -623,8 +627,11 @@ pub fn capture_start_body(req: &CaptureStart) -> String {
         .map(|id| format!(r#"{{"function_id":{id}}}"#))
         .collect::<Vec<_>>()
         .join(",");
+    // Absent is "when the target is a Python program", which is what the
+    // switch being on means; only a refusal is said.
+    let python = if req.python_stacks { "" } else { r#","python_stacks":false"# };
     format!(
-        r#"{{"pid":{},"enable_api":{},"context_switches":{},"thread_states":{},"sampling":{},"samples_per_second":{},"unwinding":"{}","dynamic_instrumentation_method":"{}","instrumented_functions":[{fns}],"show_all_processes":{},"uprobe_duplicate_filter":{},"auto_profile":{},"machine_health":{}}}"#,
+        r#"{{"pid":{},"enable_api":{},"context_switches":{},"thread_states":{},"sampling":{},"samples_per_second":{},"unwinding":"{}","dynamic_instrumentation_method":"{}","instrumented_functions":[{fns}],"show_all_processes":{},"uprobe_duplicate_filter":{},"auto_profile":{},"machine_health":{}{python}}}"#,
         req.pid,
         req.enable_api,
         req.context_switches,
@@ -1664,7 +1671,18 @@ mod tests {
             uprobe_duplicate_filter: true,
             auto_profile: false,
             machine_health: true,
+            python_stacks: true,
         }
+    }
+
+    #[test]
+    fn python_stacks_are_left_to_the_service_unless_switched_off() {
+        let on = capture_start_body(&capture_start());
+        assert!(!on.contains("python_stacks"), "{on}");
+        let off = capture_start_body(&CaptureStart { python_stacks: false, ..capture_start() });
+        let v: serde_json::Value = serde_json::from_str(&off).unwrap();
+        assert_eq!(v["python_stacks"], false);
+        assert_eq!(v["machine_health"], true);
     }
 
     #[test]

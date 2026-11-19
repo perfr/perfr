@@ -1092,6 +1092,12 @@ pub struct StartBody {
     /// disks, network, GPU) into the Node Health track. On by default.
     #[serde(default = "default_true")]
     pub machine_health: bool,
+    /// Python frames in the samples of a Python program, its thread names
+    /// and the GIL row. Absent: when the target is a Python program.
+    /// `false` turns it off, `true` tries on a program that does not look
+    /// like one (an interpreter linked in under another name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python_stacks: Option<bool>,
 }
 
 fn default_true() -> bool {

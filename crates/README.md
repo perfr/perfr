@@ -33,6 +33,7 @@ Where the events come from on Linux:
 | `perfr-perf-ring` | `perf_event_open`, the event attributes and the mmap ring-buffer protocol. The unsafe code is confined to its `sys` module; `libc` is the one dependency. |
 | `perfr-unwind` | DWARF callstack unwinding over sampled stack copies, with `framehop` and `object`. |
 | `perfr-maps` | Parsing of `/proc/<pid>/maps`. No dependencies. |
+| `perfr-pystack` | The Python call stacks of a Python target, read from outside with the `py-spy` crate without pausing it, and the rule by which one joins a native stack. Also who holds the GIL, and Python's names for its threads. |
 | `perfr-thread-states` | The per-thread state machine over the scheduler tracepoints. |
 | `perfr-tracing-state` | Bookkeeping that needs no kernel: pairing context switches, hooked calls, GPU samples. |
 | `perfr-gpu` | The NVIDIA telemetry helper, a separate process (see Distributing). |

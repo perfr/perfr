@@ -70,7 +70,16 @@ use perfr_live_render::{lane_gap, lane_height, sort_thread_leaves, TrackIndex};
 pub const MACHINE_H: f32 = 16.0;
 pub const PROCESS_H: f32 = 18.0;
 pub const SCHEDULER_H: f32 = 18.0;
+/// The least a thread's row is tall: its name and its id in the rail.
 pub const THREAD_H: f32 = 32.0;
+/// From the top of a thread's row to its first lane. The lanes start beside
+/// the thread's name, not under it: the name is in the rail, and a band as
+/// tall as it across the timeline was a band of nothing on every thread.
+/// This much puts the state bar level with the name and the sample bar with
+/// the id under it.
+pub const THREAD_PAD_TOP: f32 = 4.0;
+/// Under a thread's last lane, before the line that begins the next track.
+pub const THREAD_PAD_BOTTOM: f32 = 3.0;
 
 enum SkelItem {
     Row(RowId, f32),
@@ -1379,7 +1388,7 @@ impl TrackStrip {
                     let Some(&ty) = next.get(&RowId::Thread(t)) else {
                         continue;
                     };
-                    let mut ly = ty + THREAD_H * s;
+                    let mut ly = ty + THREAD_PAD_TOP * s;
                     for &k in self.catalogue.leaves_of(t) {
                         if is_standalone_lane(k) {
                             continue;
@@ -1606,16 +1615,20 @@ impl TrackStrip {
 
     fn thread_scope_stack_h(&self, t: ThreadId) -> f32 {
         let s = self.scale.max(0.01);
-        let mut h = THREAD_H * s;
+        let head = THREAD_H * s;
         if self.collapsed.contains(&RowId::Thread(t)) {
-            return h;
+            return head;
         }
-        for &k in self.catalogue.leaves_of(t) {
-            if !is_standalone_lane(k) {
-                h += (lane_height(k) + lane_gap(k)) * s;
-            }
-        }
-        h
+        let lanes: f32 = self
+            .catalogue
+            .leaves_of(t)
+            .iter()
+            .filter(|k| !is_standalone_lane(**k))
+            .map(|k| (lane_height(*k) + lane_gap(*k)) * s)
+            .sum();
+        // The lanes are beside the head, so the row is as tall as the
+        // taller of the two.
+        head.max((THREAD_PAD_TOP + THREAD_PAD_BOTTOM) * s + lanes)
     }
 
     fn height_of(&self, id: RowId) -> f32 {
@@ -2901,7 +2914,7 @@ mod tests {
                 .any(|r| r.id == RowId::Thread(t1) && (r.y - y1).abs() < 0.5),
             "dragged header must leave the origin row"
         );
-        let origin_lane = y1 + THREAD_H * strip.scale;
+        let origin_lane = y1 + THREAD_PAD_TOP * strip.scale;
         assert!(
             strip
                 .rest_layout()
@@ -3033,6 +3046,59 @@ mod tests {
     }
 
     #[test]
+    fn a_threads_lanes_start_at_the_top_of_its_row_beside_its_name() {
+        let mut idx = TrackIndex::default();
+        // A thread with a state bar, samples and three depths of scopes,
+        // and under it one with a single scope lane.
+        idx.insert(ev(kind::THREAD_STATE, 1, 1, 0, 0));
+        idx.insert(ev(kind::SAMPLE, 1, 1, 0, 0));
+        for depth in 0..3 {
+            idx.insert(ev(kind::API_SCOPE, 1, 1, depth, 0));
+        }
+        idx.insert(ev(kind::API_SCOPE, 1, 2, 0, 0));
+        for scale in [1.0_f32, 1.5] {
+            let mut strip = TrackStrip { scale, ..Default::default() };
+            strip.sync(&idx, None);
+            strip.tick(1.0, &idx, None);
+            let tall = ThreadId { pid: 1, tid: 1 };
+            let short = ThreadId { pid: 1, tid: 2 };
+            let (tall_y, tall_h) = strip.thread_band(tall).unwrap();
+            let (short_y, short_h) = strip.thread_band(short).unwrap();
+            // The first lane is the state bar, a pad under the row's top:
+            // no band the height of the name above it.
+            let tall_lanes = lanes_of_strip(&strip, 1);
+            assert_eq!(tall_lanes.len(), 5);
+            assert_eq!(tall_lanes[0].0.kind, kind::THREAD_STATE);
+            assert!((tall_lanes[0].1 - (tall_y + THREAD_PAD_TOP * scale)).abs() < 0.01, "{tall_lanes:?}");
+            // The row ends a pad under its last lane, and the next thread
+            // begins there.
+            let stacked: f32 = tall_lanes.iter().map(|(k, _)| (lane_height(*k) + lane_gap(*k)) * scale).sum();
+            assert!((tall_h - ((THREAD_PAD_TOP + THREAD_PAD_BOTTOM) * scale + stacked)).abs() < 0.01);
+            assert!(tall_h > THREAD_H * scale);
+            assert!((short_y - (tall_y + tall_h)).abs() < 0.01);
+            // A thread with less to show than its name is tall keeps the
+            // name's height, and its lane is still at the top.
+            let short_lanes = lanes_of_strip(&strip, 2);
+            assert!((short_h - THREAD_H * scale).abs() < 0.01);
+            assert!((short_lanes[0].1 - (short_y + THREAD_PAD_TOP * scale)).abs() < 0.01);
+            // Every lane is inside its thread's row.
+            for (k, y) in strip.layout() {
+                let (top, h) = strip.thread_band(ThreadId { pid: k.pid, tid: k.tid }).unwrap();
+                assert!(*y >= top && *y + lane_height(*k) * scale <= top + h + 0.01, "{k:?} at {y}");
+            }
+            // Folded, it is its name and nothing else.
+            strip.toggle(RowId::Thread(tall));
+            strip.tick(1.0, &idx, None);
+            assert!((strip.thread_band(tall).unwrap().1 - THREAD_H * scale).abs() < 0.01);
+            assert!(lanes_of_strip(&strip, 1).is_empty());
+        }
+    }
+
+    fn lanes_of_strip(strip: &TrackStrip, tid: u32) -> Vec<(LaneKey, f32)> {
+        strip.layout().iter().copied().filter(|(k, _)| k.tid == tid).collect()
+    }
+
+    #[test]
     fn graphs_and_async_blocks_are_tracks_of_their_own_under_their_thread() {
         let mut idx = TrackIndex::default();
         idx.insert(ev(kind::API_SCOPE, 1, 1, 0, 0));
@@ -3068,9 +3134,9 @@ mod tests {
         let async_h = strip.rows().iter().find(|r| r.id == RowId::Async(t1)).unwrap().height;
         let lane = LaneKey { pid: 1, tid: 1, kind: kind::API_TRACK, depth: 0, extra: 0 };
         assert!((async_h - 2.0 * (lane_height(lane) + lane_gap(lane))).abs() < 0.01);
+        // One scope lane is shorter than the thread's head beside it.
         let (_, thread_h) = strip.thread_band(t1).unwrap();
-        let scope = LaneKey { pid: 1, tid: 1, kind: kind::API_SCOPE, depth: 0, extra: 0 };
-        assert!((thread_h - (THREAD_H + lane_height(scope) + lane_gap(scope))).abs() < 0.01);
+        assert!((thread_h - THREAD_H).abs() < 0.01);
         // Both async lanes have a Y inside the block.
         let ay = strip.y[&RowId::Async(t1)];
         let d0 = strip.layout().iter().find(|(k, _)| *k == lane).unwrap().1;

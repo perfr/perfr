@@ -7319,7 +7319,11 @@ impl PerfrLiveApp {
         // The node of the scheduler lane above the row being drawn, to
         // mark where the node changes.
         let mut node_above: Option<u16> = None;
+        // What the row above the one being drawn is, lifted or not.
+        let mut above: Option<RowId> = None;
         for row in &rows {
+            let under_process_header = matches!(above, Some(RowId::Process(_)));
+            above = Some(row.id);
             let lane_node = match row.id {
                 RowId::Lane(key) if key.is_scheduler() => Some(self.machines.tinted_node(u16::from(key.extra))),
                 _ => None,
@@ -7396,6 +7400,23 @@ impl PerfrLiveApp {
                         [band.left_top(), band.right_top()],
                         Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 12)),
                     );
+                }
+                // Where one thread's track ends and the next begins. Its
+                // lanes start at the top of its row, so without a line the
+                // last lane of one thread and the state bar of the next are
+                // a few pixels apart and read as one track. A lifted track
+                // has its shadow for an edge, and the first thread of a
+                // process has the process's header.
+                if matches!(row.id, RowId::Thread(_)) && !dragging && !under_process_header {
+                    painter.line_segment([band.left_top(), band.right_top()], Stroke::new(1.0, track_divider()));
+                    if !self.in_self_pane {
+                        if let RowId::Thread(t) = row.id {
+                            note_ui_rect_fmt(
+                                format_args!("divider:thread:{}:{}", t.pid, t.tid),
+                                Rect::from_min_size(band.left_top(), Vec2::new(band.width(), 1.0)),
+                            );
+                        }
+                    }
                 }
                 // Each track highlights on its own: a thread's block, an
                 // async block, a graph. They are separate rows now, so a
@@ -13292,6 +13313,13 @@ fn section(ui: &mut Ui, label: &str) {
             .color(theme::MUTED()),
     );
     ui.add_space(6.0);
+}
+
+/// The line over a thread's track: the scheme's text colour at a tenth, so
+/// it is light on a dark scheme and dark on a light one, and in both a
+/// shade of the track's own ground and not a rule across the page.
+fn track_divider() -> Color32 {
+    theme::TEXT().gamma_multiply(0.10)
 }
 
 fn row_process_wash(id: RowId, dragging: bool) -> Color32 {

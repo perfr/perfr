@@ -94,9 +94,32 @@ job and end with the file sizes from that run.
   `PERFR_SYMBOL_STORE_REGION` (default `auto`) and
   `PERFR_SYMBOL_STORE_PREFIX`. Without them the upload step is skipped
   with a message; the symstore archives are still on the release.
-- PyPI: configure Trusted Publishing for `perfr-api` and `perfr`, using
-  the `pypi` environment of this repository. Without it the wheel
-  publish job fails; the GitHub Release is unaffected.
+- PyPI: give each of the two projects, `perfr-api` and `perfr`, a Trusted
+  Publisher (the project's **Publishing** settings on pypi.org) with
+  exactly these fields:
+
+  | Field | Value |
+  |---|---|
+  | Owner | `perfr` |
+  | Repository name | `perfr` |
+  | Workflow name | `python-wheels.yml` |
+  | Environment name | `pypi` |
+
+  Fill in the environment. Left empty, the publisher accepts an upload
+  from any environment of the repository, and PyPI sends a notice after
+  each release asking for it to be constrained; a publisher made that way
+  is constrained from that notice's link or by deleting it and adding it
+  again with the environment set. Without a publisher the wheel publish
+  job fails with `invalid-publisher`; the GitHub Release is unaffected.
+- GitHub: the environment `pypi` (Settings, Environments) is what the
+  publishers trust, so limit which runs may use it: under **Deployment
+  branches and tags** choose **Selected branches and tags** and add the
+  tag rule `perfr-v*`. A run from a branch, or from any other tag, is then
+  refused the environment before it can ask PyPI for anything.
+
+The pull-request check `.github/scripts/check-pypi-publish.py` keeps the
+workflow to the same three things: the upload is in `python-wheels.yml`, in
+the environment `pypi`, for the push of a `perfr-v*` tag.
 
 ## By hand
 
@@ -123,7 +146,8 @@ A manual run (Actions, then release-rust, then Run workflow) with an empty
 existing `perfr-v*` tag, it checks out that tag in every job and creates the
 release for it; the branch chosen under "Use workflow from" only decides
 which copy of the workflow file runs. A manual run of python-wheels builds
-wheels and never publishes.
+wheels and never publishes, including one started from a release tag: its
+`publish` job runs for the push of the tag only.
 
 ## release-rust.yml
 
@@ -262,8 +286,9 @@ the two installers keep the same names.
 
 On a `perfr-v*` tag it builds wheels with `tools/release/build_wheels.sh` for
 `linux-x86_64`, `linux-aarch64`, `macos-arm64`, `macos-x86_64` and
-`windows-x86_64`. Its `publish` job (environment `pypi`) then uploads them
-with Trusted Publishing. `perfr-api` carries the API-only `libperfr`. `perfr`
+`windows-x86_64`. Its `publish` job (environment `pypi`, the one the
+publishers on PyPI are constrained to) then uploads them with Trusted
+Publishing. `perfr-api` carries the API-only `libperfr`. `perfr`
 carries the `perfr` binary, the full `libperfr`, `perfr-hook` and `perfr.h`.
 
 ## perfr.dev downloads

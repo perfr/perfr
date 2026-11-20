@@ -35,6 +35,8 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y shellcheck
     - name: Test the release script
       run: tools/release/test_release.sh
+    - name: Check the upload to PyPI still matches its Trusted Publishers
+      run: python3 .github/scripts/check-pypi-publish.py
     - name: Test the installer
       run: tools/install/test_install.sh
     - name: Test the debug-info splitter

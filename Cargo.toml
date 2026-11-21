@@ -62,7 +62,7 @@ rust-version = "1.88"
 
 # Shared by the live-viewer crates (`clap.workspace = true` and friends).
 [workspace.dependencies]
-clap = "=4.6.7"
+clap = "=4.6.8"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 parking_lot = "0.12"
 serde = { version = "1.0.217", features = ["derive"] }

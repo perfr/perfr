@@ -228,6 +228,8 @@ pub struct FridaSession {
     /// Hook display names by the name id their START tokens carry.
     names_by_id: HashMap<u32, String>,
     max_calls_per_s: u64,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    returns: Option<crate::frida_returns::Returns>,
 }
 impl FridaSession {
     /// `name_ids` name each hook's spans; `label_ids` name the marker a hook
@@ -247,6 +249,12 @@ impl FridaSession {
             .tempfile_in(lease_dir)
             .map_err(|e| e.to_string())?;
         let mapping = Transport::create(file.as_file(), pid as u32).map_err(|e| e.to_string())?;
+        let repair_returns = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+        if repair_returns { mapping.enable_return_repair(); }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        let returns = if repair_returns {
+            Some(crate::frida_returns::Returns::new(perfr_frida_transport::returns::Journal::open(file.as_file()).map_err(|e| e.to_string())?))
+        } else { None };
         // A privileged Linux service must allow its unprivileged target to
         // open the capture file. No permissions outside this new file change.
         #[cfg(target_os = "linux")]
@@ -283,9 +291,12 @@ impl FridaSession {
             .collect();
         let helper = Helper::launch(
             serde_json::json!({"pid":pid,"agent":agent,"transport":file.path(),"hooks":hooks,
-                "max_calls_per_s":max_calls_per_s}),
+                "max_calls_per_s":max_calls_per_s,"repair_returns":repair_returns}),
         )?;
         let ready = helper.response()?;
+        if repair_returns && ready["repair_returns"].as_bool() != Some(true) {
+            return Err("Frida agent does not support sampled return repair; install matching service and libperfr".into());
+        }
         if ready["armed"].as_u64() != Some(hooks.len() as u64) {
             return Err(format!("Frida did not arm every hook: {ready}"));
         }
@@ -298,7 +309,54 @@ impl FridaSession {
             stopped: false,
             names_by_id,
             max_calls_per_s,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            returns,
         })
+    }
+    pub fn poll_returns(&mut self) {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if let Some(r) = self.returns.as_mut() {
+            // An unexpected detach stops metadata publication. Old open
+            // records must not be mistaken for subsequent calls at that slot.
+            r.invalid |= !self.stopped && (!self.mapping.active() || r.journal.closed());
+            r.poll();
+        }
+    }
+    pub fn sample_horizon(&self) -> u64 {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if let Some(r) = self.returns.as_ref() { return r.horizon; }
+        u64::MAX
+    }
+    pub fn patch_returns(&self, tid: u32, sp: u64, time: u64, stack: &mut [u8]) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if let Some(r) = self.returns.as_ref() {
+            return (self.stopped || (self.mapping.active() && !r.journal.closed())) && r.patch(tid, sp, time, stack);
+        }
+        let _ = (tid, sp, time, stack);
+        true
+    }
+    pub fn return_trampolines(&self) -> &[u64] {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if let Some(r) = self.returns.as_ref() { return &r.trampolines; }
+        &[]
+    }
+    pub fn note_incomplete_return(&self) {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if let Some(r) = self.returns.as_ref() { r.incomplete_samples.set(r.incomplete_samples.get() + 1); }
+    }
+    pub fn retire_returns(&mut self, horizon: u64) {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if let Some(r) = self.returns.as_mut() { r.retire(horizon); }
+        let _ = horizon;
+    }
+    pub fn finish_returns(&mut self, stop_ns: u64) {
+        self.poll_returns();
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if let Some(r) = self.returns.as_mut() {
+            // Do not wait forever for a publisher in a stopped target.
+            if r.horizon < stop_ns { r.invalid = true; }
+        }
+        let _ = stop_ns;
     }
     pub fn poll(&mut self) {
         if !self.stopped {
@@ -316,6 +374,7 @@ impl FridaSession {
     }
     pub fn stop(&mut self) {
         let _phase = perfr_api::scope("Frida: stop instrumentation");
+        self.poll_returns();
         self.stopped = true;
         if let Err(e) = self.helper.stop() {
             self.error = Some(e);
@@ -326,6 +385,11 @@ impl FridaSession {
     /// switching off (see `scopes.rs`).
     pub fn status(&self, shared_records_lost: u64, auto_unhooked: &[u32]) -> String {
         let mut line = format!("Frida: {} completed API scopes", self.calls);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if let Some(r) = self.returns.as_ref() {
+            line.push_str(&format!("; {} sampled return slots repaired, {} incomplete samples", r.patched_slots.get(), r.incomplete_samples.get()));
+            if r.invalid { line.push_str("; return history unavailable: keeping samples leaf-only (journal loss, unexpected detach, unsupported redirect, or unfinished publication)"); }
+        }
         if shared_records_lost > 0 {
             // The shared scope ring lapped: STOPs were among the losses and
             // the open spans were discarded rather than drawn wrong.

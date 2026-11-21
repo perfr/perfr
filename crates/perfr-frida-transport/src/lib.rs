@@ -2,9 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Capture lease and counters only. Scope events use the ordinary perfr API.
+//! Capture lease, counters, and optional sampled-return metadata.
+//! Scope events use the ordinary perfr API.
 //! `profile` is the setup-only timing the agent and the helper share.
 pub mod profile;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub mod returns;
+
+fn file_size() -> usize {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    { returns::FILE_SIZE }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    { std::mem::size_of::<Control>() }
+}
 #[cfg(windows)]
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -12,14 +22,14 @@ use std::{fs::File, io};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 
-const MAGIC: u64 = 0x46524944414c5332;
+const MAGIC: u64 = 0x46524944414c5333;
 #[repr(C)]
 struct Control {
     magic: AtomicU64,
     pid: u32,
     controller: u32,
     active: AtomicU32,
-    reserved: u32,
+    repair_returns: AtomicU32,
     calls: AtomicU64,
 }
 pub struct Transport {
@@ -30,7 +40,8 @@ unsafe impl Send for Transport {}
 unsafe impl Sync for Transport {}
 impl Transport {
     pub fn create(file: &File, pid: u32) -> io::Result<Self> {
-        file.set_len(std::mem::size_of::<Control>() as u64)?;
+        file.set_len(0)?;
+        file.set_len(file_size() as u64)?;
         let mapping = Self::map(file)?;
         unsafe {
             mapping.base.write(Control {
@@ -38,7 +49,7 @@ impl Transport {
                 pid,
                 controller: std::process::id(),
                 active: AtomicU32::new(1),
-                reserved: 0,
+                repair_returns: AtomicU32::new(0),
                 calls: AtomicU64::new(0),
             });
         }
@@ -59,7 +70,7 @@ impl Transport {
     #[cfg(unix)]
     fn map(file: &File) -> io::Result<Self> {
         let len = std::mem::size_of::<Control>();
-        if file.metadata()?.len() != len as u64 {
+        if file.metadata()?.len() != file_size() as u64 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid Frida capture lease size",
@@ -87,7 +98,7 @@ impl Transport {
     fn map(file: &File) -> io::Result<Self> {
         use std::os::windows::io::AsRawHandle;
         let len = std::mem::size_of::<Control>();
-        if file.metadata()?.len() != len as u64 {
+        if file.metadata()?.len() != file_size() as u64 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid Frida capture lease size",
@@ -118,6 +129,8 @@ impl Transport {
     fn control(&self) -> &Control {
         unsafe { &*self.base }
     }
+    pub fn enable_return_repair(&self) { self.control().repair_returns.store(1, Ordering::Release); }
+    pub fn return_repair_enabled(&self) -> bool { self.control().repair_returns.load(Ordering::Acquire) != 0 }
     pub fn active(&self) -> bool {
         self.control().active.load(Ordering::Acquire) != 0
     }

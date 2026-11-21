@@ -105,6 +105,11 @@ jobs:
       - name: Verify missing native helper does not block manual capture
         if: runner.os == 'Linux'
         run: /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-hook --service target/debug/perfr --agent target/debug/libperfr.so --target /tmp/perfr-frida-target --missing-helper
+      - name: Verify sampled caller chains with timing hooks
+        if: runner.os == 'Linux'
+        run: |
+          cc -O2 -g -fomit-frame-pointer -fno-optimize-sibling-calls -pthread tools/e2e/frida_unwind_target.c -o /tmp/perfr-frida-unwind-target
+          sudo /tmp/perfr-frida-test/bin/python tools/e2e/frida_unwind.py --helper target/debug/perfr-hook --service target/debug/perfr --agent target/debug/libperfr.so --target /tmp/perfr-frida-unwind-target --out /tmp/perfr-frida-unwind-results
       - name: Verify retained Linux uprobe backend
         if: runner.os == 'Linux'
         run: sudo /tmp/perfr-frida-test/bin/python tools/e2e/frida_smoke.py --helper target/debug/perfr-hook --service target/debug/perfr --agent target/debug/libperfr.so --target /tmp/perfr-frida-target --engine kernel_uprobes

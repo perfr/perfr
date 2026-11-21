@@ -16,6 +16,9 @@
 
 extern uint64_t perfr_frida_start(uint32_t, const char *, size_t);
 extern void perfr_frida_stop(uint32_t, uint64_t);
+extern void perfr_frida_register_return(uint64_t);
+extern uint64_t perfr_frida_return_enter(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t);
+extern void perfr_frida_return_leave(uint32_t, uint64_t);
 // Calls a second past which a hook mutes itself: keeps counting nothing,
 // emits nothing, and tells the service once via its unhook token. A function
 // this hot floods the shared ring and takes every other hook's spans with it.
@@ -23,13 +26,15 @@ static volatile uint64_t call_limit = 0;
 void perfr_gum_set_call_limit(uint64_t max_calls_per_s) { call_limit = max_calls_per_s; }
 typedef struct {
   uint32_t generation;
+  int repair_returns;
+  gpointer return_trampoline;
   char * name; size_t len;
   char * unhook_token; size_t unhook_len;
   volatile gint calls;            // entries in the current window
   volatile gint64 window_start_us;
   volatile gint muted;
 } Hook;
-typedef struct { uint32_t generation; uint64_t handle; } Invocation;
+typedef struct { uint32_t generation; uint64_t handle, return_token; } Invocation;
 // The OS's own once: nothing of GLib may run before gum_init_embedded has
 // set up its thread backend (on Windows that backend is a table of function
 // pointers that an uninitialized g_once_init_enter calls through -- a null
@@ -54,11 +59,8 @@ void perfr_gum_ignore(int ignore) {
   else gum_interceptor_unignore_current_thread(i);
   g_object_unref(i);
 }
-static void enter(GumInvocationContext * ic, gpointer data) {
-  Hook * h = data;
-  Invocation * call = gum_invocation_context_get_listener_invocation_data(ic, sizeof(Invocation));
-  call->generation = h->generation;
-  if (h->muted) { call->handle = 0; return; }
+static uint64_t record_entry(Hook * h) {
+  if (h->muted) return 0;
   if (call_limit != 0) {
     // The rate is judged over 100 ms windows against a tenth of the limit:
     // a function at a million calls a second is muted after ~10k calls,
@@ -77,15 +79,80 @@ static void enter(GumInvocationContext * ic, gpointer data) {
         uint64_t marker = perfr_frida_start(h->generation, h->unhook_token, h->unhook_len);
         perfr_frida_stop(h->generation, marker);
       }
-      call->handle = 0;
-      return;
+      return 0;
     }
   }
-  call->handle = perfr_frida_start(h->generation, h->name, h->len);
+  return perfr_frida_start(h->generation, h->name, h->len);
+}
+// Resolve the installed entry redirect using x86 encodings, then ask Gum
+// which nearby address is its return trampoline. No private Gum structure
+// layout is read. Unsupported redirects fail closed through the journal.
+// This is done once per hook; the callback's own invocation is already on
+// Gum's stack, before Gum replaces the application's return slot.
+#if defined(__linux__) && defined(__x86_64__)
+static gpointer discover_return_trampoline(GumInvocationContext * ic) {
+  gsize size = 0;
+  guint8 * code = gum_memory_read(ic->function, 16, &size);
+  if (code == NULL) return NULL;
+  uintptr_t target = 0, pc = (uintptr_t)ic->function;
+  if (size >= 5 && code[0] == 0xe9) {
+    int32_t displacement; memcpy(&displacement, code + 1, 4);
+    target = pc + 5 + displacement;
+  } else if (size >= 6 && code[0] == 0xff && code[1] == 0x25) {
+    int32_t displacement; memcpy(&displacement, code + 2, 4);
+    gsize n = 0;
+    guint8 * pointer = gum_memory_read((gpointer)(pc + 6 + displacement), 8, &n);
+    if (pointer != NULL && n == 8) memcpy(&target, pointer, 8);
+    g_free(pointer);
+  }
+  g_free(code);
+  if (target == 0) return NULL;
+  GumInvocationStack * stack = gum_interceptor_get_current_stack();
+  gpointer original = gum_invocation_context_get_return_address(ic);
+  for (unsigned offset = 0; offset != 128; ++offset) {
+    gpointer candidate = (gpointer)(target + offset);
+    gpointer translated = gum_invocation_stack_translate(stack, candidate);
+    if (translated != candidate && translated == original) {
+      return candidate;
+    }
+  }
+  return NULL;
+}
+static gpointer return_trampoline(GumInvocationContext * ic, Hook * h) {
+  gpointer cached = g_atomic_pointer_get(&h->return_trampoline);
+  if (cached == NULL) {
+    gpointer found = discover_return_trampoline(ic);
+    // Register before publishing the cache and before Gum patches the slot,
+    // even if this callback races Stop or belongs to an older capture.
+    perfr_frida_register_return((uint64_t)(uintptr_t)found);
+    cached = found != NULL ? found : GSIZE_TO_POINTER(1);
+    g_atomic_pointer_compare_and_exchange(&h->return_trampoline, NULL, cached);
+    cached = g_atomic_pointer_get(&h->return_trampoline);
+  }
+  return cached == GSIZE_TO_POINTER(1) ? NULL : cached;
+}
+#endif
+static void enter(GumInvocationContext * ic, gpointer data) {
+  Hook * h = data;
+  Invocation * call = gum_invocation_context_get_listener_invocation_data(ic, sizeof(Invocation));
+  call->generation = h->generation;
+  call->return_token = 0;
+#if defined(__linux__) && defined(__x86_64__)
+  if (h->repair_returns) {
+    call->return_token = perfr_frida_return_enter(h->generation,
+        (uint32_t)gum_invocation_context_get_thread_id(ic), ic->cpu_context->rsp,
+        (uint64_t)(uintptr_t)gum_invocation_context_get_return_address(ic),
+        (uint64_t)(uintptr_t)return_trampoline(ic, h));
+  }
+#endif
+  // Even a muted timing hook still intercepts returns: metadata must not
+  // depend on whether a scope was emitted or got a nonzero handle.
+  call->handle = record_entry(h);
 }
 static void leave(GumInvocationContext * ic, gpointer data) {
   (void)data;
   Invocation * call = gum_invocation_context_get_listener_invocation_data(ic, sizeof(Invocation));
+  perfr_frida_return_leave(call->generation, call->return_token);
   perfr_frida_stop(call->generation, call->handle);
 }
 static void free_hook(gpointer data) {
@@ -94,9 +161,10 @@ static void free_hook(gpointer data) {
   g_free(h->unhook_token);
   g_free(h);
 }
-void * perfr_gum_attach(uint64_t address, uint32_t generation, const char * name, const char * unhook_token, int * status) {
+void * perfr_gum_attach(uint64_t address, uint32_t generation, const char * name, const char * unhook_token, int repair_returns, int * status) {
   Hook * h = g_new0(Hook, 1);
   h->generation = generation;
+  h->repair_returns = repair_returns;
   h->name = g_strdup(name);
   h->len = strlen(name);
   h->unhook_token = g_strdup(unhook_token != NULL ? unhook_token : "");

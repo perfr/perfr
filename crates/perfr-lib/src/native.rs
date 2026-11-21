@@ -18,7 +18,7 @@ use perfr_frida_transport::profile;
 extern "C" {
     fn perfr_gum_init();
     fn perfr_gum_ignore(ignore: i32);
-    fn perfr_gum_attach(address: u64, generation: u32, name: *const c_char, unhook_token: *const c_char, status: *mut i32) -> *mut c_void;
+    fn perfr_gum_attach(address: u64, generation: u32, name: *const c_char, unhook_token: *const c_char, repair_returns: i32, status: *mut i32) -> *mut c_void;
     fn perfr_gum_detach(listener: *mut c_void);
     fn perfr_gum_set_call_limit(max_calls_per_s: u64);
     fn perfr_gum_resolve(path: *const c_char, offset: u64) -> u64;
@@ -204,7 +204,7 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
             stream,
             profiling,
             &format!("Frida: install trampoline: {}", display.to_string_lossy()),
-            || unsafe { perfr_gum_attach(address, generation, name.as_ptr(), unhook_token.as_ptr(), &mut status) },
+            || unsafe { perfr_gum_attach(address, generation, name.as_ptr(), unhook_token.as_ptr(), i32::from(config["repair_returns"].as_bool().unwrap_or(false)), &mut status) },
         );
         if listener.is_null() {
             return Err(format!(
@@ -218,7 +218,8 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         stream,
         "{}",
-        json!({"armed":capture.listeners.len(),"arch":std::env::consts::ARCH})
+        json!({"armed":capture.listeners.len(),"arch":std::env::consts::ARCH,
+            "repair_returns":config["repair_returns"].as_bool().unwrap_or(false) && cfg!(all(target_os = "linux", target_arch = "x86_64"))})
     )?;
     line.clear();
     // EOF (the controller dropped the pipe) is a stop, like an explicit

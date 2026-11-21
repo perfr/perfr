@@ -254,6 +254,13 @@ struct StreamLoad {
     arrived: bool,
     /// The replay, while one is running. See [`Replay`].
     replay: Option<Replay>,
+    /// The window on screen is the one the replay has been following the
+    /// newest events with, and nothing has shown the whole capture since.
+    /// It is then kept when the file is all in: going from two seconds of
+    /// the capture to all of it at the last frame is a jump, and a capture
+    /// that was being watched arrive is not one the reader asked to see
+    /// whole.
+    followed: bool,
 }
 
 impl StreamLoad {
@@ -268,6 +275,7 @@ impl StreamLoad {
             failed: None,
             arrived: false,
             replay: replay_speed.map(|speed| Replay { speed, origin: None }),
+            followed: false,
         }
     }
 
@@ -985,6 +993,10 @@ pub struct PerfrLiveApp {
     t0: f64,
     t1: f64,
     follow: bool,
+    /// The window is following an edge that has stopped moving, and stops
+    /// following when it gets there: the last of a replay, which ends on
+    /// the capture's end and not a little short of it.
+    follow_to_rest: bool,
     last_status_request: f64,
     last_process_request: f64,
     last_view_request: f64,
@@ -2112,6 +2124,7 @@ impl PerfrLiveApp {
             t0: 0.0,
             t1: FOLLOW_NS,
             follow: true,
+            follow_to_rest: false,
             last_status_request: -1.0,
             last_process_request: -1.0,
             last_view_request: -1.0,
@@ -2943,6 +2956,11 @@ impl PerfrLiveApp {
     }
 
     fn fit_to_content(&mut self) {
+        // The whole capture is what is shown now: a replay that was being
+        // followed has no window of its own to keep.
+        if let Some(load) = &mut self.stream_load {
+            load.followed = false;
+        }
         if let Some((a, b)) = self.content_span() {
             let (t0, t1) = fit_content_window(a, b);
             let (t0, t1) = clamp_window_contain(t0, t1, a, b);
@@ -3108,8 +3126,9 @@ impl PerfrLiveApp {
 
     /// The stream file has been read to its end, or as far as it went.
     /// `bytes` is the file when all of it arrived: what Share posts. With
-    /// `keep_view` the window stays where the reader put it while the file
-    /// was coming in; otherwise the whole capture is shown.
+    /// `keep_view` the window stays where it is: where the reader put it
+    /// while the file was coming in, or where a replay was following the
+    /// capture. Otherwise the whole capture is shown.
     fn finish_stream(&mut self, bytes: Option<Vec<u8>>, keep_view: bool) {
         // A stream saved while its capture ran carries the status of that
         // moment, and a file has no later status to correct it: the static
@@ -3219,8 +3238,22 @@ impl PerfrLiveApp {
         self.dropped_capture_fetches += 1;
     }
 
+    /// The window follows the capture's last events to where they end and
+    /// stops there. For a replay that has just shown its last frame: the
+    /// follow eases towards the newest events, so it is always a little
+    /// behind them, and stopping it at the last frame would leave the end
+    /// of the capture off the window's edge.
+    fn follow_to_rest(&mut self) {
+        let Some((_, edge)) = self.content_span() else { return };
+        self.live_edge_ns = self.live_edge_ns.max(edge as u64);
+        self.follow = true;
+        self.follow_to_rest = true;
+        self.needs_repaint = true;
+    }
+
     /// The reader did something: a replay is a way of showing a capture
-    /// arrive, not a wait before it can be used, so the rest is shown now.
+    /// arrive, not a wait before it can be used, so the rest is read now,
+    /// under the window that was showing.
     fn end_replay(&mut self) {
         if let Some(load) = &mut self.stream_load {
             if load.replay.take().is_some() {
@@ -3282,11 +3315,14 @@ impl PerfrLiveApp {
         // The window is left where it is for a reader who moved it, and
         // for a story that places it.
         let view_is_taken = self.user_set_view || self.story.drives_camera();
+        // And where a replay has been following the capture with it, for
+        // the rest of the file and at its end. See `StreamLoad::followed`.
+        let keep_view = view_is_taken || load.followed;
         if unreadable {
             // Nothing after an unreadable frame starts on a frame, so the
             // rest of the file is not waited for, nor downloaded.
             self.drop_capture_fetch();
-            self.finish_stream(None, view_is_taken);
+            self.finish_stream(None, keep_view);
             self.story.note_capture_complete();
             return;
         }
@@ -3303,11 +3339,20 @@ impl PerfrLiveApp {
                     self.fail_stream(fault);
                 }
             }
+            // A replay that ran to its end, with the window still its
+            // own: the window goes the last of the way to the capture's
+            // end, as it was going, and rests there.
+            let to_rest = load.followed && load.replay.is_some() && !view_is_taken;
             match load.failed {
-                None => self.finish_stream(Some(load.bytes), view_is_taken),
+                None => {
+                    self.finish_stream(Some(load.bytes), keep_view);
+                    if to_rest {
+                        self.follow_to_rest();
+                    }
+                }
                 Some(why) => {
                     // Part of a file is not the capture: nothing to share.
-                    self.finish_stream(None, view_is_taken);
+                    self.finish_stream(None, keep_view);
                     self.fail(format!("The capture stopped arriving ({why}). Only what was read before that is shown."));
                 }
             }
@@ -3319,7 +3364,10 @@ impl PerfrLiveApp {
                 if load.replay.is_some() {
                     self.live_edge_ns = self.live_edge_ns.max(edge as u64);
                     self.follow = true;
-                } else if grew {
+                    load.followed = true;
+                } else if grew && !load.followed {
+                    // Not after a replay the reader cut short: the rest of
+                    // the file comes in under the window that was showing.
                     self.fit_to_content();
                 }
             }
@@ -4734,7 +4782,12 @@ impl PerfrLiveApp {
                 // keep, so it still fits to show the whole of it.
                 self.follow = false;
                 self.needs_repaint = true;
+                // A file that is being read is fitted when it is all in, by
+                // `finish_stream`, which knows whether its window is to be
+                // kept: this frame is a file's last, and fitting here undid
+                // the window a replay had been following.
                 if self.static_capture.is_some()
+                    && !self.held_stream.is_loading()
                     && !self.user_set_view
                     && self.index.event_count() > 0
                 {
@@ -12565,6 +12618,10 @@ impl PerfrLiveApp {
     }
 
     fn tick_follow(&mut self, dt: f32, hold_window: bool) {
+        if !self.follow && !self.in_self_pane {
+            // Whatever stopped the follow, it is not on its way anywhere.
+            self.follow_to_rest = false;
+        }
         if !self.follow || self.live_edge_ns == 0 || hold_window {
             return;
         }
@@ -12582,10 +12639,23 @@ impl PerfrLiveApp {
             self.t0 = target_t0;
             self.t1 = target_t1;
         }
+        let mut goal = (target_t0, target_t1);
         if let Some((c0, c1)) = self.content_span() {
             let (t0, t1) = clamp_window_contain(self.t0, self.t1, c0, c1);
             self.t0 = t0;
             self.t1 = t1;
+            goal = clamp_window_contain(target_t0, target_t1, c0, c1);
+        }
+        // There, for a follow that was only going to the end: it stops, and
+        // the page stops drawing for it.
+        if self.follow_to_rest && !self.in_self_pane {
+            let near = |at: f64, goal: f64| (goal - at).abs() < px_ns * 0.125;
+            if near(self.t0, goal.0) && near(self.t1, goal.1) {
+                (self.t0, self.t1) = goal;
+                self.follow = false;
+                self.follow_to_rest = false;
+                self.needs_repaint = true;
+            }
         }
     }
 

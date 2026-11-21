@@ -24,7 +24,7 @@ version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e567177890eb1617b1f774005b66b26b2377afd138a2ca37aae7d8f0c81429d4"
 dependencies = [
- "cpp_demangle",
+ "cpp_demangle 0.5.1",
  "fallible-iterator 0.3.0",
  "gimli 0.34.0",
  "memmap2",
@@ -812,6 +812,15 @@ name = "cpp_demangle"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0667304c32ea56cb4cd6d2d7c0cfe9a2f8041229db8c033af7f8d69492429def"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
+name = "cpp_demangle"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b0fa7b695ebf7023a5af95490233db9d2987c212ce56ec1cf831763f9deaf80"
 dependencies = [
  "cfg-if",
 ]
@@ -2898,7 +2907,7 @@ name = "perfr"
 version = "0.1.9"
 dependencies = [
  "clap",
- "cpp_demangle",
+ "cpp_demangle 0.6.0",
  "flate2",
  "iced-x86",
  "libc",
@@ -3441,7 +3450,7 @@ checksum = "101ab8471e25ec1fa10d98fb637edb64e4caf958e29bf5d254ac804e863fa453"
 dependencies = [
  "anyhow",
  "chrono",
- "cpp_demangle",
+ "cpp_demangle 0.5.1",
  "goblin",
  "lazy_static",
  "libc",

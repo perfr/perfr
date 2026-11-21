@@ -132,6 +132,9 @@ pub struct Stats {
     pub last_ns: u64,
     /// Python threads in the last reading.
     pub threads: u32,
+    /// The most Python threads any reading had. A program that has ended
+    /// by the time its capture stops had none in the last one.
+    pub most_threads: u32,
 }
 
 struct Reading {
@@ -421,6 +424,7 @@ impl Readings {
         inner.stats.readings += 1;
         inner.stats.last_ns = time_ns;
         inner.stats.threads = threads.len() as u32;
+        inner.stats.most_threads = inner.stats.most_threads.max(threads.len() as u32);
     }
 
     /// A reading that failed.
@@ -964,5 +968,7 @@ mod tests {
             ),
             (2, 1, 5 * MS, 6 * MS, 1)
         );
+        // The last reading had one thread; the one before it had two.
+        assert_eq!(stats.most_threads, 2);
     }
 }

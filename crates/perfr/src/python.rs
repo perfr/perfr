@@ -427,10 +427,10 @@ impl PythonStacks {
             0.0
         };
         log::info!(
-            "Python stacks: {} readings of {} thread(s) at {rate:.0} per second; \
+            "Python stacks: {} readings of up to {} thread(s) at {rate:.0} per second; \
              {} failed and {} stack(s) were read torn, and were dropped",
             stats.readings,
-            stats.threads,
+            stats.most_threads,
             stats.failed,
             stats.torn
         );

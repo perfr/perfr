@@ -1054,15 +1054,43 @@ struct SampleCounters {
     unwound_whole: u64,
     unwound_cut: u64,
     unwind_failed: u64,
+    /// Of the failed ones, those that stopped where the copy of the stack
+    /// taken with the sample ends: a stack deeper in bytes than the kernel
+    /// copies.
+    stack_copy_short: u64,
+    /// Samples whose stack, once named, was deeper than a sample keeps
+    /// ([`MAX_SAMPLE_FRAMES`]) and lost its outermost frames.
+    trimmed: u64,
     /// Samples taken with no unwinder at all: their sampled pc only.
     not_unwound: u64,
 }
 
 /// The deepest stack a sample keeps. One timeline event per frame per sample
 /// is what this bounds; a stack deeper than it loses its outermost frames
-/// and is counted (`SampleCounters::unwound_cut`).
+/// and is counted (`SampleCounters::trimmed`). At 64, one sample in fourteen
+/// of a PyTorch training run was trimmed with its Python frames already in
+/// place of the interpreter's: a compiled model's forward pass is forty
+/// Python functions deep before it reaches the first C++ one.
 #[cfg(target_os = "linux")]
-const MAX_SAMPLE_FRAMES: usize = 64;
+const MAX_SAMPLE_FRAMES: usize = 128;
+
+/// How far up a stack the unwinder walks: further than a sample keeps. In a
+/// Python program each Python call is three or four frames of the
+/// interpreter, which give way to one Python function when the sample is
+/// named (`python.rs`), so a stack of sixty frames to keep is two hundred to
+/// walk. Stopping the walk at what a sample keeps cut one sample in six of a
+/// PyTorch training loop off from its root, and its Python frames were then
+/// paired from the wrong end. A walk that stops here is counted
+/// (`SampleCounters::unwound_cut`).
+#[cfg(target_os = "linux")]
+const MAX_UNWOUND_FRAMES: usize = 512;
+
+/// How much of a thread's stack the kernel copies into each sample, from the
+/// stack pointer up. The unwinder walks that copy, so a stack deeper than
+/// this in bytes stops part-way (`SampleCounters::stack_copy_short`). The
+/// field is sixteen bits and the kernel wants a multiple of eight.
+#[cfg(target_os = "linux")]
+const SAMPLE_STACK_BYTES: u16 = 64_000;
 
 /// The open-file limit a capture asks for. Its rings are descriptors: two
 /// per sampled thread, four per CPU for the scheduler and its tracepoints,
@@ -1266,6 +1294,7 @@ fn drain_samples(
         period_ns,
         batch,
         scratch,
+        counters,
         python.as_deref_mut(),
     );
     // Samples the reorder horizon has caught up to.
@@ -1399,13 +1428,14 @@ fn name_waiting_samples(
     period_ns: u64,
     batch: &mut Vec<LiveEvent>,
     scratch: &mut SampleScratch,
+    counters: &mut SampleCounters,
     mut python: Option<&mut PythonStacks>,
 ) {
     scratch.unnamed.retain(|sample| {
         if sample.time > named_through_ns {
             return true;
         }
-        name_sample(
+        counters.trimmed += u64::from(name_sample(
             sample.time,
             sample.tid,
             &sample.frames,
@@ -1419,7 +1449,7 @@ fn name_waiting_samples(
             period_ns,
             batch,
             python.as_deref_mut(),
-        );
+        ));
         false
     });
 }
@@ -1493,7 +1523,7 @@ fn push_sample(
                         start,
                         start.sp,
                         stack,
-                        MAX_SAMPLE_FRAMES,
+                        MAX_UNWOUND_FRAMES,
                         frames,
                         frida_returns.map_or(&[], |r| r.return_trampolines()),
                     )
@@ -1504,7 +1534,10 @@ fn push_sample(
                         counters.unwound_whole += 1
                     }
                     UnwindEnd::Truncated => counters.unwound_cut += 1,
-                    UnwindEnd::Failed(_) => counters.unwind_failed += 1,
+                    UnwindEnd::Failed(_) => {
+                        counters.unwind_failed += 1;
+                        counters.stack_copy_short += u64::from(end.ran_out_of_stack(start.sp, stack.len()));
+                    }
                     UnwindEnd::UnresolvedReturn => {
                         counters.unwind_failed += 1;
                         if let Some(r) = frida_returns {
@@ -1526,10 +1559,9 @@ fn push_sample(
         .map(|python| python.near(tid, time))
         .unwrap_or_default();
     if time <= named_through_ns {
-        name_sample(
-            time, tid, frames, whole, &near, symbolizer, pc_ids, names, store, target_pid,
-            period_ns, batch, python,
-        );
+        counters.trimmed += u64::from(name_sample(
+            time, tid, frames, whole, &near, symbolizer, pc_ids, names, store, target_pid, period_ns, batch, python,
+        ));
     } else if unnamed.len() < MAX_UNNAMED_SAMPLES {
         unnamed.push(UnnamedSample {
             time,
@@ -1546,10 +1578,9 @@ fn push_sample(
             );
         }
         counters.named_early += 1;
-        name_sample(
-            time, tid, frames, whole, &near, symbolizer, pc_ids, names, store, target_pid,
-            period_ns, batch, python,
-        );
+        counters.trimmed += u64::from(name_sample(
+            time, tid, frames, whole, &near, symbolizer, pc_ids, names, store, target_pid, period_ns, batch, python,
+        ));
     }
 }
 
@@ -1557,7 +1588,8 @@ fn push_sample(
 /// innermost first. In a Python program the interpreter's eval frames give
 /// way to the Python functions they were running, when `near` has a Python
 /// stack of the thread that fits (`python.rs`); `whole` is whether the
-/// unwind reached the root.
+/// unwind reached the root. Returns true when the stack was deeper than a
+/// sample keeps and lost its outermost frames.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn name_sample(
@@ -1574,7 +1606,7 @@ fn name_sample(
     period_ns: u64,
     batch: &mut Vec<LiveEvent>,
     python: Option<&mut PythonStacks>,
-) {
+) -> bool {
     // Innermost-first ids, for the report's self/inclusive
     // counts; the timeline spans below want them reversed.
     let mut frame_ids: Vec<u32> = {
@@ -1585,8 +1617,12 @@ fn name_sample(
             .collect()
     };
     if let Some(python) = python {
-        python.merge(tid, time, &mut frame_ids, whole, near, names, MAX_SAMPLE_FRAMES);
+        python.merge(tid, time, &mut frame_ids, whole, near, names, usize::MAX);
     }
+    // Only now, with the interpreter's frames gone: the walk went further
+    // than this so that there was a whole stack to put the Python frames in.
+    let trimmed = frame_ids.len() > MAX_SAMPLE_FRAMES;
+    frame_ids.truncate(MAX_SAMPLE_FRAMES);
     // One tick on the thread's sample bar, named by the leaf
     // frame so hovering it says what was running without a
     // lookup. Drawn as an instant: see LiveEvent::end_ns.
@@ -1617,6 +1653,7 @@ fn name_sample(
         });
     }
     store.push(StoredSample { timestamp_ns: time, tid, frames: frame_ids });
+    trimmed
 }
 
 /// The line a capture logs when its symbols land.
@@ -2055,7 +2092,7 @@ fn capture_loop(
         if threads.iter().any(|t| t.tid == tid && !t.dead) {
             return false;
         }
-        let sample = match perfr_perf_ring::ring::open_stack_sample(period_ns, 64_000, tid, -1, 4096) {
+        let sample = match perfr_perf_ring::ring::open_stack_sample(period_ns, SAMPLE_STACK_BYTES, tid, -1, 4096) {
             Ok(sample) => sample,
             Err(error) => {
                 sample_ring_failures.borrow_mut().note(format_args!("the sampling ring of thread {tid}"), &error);
@@ -3143,6 +3180,7 @@ fn capture_loop(
                 period_ns,
                 &mut tail,
                 &mut sample_scratch,
+                &mut samples,
                 python.as_mut(),
             );
         }
@@ -3275,18 +3313,27 @@ fn capture_loop(
     }
     log::info!("{} callstack samples recorded", samples.parsed);
     // How good the stacks are, which a count of samples does not say: a
-    // stack cut at the limit has lost its outermost frames, and one that
-    // failed stops wherever the unwind tables or the stack copy ran out.
+    // walk cut at its limit or a stack deeper than a sample keeps has lost
+    // its outermost frames, and a walk that failed stops wherever the unwind
+    // tables or the stack copy ran out.
     if samples.not_unwound > 0 {
         log::info!("{} of those have no callstack: there was no unwinder", samples.not_unwound);
     }
     if samples.unwound_cut + samples.unwind_failed > 0 {
         log::info!(
-            "of those, {} unwound to the root of their stack, {} were cut at {MAX_SAMPLE_FRAMES} frames \
-             and {} stopped part-way up",
+            "of those, {} unwound to the root of their stack, {} were cut at {MAX_UNWOUND_FRAMES} frames \
+             and {} stopped part-way up ({} of them where the {SAMPLE_STACK_BYTES} bytes of stack copied \
+             with a sample ended)",
             samples.unwound_whole,
             samples.unwound_cut,
-            samples.unwind_failed
+            samples.unwind_failed,
+            samples.stack_copy_short
+        );
+    }
+    if samples.trimmed > 0 {
+        log::info!(
+            "{} stack(s) were deeper than the {MAX_SAMPLE_FRAMES} frames a sample keeps and lost their outermost frames",
+            samples.trimmed
         );
     }
     {
@@ -4782,21 +4829,25 @@ mod tests {
         // No module is loaded, so the unwinder follows frame pointers; the
         // samples' frame pointer is 0, which is the root at once.
         assert!(rig.ring(4001).publish(&stack_sample_record(4001, 5_000, 0x401000, &[0u8; 64])));
-        // A stack of 70 frames linked by frame pointers: deeper than a
-        // sample keeps.
-        let mut deep = vec![0u8; 70 * 16];
-        for frame in 0..70u64 {
+        // A stack linked by frame pointers that is six frames deeper than
+        // a sample keeps.
+        let depth = MAX_SAMPLE_FRAMES as u64 + 6;
+        let mut deep = vec![0u8; depth as usize * 16];
+        for frame in 0..depth {
             let at = (frame * 16) as usize;
-            let caller = if frame < 69 { 0x7fff_0000_1000 + (frame + 1) * 16 } else { 0 };
+            let caller = if frame + 1 < depth { 0x7fff_0000_1000 + (frame + 1) * 16 } else { 0 };
             deep[at..at + 8].copy_from_slice(&caller.to_le_bytes());
             deep[at + 8..at + 16].copy_from_slice(&(0x402000 + frame * 16).to_le_bytes());
         }
-        let mut record = stack_sample_record_with_area(4001, 6_000, 0x401000, &deep, 2048);
+        let mut record = stack_sample_record_with_area(4001, 6_000, 0x401000, &deep, deep.len().next_multiple_of(1024));
         // rbp = the stack pointer the helper sets: the chain starts there.
         record[8 + 32 + 8 + 6 * 8..][..8].copy_from_slice(&0x7fff_0000_1000u64.to_le_bytes());
         assert!(rig.ring(4001).publish(&record));
         let batch = rig.drain(u64::MAX);
-        assert_eq!((rig.counters.unwound_whole, rig.counters.unwound_cut, rig.counters.unwind_failed), (1, 1, 0));
+        // The walk goes further than a sample keeps, so it reached the root
+        // of both; the deep one was trimmed to what a sample keeps.
+        assert_eq!((rig.counters.unwound_whole, rig.counters.unwound_cut, rig.counters.unwind_failed), (2, 0, 0));
+        assert_eq!(rig.counters.trimmed, 1);
         let deepest = batch.iter().filter(|e| e.kind == kind::FUNCTION_CALL && e.start_ns == 6_000).count();
         assert_eq!(deepest, MAX_SAMPLE_FRAMES);
     }

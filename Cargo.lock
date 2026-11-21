@@ -3130,7 +3130,7 @@ name = "perfr-object"
 version = "0.1.1"
 dependencies = [
  "crc32fast",
- "gimli 0.31.1",
+ "gimli 0.34.0",
  "msvc-demangler",
  "object 0.41.0",
  "pdb",

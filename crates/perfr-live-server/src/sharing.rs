@@ -4,7 +4,7 @@
 
 //! S3 uploads happen on the service machine, using its AWS credential chain.
 //! No credentials or write URLs are exposed to the browser.
-use rand::RngCore;
+use rand::TryRng;
 use serde::Serialize;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -60,7 +60,9 @@ impl ShareConfig {
 
     pub fn upload(&self, bundle: Vec<u8>, stream: Vec<u8>) -> Result<ShareResult, String> {
         let mut random = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut random);
+        rand::rngs::SysRng
+            .try_fill_bytes(&mut random)
+            .map_err(|error| format!("The system gave no random bytes for the share's id: {error}"))?;
         let id: String = random.iter().map(|b| format!("{b:02x}")).collect();
         self.publish(&id, bundle, stream, &Aws)
     }

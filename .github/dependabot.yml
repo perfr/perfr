@@ -59,6 +59,13 @@ updates:
       # its own would put a second copy of it in the service.
       - dependency-name: "tokio-tungstenite"
         update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
+      # parking_lot 0.13 asks for Rust 1.95, and so do the lock_api 0.5 and
+      # parking_lot_core 0.10 it brings; rust-toolchain.toml pins 1.88, and
+      # cargo refuses to build them with it. Dependabot does not read a
+      # crate's rust-version, so it is told here. This goes when the
+      # toolchain reaches 1.95.
+      - dependency-name: "parking_lot"
+        versions: [">= 0.13.0"]
 
   # The fuzz targets are a workspace of their own with no lock file in the
   # repository (the fuzz workflow copies the root's), so this speaks up only

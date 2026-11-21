@@ -31,6 +31,8 @@ These keys do nothing while a text field has focus, except **Escape**, which cle
 | Click a scope | Select it. Click empty canvas to clear |
 | Double-click a scope | Zoom to it, at 1.1× its duration. A value lane does not zoom |
 | Click a thread header | Focus that thread. Click it again to release. Other threads’ scheduler slices go grey, and a chip above the timeline names the thread |
+| Click a thread’s triangle | Fold the thread, or unfold it. Folded, it keeps its state bar, its sample bar and its first row of scopes where they were; the rows under them go |
+| Ctrl+click or ⌘+click a thread’s triangle | Fold or unfold every thread of that process, the way the clicked one goes |
 | Click a sample tick | Copy that sample’s call stack to the clipboard, leaf first |
 | Left-drag on a thread’s sample bar | Select that thread’s samples. The report recomputes for them |
 | Right-drag anywhere | Select every thread’s samples in that range (ruler, frame strip, bar, or empty space). The span’s length is written between two arrows under the ruler; when the span is narrower than that text, the arrows stand outside it pointing in and the text goes beside them |

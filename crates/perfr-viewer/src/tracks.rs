@@ -65,7 +65,7 @@ pub type FastSet<K> = HashSet<K, FastState>;
 
 use perfr_live_event::dev::{is_self_pid, MachineId};
 use perfr_live_event::{kind, LaneKey};
-use perfr_live_render::{lane_gap, lane_height, sort_thread_leaves, TrackIndex};
+use perfr_live_render::{is_mark_lane, is_overlay_lane, lane_gap, lane_height, sort_thread_leaves, TrackIndex};
 
 pub const MACHINE_H: f32 = 16.0;
 pub const PROCESS_H: f32 = 18.0;
@@ -841,6 +841,22 @@ impl TrackStrip {
         self.collapsed.contains(&id)
     }
 
+    /// Fold or unfold every thread of a process at once, as the user's doing.
+    /// By the threads' own process, wherever their tracks were moved to.
+    pub fn set_process_threads_collapsed(&mut self, pid: u32, collapsed: bool) {
+        let threads: Vec<ThreadId> = self
+            .track_order
+            .iter()
+            .filter_map(|key| match key {
+                TrackKey::Thread(t) if t.pid == pid => Some(*t),
+                _ => None,
+            })
+            .collect();
+        for t in threads {
+            self.set_collapsed(RowId::Thread(t), collapsed);
+        }
+    }
+
     /// Set a row's collapsed state. Lane rows have none. A change is marked
     /// as the user's, so a later auto-fold does not undo a story step.
     pub fn set_collapsed(&mut self, id: RowId, collapsed: bool) {
@@ -1382,20 +1398,12 @@ impl TrackStrip {
         for key in &self.track_order {
             match *key {
                 TrackKey::Thread(t) => {
-                    if self.collapsed.contains(&RowId::Thread(t)) {
-                        continue;
-                    }
                     let Some(&ty) = next.get(&RowId::Thread(t)) else {
                         continue;
                     };
-                    let mut ly = ty + THREAD_PAD_TOP * s;
-                    for &k in self.catalogue.leaves_of(t) {
-                        if is_standalone_lane(k) {
-                            continue;
-                        }
-                        next.insert(RowId::Lane(k), ly);
-                        ly += (lane_height(k) + lane_gap(k)) * s;
-                    }
+                    self.thread_stack(t, |k, under_top| {
+                        next.insert(RowId::Lane(k), ty + under_top);
+                    });
                 }
                 TrackKey::Async(t) => {
                     let Some(&ty) = next.get(&RowId::Async(t)) else {
@@ -1419,7 +1427,13 @@ impl TrackStrip {
         // Sort (id, y) pairs outright: the comparator used to look each side
         // up in the map, tens of thousands of hashes per frame on a big rail.
         let mut rows: Vec<(RowId, f32)> = self.y.iter().map(|(id, y)| (*id, *y)).collect();
-        rows.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Two lanes can have one Y: a thread's log lines are laid out on its
+        // sample bar. The one on top is listed after the one under it, which
+        // is the order they are drawn in.
+        let on_top = |id: &RowId| matches!(id, RowId::Lane(k) if is_overlay_lane(*k));
+        rows.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then(on_top(&a.0).cmp(&on_top(&b.0)))
+        });
         self.cached_rows.clear();
         self.cached_layout.clear();
         let mut bottom = 0.0_f32;
@@ -1614,21 +1628,51 @@ impl TrackStrip {
     }
 
     fn thread_scope_stack_h(&self, t: ThreadId) -> f32 {
+        self.thread_stack(t, |_, _| {})
+    }
+
+    /// The lanes on a thread's row, top to bottom: `place` is told each one
+    /// and how far under the row's top it starts. Returns the row's height.
+    ///
+    /// - The lanes are beside the thread's name, so the row is as tall as
+    ///   the taller of the two.
+    /// - The log lines have no row: they are laid out on the sample bar,
+    ///   which is a strip of ticks with room for a few more. A thread that
+    ///   logs and is not sampled has them in a row of their own.
+    /// - A folded thread keeps what heads its row, the marks (states,
+    ///   samples, log lines, lost events) and the first row of scopes, and
+    ///   every one of them where it is when the thread is open: folding
+    ///   takes the rows under them away and moves nothing.
+    fn thread_stack(&self, t: ThreadId, mut place: impl FnMut(LaneKey, f32)) -> f32 {
         let s = self.scale.max(0.01);
-        let head = THREAD_H * s;
-        if self.collapsed.contains(&RowId::Thread(t)) {
-            return head;
+        let folded = self.collapsed.contains(&RowId::Thread(t));
+        let mut y = THREAD_PAD_TOP * s;
+        let mut sample_bar = None;
+        let mut any = false;
+        for &k in self.catalogue.leaves_of(t) {
+            if is_standalone_lane(k) {
+                continue;
+            }
+            any = true;
+            if let (true, Some(bar)) = (is_overlay_lane(k), sample_bar) {
+                place(k, bar);
+                continue;
+            }
+            if k.kind == kind::SAMPLE {
+                sample_bar = Some(y);
+            }
+            place(k, y);
+            y += (lane_height(k) + lane_gap(k)) * s;
+            if folded && !is_mark_lane(k) {
+                break;
+            }
         }
-        let lanes: f32 = self
-            .catalogue
-            .leaves_of(t)
-            .iter()
-            .filter(|k| !is_standalone_lane(**k))
-            .map(|k| (lane_height(*k) + lane_gap(*k)) * s)
-            .sum();
-        // The lanes are beside the head, so the row is as tall as the
-        // taller of the two.
-        head.max((THREAD_PAD_TOP + THREAD_PAD_BOTTOM) * s + lanes)
+        let head = THREAD_H * s;
+        if any {
+            head.max(y + THREAD_PAD_BOTTOM * s)
+        } else {
+            head
+        }
     }
 
     fn height_of(&self, id: RowId) -> f32 {
@@ -1971,18 +2015,21 @@ mod tests {
     }
 
     #[test]
-    fn collapse_thread_hides_leaf_lanes() {
+    fn collapse_thread_hides_the_lanes_under_its_first_row_of_scopes() {
         let mut idx = TrackIndex::default();
         idx.insert(scope(1, 100, 1));
+        idx.insert(LiveEvent { depth: 1, ..scope(1, 100, 2) });
+        idx.insert(LiveEvent { depth: 2, ..scope(1, 100, 3) });
         let mut strip = TrackStrip::default();
         strip.sync(&idx, None);
         strip.tick(1.0, &idx, None);
-        assert_eq!(strip.layout().len(), 1);
+        assert_eq!(strip.layout().len(), 3);
+        let first = strip.layout()[0];
         let th = strip.thread_order()[0];
         strip.toggle(RowId::Thread(th));
         strip.sync(&idx, None);
         strip.tick(1.0, &idx, None);
-        assert!(strip.layout().is_empty());
+        assert_eq!(strip.layout(), [first]);
         assert!(strip
             .rows()
             .iter()
@@ -3086,12 +3133,127 @@ mod tests {
                 let (top, h) = strip.thread_band(ThreadId { pid: k.pid, tid: k.tid }).unwrap();
                 assert!(*y >= top && *y + lane_height(*k) * scale <= top + h + 0.01, "{k:?} at {y}");
             }
-            // Folded, it is its name and nothing else.
+            // Folded, it keeps its marks and its first row of scopes, each
+            // where it was, and is as tall as they are.
             strip.toggle(RowId::Thread(tall));
             strip.tick(1.0, &idx, None);
-            assert!((strip.thread_band(tall).unwrap().1 - THREAD_H * scale).abs() < 0.01);
-            assert!(lanes_of_strip(&strip, 1).is_empty());
+            assert_eq!(lanes_of_strip(&strip, 1), tall_lanes[..3]);
+            let kept: f32 = tall_lanes[..3].iter().map(|(k, _)| (lane_height(*k) + lane_gap(*k)) * scale).sum();
+            let folded_h = strip.thread_band(tall).unwrap().1;
+            assert!((folded_h - ((THREAD_PAD_TOP + THREAD_PAD_BOTTOM) * scale + kept)).abs() < 0.01);
+            assert!(folded_h < tall_h);
         }
+    }
+
+    #[test]
+    fn folding_a_thread_moves_nothing_that_stays() {
+        // Everything a thread can have on its row, in the order the service
+        // might send it.
+        let mut idx = TrackIndex::default();
+        for depth in 0..4 {
+            idx.insert(ev(kind::FUNCTION_CALL, 1, 1, depth, 0));
+            idx.insert(ev(kind::API_SCOPE, 1, 1, depth, 0));
+        }
+        idx.insert(ev(kind::DROP, 1, 1, 0, 0));
+        idx.insert(ev(kind::LOG, 1, 1, 0, 2));
+        idx.insert(ev(kind::SAMPLE, 1, 1, 0, 0));
+        idx.insert(ev(kind::THREAD_STATE, 1, 1, 0, 0));
+        // A thread that is only sampled: its first row of scopes is the
+        // sampled frames.
+        idx.insert(ev(kind::SAMPLE, 1, 2, 0, 0));
+        for depth in 0..3 {
+            idx.insert(ev(kind::FUNCTION_CALL, 1, 2, depth, 0));
+        }
+        // And one with marks and no scopes at all.
+        idx.insert(ev(kind::THREAD_STATE, 1, 3, 0, 0));
+        idx.insert(ev(kind::SAMPLE, 1, 3, 0, 0));
+        let mut strip = TrackStrip::default();
+        strip.sync(&idx, None);
+        strip.tick(1.0, &idx, None);
+        for (tid, kept) in [
+            (1, vec![kind::THREAD_STATE, kind::SAMPLE, kind::LOG, kind::DROP, kind::API_SCOPE]),
+            (2, vec![kind::SAMPLE, kind::FUNCTION_CALL]),
+            (3, vec![kind::THREAD_STATE, kind::SAMPLE]),
+        ] {
+            let t = ThreadId { pid: 1, tid };
+            let (open_y, open_h) = strip.thread_band(t).unwrap();
+            let open = lanes_of_strip(&strip, tid);
+            strip.toggle(RowId::Thread(t));
+            strip.tick(1.0, &idx, None);
+            let (folded_y, folded_h) = strip.thread_band(t).unwrap();
+            let folded = lanes_of_strip(&strip, tid);
+            assert_eq!(folded_y, open_y);
+            assert_eq!(folded.iter().map(|(k, _)| k.kind).collect::<Vec<_>>(), kept, "thread {tid}");
+            assert!(folded.iter().all(|(k, _)| k.depth == 0), "the first row of scopes, not a deeper one: {folded:?}");
+            // The same lanes at the same heights as when it was open: a
+            // prefix of them, so nothing on screen moves.
+            assert_eq!(folded, open[..folded.len()], "thread {tid}");
+            assert!(folded_h <= open_h && folded_h >= THREAD_H);
+            for (k, y) in &folded {
+                assert!(*y + lane_height(*k) <= folded_y + folded_h, "{k:?} is cut by the row's end");
+            }
+            strip.toggle(RowId::Thread(t));
+            strip.tick(1.0, &idx, None);
+            assert_eq!(lanes_of_strip(&strip, tid), open, "and unfolding puts every lane back");
+        }
+    }
+
+    #[test]
+    fn a_threads_log_lines_are_laid_out_on_its_sample_bar() {
+        let mut idx = TrackIndex::default();
+        // Sampled and logging: the log lines take no row.
+        for k in [kind::LOG, kind::THREAD_STATE, kind::SAMPLE, kind::API_SCOPE] {
+            idx.insert(ev(k, 1, 1, 0, 0));
+        }
+        // The same thread without the log lines, to compare heights with.
+        for k in [kind::THREAD_STATE, kind::SAMPLE, kind::API_SCOPE] {
+            idx.insert(ev(k, 1, 2, 0, 0));
+        }
+        // Logging and not sampled: there is no bar, so they keep a row.
+        for k in [kind::LOG, kind::THREAD_STATE, kind::API_SCOPE] {
+            idx.insert(ev(k, 1, 3, 0, 0));
+        }
+        let mut strip = TrackStrip::default();
+        strip.sync(&idx, None);
+        strip.tick(1.0, &idx, None);
+        let y_of = |tid: u32, k: u8| lanes_of_strip(&strip, tid).iter().find(|(key, _)| key.kind == k).unwrap().1;
+        assert_eq!(y_of(1, kind::LOG), y_of(1, kind::SAMPLE));
+        let band = |tid: u32| strip.thread_band(ThreadId { pid: 1, tid }).unwrap();
+        assert_eq!(band(1).1, band(2).1, "the log lines cost the row nothing");
+        assert_eq!(y_of(1, kind::API_SCOPE) - band(1).0, y_of(2, kind::API_SCOPE) - band(2).0);
+        // Listed after the samples, which is drawn after them.
+        let kinds: Vec<u8> = lanes_of_strip(&strip, 1).iter().map(|(k, _)| k.kind).collect();
+        assert_eq!(kinds, [kind::THREAD_STATE, kind::SAMPLE, kind::LOG, kind::API_SCOPE]);
+        // With no sample bar they are a row of their own, between the state
+        // bar and the scopes.
+        let log = LaneKey { pid: 1, tid: 3, kind: kind::LOG, depth: 0, extra: 0 };
+        assert!(y_of(3, kind::LOG) > y_of(3, kind::THREAD_STATE));
+        assert!((y_of(3, kind::API_SCOPE) - y_of(3, kind::LOG) - (lane_height(log) + lane_gap(log))).abs() < 0.01);
+    }
+
+    #[test]
+    fn one_call_folds_or_unfolds_every_thread_of_a_process() {
+        let mut idx = TrackIndex::default();
+        for tid in 1..=3 {
+            idx.insert(scope(1, tid, 1));
+        }
+        idx.insert(scope(4, 9, 1));
+        let mut strip = TrackStrip::default();
+        strip.sync(&idx, None);
+        let thread = |pid: u32, tid: u32| RowId::Thread(ThreadId { pid, tid });
+        // From a mix of both, to all one way.
+        strip.toggle(thread(1, 2));
+        strip.toggle(thread(4, 9));
+        let gen = strip.layout_gen();
+        strip.set_process_threads_collapsed(1, true);
+        assert!((1..=3).all(|tid| strip.collapsed(thread(1, tid))));
+        assert_ne!(strip.layout_gen(), gen, "the rail is laid out again");
+        strip.set_process_threads_collapsed(1, false);
+        assert!((1..=3).all(|tid| !strip.collapsed(thread(1, tid))));
+        // Another process's threads are as they were, and so are the
+        // process headers.
+        assert!(strip.collapsed(thread(4, 9)));
+        assert!(!strip.collapsed(RowId::Process(1)) && !strip.collapsed(RowId::Process(4)));
     }
 
     fn lanes_of_strip(strip: &TrackStrip, tid: u32) -> Vec<(LaneKey, f32)> {

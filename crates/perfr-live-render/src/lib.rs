@@ -54,7 +54,7 @@ pub use lod::{
     collect_instances_cached, ListingCache,ThreadFocus, 
     apply_highlight_flags, choose_lod, choose_lod_hint, collect_instances,
     collect_instances_layout, collect_instances_layout_opts,
-    instance_for_event, is_overview_lane, lane_gap, lane_height, leaf_label, pick_column_event, pick_instance_at,
+    instance_for_event, is_mark_lane, is_overlay_lane, is_overview_lane, lane_gap, lane_height, leaf_label, pick_column_event, pick_instance_at,
     sample_lod_lanes, sort_thread_leaves, stack_height, stack_height_keys,
     stacked_layout, value_lanes_in_view, CollectOpts, InstanceFrame,
     ScopeInstance, ScopePick, TimelineLod, YCull, FLAG_DIMMED, FLAG_HOVER, FLAG_NONE,
@@ -1132,7 +1132,11 @@ impl RasterizedFrame {
         let placed = self.placed_ys(layout, s);
         let (origin, height) = Self::extent_of(&placed, s);
         let mut out = vec![0u8; self.width.saturating_mul(height as usize).saturating_mul(4)];
-        for (row, key) in self.lanes.iter().enumerate() {
+        // A lane laid out over another's row goes last, and only where it
+        // has a mark: its empty columns are the other lane's to show.
+        let (over, rows): (Vec<_>, Vec<_>) =
+            self.lanes.iter().enumerate().partition(|(_, key)| lod::is_overlay_lane(**key));
+        for (row, key) in rows {
             let Some(&y) = ys
                 .get(key)
                 .or_else(|| placed.iter().find(|(k, _)| *k == *key).map(|(_, y)| y))
@@ -1158,6 +1162,28 @@ impl RasterizedFrame {
             }
             for dy in 1..rows {
                 out.copy_within(first..first + stride, first + dy * stride);
+            }
+        }
+        for (row, key) in over {
+            let Some(&y) = ys
+                .get(key)
+                .or_else(|| placed.iter().find(|(k, _)| *k == *key).map(|(_, y)| y))
+            else {
+                continue;
+            };
+            let h = (lod::lane_height(*key) * s).round().max(1.0) as u32;
+            let y0 = ((y - origin).round()).max(0.0) as u32;
+            let rows = h.min(height.saturating_sub(y0)) as usize;
+            let stride = self.width * 4;
+            for (column, p) in self.row(row).iter().enumerate() {
+                if *p == chrome::TRACK {
+                    continue;
+                }
+                let rgba = argb_to_rgba8(*p);
+                for dy in 0..rows {
+                    let at = (y0 as usize + dy) * stride + column * 4;
+                    out[at..at + 4].copy_from_slice(&rgba);
+                }
             }
         }
         (out, height)
@@ -1892,6 +1918,87 @@ mod tests {
             None, ThreadFocus::default());
         assert_eq!(insts[1].flags, FLAG_SELECTED);
         assert_eq!(insts[0].flags, FLAG_SIBLING);
+    }
+
+    #[test]
+    fn log_lines_laid_out_on_the_sample_bar_are_drawn_and_picked_over_the_samples() {
+        let sample = |start: u64| LiveEvent {
+            start_ns: start,
+            // A sample's length is its period.
+            duration_ns: 4,
+            tid: 1,
+            pid: 1,
+            kind: kind::SAMPLE,
+            depth: 0,
+            extra: 0,
+            _pad: 0,
+            name_id: 1,
+        };
+        let log = |start: u64| LiveEvent { duration_ns: 0, kind: kind::LOG, extra: 2, name_id: 9, ..sample(start) };
+        let mut index = TrackIndex::default();
+        // 10 ns to the pixel: samples in columns 10, 30, 50 and 70, a log
+        // line in a column that has a sample (30) and in one that has none
+        // (60).
+        for start in [100, 300, 500, 700] {
+            index.insert(sample(start));
+        }
+        for start in [304, 604] {
+            index.insert(log(start));
+        }
+        let (samples, logs) = (sample(0).lane_key(), log(0).lane_key());
+        let both = [(samples, 4.0), (logs, 4.0)];
+        let row = |order: &[LaneKey], layout: &[(LaneKey, f32)]| -> Vec<[u8; 4]> {
+            let frame = index.rasterize_pixel_layout(0, 1_000, 100, order, Some(layout), None, None, false);
+            let (rgba, height) = frame.to_rgba8_placed(layout, 1.0);
+            assert_eq!(height, 9, "one row's height, not two");
+            // Every row of the lane's height is the same.
+            for dy in 1..8 {
+                assert_eq!(rgba[..400], rgba[dy * 400..(dy + 1) * 400]);
+            }
+            rgba[..400].chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect()
+        };
+        let alone = row(&[samples], &[(samples, 4.0)]);
+        let lines = row(&[logs], &[(logs, 4.0)]);
+        let clear = [0u8; 4];
+        for column in [10, 30, 50, 70] {
+            assert_ne!(alone[column], clear, "a sample in column {column}");
+        }
+        for column in [30, 60] {
+            assert_ne!(lines[column], clear, "a log line in column {column}");
+            assert_ne!(lines[column], alone[10], "in its level's colour, not a sample's");
+        }
+        // Together, whichever is rasterized first: the log lines where there
+        // are any, and under them every sample that was there without them.
+        for order in [[samples, logs], [logs, samples]] {
+            let drawn = row(&order, &both);
+            for column in 0..100 {
+                let want = if lines[column] != clear { lines[column] } else { alone[column] };
+                assert_eq!(drawn[column], want, "column {column}");
+            }
+        }
+        // A pick on the bar: the log line where there is one, the sample
+        // elsewhere, nothing in an empty column.
+        let pick = |x: f32| pick_column_event(&index, &both, 0, 1_000, 100.0, x, 6.0, 1.0);
+        assert_eq!(pick(30.0).map(|e| e.kind), Some(kind::LOG));
+        assert_eq!(pick(60.0).map(|e| e.kind), Some(kind::LOG));
+        assert_eq!(pick(10.0).map(|e| e.kind), Some(kind::SAMPLE));
+        assert_eq!(pick(20.0), None);
+        // The same pick with the log lines in a row of their own, under the
+        // bar: each lane answers for its own row.
+        let apart = [(samples, 4.0), (logs, 13.0)];
+        let pick = |y: f32| pick_column_event(&index, &apart, 0, 1_000, 100.0, 30.0, y, 1.0).map(|e| e.kind);
+        assert_eq!((pick(6.0), pick(15.0)), (Some(kind::SAMPLE), Some(kind::LOG)));
+        // Listed, the two ticks of column 30 are one over the other. The
+        // log line is picked, though a sample has a length and a log line
+        // has none.
+        let frame = collect_instances_layout(&index, 0, 1_000, 100.0, &both, None);
+        let hit = pick_instance_at(&frame.instances, 30.5, 6.0).map(|i| frame.instances[i].kind);
+        assert_eq!(hit, Some(kind::LOG));
+        let hit = pick_instance_at(&frame.instances, 10.5, 6.0).map(|i| frame.instances[i].kind);
+        assert_eq!(hit, Some(kind::SAMPLE));
+        // And it is listed after the samples, which is drawn over them.
+        let kinds: Vec<u8> = frame.instances.iter().map(|i| i.kind).collect();
+        assert!(kinds.iter().position(|k| *k == kind::LOG) > kinds.iter().rposition(|k| *k == kind::SAMPLE), "{kinds:?}");
     }
 
     #[test]

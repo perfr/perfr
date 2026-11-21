@@ -152,30 +152,24 @@ fn unit_covers(
 }
 
 /// Whether the address ranges of `entry` -- `DW_AT_low_pc` with
-/// `DW_AT_high_pc`, or `DW_AT_ranges` -- contain `address`. An entry whose
-/// attributes cannot be read covers nothing.
+/// `DW_AT_high_pc`, or `DW_AT_ranges` -- contain `address`. An attribute
+/// that names no address or no range list makes the entry cover nothing.
 ///
 /// This is `gimli::Dwarf::die_ranges` asked one question, and written out
-/// because of one line of it: gimli 0.31 computes the end of a range as
+/// because of one line of it: gimli (0.34 still) computes the end of a range as
 /// `low_pc + size` unchecked, where both come from the file. A debug or
 /// test build aborts on that sum; a release build wraps it. Here an end
 /// that does not fit is no range.
 fn entry_covers(
     dwarf: &gimli::Dwarf<gimli::EndianSlice<'_, gimli::RunTimeEndian>>,
     unit: &gimli::Unit<gimli::EndianSlice<'_, gimli::RunTimeEndian>>,
-    entry: &gimli::DebuggingInformationEntry<'_, '_, gimli::EndianSlice<'_, gimli::RunTimeEndian>>,
+    entry: &gimli::DebuggingInformationEntry<gimli::EndianSlice<'_, gimli::RunTimeEndian>>,
     address: u64,
 ) -> bool {
     let mut low_pc = None;
     let mut high_pc = None;
     let mut size = None;
-    let mut attrs = entry.attrs();
-    loop {
-        let attr = match attrs.next() {
-            Ok(Some(attr)) => attr,
-            Ok(None) => break,
-            Err(_) => return false,
-        };
+    for attr in entry.attrs() {
         match attr.name() {
             gimli::DW_AT_low_pc => match dwarf.attr_address(unit, attr.value()) {
                 Ok(Some(address)) => low_pc = Some(address),
@@ -276,11 +270,10 @@ fn outermost_inlined_call_site(
     address: u64,
 ) -> Option<(u64, u64)> {
     let mut entries = unit.entries();
-    let mut depth: isize = 0;
     let mut best: Option<(isize, u64, u64)> = None;
 
-    while let Ok(Some((delta, entry))) = entries.next_dfs() {
-        depth += delta;
+    while let Ok(Some(entry)) = entries.next_dfs() {
+        let depth = entry.depth();
         if entry.tag() != gimli::DW_TAG_inlined_subroutine {
             continue;
         }
@@ -293,16 +286,12 @@ fn outermost_inlined_call_site(
         // or every inlined call silently falls through to the callee's line.
         let call_file = entry
             .attr_value(gimli::DW_AT_call_file)
-            .ok()
-            .flatten()
             .and_then(|value| match value {
                 gimli::AttributeValue::FileIndex(index) => Some(index),
                 other => other.udata_value(),
             });
         let call_line = entry
             .attr_value(gimli::DW_AT_call_line)
-            .ok()
-            .flatten()
             .and_then(|value| value.udata_value());
         let (Some(call_file), Some(call_line)) = (call_file, call_line) else {
             continue;
@@ -533,11 +522,10 @@ fn subprogram_declaration(
     // the opposite of what GetLineInfo wants, and the corpus caught the
     // difference as a declaration line of 67 where LLVM said 410.
     let mut entries = unit.entries();
-    let mut depth: isize = 0;
     let mut best: Option<(isize, gimli::UnitOffset)> = None;
 
-    while let Ok(Some((delta, entry))) = entries.next_dfs() {
-        depth += delta;
+    while let Ok(Some(entry)) = entries.next_dfs() {
+        let depth = entry.depth();
         if !matches!(
             entry.tag(),
             gimli::DW_TAG_subprogram | gimli::DW_TAG_inlined_subroutine
@@ -572,7 +560,7 @@ fn find_recursively(
         let Ok(entry) = unit.entry(offset) else {
             return None;
         };
-        if let Ok(Some(value)) = entry.attr_value(attribute) {
+        if let Some(value) = entry.attr_value(attribute) {
             let resolved = match value {
                 gimli::AttributeValue::FileIndex(index) => Some(index),
                 other => other.udata_value(),
@@ -583,7 +571,7 @@ fn find_recursively(
         }
         let mut next = None;
         for reference in [gimli::DW_AT_specification, gimli::DW_AT_abstract_origin] {
-            if let Ok(Some(gimli::AttributeValue::UnitRef(target))) = entry.attr_value(reference) {
+            if let Some(gimli::AttributeValue::UnitRef(target)) = entry.attr_value(reference) {
                 next = Some(target);
                 break;
             }

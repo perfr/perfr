@@ -15,7 +15,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-framehop = "0.13"
+framehop = "0.16"
 object = { version = "0.41", default-features = false, features = ["read", "std", "compression"] }
 perfr-maps = { path = "../perfr-maps" }
 

@@ -55,6 +55,22 @@ pub struct UnwindOutcome {
     pub end: UnwindEnd,
 }
 
+impl UnwindEnd {
+    /// The walk stopped because it needed a word of the stack above what it
+    /// was given: `stack_len` bytes from `stack_base`. A sampler copies a
+    /// bounded piece of the stack with each sample (64 KiB at most, the
+    /// kernel's limit), and a stack deeper than that in bytes cannot be
+    /// walked to its root whatever the unwind tables say.
+    pub fn ran_out_of_stack(&self, stack_base: u64, stack_len: usize) -> bool {
+        match self {
+            UnwindEnd::Failed(framehop::Error::CouldNotReadStack(address)) => {
+                *address >= stack_base.saturating_add(stack_len as u64).saturating_sub(8)
+            }
+            _ => false,
+        }
+    }
+}
+
 impl UnwindOutcome {
     /// No error on the way. A stack cut at the frame limit counts: every
     /// frame it has is a real one.

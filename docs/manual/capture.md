@@ -123,7 +123,7 @@ What cannot be checked is the inside of a run. Python calling Python does not mo
 When the capture stops the service log says how it went:
 
 ```
-Python stacks: 3913 readings of 7 thread(s) at 983 per second; 1 failed and 4 stack(s) were read torn, and were dropped
+Python stacks: 3913 readings of up to 7 thread(s) at 983 per second; 1 failed and 4 stack(s) were read torn, and were dropped
 3929 sample(s) carry Python frames: 249 between two readings of the same stack, 6 with their innermost call into Python taken from a reading a little further away, 163 with a Python stack a call deeper or shallower than the native one. 2 kept the interpreter's frames: 2 had no reading close enough, 0 no Python frame to place
 ```
 
@@ -132,6 +132,8 @@ Code that hands generators and callbacks to C all the time is the hard case. A l
 ### Limits
 
 - Linux and Windows services. The macOS service does not read Python stacks.
+- On Linux a stack is walked in the 64,000 bytes of it that the kernel copies with each sample, the most `perf_event_open` gives. A PyTorch training loop is deeper than that in about one sample in ten (a compiled model's forward and backward pass). Such a sample keeps every Python function, because those are read from the interpreter and not from the copy, and the native frames from where it was running up to where the copy ends; the native frames beyond that, down to the thread's start, are missing, so in a call tree it hangs from its outermost Python function (`<module> (train.py:1)`) and not from `__libc_start_main`. The line `... stopped part-way up (N of them where the 64000 bytes of stack copied with a sample ended)` at the end of a capture counts them.
+- The walk goes up to 512 native frames and a sample keeps 128 once the interpreter's frames have given way to Python functions; `N stack(s) were deeper than the 128 frames a sample keeps` counts the rest, which lose their outermost frames.
 - On Windows the kernel's walk is treated as the whole user stack. A walk the kernel cut at its frame cap is not marked; an unmatched outer Python run is left out, which is the rule for a whole stack. Nothing is appended to fill a gap.
 - CPython, the versions py-spy 0.4.3 knows: 2.3 to 2.7 and 3.3 to 3.15. PyPy and other interpreters are not read. The capture described above was taken on Linux with 3.14.4. The Windows reader was run in CI (`windows-rust`, `windows-2022`) by `crates/perfr-pystack/tests/reader.rs` against `tools/test-programs/PerfrPythonStacks/python_stacks.py` on CPython 3.12.10: the program's functions, Python's thread names, the GIL spans, and that the process's CPU time moved while it was read. A capture on Windows with those readings joined to the kernel's stack samples, and the GIL row on the timeline, was not run. A free-threaded build has not been tried on either platform.
 - The service must be allowed to read the target's memory. On Linux that is the permission attaching needs (`perfr doctor`). On Windows the open asks for `PROCESS_VM_READ`, `PROCESS_QUERY_INFORMATION` and `PROCESS_SUSPEND_RESUME`. The process's owner can open it. Another user's process, an elevated target, or a protected one needs an elevated prompt (Run as administrator). A capture that records samples is already elevated, because the kernel logger needs it. When the open is refused the log says so and the samples keep the interpreter's own frames.

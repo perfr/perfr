@@ -540,7 +540,10 @@ in the URL opens a tab on load.
   frame that cannot be read, leaves what was read on screen with a notice
   and nothing to share. With `&replay=1` it is played in at the speed it
   was recorded at, the view following it as in a live capture, until it is
-  all in or the reader clicks, types or scrolls.
+  all in or the reader clicks, types or scrolls. The window stays where the
+  replay left it: at the end it goes the last of the way to the capture's
+  end and rests there, two seconds wide, and it does not jump out to the
+  whole capture. Home shows the whole capture, as always.
   Screenshot: `23-static-viewer.png`.
 - **Python.** `crates/perfr-capture/python/open_capture.py <unzipped dir>`
   reads the tables with pyarrow and prints the columns and counts; its

@@ -2080,6 +2080,44 @@ def wire_and_perf(run):
 
 
 
+def _check_replay_keeps_its_window(run, address):
+    """A capture played in (`&replay=`) is followed with a two-second window,
+    and the window is still that when the file is all in: it does not jump
+    out to the whole capture at the last frame."""
+    whole = run.sel()
+    events, content = whole["events"], whole["content"]
+    length = content[1] - content[0]
+    if length < 3e9:
+        # Shorter than the follow's window and a half: nothing to tell apart.
+        return
+    follow = 2e9
+    # Fast enough to be over in about two seconds of the page's time.
+    run.chrome.goto(f"{address}&replay={length / 2e9:.2f}", settle=0.5)
+    widths = []
+    deadline = time.time() + 30
+    done_at = None
+    while time.time() < deadline:
+        sel = run.sel()
+        if sel.get("events"):
+            widths.append((sel["events"], sel["view"][1] - sel["view"][0], sel["view"][1]))
+            if sel["events"] >= events and done_at is None:
+                done_at = time.time()
+        # A second and a half after the last event: the window has come to rest.
+        if done_at is not None and time.time() - done_at > 1.5:
+            break
+        time.sleep(0.05)
+    check(done_at is not None, f"the replay did not show all {events} events: {widths[-3:]}")
+    following = [w for w in widths if w[0] > events * 0.5]
+    check(len(following) >= 5, f"the replay was over before it could be watched: {len(widths)} readings")
+    wide = [w for w in following if w[1] > follow * 1.05]
+    check(not wide, f"the window left the follow's two seconds: {wide[:3]} of a {length / 1e9:.1f} s capture")
+    last = widths[-1]
+    check(abs(last[1] - follow) < follow * 0.01, f"the window at rest is {last[1] / 1e9:.3f} s wide")
+    check(abs(last[2] - content[1]) < follow * 0.01,
+          f"the window rests {(content[1] - last[2]) / 1e6:.1f} ms short of the capture's end")
+    run.shot("23b-static-viewer-after-replay", settle=0.5)
+
+
 @scenario("website", "The static site embeds a capture the viewer opens with no service")
 def website(run):
     if run.chrome is None:
@@ -2100,6 +2138,10 @@ def website(run):
         [sys.executable, os.path.join(WEB, "build_site.py"), "--out", site,
          "--stream", stream_path, "--name", "e2e"],
         capture_output=True, text=True, timeout=120,
+        # The viewer of this checkout, which is what is being tested: left
+        # to itself the site takes the pack of the checkout named `perfr`
+        # beside it, and from a worktree that is another branch's.
+        env=dict(os.environ, PERFR_REPO=REPO),
     )
     check(build.returncode == 0, f"build_site.py failed: {build.stderr[-400:]}")
     for needed in ("index.html", "features.html", "captures/e2e.perfr.stream",
@@ -2138,6 +2180,7 @@ def website(run):
         sel = run.wait_for(lambda: run.sel() if run.sel().get("events") else None, "the full-page viewer", timeout=30)
         check(sel["hellos"] >= 1, "the stream's Hello frame was read")
         run.shot("23-static-viewer", settle=2.0)
+        _check_replay_keeps_its_window(run, f"{base}/viewer/index.html?capture=../captures/e2e.perfr.stream&collapse=scheduler")
         run.perf["stream_bytes"] = len(stream)
         run.perf["site_first_events_s"] = round(seconds, 1)
         return f"{shown} events from a {len(stream)//1024} KB stream, {seconds:.1f} s to first events"

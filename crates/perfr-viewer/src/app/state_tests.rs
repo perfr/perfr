@@ -2692,14 +2692,17 @@ fn a_replay_shows_a_capture_at_the_speed_it_was_recorded_until_the_reader_acts()
     fast.frames(30);
     assert!(fast.app.index.event_count() >= 2 * events - 6, "{} at twice the speed", fast.app.index.event_count());
 
-    // A key: the reader is not made to sit through the rest.
+    // A key: the reader is not made to sit through the rest. It is read
+    // at once, under the window that was showing.
+    let shown = (page.app.t0, page.app.t1);
     page.frame(vec![key_event(Key::Escape, true)]);
     page.frames(2);
     assert_eq!(page.app.index.event_count(), 100);
     assert!(page.app.stream_load.is_none() && !page.app.follow);
     assert!(page.app.can_share());
     let (first, last) = page.app.content_span().expect("events have a span");
-    assert_eq!((page.app.t0, page.app.t1), (first, last), "the whole capture is shown at the end");
+    assert_eq!((page.app.t0, page.app.t1), shown, "the window does not jump out to the whole capture");
+    assert!(page.app.t1 < last);
 
     // A hundred times slower, the batches are a second apart. Between two
     // of them nothing moves, and the page does not draw at the display's
@@ -2710,13 +2713,90 @@ fn a_replay_shows_a_capture_at_the_speed_it_was_recorded_until_the_reader_acts()
     let wait = slow.next_frame_in();
     assert!(!wait.is_zero() && wait <= std::time::Duration::from_millis(100), "the next frame is {wait:?} away");
 
-    // Left alone, it ends on its own, a second after it began.
+    // Left alone, it ends on its own, a second after it began. This
+    // capture is shorter than the window a follow keeps, so what was being
+    // followed was all of it, and that is where the window comes to rest.
     let mut page = replay(1.0);
     page.frames(55);
     assert!(page.app.stream_load.is_some(), "still replaying {:?}", page.app.index.event_count());
     page.frames(10);
     assert!(page.app.stream_load.is_none());
+    page.frames(60);
     assert_eq!((page.app.t0, page.app.t1), (first, last));
+    assert!(!page.app.follow);
+}
+
+#[test]
+fn a_replay_ends_on_the_window_it_was_following_and_not_on_the_whole_capture() {
+    use crate::net::StreamPiece::{Begin, Bytes, End};
+    // Six seconds of capture, three times the window a follow keeps, played
+    // in at four times its speed: a second and a half of the page's time.
+    let file = batched_stream(600);
+    let replay = || {
+        let mut page = Page::with(|app| {
+            *app = static_app();
+            app.replay_speed = Some(4.0);
+        });
+        page.deliver(vec![Begin { total: Some(file.len() as u64) }, Bytes(file.clone()), End]);
+        page
+    };
+    let step_limit = 0.2e9;
+    // The two ends of the window ease to the follow's two seconds apart,
+    // each on its own: within a hundredth of it while the window moves.
+    let two_seconds = |page: &Page| (page.app.t1 - page.app.t0 - FOLLOW_NS).abs() < FOLLOW_NS / 100.0;
+    let mut page = replay();
+    page.frames(60);
+    assert!(page.app.stream_load.is_some() && page.app.follow);
+    assert!(two_seconds(&page), "the follow's two seconds: {}", page.app.t1 - page.app.t0);
+    // From here to well after the last frame is in, one frame at a time:
+    // the window is two seconds wide throughout and only ever moves on by
+    // what a frame of the replay moves it. Fitting the capture at the end
+    // made the last step one of four seconds, to a window of six.
+    let mut ended_at = None;
+    for frame in 0..150 {
+        let before = (page.app.t0, page.app.t1);
+        page.frames(1);
+        let (t0, t1) = (page.app.t0, page.app.t1);
+        assert!(two_seconds(&page), "frame {frame}: the window is {} ns wide", t1 - t0);
+        assert!(t1 >= before.1 && t1 - before.1 < step_limit, "frame {frame}: the window went from {before:?} to {:?}", (t0, t1));
+        if page.app.stream_load.is_none() && ended_at.is_none() {
+            ended_at = Some(frame);
+        }
+    }
+    let ended_at = ended_at.expect("the replay ends");
+    assert!((20..40).contains(&ended_at), "the file was all in at frame {ended_at}");
+    assert_eq!(page.app.index.event_count(), 600);
+    // It came to rest on the capture's end, having gone the last of the
+    // way there after the last frame, and the page is at rest with it.
+    let (first, last) = page.app.content_span().expect("events have a span");
+    assert_eq!((page.app.t0, page.app.t1), (last - FOLLOW_NS, last));
+    assert!(!page.app.follow && !page.app.follow_to_rest);
+    assert!(!page.app.wants_live_repaint() && !page.next_frame_in().is_zero());
+    assert!(page.app.can_share());
+    // Home is still how the whole capture is asked for.
+    page.key(Key::Home);
+    assert_eq!((page.app.t0, page.app.t1), (first, last));
+
+    // Asked for while the replay runs, it is what the end shows: the
+    // reader's last word on the window was the whole capture.
+    let mut page = replay();
+    page.frames(30);
+    page.key(Key::Home);
+    page.frames(3);
+    assert_eq!(page.app.index.event_count(), 600);
+    assert!(page.app.stream_load.is_none());
+    assert_eq!((page.app.t0, page.app.t1), (first, last));
+
+    // A click cuts the replay short: the rest is read under the window
+    // that was showing, which stays as it was to the nanosecond.
+    let mut page = replay();
+    page.frames(60);
+    let shown = (page.app.t0, page.app.t1);
+    page.frame(vec![key_event(Key::Escape, true)]);
+    page.frames(5);
+    assert_eq!(page.app.index.event_count(), 600);
+    assert!(page.app.stream_load.is_none() && !page.app.follow);
+    assert_eq!((page.app.t0, page.app.t1), shown);
 }
 
 #[test]

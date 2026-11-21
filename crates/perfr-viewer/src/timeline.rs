@@ -1397,7 +1397,7 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_thread_omitted_from_layout_and_draw() {
+    fn collapsed_thread_keeps_its_first_row_in_layout_and_draw() {
         fn ev(tid: u32, name: u32) -> LiveEvent {
             LiveEvent {
                 start_ns: 0,
@@ -1414,12 +1414,14 @@ mod tests {
         let mut idx = TrackIndex::default();
         idx.insert(ev(1, 1));
         idx.insert(ev(2, 2));
+        // A second row of scopes on thread 2: what folding it takes away.
+        idx.insert(LiveEvent { depth: 1, ..ev(2, 3) });
         let mut strip = crate::tracks::TrackStrip::default();
         strip.sync(&idx, None);
         strip.tick(1.0, &idx, None);
-        assert_eq!(strip.layout().len(), 2);
+        assert_eq!(strip.layout().len(), 3);
         let open = collect_instances_layout(&idx, 0, 100, 64.0, strip.layout(), None);
-        assert_eq!(open.instances.len(), 2);
+        assert_eq!(open.instances.len(), 3);
         let hide = strip
             .thread_order()
             .iter()
@@ -1429,16 +1431,16 @@ mod tests {
         strip.toggle(crate::tracks::RowId::Thread(hide));
         strip.tick(1.0, &idx, None);
         assert!(
-            strip.layout().iter().all(|(k, _)| k.tid != 2),
-            "collapsed thread lanes must leave the packed layout"
+            strip.layout().iter().all(|(k, _)| k.tid != 2 || k.depth == 0),
+            "a collapsed thread's lanes under its first row must leave the packed layout"
         );
         assert!(strip
             .rows()
             .iter()
             .any(|r| matches!(r.id, crate::tracks::RowId::Thread(t) if t.tid == 2)));
         let hidden = collect_instances_layout(&idx, 0, 100, 64.0, strip.layout(), None);
-        assert!(hidden.instances.iter().all(|i| i.tid != 2));
-        assert_eq!(hidden.instances.len(), 1);
+        assert!(hidden.instances.iter().all(|i| i.tid != 2 || i.depth == 0));
+        assert_eq!(hidden.instances.len(), 2);
         let (pixel, _) = TimelinePayload::from_index(
             &idx,
             0,
@@ -1488,9 +1490,9 @@ mod tests {
         strip.toggle(crate::tracks::RowId::Process(1));
         strip.toggle(crate::tracks::RowId::Thread(hide));
         strip.tick(1.0, &idx, None);
-        assert_eq!(strip.layout().len(), 2);
+        assert_eq!(strip.layout().len(), 3);
         let restored = collect_instances_layout(&idx, 0, 100, 64.0, strip.layout(), None);
-        assert_eq!(restored.instances.len(), 2);
+        assert_eq!(restored.instances.len(), 3);
     }
 
     #[test]

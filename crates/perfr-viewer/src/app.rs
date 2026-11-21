@@ -7780,7 +7780,13 @@ impl PerfrLiveApp {
                 }
                 note_ui_rect_fmt(format_args!("fold:thread:{}:{}", th.pid, th.tid), chevron_hit);
                 if chevron(ui, title, chevron_x, open, ("t", th.pid, th.tid)) {
-                    self.tracks.toggle(row.id);
+                    // With Ctrl (Cmd on a Mac) every thread of the process
+                    // goes the way this one does, whichever way each was.
+                    if ui.input(|i| i.modifiers.ctrl || i.modifiers.command) {
+                        self.tracks.set_process_threads_collapsed(th.pid, open);
+                    } else {
+                        self.tracks.toggle(row.id);
+                    }
                     self.relayout_tracks();
                 }
                 let chip =

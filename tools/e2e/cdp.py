@@ -196,17 +196,19 @@ class Chrome:
         )
         return result.get("result", {}).get("value")
 
-    def click(self, x, y, button="left", hold=0.05):
+    def click(self, x, y, button="left", hold=0.05, ctrl=False):
         """A press and release at a canvas position. Right-clicks must be
         quick: the viewer opens its scope menu on release and treats a
-        press held longer than a beat as a drag."""
+        press held longer than a beat as a drag. `ctrl` holds Ctrl for the
+        click."""
         buttons = {"left": 1, "right": 2}[button]
-        self.call("Input.dispatchMouseEvent", type="mouseMoved", x=x, y=y)
+        modifiers = 2 if ctrl else 0
+        self.call("Input.dispatchMouseEvent", type="mouseMoved", x=x, y=y, modifiers=modifiers)
         self.call("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y,
-                  button=button, buttons=buttons, clickCount=1)
+                  button=button, buttons=buttons, clickCount=1, modifiers=modifiers)
         time.sleep(hold)
         self.call("Input.dispatchMouseEvent", type="mouseReleased", x=x, y=y,
-                  button=button, buttons=0, clickCount=1)
+                  button=button, buttons=0, clickCount=1, modifiers=modifiers)
 
     def move(self, x, y):
         self.call("Input.dispatchMouseEvent", type="mouseMoved", x=x, y=y)

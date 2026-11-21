@@ -468,15 +468,34 @@ fn leaf_rank(kind_id: u8) -> u8 {
         // Directly under the state bar: both answer "what was this thread
         // doing", at a glance, before any stack detail.
         kind::SAMPLE => 1,
-        kind::LOG => 1,
-        kind::DROP => 1,
-        kind::SCHEDULING_SLICE => 2,
-        kind::API_SCOPE => 2,
-        kind::FUNCTION_CALL => 3,
-        kind::API_TRACK => 4,
-        kind::VALUE => 6,
-        _ => 5,
+        // After the samples and never before: the log lines are drawn on
+        // the sample bar (see `is_overlay_lane`), and what is listed later
+        // is drawn later.
+        kind::LOG => 2,
+        kind::DROP => 3,
+        kind::SCHEDULING_SLICE => 4,
+        kind::API_SCOPE => 4,
+        kind::FUNCTION_CALL => 5,
+        kind::API_TRACK => 6,
+        kind::VALUE => 8,
+        _ => 7,
     }
+}
+
+/// Lanes of marks that say what a thread was doing before any of its scopes
+/// do: its states, its samples, its log lines, its lost events. They head a
+/// thread's row, and a folded thread keeps them.
+pub fn is_mark_lane(key: LaneKey) -> bool {
+    matches!(key.kind, kind::THREAD_STATE | kind::SAMPLE | kind::LOG | kind::DROP)
+}
+
+/// A lane that may be laid out over another lane's row instead of in a row
+/// of its own: a thread's log lines, which are a few ticks and go on its
+/// sample bar. Where two lanes share a row, the overlay is drawn last, leaves
+/// the other lane's marks standing wherever it has none of its own, and is
+/// what a pick at one of its marks answers.
+pub fn is_overlay_lane(key: LaneKey) -> bool {
+    key.kind == kind::LOG
 }
 
 pub fn leaf_label(key: LaneKey) -> String {
@@ -1163,16 +1182,22 @@ pub fn value_lanes_in_view(
 /// Longest true `duration_ns` wins so a 1 px tick cannot steal the hit-test
 /// from a longer same-lane scope under that pixel. Equal duration keeps
 /// last-in-list (painter's top among siblings).
+/// A mark of a lane laid out over another's row (see [`is_overlay_lane`])
+/// wins over anything of the lane under it.
 pub fn pick_instance_at(instances: &[ScopeInstance], x: f32, y: f32) -> Option<usize> {
     let mut best: Option<usize> = None;
     for (i, inst) in instances.iter().enumerate() {
         if x < inst.x || x > inst.x + inst.w || y < inst.y || y > inst.y + inst.h {
             continue;
         }
+        // What is drawn over another lane's row is on top of it, whatever
+        // the lengths: a log line's is nothing and a sample's is its period.
+        let over = |inst: &ScopeInstance| inst.kind == kind::LOG;
         match best {
             None => best = Some(i),
             Some(j) => {
-                if inst.duration_ns >= instances[j].duration_ns {
+                let under = &instances[j];
+                if (over(inst), inst.duration_ns) >= (over(under), under.duration_ns) {
                     best = Some(i);
                 }
             }
@@ -1204,20 +1229,29 @@ pub fn pick_column_event(
     if width <= 0.0 || t1 <= t0 {
         return None;
     }
-    let key = layout.iter().find_map(|(k, ly)| {
-        let h = (lane_height(*k) + lane_gap(*k)) * scale.max(0.01);
-        if y >= *ly && y < *ly + h {
-            Some(*k)
-        } else {
-            None
-        }
-    })?;
     let span = (t1 - t0) as f64;
     let col0 = t0.saturating_add((x.max(0.0) as f64 / width as f64 * span) as u64);
     let col1 = t0
         .saturating_add(((x.max(0.0) as f64 + 1.0) / width as f64 * span) as u64)
         .max(col0.saturating_add(1));
-    index.lane(key)?.overlapping(col0, col1).copied()
+    // One lane, unless another is laid out over its row: then the one on
+    // top answers where it has a mark, and the one under it elsewhere.
+    let under = |(k, ly): &&(LaneKey, f32)| {
+        let h = (lane_height(*k) + lane_gap(*k)) * scale.max(0.01);
+        y >= *ly && y < *ly + h
+    };
+    let at = |key: LaneKey| index.lane(key)?.overlapping(col0, col1).copied();
+    let mut found = None;
+    for (key, _) in layout.iter().filter(under) {
+        if is_overlay_lane(*key) {
+            if let Some(event) = at(*key) {
+                return Some(event);
+            }
+        } else if found.is_none() {
+            found = Some(*key);
+        }
+    }
+    at(found?)
 }
 
 pub fn apply_highlight_flags(

@@ -307,6 +307,11 @@ opens on first load with a service and closes with its ×. Its rows:
   from an instrumented app). New ones start out under the thread that
   emitted them. Screenshot: `19-service-lanes.png`.
 - **Collapse.** The chevron on a process, machine or thread row folds it.
+  A folded thread keeps what heads its row: its state bar, its sample bar
+  and its first row of scopes, each where it is when the thread is open,
+  so folding takes the deeper rows away and nothing that stays moves. With
+  Ctrl held (Cmd on a Mac), the chevron of a thread folds or unfolds every
+  thread of its process with it.
   `?collapse=scheduler` in the URL folds the scheduler on load.
 - **Reorder and hide.** Every track has a handle: threads, async tracks and
   graphs each drag on their own, within their process or into another one
@@ -666,8 +671,9 @@ in the URL opens a tab on load.
   count, average, minimum and maximum are the frame times.
 - **Log lines.** `log(level, text)` (`perfr_log`, `PERFR_LOG`,
   `perfr_api.log`) writes a line on the same ring as scopes, with its
-  level, thread and timestamp. Each thread grows a `logs` lane of ticks,
-  and the **Logs** window lists the lines in the visible range. A line names
+  level, thread and timestamp. Each line is a tick on its thread's sample
+  bar, in its level's colour and over the samples (a thread that is not
+  sampled has them in a row of their own), and the **Logs** window lists the lines in the visible range. A line names
   no scope: clicking a scope lists the lines logged while it was open on
   that thread, and a scope that recurs folds identical lines with a count.
   `GET /api/logs` and the `perfr_logs` MCP tool read the same thing.

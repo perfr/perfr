@@ -44,6 +44,8 @@ More also lists “Pan time: A / D”, “Zoom: W / S” and “Scroll tracks: �
 | Double-click | A scope | Zoom to 1.1× its duration |
 | Double-click | Ruler | Fit, same as Home |
 | Click | Thread header | Focus that thread, or release it |
+| Click | A thread's triangle | Fold the thread to its state bar, sample bar and first row of scopes, or unfold it |
+| Ctrl+click or ⌘+click | A thread's triangle | Fold or unfold every thread of that process |
 | Click | Sample tick | Copy its call stack |
 | Click | A bar of the frame strip | Show that frame, centred, at 90% of the timeline's width |
 | Left-drag | The window on the frame strip | Pan the timeline |

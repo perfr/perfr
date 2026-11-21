@@ -627,6 +627,55 @@ def _thread_names(stream):
 GIL_TID = 0x00FE611A
 
 
+def _check_thread_folds(run, pid):
+    """Folding a thread takes away the rows under its first row of scopes
+    and moves nothing that stays; Ctrl on the triangle does it to every
+    thread of the process."""
+    def state():
+        ui = run.ui()
+        rows = {k: v for k, v in ui.items() if k.startswith(f"row:thread:{pid}:")}
+        bars = {k: v for k, v in ui.items() if k.startswith(f"sample_bar:{pid}:")}
+        return rows, bars
+
+    def fold(tid, ctrl=False):
+        x, y, w, h = run.rect(f"fold:thread:{pid}:{tid}")
+        run.chrome.click(x + w / 2, y + h / 2, ctrl=ctrl)
+        time.sleep(0.6)
+
+    rows, bars = state()
+    # The topmost thread that has more than one row of scopes to lose, so
+    # that it is on screen and nothing above it changes.
+    kept_h = min(v[3] for k, v in rows.items() if k.replace("row:thread", "sample_bar") in bars)
+    deep = sorted((v[1], k) for k, v in rows.items() if v[3] > kept_h and k.replace("row:thread", "sample_bar") in bars)
+    check(deep, f"no thread with rows to fold: {rows}")
+    label = deep[0][1]
+    tid = label.split(":")[3]
+    bar = f"sample_bar:{pid}:{tid}"
+    fold(tid)
+    folded, folded_bars = state()
+    check(folded[label][3] < rows[label][3], f"folding {tid} left its row {folded[label][3]} px tall, from {rows[label][3]}")
+    check(folded[label][:3] == rows[label][:3], f"folding {tid} moved its row: {rows[label]} to {folded[label]}")
+    check(folded_bars.get(bar) == bars[bar], f"folding {tid} moved its sample bar: {bars[bar]} to {folded_bars.get(bar)}")
+    check(folded[label][3] >= kept_h, f"a folded thread is {folded[label][3]} px, shorter than its marks and one row of scopes")
+    others = [k for k in rows if k != label and folded[k][3] != rows[k][3]]
+    check(not others, f"folding {tid} changed other threads: {others}")
+    run.shot("59-thread-folded", settle=0.5)
+    # Ctrl on an open thread's triangle folds them all, on a folded one's
+    # opens them all.
+    other = next(k.split(":")[3] for _, k in deep if k != label) if len(deep) > 1 else tid
+    if other != tid:
+        fold(other, ctrl=True)
+        all_folded, _ = state()
+        tall = {k: v[3] for k, v in all_folded.items() if v[3] > folded[label][3]}
+        check(not tall, f"Ctrl on a triangle left threads open: {tall}")
+        run.shot("60-threads-folded", settle=0.5)
+    fold(tid, ctrl=True)
+    opened, opened_bars = state()
+    check({k: v[3] for k, v in opened.items()} == {k: v[3] for k, v in rows.items()},
+          "Ctrl on a folded thread's triangle did not open every thread as it was")
+    check(opened_bars == bars, "the sample bars are not where they were before any fold")
+
+
 @scenario("python-stacks", "A Python program: its functions in the samples, Python's thread names, a row for the GIL, and its own scopes")
 def python_stacks(run):
     # This suite starts target/release/perfr, reads /proc and is not run on
@@ -702,6 +751,7 @@ def python_stacks(run):
             run.open_viewer("?collapse=scheduler")
             check(f"row:thread:{app.pid}:{GIL_TID}" in run.ui(), "the viewer shows no GIL row")
             run.shot("58-python-rows", settle=2.0)
+            _check_thread_folds(run, app.pid)
         return (f"{report['samples']} samples, {merged} with Python frames, {kept} without, "
                 f"{sum(scopes.values())} scopes of its own")
     finally:

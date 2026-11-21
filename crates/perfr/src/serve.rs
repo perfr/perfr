@@ -1247,6 +1247,7 @@ fn drain_samples(
     batch: &mut Vec<LiveEvent>,
     horizon_ns: u64,
     returns: Option<&UprobeSession>,
+    frida_returns: Option<&crate::frida::FridaSession>,
     scratch: &mut SampleScratch,
     mut python: Option<&mut PythonStacks>,
 ) {
@@ -1286,6 +1287,7 @@ fn drain_samples(
             counters,
             batch,
             returns,
+            frida_returns,
             &mut scratch.unnamed,
             &mut scratch.frames,
             python.as_deref_mut(),
@@ -1350,6 +1352,7 @@ fn drain_samples(
                     counters,
                     batch,
                     returns,
+                    frida_returns,
                     &mut scratch.unnamed,
                     &mut scratch.frames,
                     python.as_deref_mut(),
@@ -1418,7 +1421,7 @@ fn name_waiting_samples(
 
 /// Unwind one sample and, when the symbols are there to name its frames,
 /// push its timeline events; otherwise its frames wait in `unnamed`. `stack`
-/// is patched in place when a uprobe session has hijacked return addresses.
+/// is patched in place for return addresses intercepted by uprobes or Frida.
 ///
 /// Without an unwinder (the target's maps could not be read) the sample is
 /// its sampled pc alone: a tick on the thread's bar that says what was
@@ -1441,46 +1444,93 @@ fn push_sample(
     counters: &mut SampleCounters,
     batch: &mut Vec<LiveEvent>,
     returns: Option<&UprobeSession>,
+    frida_returns: Option<&crate::frida::FridaSession>,
     unnamed: &mut Vec<UnnamedSample>,
     frames: &mut Vec<u64>,
     python: Option<&mut PythonStacks>,
 ) {
     #[cfg(target_arch = "x86_64")]
-    let start = StartRegs { ip: regs[8], sp: regs[7], frame_pointer: regs[6], link: 0 };
+    let start = StartRegs {
+        ip: regs[8],
+        sp: regs[7],
+        frame_pointer: regs[6],
+        link: 0,
+    };
     #[cfg(target_arch = "aarch64")]
-    let start = StartRegs { ip: regs[32], sp: regs[31], frame_pointer: regs[29], link: regs[30] };
+    let start = StartRegs {
+        ip: regs[32],
+        sp: regs[31],
+        frame_pointer: regs[29],
+        link: regs[30],
+    };
     if let Some(session) = returns {
         session.patch_user_stack(tid as i32, start.sp, time, stack);
     }
-    // frames[0] is the sampled pc.
     let mut whole = false;
-    match unwinder {
-        Some(unwinder) => {
-            let end = {
-                let _unwind = perfr_api::scope("unwind");
-                unwinder.unwind_into(start, start.sp, stack, MAX_SAMPLE_FRAMES, frames)
-            };
-            match end {
-                UnwindEnd::Root => {
-                    whole = true;
-                    counters.unwound_whole += 1
-                }
-                UnwindEnd::Truncated => counters.unwound_cut += 1,
-                UnwindEnd::Failed(_) => counters.unwind_failed += 1,
-            }
+    let repair_valid = frida_returns.is_none_or(|r| r.patch_returns(tid, start.sp, time, stack));
+    // frames[0] is the sampled pc. Missing history is leaf-only, not a
+    // plausible but untrustworthy caller chain through a trampoline.
+    if !repair_valid {
+        frames.clear();
+        frames.push(start.ip);
+        counters.unwind_failed += 1;
+        if let Some(r) = frida_returns {
+            r.note_incomplete_return();
         }
-        None => {
-            frames.clear();
-            frames.push(start.ip);
-            counters.not_unwound += 1;
+    } else {
+        match unwinder {
+            Some(unwinder) => {
+                let end = {
+                    let _unwind = perfr_api::scope("unwind");
+                    unwinder.unwind_into_avoiding(
+                        start,
+                        start.sp,
+                        stack,
+                        MAX_SAMPLE_FRAMES,
+                        frames,
+                        frida_returns.map_or(&[], |r| r.return_trampolines()),
+                    )
+                };
+                match end {
+                    UnwindEnd::Root => {
+                        whole = true;
+                        counters.unwound_whole += 1
+                    }
+                    UnwindEnd::Truncated => counters.unwound_cut += 1,
+                    UnwindEnd::Failed(_) => counters.unwind_failed += 1,
+                    UnwindEnd::UnresolvedReturn => {
+                        counters.unwind_failed += 1;
+                        if let Some(r) = frida_returns {
+                            r.note_incomplete_return();
+                        }
+                    }
+                }
+            }
+            None => {
+                frames.clear();
+                frames.push(start.ip);
+                counters.not_unwound += 1;
+            }
         }
     }
     // The thread's Python stacks around this instant, while they are kept.
-    let near = python.as_ref().map(|python| python.near(tid, time)).unwrap_or_default();
+    let near = python
+        .as_ref()
+        .map(|python| python.near(tid, time))
+        .unwrap_or_default();
     if time <= named_through_ns {
-        name_sample(time, tid, frames, whole, &near, symbolizer, pc_ids, names, store, target_pid, period_ns, batch, python);
+        name_sample(
+            time, tid, frames, whole, &near, symbolizer, pc_ids, names, store, target_pid,
+            period_ns, batch, python,
+        );
     } else if unnamed.len() < MAX_UNNAMED_SAMPLES {
-        unnamed.push(UnnamedSample { time, tid, frames: frames.clone(), whole, python: near });
+        unnamed.push(UnnamedSample {
+            time,
+            tid,
+            frames: frames.clone(),
+            whole,
+            python: near,
+        });
     } else {
         if counters.named_early == 0 {
             log::warn!(
@@ -1489,7 +1539,10 @@ fn push_sample(
             );
         }
         counters.named_early += 1;
-        name_sample(time, tid, frames, whole, &near, symbolizer, pc_ids, names, store, target_pid, period_ns, batch, python);
+        name_sample(
+            time, tid, frames, whole, &near, symbolizer, pc_ids, names, store, target_pid,
+            period_ns, batch, python,
+        );
     }
 }
 
@@ -2155,8 +2208,8 @@ fn capture_loop(
     let mut uprobe_status = String::new();
     let mut uprobes = {
       let _phase = perfr_api::scope("arm instrumentation");
-      if frida.is_some() {
-        service.set_instrumentation_status(format!("Frida: {} functions armed", hooks.len()));
+      if let Some(session) = frida.as_ref() {
+        service.set_instrumentation_status(session.status(0, &[]));
         visible.add_instrumented(target_pid as u32);
         None
       } else if hooks.is_empty() || !has_target {
@@ -2692,7 +2745,12 @@ fn capture_loop(
             }
             uprobe_calls = session.poll_at(probe_now_ns);
         }
-        let sample_horizon = uprobes.as_ref().map(|s| s.sample_horizon(probe_now_ns)).unwrap_or(u64::MAX);
+        if let Some(session) = frida.as_mut() { session.poll_returns(); }
+        // Retain return history until every consumer, including Python
+        // enrichment, has released its older copied samples.
+        let sample_horizon = uprobes.as_ref().map(|s| s.sample_horizon(probe_now_ns)).unwrap_or(u64::MAX)
+            .min(frida.as_ref().map_or(u64::MAX, |s| s.sample_horizon()))
+            .min(python.as_ref().map_or(u64::MAX, |python| python.horizon_ns(probe_now_ns)));
         // Read and unwound every pass; named once the symbols are ready, so
         // they arrive named rather than as bare addresses.
         let _samples = perfr_api::scope("read samples");
@@ -2711,12 +2769,14 @@ fn capture_loop(
                 &mut samples,
                 &mut batch,
                 // A sample waits for the Python reading that follows it.
-                sample_horizon.min(python.as_ref().map_or(u64::MAX, |python| python.horizon_ns(probe_now_ns))),
+                sample_horizon,
                 uprobes.as_ref(),
+                frida.as_ref(),
                 &mut sample_scratch,
                 python.as_mut(),
             );
         }
+        if let Some(session) = frida.as_mut() { session.retire_returns(sample_horizon); }
         if let Some(python) = python.as_mut() {
             python.pump(&service, &mut names, &mut comm_names, &mut batch);
         }
@@ -3002,6 +3062,15 @@ fn capture_loop(
         perfr_api::span_async(format!("DROPPED {lost} events"), start, crate::now_monotonic_ns());
     }
 
+    // Freeze copied samples before the final metadata checkpoint. Detach
+    // closes the writer mapping only after active publication guards finish.
+    for thread in &threads { let _ = perfr_perf_ring::ring::disable_fd(thread.sample.fd()); }
+    let sampling_stopped_ns = crate::now_monotonic_ns();
+    if let Some(session) = frida.as_mut() {
+        session.stop();
+        session.finish_returns(sampling_stopped_ns);
+    }
+
     // Pair every uprobe hit still inside the reorder window before the
     // final unwind, so the last samples are patched with the same return
     // addresses as the rest of the capture.
@@ -3029,6 +3098,7 @@ fn capture_loop(
             &mut tail,
             u64::MAX,
             uprobes.as_ref(),
+            frida.as_ref(),
             &mut sample_scratch,
             python.as_mut(),
         );
@@ -3102,7 +3172,6 @@ fn capture_loop(
     }
 
     if let Some(session) = frida.as_mut() {
-        session.stop();
         session.poll();
         service.set_instrumentation_status(session.status(scopes.events_lost, &scopes.auto_unhooked));
     }
@@ -4459,6 +4528,7 @@ mod tests {
                 &mut self.counters,
                 &mut batch,
                 horizon_ns,
+                None,
                 None,
                 &mut self.scratch,
                 None,

@@ -34,6 +34,8 @@ mod hooks;
 mod hook_safety;
 mod hook_journal;
 mod frida;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod frida_returns;
 mod code;
 mod demangle;
 mod functions;

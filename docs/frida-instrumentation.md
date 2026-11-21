@@ -132,10 +132,32 @@ agent for the target architecture, including Rosetta when applicable.
 Native end-to-end tests pass on Linux x86-64, Apple Silicon and Intel Macs.
 The hosted Mac tests run both collector and development target as root to avoid
 interactive task-port authorization prompts; this does not validate unprivileged
-attachment. ARM Linux and Rosetta runtime validation remain pending. Neither exception handling nor sampled callstack fidelity through Gum
-trampolines is certified by these tests. Existing Linux sampling continues, but
-Gum's return interception can affect unwinding; no trampoline-aware callstack
-repair is implemented here. CPU sampling on macOS remains future work.
+attachment. ARM Linux and Rosetta runtime validation remain pending.
+
+Linux x86-64 timing hooks now repair intercepted return addresses in copied
+perf stacks before DWARF unwinding. The agent journals each invocation's thread,
+stack slot, original return address, verified Gum trampoline, and entry/exit time.
+The collector retains history until older samples are consumed and patches only
+slots still holding the expected trampoline. Real target stacks are unchanged;
+entry/exit timing remains enabled. Trampoline discovery checks the pinned Gum
+entry redirect against its public invocation-stack translation API; unsupported
+redirects disable repair. New trampoline addresses are registered under the
+capture-transition lock before their first use, including late old callbacks.
+Return history also waits for Python enrichment before retirement.
+
+`tools/e2e/frida_unwind.py` checks full sampled caller chains and all 480 timed
+calls with recursive nesting in the same capture, across two threads and repeated
+captures, with frame pointers omitted. Unit tests cover delayed samples, reused
+slots, tail-call chains, concurrent publication, and overflow. Missing history
+stops a walk at a known trampoline; lost or unsupported metadata makes samples
+leaf-only and is reported in instrumentation status. Calls spanning captures can
+therefore remain partial. The journal is bounded; a publisher stalled for 250 ms
+invalidates repair for that capture instead of accumulating samples indefinitely.
+
+This repairs return substitution, not missing unwind tables for relocated
+instructions, generated code, or hook callbacks. It does not certify C++ exception
+handling through hooks or repair another tool's interception. Runtime validation
+of this repair is Linux x86-64 only; CPU sampling on macOS remains future work.
 
 The pinned upstream Core and Gum license texts are shipped under `licenses/`
 with the native package. perfr's adapter, helper and transport use this
@@ -175,3 +197,6 @@ Upstream references: [Frida modes](https://frida.re/docs/modes/),
 [Gum](https://github.com/frida/frida-gum),
 [Native C API](https://frida.re/docs/c-api/),
 [Apple hardened runtime](https://developer.apple.com/documentation/xcode/configuring-the-hardened-runtime/).
+
+See `docs/blog/frida-unwinding.html` for the mechanism, measured before/after
+call stacks, limitations, and a reproducible test command.

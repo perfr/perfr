@@ -41,15 +41,21 @@ struct Session {
     mapping: Transport,
     start: Start,
     stop: Stop,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    returns: std::sync::RwLock<Option<perfr_frida_transport::returns::Journal>>,
 }
 
 /// The capture hooks report to now, or null between captures.
 ///
-/// A pointer the hooks load, not a lock they take. Every hooked call on
+/// The duration path loads a pointer, not a lock. Previously every hooked call on
 /// every thread came through a process-wide `RwLock` twice, on entry and
 /// on return: four atomic updates of one cache line per call, and a stop
 /// waiting to close the session held every caller up behind it. With eight
 /// threads in a hooked function that was 700 ns a call against 24 on one.
+///
+/// Sampled-return metadata takes a short separate read lock while publishing;
+/// close takes its write lock to release the larger journal mapping safely.
+/// Neither lock is held for the duration of the instrumented target call.
 ///
 /// Each session is leaked, its 32-byte lease mapping with it, so a call
 /// that loaded the pointer just before a close still reads memory that is
@@ -58,6 +64,28 @@ static SESSION: AtomicPtr<Session> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Serialises open and close, and remembers the last generation given out.
 static GENERATIONS: Mutex<u32> = Mutex::new(0);
+
+// An old call may return after Stop and after the next capture starts.
+// Remember its trampoline so missing old history truncates instead of guessing.
+// Accessed during capture transitions and first discovery of each hook.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+static KNOWN_RETURNS: Mutex<(Vec<u64>, bool)> = Mutex::new((Vec::new(), false));
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn retire_return_journal(session: &Session) {
+    if let Ok(mut journal) = session.returns.write() {
+        if let Some(journal) = journal.take() {
+            if let Ok(mut known) = KNOWN_RETURNS.lock() {
+                known.1 |= journal.unknown_return();
+                for address in journal.trampolines() {
+                    if !known.0.contains(&address) {
+                        if known.0.len() == 1024 { known.1 = true; break; }
+                        known.0.push(address);
+                    }
+                }
+            }
+        }
+    }
+}
 
 #[inline]
 fn session() -> Option<&'static Session> {
@@ -99,12 +127,25 @@ pub unsafe extern "C" fn perfr_frida_open(
     let Ok(mapping) = Transport::open(&file, std::process::id()) else {
         return 0;
     };
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let returns = if mapping.return_repair_enabled() {
+        match perfr_frida_transport::returns::Journal::open(&file) { Ok(j) => Some(j), Err(_) => return 0 }
+    } else { None };
     let Ok(mut last_generation) = GENERATIONS.lock() else {
         return 0;
     };
     // Refuse two collectors rather than silently stealing a running session.
     if session().is_some_and(|s| s.mapping.active() && s.mapping.controller_alive()) {
         return 0;
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        if let Some(old) = session() { retire_return_journal(old); }
+        if let Some(journal) = returns.as_ref() {
+            let Ok(known) = KNOWN_RETURNS.lock() else { return 0; };
+            for &address in &known.0 { journal.register(address); }
+            if known.1 { journal.invalidate(); }
+        }
     }
     let reader = perfr_scope_ring::ScopeRingReader::open(std::process::id()).ok();
     let descriptor = reader.as_ref().map_or(0, |r| r.api_descriptor());
@@ -156,6 +197,8 @@ pub unsafe extern "C" fn perfr_frida_open(
         mapping,
         start: api.0,
         stop: api.1,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        returns: std::sync::RwLock::new(returns),
     }));
     SESSION.store(session, Ordering::Release);
     *last_generation
@@ -168,7 +211,22 @@ pub extern "C" fn perfr_frida_close(generation: u32) {
     }
     if let Ok(_control) = GENERATIONS.lock() {
         if session().is_some_and(|s| s.generation == generation) {
-            SESSION.store(std::ptr::null_mut(), Ordering::Release);
+            // Publish the end of metadata before callbacks stop recording,
+            // including a detach initiated by loss of the helper connection.
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            if let Some(current) = session() {
+                if let Ok(journal) = current.returns.read() {
+                    if let Some(journal) = journal.as_ref() { journal.close(); }
+                }
+            }
+            let old = SESSION.swap(std::ptr::null_mut(), Ordering::AcqRel);
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            if let Some(old) = unsafe { old.as_ref() } {
+                // Wait only for metadata publication, never for the target call.
+                retire_return_journal(old);
+            }
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+            let _ = old;
         }
     }
 }
@@ -205,6 +263,63 @@ pub extern "C" fn perfr_frida_stop(generation: u32, handle: u64) {
     }
 }
 
+/// First discovery of a hook must survive a racing capture transition.
+/// This cold path is serialized with open/close: seeding a new journal and
+/// publishing SESSION cannot miss a late callback from the previous capture.
+#[no_mangle]
+pub extern "C" fn perfr_frida_register_return(trampoline: u64) {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        if FORK_CHILD.load(Ordering::Relaxed) { return; }
+        let Ok(_control) = GENERATIONS.lock() else { return; };
+        let Ok(mut known) = KNOWN_RETURNS.lock() else { return; };
+        if trampoline == 0 {
+            known.1 = true;
+        } else if !known.0.contains(&trampoline) {
+            if known.0.len() < 1024 { known.0.push(trampoline); }
+            else { known.1 = true; }
+        }
+        if let Some(current) = session() {
+            if let Ok(journal) = current.returns.read() {
+                if let Some(journal) = journal.as_ref() {
+                    if known.1 { journal.invalidate(); }
+                    else { journal.register(trampoline); }
+                }
+            }
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = trampoline;
+}
+
+// Gum calls these before it replaces a return slot, and on return. A token
+// belongs to one capture; a late return cannot close a newer invocation.
+#[no_mangle]
+pub extern "C" fn perfr_frida_return_enter(generation: u32, tid: u32, sp: u64, original: u64, trampoline: u64) -> u64 {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if !FORK_CHILD.load(Ordering::Relaxed) {
+        if let Some(s) = session().filter(|s| s.generation == generation && s.mapping.active()) {
+            if let Ok(journal) = s.returns.read() {
+                if let Some(j) = journal.as_ref() { return j.enter(tid, sp, original, trampoline); }
+            }
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = (generation, tid, sp, original, trampoline);
+    0
+}
+#[no_mangle]
+pub extern "C" fn perfr_frida_return_leave(generation: u32, invocation: u64) {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if invocation != 0 && !FORK_CHILD.load(Ordering::Relaxed) {
+        if let Some(s) = session().filter(|s| s.generation == generation && s.mapping.active()) {
+            if let Ok(journal) = s.returns.read() { if let Some(j) = journal.as_ref() { j.leave(invocation); } }
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = (generation, invocation);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +342,33 @@ mod tests {
         7
     }
     extern "C" fn quiet_stop(_: u64) {}
+
+    #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn first_return_discovery_survives_capture_boundaries() {
+        let _one = ONE_SESSION.lock().unwrap_or_else(|p| p.into_inner());
+        // A callback may discover its address with no active session at all.
+        perfr_frida_register_return(0x123400);
+        let mut previous = 0;
+        for address in [0x123500, 0x123600] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let lease = Transport::create(file.as_file(), std::process::id()).unwrap();
+            lease.enable_return_repair();
+            let journal = perfr_frida_transport::returns::Journal::open(file.as_file()).unwrap();
+            let path = std::ffi::CString::new(file.path().to_str().unwrap()).unwrap();
+            let generation = unsafe { perfr_frida_open(path.as_ptr(), Some(init), Some(quiet_start), Some(quiet_stop)) };
+            assert_ne!(generation, 0);
+            assert!(journal.trampolines().contains(&0x123400));
+            if previous != 0 { assert!(journal.trampolines().contains(&previous)); }
+            // An old callback discovered after the new session was published.
+            perfr_frida_register_return(address);
+            assert!(journal.trampolines().contains(&address));
+            assert_eq!(perfr_frida_return_enter(generation.wrapping_sub(1), 1, 8, 16, address), 0);
+            perfr_frida_close(generation);
+            assert!(journal.closed());
+            previous = address;
+        }
+    }
 
     /// What the hook path adds to a hooked call, beyond the record it
     /// writes: the stubs above do nothing, so this is the session check and

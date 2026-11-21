@@ -41,6 +41,8 @@ pub enum UnwindEnd {
     Truncated,
     /// The unwinder could not get from the last frame to its caller.
     Failed(framehop::Error),
+    /// A known intercepted return lacked trustworthy invocation history.
+    UnresolvedReturn,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +59,7 @@ impl UnwindOutcome {
     /// No error on the way. A stack cut at the frame limit counts: every
     /// frame it has is a real one.
     pub fn is_success(&self) -> bool {
-        !matches!(self.end, UnwindEnd::Failed(_))
+        !matches!(self.end, UnwindEnd::Failed(_) | UnwindEnd::UnresolvedReturn)
     }
 }
 
@@ -244,6 +246,14 @@ impl ProcessUnwinder {
         max_frames: usize,
         frames: &mut Vec<u64>,
     ) -> UnwindEnd {
+        self.unwind_into_avoiding(regs, stack_base, stack, max_frames, frames, &[])
+    }
+
+    /// Stop before a known return trampoline instead of inventing its caller.
+    pub fn unwind_into_avoiding(
+        &mut self, regs: StartRegs, stack_base: u64, stack: &[u8],
+        max_frames: usize, frames: &mut Vec<u64>, return_trampolines: &[u64],
+    ) -> UnwindEnd {
         frames.clear();
         let mut read_stack = |address: u64| -> Result<u64, ()> {
             let offset = address.checked_sub(stack_base).ok_or(())? as usize;
@@ -263,6 +273,10 @@ impl ProcessUnwinder {
         loop {
             match iterator.next() {
                 Ok(Some(frame)) => {
+                    if return_trampolines.iter().any(|address| address.checked_sub(1) == Some(frame.address_for_lookup()) || (frames.is_empty() && *address == frame.address_for_lookup())) {
+                        if frames.is_empty() { frames.push(frame.address_for_lookup()); }
+                        return UnwindEnd::UnresolvedReturn;
+                    }
                     if frames.len() >= max_frames {
                         // There was a caller above the last frame kept.
                         return UnwindEnd::Truncated;
@@ -285,6 +299,22 @@ mod tests {
     use super::*;
     use perfr_perf_records::reader::{parse_record_sample, SampleFlags};
     use perfr_perf_records::{record_type, PerfEventHeader};
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn unresolved_hook_returns_stop_before_frame_pointer_fallback() {
+        let mut unwinder = ProcessUnwinder::from_maps_content(b"");
+        let regs = StartRegs { ip: 0x1000, sp: 0x8000, frame_pointer: 0x8000, link: 0 };
+        let mut stack = Vec::new();
+        for word in [0x8010u64, 0x2000, 0, 0x3000] { stack.extend(word.to_le_bytes()); }
+        let mut frames = Vec::new();
+        let end = unwinder.unwind_into_avoiding(regs, 0x8000, &stack, 32, &mut frames, &[0x2000]);
+        assert_eq!(end, UnwindEnd::UnresolvedReturn);
+        assert_eq!(frames, [0x1000]);
+        let end = unwinder.unwind_into_avoiding(StartRegs { ip: 0x2000, ..regs }, 0x8000, &stack, 32, &mut frames, &[0x2000]);
+        assert_eq!(end, UnwindEnd::UnresolvedReturn);
+        assert_eq!(frames, [0x2000]);
+    }
 
     #[test]
     fn a_files_text_is_its_largest_executable_mapping() {

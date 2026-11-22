@@ -921,7 +921,7 @@ pub fn tool_specs() -> Vec<Value> {
                     "instrumentation": { "type": "string", "enum": ["frida", "kernel_uprobes"], "description": "Default frida." },
                     "auto_profile": { "type": "boolean", "description": "Let the service pick hooks. Linux only. Default false." },
                     "program_output": { "type": "boolean", "description": "Record what the program writes to stdout and stderr as log lines (read them with perfr_logs). Loads an agent into the program, as a hook does. Linux and macOS. Default false." },
-                    "gpu_kernels": { "type": "boolean", "description": "Record every CUDA kernel and memory copy the program's GPU runs, as spans under the thread that launched it; perfr_function_stats then lists GPU time by kernel (kind gpu). Needs an NVIDIA GPU and CUPTI beside the program's CUDA runtime (PyTorch ships it). Start after the program has initialised CUDA. Loads an agent into the program. Linux. Default false." }
+                    "gpu_kernels": { "type": "boolean", "description": "Record every CUDA kernel and memory copy the program's GPU runs, as spans under the thread that launched it; perfr_function_stats then lists GPU time by kernel (kind gpu). Needs an NVIDIA GPU and CUPTI beside the program's CUDA libraries (PyTorch ships it; with CuPy, install nvidia-cuda-cupti). Start after the program has initialised CUDA. Loads an agent into the program. Linux. Default false." }
                 },
                 "additionalProperties": false,
             }),

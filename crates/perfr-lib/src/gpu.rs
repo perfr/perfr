@@ -21,8 +21,8 @@
 //! running the forward pass, the kernels of the forward pass, when the GPU
 //! got to them.
 //!
-//! CUPTI is not linked. It is found beside the CUDA runtime the program has
-//! loaded and opened with `dlopen`, and the fields of its records are read
+//! CUPTI is not linked. It is found beside the CUDA libraries the program
+//! has loaded and opened with `dlopen`, and the fields of its records are read
 //! at their offsets: the leading fields used here have not moved since CUDA
 //! 9, and every later version of a record only adds to its end.
 
@@ -341,31 +341,66 @@ fn mapped_library(maps: &str, prefix: &str) -> Option<String> {
     })
 }
 
+/// CUDA's own libraries, by the start of their file names. A program need
+/// not load the runtime to use the GPU: CuPy calls the driver itself and
+/// maps only the math libraries and the compiler. Where one of these is,
+/// CUPTI was installed with it.
+const CUDA_LIBRARIES: &[&str] = &[
+    "libcudart.so",
+    "libcublas.so",
+    "libnvrtc.so",
+    "libcudnn.so",
+    "libcufft.so",
+    "libcusparse.so",
+    "libcusolver.so",
+    "libcurand.so",
+    "libnvJitLink.so",
+];
+
+/// The directories CUPTI may be in, for a program with `maps`: beside each
+/// CUDA library it has mapped, where a CUDA toolkit keeps it relative to
+/// that (`extras/CUPTI/lib64`), and where the CUDA 12 wheels put it (a
+/// package of its own beside the runtime's). In the order of the maps, each
+/// once.
+fn cupti_directories(maps: &str) -> Vec<String> {
+    let mut directories: Vec<String> = Vec::new();
+    for line in maps.lines() {
+        let Some(path) = line.split_whitespace().nth(5).filter(|path| path.starts_with('/')) else { continue };
+        let Some((dir, file)) = path.rsplit_once('/') else { continue };
+        if !CUDA_LIBRARIES.iter().any(|prefix| file.starts_with(prefix)) {
+            continue;
+        }
+        for near in [dir.to_string(), format!("{dir}/../extras/CUPTI/lib64"), format!("{dir}/../../cuda_cupti/lib")] {
+            if !directories.contains(&near) {
+                directories.push(near);
+            }
+        }
+    }
+    directories
+}
+
 /// Where CUPTI is for this process: already mapped (PyTorch links it),
-/// else beside the CUDA runtime it has mapped, else where a CUDA toolkit
-/// keeps it relative to that runtime, else by name through the loader.
+/// else in one of [`cupti_directories`], else by name through the loader.
 fn cupti_candidates(maps: &str) -> Result<Vec<String>, String> {
     if let Some(path) = mapped_library(maps, "libcupti.so") {
         return Ok(vec![path]);
     }
-    let runtime = mapped_library(maps, "libcudart.so");
-    if runtime.is_none() && mapped_library(maps, "libcuda.so").is_none() {
+    let directories = cupti_directories(maps);
+    if directories.is_empty() && mapped_library(maps, "libcuda.so").is_none() {
         return Err("the program has not loaded CUDA (start the capture once it has)".into());
     }
     let mut candidates = Vec::new();
-    if let Some(dir) = runtime.as_deref().and_then(|path| path.rsplit_once('/')).map(|(dir, _)| dir) {
-        for dir in [dir.to_string(), format!("{dir}/../extras/CUPTI/lib64")] {
-            let mut found: Vec<String> = std::fs::read_dir(&dir)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter_map(|entry| entry.file_name().into_string().ok())
-                .filter(|name| name.starts_with("libcupti.so"))
-                .map(|name| format!("{dir}/{name}"))
-                .collect();
-            found.sort();
-            candidates.extend(found);
-        }
+    for dir in directories {
+        let mut found: Vec<String> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.starts_with("libcupti.so"))
+            .map(|name| format!("{dir}/{name}"))
+            .collect();
+        found.sort();
+        candidates.extend(found);
     }
     candidates.extend(["libcupti.so.13", "libcupti.so.12", "libcupti.so"].map(String::from));
     Ok(candidates)
@@ -418,7 +453,7 @@ unsafe fn load(candidates: &[String]) -> Result<(&'static Cupti, String), String
         FUNCTIONS.store(cupti as *const Cupti as *mut Cupti, Ordering::Release);
         return Ok((cupti, path.clone()));
     }
-    Err("CUPTI (libcupti.so) was not found beside the program's CUDA runtime".into())
+    Err("CUPTI (libcupti.so) was not found beside the program's CUDA libraries".into())
 }
 
 /// Starts recording GPU work for the capture of `generation`. Returns what
@@ -598,6 +633,26 @@ mod tests {
         let runtime_only = "7f00-7f01 r-xp 00000000 08:02 1 /nowhere/lib64/libcudart.so.12\n";
         let candidates = cupti_candidates(runtime_only).unwrap();
         assert_eq!(candidates, ["libcupti.so.13", "libcupti.so.12", "libcupti.so"]);
+        // A program that calls the driver itself and never maps the runtime
+        // (CuPy): beside the CUDA libraries it does map, each place once.
+        let cupy = "7f00-7f01 r-xp 00000000 08:02 1 /usr/lib/x86_64-linux-gnu/libcuda.so.595.91.07\n\
+                    7f02-7f03 r-xp 00000000 08:02 2 /venv/nvidia/cu13/lib/libcublasLt.so.13\n\
+                    7f04-7f05 r--p 00000000 08:02 3 /venv/nvidia/cu13/lib/libnvrtc.so.13\n\
+                    7f06-7f07 r-xp 00000000 08:02 4 /venv/nvidia/cuda_runtime/lib/libcudart.so.12\n";
+        assert_eq!(
+            cupti_directories(cupy),
+            [
+                "/venv/nvidia/cu13/lib",
+                "/venv/nvidia/cu13/lib/../extras/CUPTI/lib64",
+                "/venv/nvidia/cu13/lib/../../cuda_cupti/lib",
+                "/venv/nvidia/cuda_runtime/lib",
+                "/venv/nvidia/cuda_runtime/lib/../extras/CUPTI/lib64",
+                "/venv/nvidia/cuda_runtime/lib/../../cuda_cupti/lib",
+            ]
+        );
+        // The driver alone is CUDA too: CUPTI is then asked of the loader.
+        let driver_only = "7f00-7f01 r-xp 00000000 08:02 1 /usr/lib/x86_64-linux-gnu/libcuda.so.595.91.07\n";
+        assert_eq!(cupti_candidates(driver_only).unwrap(), ["libcupti.so.13", "libcupti.so.12", "libcupti.so"]);
         // No CUDA at all.
         let plain = "7f00-7f01 r-xp 00000000 08:02 1 /usr/lib/x86_64-linux-gnu/libc.so.6\n7f02-7f03 rw-p 00000000 00:00 0\n";
         assert!(cupti_candidates(plain).unwrap_err().contains("has not loaded CUDA"));

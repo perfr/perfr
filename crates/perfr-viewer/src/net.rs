@@ -292,6 +292,9 @@ pub struct CaptureStart {
     pub python_stacks: bool,
     /// What the program prints, as log lines. Sent only when on.
     pub program_output: bool,
+    /// The GPU's kernels under the threads that launched them. Sent only
+    /// when on.
+    pub gpu_kernels: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -634,8 +637,9 @@ pub fn capture_start_body(req: &CaptureStart) -> String {
     let python = if req.python_stacks { "" } else { r#","python_stacks":false"# };
     // Off is what a service that has never heard of it does too.
     let output = if req.program_output { r#","program_output":true"# } else { "" };
+    let gpu = if req.gpu_kernels { r#","gpu_kernels":true"# } else { "" };
     format!(
-        r#"{{"pid":{},"enable_api":{},"context_switches":{},"thread_states":{},"sampling":{},"samples_per_second":{},"unwinding":"{}","dynamic_instrumentation_method":"{}","instrumented_functions":[{fns}],"show_all_processes":{},"uprobe_duplicate_filter":{},"auto_profile":{},"machine_health":{}{python}{output}}}"#,
+        r#"{{"pid":{},"enable_api":{},"context_switches":{},"thread_states":{},"sampling":{},"samples_per_second":{},"unwinding":"{}","dynamic_instrumentation_method":"{}","instrumented_functions":[{fns}],"show_all_processes":{},"uprobe_duplicate_filter":{},"auto_profile":{},"machine_health":{}{python}{output}{gpu}}}"#,
         req.pid,
         req.enable_api,
         req.context_switches,
@@ -1677,6 +1681,7 @@ mod tests {
             machine_health: true,
             python_stacks: true,
             program_output: false,
+            gpu_kernels: false,
         }
     }
 
@@ -1687,6 +1692,10 @@ mod tests {
         let on = capture_start_body(&CaptureStart { program_output: true, ..capture_start() });
         let v: serde_json::Value = serde_json::from_str(&on).unwrap();
         assert_eq!(v["program_output"], true);
+        assert!(!off.contains("gpu_kernels"), "{off}");
+        let gpu = capture_start_body(&CaptureStart { gpu_kernels: true, ..capture_start() });
+        let v: serde_json::Value = serde_json::from_str(&gpu).unwrap();
+        assert_eq!(v["gpu_kernels"], true);
     }
 
     #[test]

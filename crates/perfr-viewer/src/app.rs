@@ -1409,6 +1409,9 @@ pub struct PerfrLiveApp {
     /// COLLECT, Output: what the program prints, as log lines.
     /// Off until asked for: the service loads an agent into the program.
     opt_output: bool,
+    /// COLLECT, GPU: the kernels the program's GPU runs, under the threads
+    /// that launched them. Off until asked for, as Output is.
+    opt_gpu: bool,
     sample_period_ms: String,
     unwind_dwarf: bool,
     user_space_hooks: bool,
@@ -2285,6 +2288,7 @@ impl PerfrLiveApp {
             opt_health: true,
             opt_python: true,
             opt_output: false,
+            opt_gpu: false,
             sample_period_ms: "1.0".into(),
             unwind_dwarf: true,
             user_space_hooks: true,
@@ -4017,6 +4021,7 @@ impl PerfrLiveApp {
             machine_health: self.opt_health,
             python_stacks: self.opt_python,
             program_output: self.opt_output,
+            gpu_kernels: self.opt_gpu,
         }
     }
 
@@ -6119,6 +6124,17 @@ impl PerfrLiveApp {
             {
                 self.opt_output = !self.opt_output;
             }
+            if pill(ui, "GPU", self.opt_gpu)
+                .on_hover_text(
+                    "Every kernel and memory copy the program's GPU runs, as spans on a GPU lane under the \
+                     thread that launched it, at the time the GPU ran it (CUDA: needs an NVIDIA GPU and CUPTI beside \
+                     the program's CUDA runtime, which PyTorch ships). Record once the program has \
+                     initialised CUDA. An agent is loaded into the program to read it (Linux services)",
+                )
+                .clicked()
+            {
+                self.opt_gpu = !self.opt_gpu;
+            }
             ui.add(
                 egui::TextEdit::singleline(&mut self.sample_period_ms)
                     .id_salt("perfr_sample_ms")
@@ -7887,10 +7903,13 @@ impl PerfrLiveApp {
                 // row is the first lane, so the label sits on it and the
                 // whole block drags together.
                 let tname = self.thread_display_name(th.pid, th.tid);
+                // `GPU` when what is under the thread is the kernels it
+                // launched, and not async spans of its own.
+                let what = self.tracks.async_block_label(th);
                 let label = if tight {
-                    format!("async  {}", th.tid)
+                    format!("{what}  {}", th.tid)
                 } else {
-                    format!("async  {}  {tname}", th.tid)
+                    format!("{what}  {}  {tname}", th.tid)
                 };
                 let text_x = if tight { 38.0 } else { 64.0 };
                 let key = TrackKey::Async(th);

@@ -225,6 +225,16 @@ opens on first load with a service and closes with its ×. Its rows:
   unwind. See [Capture](capture.html#what-the-program-prints). The e2e
   scenario is `program-output`
   (`tools/test-programs/PerfrProgramOutput`).
+- **GPU** (a COLLECT toggle, off by default, Linux services, NVIDIA): every
+  CUDA kernel and memory copy the target's GPU runs is a span on a lane
+  labelled `GPU` under the thread that launched it, from when the GPU
+  started it to when it ended. The forward pass's kernels are under the thread that
+  ran the forward pass, the backward pass's under the autograd thread,
+  and the gap between a launch and its kernel is how far behind the GPU
+  is. `GET /api/functions/stats` and `perfr_function_stats` list GPU time
+  by kernel, for one thread with `tid`. Read with CUPTI by the agent the
+  service loads for hooks; nothing in the program is patched. See
+  [Capture](capture.html#what-the-gpu-runs).
 - **UNWIND** is a two-way switch, **DWARF** or **FP**. **HOOKS** is another:
   **Frida** (the default) or **Uprobes**. Frida's note reads "requires
   permission to attach to the target". Uprobes reads "requires Linux

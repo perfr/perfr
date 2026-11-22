@@ -549,6 +549,7 @@ impl Mcp {
         let scheduler = arg_bool(args, "scheduler").unwrap_or(self.platform.scheduler);
         let auto_profile = arg_bool(args, "auto_profile").unwrap_or(false);
         let program_output = arg_bool(args, "program_output").unwrap_or(false);
+        let gpu_kernels = arg_bool(args, "gpu_kernels").unwrap_or(false);
         let rate = arg_f64(args, "samples_per_second").unwrap_or(1000.0).clamp(1.0, 10_000.0);
         let hooks = self.session.lock().map_err(|_| "session poisoned".to_string())?.hooks.clone();
         let body = json!({
@@ -562,6 +563,7 @@ impl Mcp {
             "instrumented_functions": hooks.iter().map(|h| json!({"function_id": h.function_id})).collect::<Vec<_>>(),
             "auto_profile": auto_profile,
             "program_output": program_output,
+            "gpu_kernels": gpu_kernels,
         });
         self.http.post_ok("/api/capture/start", &body, Duration::from_secs(120))?;
         Ok(json!({
@@ -574,6 +576,7 @@ impl Mcp {
             "instrumentation": instrumentation,
             "auto_profile": auto_profile,
             "program_output": program_output,
+            "gpu_kernels": gpu_kernels,
             "hooks": hooks.len(),
             "hook_names": hooks.iter().map(|h| clip(&h.name)).collect::<Vec<_>>(),
         }))
@@ -673,6 +676,9 @@ impl Mcp {
         }
         if let Some(pid) = arg_u32(args, "pid") {
             path.push_str(&format!("&pid={pid}"));
+        }
+        if let Some(tid) = arg_u32(args, "tid") {
+            path.push_str(&format!("&tid={tid}"));
         }
         let mut body = self.http.get_json(&path, Duration::from_secs(60))?;
         if let Some(rows) = body.get_mut("rows").and_then(|v| v.as_array_mut()) {
@@ -914,7 +920,8 @@ pub fn tool_specs() -> Vec<Value> {
                     "samples_per_second": { "type": "number", "description": "Sample rate. Default 1000. Clamped to 1..10000." },
                     "instrumentation": { "type": "string", "enum": ["frida", "kernel_uprobes"], "description": "Default frida." },
                     "auto_profile": { "type": "boolean", "description": "Let the service pick hooks. Linux only. Default false." },
-                    "program_output": { "type": "boolean", "description": "Record what the program writes to stdout and stderr as log lines (read them with perfr_logs). Loads an agent into the program, as a hook does. Linux and macOS. Default false." }
+                    "program_output": { "type": "boolean", "description": "Record what the program writes to stdout and stderr as log lines (read them with perfr_logs). Loads an agent into the program, as a hook does. Linux and macOS. Default false." },
+                    "gpu_kernels": { "type": "boolean", "description": "Record every CUDA kernel and memory copy the program's GPU runs, as spans under the thread that launched it; perfr_function_stats then lists GPU time by kernel (kind gpu). Needs an NVIDIA GPU and CUPTI beside the program's CUDA runtime (PyTorch ships it). Start after the program has initialised CUDA. Loads an agent into the program. Linux. Default false." }
                 },
                 "additionalProperties": false,
             }),
@@ -971,12 +978,13 @@ pub fn tool_specs() -> Vec<Value> {
         ),
         tool(
             "perfr_function_stats",
-            "Timing for hooked functions and manual scopes in the current capture. Times are integer nanoseconds: count, total_ns, avg_ns, min_ns, max_ns, stddev_ns. kind is hook, scope, track, or frame. A frame row is a series of frames the program marked (query `frame` for the main one): count is the frames, avg_ns, min_ns and max_ns its frame times. Sampled call-stack frames are excluded. Filter with query (name substring) and pid. order is total (default), count, avg, or max. This is the reading to use after a dynamic hook, including on macOS.",
+            "Timing for hooked functions and manual scopes in the current capture. Times are integer nanoseconds: count, total_ns, avg_ns, min_ns, max_ns, stddev_ns. kind is hook, scope, track, gpu, or frame. A gpu row is a kernel or memory copy the GPU ran (captures started with gpu_kernels). A frame row is a series of frames the program marked (query `frame` for the main one): count is the frames, avg_ns, min_ns and max_ns its frame times. Sampled call-stack frames are excluded. Filter with query (name substring) and pid. order is total (default), count, avg, or max. This is the reading to use after a dynamic hook, including on macOS.",
             json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Case-insensitive substring of the function name." },
                     "pid": { "type": "integer", "description": "Only rows from this process." },
+                    "tid": { "type": "integer", "description": "Only what was measured on this thread: its scopes, and the track rows drawn under it, which with gpu_kernels includes the gpu rows of the kernels it launched." },
                     "order": { "type": "string", "enum": ["total", "count", "avg", "max"] },
                     "limit": { "type": "integer", "description": "Page size. Default 15, max 40." },
                     "offset": { "type": "integer", "description": "Rows to skip. Default 0." }

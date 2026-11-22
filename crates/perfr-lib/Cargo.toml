@@ -22,6 +22,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 serde_json = { version = "1", optional = true }
+cpp_demangle = { version = "0.6", optional = true }
 libc = "0.2"
 perfr-api = { path = "../perfr-api" }
 perfr-frida-transport = { path = "../perfr-frida-transport" }
@@ -31,7 +32,7 @@ perfr-scope-ring = { path = "../perfr-scope-ring" }
 tempfile = "3"
 
 [features]
-native = ["dep:serde_json"]
+native = ["dep:serde_json", "dep:cpp_demangle"]
 
 [build-dependencies]
 perfr-frida-build = { path = "../perfr-frida-build" }

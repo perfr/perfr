@@ -53,6 +53,7 @@ fn source_kind(event: &LiveEvent) -> Option<u8> {
         return None;
     }
     match event.kind {
+        kind::API_TRACK if event.extra == extra::GPU_WORK => Some(GPU_SOURCE),
         kind::API_SCOPE | kind::FUNCTION_CALL | kind::API_TRACK => {
             if event._pad & event_flags::DYNAMIC != 0 {
                 Some(kind::FUNCTION_CALL)
@@ -65,8 +66,12 @@ fn source_kind(event: &LiveEvent) -> Option<u8> {
     }
 }
 
+/// What a row of GPU work is folded under: no event kind has this number.
+const GPU_SOURCE: u8 = 0xf0;
+
 fn kind_label(kind_id: u8) -> &'static str {
     match kind_id {
+        GPU_SOURCE => "gpu",
         kind::FRAME => "frame",
         kind::FUNCTION_CALL => "hook",
         kind::API_SCOPE => "scope",
@@ -258,6 +263,20 @@ mod tests {
             _pad: pad,
             name_id: name,
         }
+    }
+
+    #[test]
+    fn gpu_work_is_a_kind_of_its_own() {
+        let events = vec![
+            ev(9, 1, kind::API_TRACK, extra::GPU_WORK, 0, 100),
+            ev(9, 1, kind::API_TRACK, extra::GPU_WORK, 0, 300),
+            ev(9, 1, kind::API_TRACK, 0, 0, 50),
+        ];
+        let rows = fold_timing(&events, |_| "gemm".into());
+        let gpu = rows.iter().find(|r| r.kind == "gpu").expect("a gpu row");
+        assert_eq!((gpu.count, gpu.total_ns), (2, 400));
+        // An async span of the program's own with the same name is a track.
+        assert_eq!(rows.iter().find(|r| r.kind == "track").map(|r| r.count), Some(1));
     }
 
     #[test]

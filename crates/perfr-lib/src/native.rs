@@ -102,6 +102,10 @@ struct Capture {
 }
 impl Drop for Capture {
     fn drop(&mut self) {
+        // While the capture is still on: what the GPU has finished is
+        // handed over and recorded here.
+        #[cfg(target_os = "linux")]
+        super::gpu::stop(self.generation);
         #[cfg(unix)]
         super::output::stop(self.generation);
         // Stop accepts no more callbacks before removing entry redirects.
@@ -178,7 +182,8 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
     // What the capture wants besides hooks: on its own it is reason enough
     // to be here.
     let wants_output = config["output"].as_bool().unwrap_or(false);
-    if (hooks.is_empty() && !wants_output) || hooks.len() > 16 {
+    let wants_gpu = config["gpu"].as_bool().unwrap_or(false);
+    if (hooks.is_empty() && !wants_output && !wants_gpu) || hooks.len() > 16 {
         return Err("select between 1 and 16 hooks".into());
     }
     // Past this many calls a second a hook mutes itself (gum.c); 0 = never.
@@ -237,6 +242,20 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
         }
         None => {}
     }
+    // The GPU's kernels, when asked for: what was loaded to read them, or
+    // why they are not read.
+    if wants_gpu {
+        match start_gpu(capture.generation) {
+            Ok(what) => {
+                ready["gpu"] = json!(true);
+                ready["gpu_info"] = json!(what);
+            }
+            Err(why) => {
+                ready["gpu"] = json!(false);
+                ready["gpu_error"] = json!(why);
+            }
+        }
+    }
     writeln!(stream, "{ready}")?;
     line.clear();
     // EOF (the controller dropped the pipe) is a stop, like an explicit
@@ -261,6 +280,15 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
     profile::record(stream, profiling, "Frida: detach trampolines", start, profile::now_ns());
     let _ = writeln!(stream, "{}", json!({"stopped":true}));
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn start_gpu(generation: u32) -> Result<String, String> {
+    super::gpu::start(generation)
+}
+#[cfg(not(target_os = "linux"))]
+fn start_gpu(_: u32) -> Result<String, String> {
+    Err("GPU kernels are not recorded on this platform yet".into())
 }
 
 /// Puts the probe on `write` and starts handing its lines to this capture.

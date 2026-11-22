@@ -506,6 +506,7 @@ pub fn leaf_label(key: LaneKey) -> String {
         kind::DROP => "drops".into(),
         kind::SCHEDULING_SLICE => format!("Core {}", key.extra),
         kind::FUNCTION_CALL => "calls".into(),
+        kind::API_TRACK if key.extra == perfr_live_event::extra::GPU_WORK => "GPU".into(),
         kind::API_TRACK => "async".into(),
         kind::API_SCOPE if key.depth == 0 => "scopes".into(),
         kind::API_SCOPE => format!("d{}", key.depth),

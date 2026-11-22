@@ -857,6 +857,9 @@ struct StatsQuery {
     #[serde(default)]
     q: String,
     pid: Option<u32>,
+    /// Only what was measured on this thread: the scopes it ran, and the
+    /// async spans drawn under it (the GPU kernels it launched).
+    tid: Option<u32>,
     #[serde(default)]
     order: String,
     #[serde(default)]
@@ -988,9 +991,13 @@ async fn function_stats(State(svc): State<Arc<LiveService>>, Query(q): Query<Sta
     let order = crate::stats::StatsOrder::parse(&q.order);
     let query = q.q;
     let pid = q.pid;
+    let tid = q.tid;
     match tokio::task::spawn_blocking(move || {
-        let (_gen, events) = svc.ring().snapshot();
+        let (_gen, mut events) = svc.ring().snapshot();
         let scanned = events.len();
+        if let Some(tid) = tid {
+            events.retain(|event| event.tid == tid);
+        }
         // Names are resolved once per distinct scope, after the fold, not
         // once per event.
         let rows = crate::stats::fold_timing(&events, |id| {
@@ -1103,6 +1110,11 @@ pub struct StartBody {
     /// it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub program_output: bool,
+    /// The kernels and memory copies the program's GPU runs (CUDA), as
+    /// spans under the threads that launched them. Off by default, for the
+    /// reason `program_output` is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gpu_kernels: bool,
 }
 
 fn default_true() -> bool {

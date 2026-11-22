@@ -426,6 +426,32 @@ pub fn span_async(name: impl AsRef<[u8]>, start_ns: u64, end_ns: u64) {
     stop_at(handle, Some(end_ns));
 }
 
+/// A span of work the GPU ran for thread `tid` of this process: recorded by
+/// the calling thread, drawn on the GPU lane under `tid`. For an agent that
+/// learns after the fact, on a thread of its own, when the GPU ran what a
+/// thread of the program launched.
+#[doc(hidden)]
+pub fn gpu_span(tid: u32, name: impl AsRef<[u8]>, start_ns: u64, end_ns: u64) {
+    let name = name.as_ref();
+    let Some(writer) = active_segment() else { return };
+    with_thread(writer.rings().ring_count(), |state| {
+        let handle = next_handle(state);
+        let head = ScopeEvent {
+            timestamp_ns: start_ns,
+            scope_id: handle,
+            tid,
+            kind: kind::SCOPE_START,
+            flags: flags::ASYNC | flags::GPU,
+            ..ScopeEvent::default()
+        };
+        push_named(writer, state, head, name);
+        writer.rings().push(
+            state.ring,
+            ScopeEvent { timestamp_ns: end_ns, scope_id: handle, tid, kind: kind::SCOPE_STOP, ..ScopeEvent::default() },
+        );
+    });
+}
+
 /// Ends a scope, from any thread. `0` is a no-op.
 pub fn stop(handle: Handle) {
     stop_at(handle, None);

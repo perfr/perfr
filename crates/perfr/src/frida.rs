@@ -231,6 +231,9 @@ pub struct FridaSession {
     /// The program's output, when the capture asked for it: recorded, or
     /// why the agent could not.
     pub output: Option<Result<(), String>>,
+    /// The GPU's kernels, when the capture asked for them: what the agent
+    /// loaded to read them, or why it could not.
+    pub gpu: Option<Result<String, String>>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     returns: Option<crate::frida_returns::Returns>,
     /// The journal's losses when the last sample had been read. The hooks
@@ -238,21 +241,36 @@ pub struct FridaSession {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     returns_finished: Option<u64>,
 }
+
+/// What a capture has the agent record besides hooked calls.
+#[derive(Clone, Copy, Default)]
+pub struct Taps {
+    /// What the program writes to its standard output and error.
+    pub output: bool,
+    /// The kernels and memory copies the program's GPU runs (CUDA).
+    pub gpu: bool,
+}
+
+impl Taps {
+    pub fn any(self) -> bool {
+        self.output || self.gpu
+    }
+}
+
 impl FridaSession {
     /// `name_ids` name each hook's spans; `label_ids` name the marker a hook
     /// leaves on the timeline when it switches itself off ("auto-unhooked:
     /// <function>"), both interned by the service up front.
     ///
-    /// `output` asks the agent to record what the program writes to its
-    /// standard output and error as log lines; with it, `hooks` may be
-    /// empty.
+    /// `taps` is what else the agent records; with one of them on, `hooks`
+    /// may be empty.
     pub fn arm(
         pid: i32,
         hooks: &[HookSpec],
         name_ids: &[u32],
         label_ids: &[u32],
         max_calls_per_s: u64,
-        output: bool,
+        taps: Taps,
     ) -> Result<Self, String> {
         let _phase = perfr_api::scope("Frida: arm hooks");
         if pid <= 0 || pid as u32 == std::process::id() {
@@ -319,7 +337,7 @@ impl FridaSession {
             .collect();
         let helper = Helper::launch(
             serde_json::json!({"pid":pid,"agent":agent,"transport":file.path(),"hooks":hooks,
-                "max_calls_per_s":max_calls_per_s,"repair_returns":repair_returns,"output":output}),
+                "max_calls_per_s":max_calls_per_s,"repair_returns":repair_returns,"output":taps.output,"gpu":taps.gpu}),
         )?;
         let ready = helper.response()?;
         if repair_returns && ready["repair_returns"].as_bool() != Some(true) {
@@ -328,9 +346,13 @@ impl FridaSession {
         if ready["armed"].as_u64() != Some(hooks.len() as u64) {
             return Err(format!("Frida did not arm every hook: {ready}"));
         }
-        let output = output.then(|| match ready["output"].as_bool() {
+        let output = taps.output.then(|| match ready["output"].as_bool() {
             Some(true) => Ok(()),
             _ => Err(ready["output_error"].as_str().unwrap_or("the agent did not say why").to_string()),
+        });
+        let gpu = taps.gpu.then(|| match ready["gpu"].as_bool() {
+            Some(true) => Ok(ready["gpu_info"].as_str().unwrap_or("CUPTI").to_string()),
+            _ => Err(ready["gpu_error"].as_str().unwrap_or("the agent did not say why").to_string()),
         });
         Ok(Self {
             helper,
@@ -342,6 +364,7 @@ impl FridaSession {
             names_by_id,
             max_calls_per_s,
             output,
+            gpu,
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             returns,
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -435,6 +458,11 @@ impl FridaSession {
         match &self.output {
             Some(Ok(())) => line.push_str("; recording what the program prints"),
             Some(Err(why)) => line.push_str(&format!("; what the program prints is not recorded: {why}")),
+            None => {}
+        }
+        match &self.gpu {
+            Some(Ok(what)) => line.push_str(&format!("; recording GPU kernels with {what}")),
+            Some(Err(why)) => line.push_str(&format!("; GPU kernels are not recorded: {why}")),
             None => {}
         }
         if let Some(e) = &self.error {

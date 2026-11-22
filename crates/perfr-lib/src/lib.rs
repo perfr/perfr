@@ -5,6 +5,8 @@
 //! Native lifecycle guard around the target’s perfr start/stop API.
 #[cfg(feature = "native")]
 mod native;
+#[cfg(all(feature = "native", target_os = "linux"))]
+mod gpu;
 #[cfg(all(feature = "native", unix))]
 mod output;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

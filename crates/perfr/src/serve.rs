@@ -716,6 +716,10 @@ struct StartRequest {
     /// lines on the threads that wrote them. Off unless asked for: it is
     /// read by an agent loaded into the program, as a hook is.
     program_output: bool,
+    /// The kernels and memory copies the program's GPU runs, as spans under
+    /// the threads that launched them (CUDA, read with CUPTI by the agent).
+    /// Off unless asked for, like `program_output`.
+    gpu_kernels: bool,
 }
 
 impl StartRequest {
@@ -746,6 +750,7 @@ impl StartRequest {
             machine_health: flag("machine_health").unwrap_or(true),
             python_stacks: flag("python_stacks"),
             program_output: flag("program_output").unwrap_or(false),
+            gpu_kernels: flag("gpu_kernels").unwrap_or(false),
         }
     }
 
@@ -3779,7 +3784,10 @@ pub fn run_on(
             let uprobe_duplicate_filter = request.uprobe_duplicate_filter;
             let machine_health = request.machine_health;
             let python_stacks = request.python_stacks;
-            let program_output = request.program_output && pid > 0;
+            let taps = crate::frida::Taps {
+                output: request.program_output && pid > 0,
+                gpu: request.gpu_kernels && pid > 0,
+            };
             let max_hook_calls_per_s = request.max_hook_calls_per_s(&start_service);
             let mut hooks = Vec::new();
             // Per-hook size and safety verdict, in the same order as `hooks`,
@@ -3868,17 +3876,18 @@ pub fn run_on(
             scopes.begin_self_capture();
             let _capture = perfr_api::start("capture");
             // The agent goes into the program for its hooks, and for what it
-            // prints when that was asked for: with kernel uprobes doing the
-            // hooks, or no hooks at all, it is loaded for the output alone.
+            // prints or what its GPU runs when that was asked for: with
+            // kernel uprobes doing the hooks, or no hooks at all, it is
+            // loaded for those alone.
             let frida_hooks: &[HookSpec] = if engine == crate::frida::Engine::Frida { &hooks } else { &[] };
-            let frida = if !frida_hooks.is_empty() || program_output {
+            let frida = if !frida_hooks.is_empty() || taps.any() {
                 // Each hook names its scopes by a service-interned id (one
                 // record per call, see scopes.rs); the agent switches a hook
                 // off itself past the call-rate limit.
                 let name_ids: Vec<u32> = frida_hooks.iter().map(|h| scopes.intern_name(&h.name)).collect();
                 let label_ids: Vec<u32> =
                     frida_hooks.iter().map(|h| scopes.intern_name(&format!("auto-unhooked: {}", h.name))).collect();
-                match crate::frida::FridaSession::arm(pid, frida_hooks, &name_ids, &label_ids, max_hook_calls_per_s, program_output) {
+                match crate::frida::FridaSession::arm(pid, frida_hooks, &name_ids, &label_ids, max_hook_calls_per_s, taps) {
                     Ok(session) => {
                         // The agent is live: read the target's segment from
                         // now on, not from the loop's first discovery tick.
@@ -3886,10 +3895,15 @@ pub fn run_on(
                         Some(session)
                     }
                     // Without hooks the capture is still a capture: it says
-                    // why it has no output and goes on.
+                    // what it is missing and goes on.
                     Err(error) if frida_hooks.is_empty() => {
-                        log::warn!("what pid {pid} prints is not recorded: {error}");
-                        start_service.set_instrumentation_status(format!("what the program prints is not recorded: {error}"));
+                        let what = match (taps.output, taps.gpu) {
+                            (true, true) => "what the program prints and its GPU kernels are not recorded",
+                            (false, true) => "GPU kernels are not recorded",
+                            _ => "what the program prints is not recorded",
+                        };
+                        log::warn!("pid {pid}: {what}: {error}");
+                        start_service.set_instrumentation_status(format!("{what}: {error}"));
                         None
                     }
                     Err(error) => {
@@ -4968,6 +4982,7 @@ mod tests {
             machine_health: true,
             python_stacks: None,
             program_output: false,
+            gpu_kernels: false,
         };
         // What the server sends: its typed body, as JSON.
         let full = perfr_live_server::http::StartBody {
@@ -4987,6 +5002,7 @@ mod tests {
             machine_health: false,
             python_stacks: Some(false),
             program_output: true,
+            gpu_kernels: true,
         };
         assert_eq!(
             StartRequest::parse(&full.to_json()),
@@ -4999,12 +5015,15 @@ mod tests {
                 machine_health: false,
                 python_stacks: Some(false),
                 program_output: true,
+                gpu_kernels: true,
                 ..request(4242)
             }
         );
         // The program's output is asked for or it is not recorded.
         assert!(StartRequest::parse(r#"{"pid":7,"program_output":true}"#).program_output);
         assert!(!StartRequest::parse(r#"{"pid":7,"program_output":"yes"}"#).program_output);
+        assert!(StartRequest::parse(r#"{"pid":7,"gpu_kernels":true}"#).gpu_kernels);
+        assert!(!StartRequest::parse(r#"{"pid":7}"#).gpu_kernels);
         // Python stacks are asked for outright, refused, or left to what
         // the target is.
         assert_eq!(StartRequest::parse(r#"{"pid":7,"python_stacks":true}"#).python_stacks, Some(true));

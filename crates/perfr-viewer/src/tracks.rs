@@ -1281,6 +1281,25 @@ impl TrackStrip {
         }
     }
 
+    /// What a thread's async block is called on the rail: `GPU` when all it
+    /// holds is work the GPU ran for the thread, `async` when it holds none,
+    /// and both when the thread has async spans of its own as well.
+    pub fn async_block_label(&self, t: ThreadId) -> &'static str {
+        let (mut gpu, mut other) = (false, false);
+        for k in self.catalogue.leaves_of(t).iter().filter(|k| k.kind == kind::API_TRACK) {
+            if k.extra == perfr_live_event::extra::GPU_WORK {
+                gpu = true;
+            } else {
+                other = true;
+            }
+        }
+        match (gpu, other) {
+            (true, false) => "GPU",
+            (true, true) => "async, GPU",
+            _ => "async",
+        }
+    }
+
     /// A thread's async lanes, every depth, stacked.
     fn async_block_h(&self, t: ThreadId) -> f32 {
         let s = self.scale.max(0.01);
@@ -3291,6 +3310,7 @@ mod tests {
             !ids.iter().any(|id| matches!(id, RowId::Lane(k) if k.kind == kind::API_TRACK)),
             "async lanes pack under their block's head row, not as rows: {ids:?}"
         );
+        assert_eq!(strip.async_block_label(t1), "async");
         // The async block is as tall as its two depth lanes, and the thread
         // row no longer counts them.
         let async_h = strip.rows().iter().find(|r| r.id == RowId::Async(t1)).unwrap().height;
@@ -3593,6 +3613,31 @@ mod tests {
         assert_eq!(strip.thread_order()[1], mid);
         assert_eq!(strip.thread_order()[0], last);
         assert_eq!(strip.thread_order()[2], first);
+    }
+
+    #[test]
+    fn a_block_of_gpu_work_is_called_gpu_and_keeps_a_lane_apart_from_async_spans() {
+        let gpu = perfr_live_event::extra::GPU_WORK;
+        let mut idx = TrackIndex::default();
+        // Thread 1 launched kernels; thread 2 has async spans of its own;
+        // thread 3 has both.
+        idx.insert(ev(kind::API_TRACK, 1, 1, 0, gpu));
+        idx.insert(ev(kind::API_TRACK, 1, 2, 0, 0));
+        idx.insert(ev(kind::API_TRACK, 1, 3, 0, 0));
+        idx.insert(ev(kind::API_TRACK, 1, 3, 0, gpu));
+        let mut strip = TrackStrip::default();
+        strip.sync(&idx, None);
+        strip.tick(1.0, &idx, None);
+        let thread = |tid| ThreadId { pid: 1, tid };
+        assert_eq!(strip.async_block_label(thread(1)), "GPU");
+        assert_eq!(strip.async_block_label(thread(2)), "async");
+        assert_eq!(strip.async_block_label(thread(3)), "async, GPU");
+        // Two lanes under thread 3, one above the other: the GPU's work
+        // overlaps the thread's own spans in time and may not share a lane.
+        let lanes: Vec<f32> = strip.layout().iter().filter(|(k, _)| k.tid == 3 && k.kind == kind::API_TRACK).map(|(_, y)| *y).collect();
+        assert_eq!(lanes.len(), 2);
+        assert_ne!(lanes[0], lanes[1]);
+        assert_eq!(perfr_live_render::leaf_label(LaneKey { pid: 1, tid: 1, kind: kind::API_TRACK, depth: 0, extra: gpu }), "GPU");
     }
 
     fn ev(kind_id: u8, pid: u32, tid: u32, depth: u8, extra: u8) -> LiveEvent {

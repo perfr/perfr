@@ -25,6 +25,7 @@ Settings, **COLLECT**:
 | **Health** | Node Health | The machine's CPU, memory, pressure, disks, network and GPU, twice a second |
 | **Python** | When the target is a Python program | Its Python functions in the stack samples, Python's names for its threads, and who holds the GIL |
 | **Output** | What the program prints | Its standard output and error as log lines. Off by default |
+| **GPU** | GPU kernels | Every CUDA kernel and memory copy, as a span on a GPU lane under the thread that launched it, when the GPU ran it. Off by default |
 
 The field beside Sample is a period in milliseconds (`ms`). It starts at `1.0`. The viewer sends it as `samples_per_second`. The service on main does not read that field: a Linux or Windows capture samples at a fixed 1 kHz.
 
@@ -79,6 +80,35 @@ What it does not see:
 The status line of the capture says `recording what the program prints`, or `what the program prints is not recorded:` and why; a capture that asked for nothing else still runs. The body field is `program_output`, `true` to ask for it; the MCP tool `perfr_start_capture` takes the same field.
 
 The e2e scenario is `program-output` (`tools/test-programs/PerfrProgramOutput`).
+
+## What the GPU runs
+
+A CUDA program hands its work to the GPU and goes on. The kernel it launched runs later, on a queue, and what a profile of the CPU shows is the launch and then, somewhere else, a wait: in a PyTorch training loop more than half of the main thread's samples are in the NVIDIA driver under `loss.item()`, spinning until the GPU has caught up. With **GPU** on, a Linux service records the other half, with nothing changed in the program.
+
+**Kernels, under the thread that launched them.** Every kernel, memory copy and fill the GPU finishes is a span, from when the GPU started it to when it ended, on a lane labelled `GPU` under the thread whose driver call launched it. That lane is apart from the async spans a thread may have of its own; a thread with both has its block labelled `async, GPU`. In a training loop that is the forward pass, the optimizer and the evaluation under the main thread, and the backward pass under PyTorch's `pt_autograd_0`. The CPU's side of a pass and the GPU's are then one above the other, and the distance between them is how far behind the GPU is running: in nanoGPT on an RTX 4090 a kernel starts a median 25 ms after its launch, and the main thread's wait in `loss.item()` ends when the last kernel of the backlog does.
+
+**Names.** A kernel is named by its symbol: demangled when it is a C++ one, without the return type and the parameters, and cut at 120 bytes (`cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nt_align8>`); as it is otherwise (`triton_poi_fused_gelu_7`, `ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn`). Copies are `memcpy: host to device` and its other directions, fills are `memset`.
+
+**One queue, drawn by who filled it.** The lanes of two threads are not two things the GPU does at once. A CUDA stream runs what it is given one kernel at a time, in the order it was given, and PyTorch gives everything to one stream: in the nanoGPT capture not one of 274,000 kernels started before the one before it had ended, and the launching thread changed 1,502 times. The lane under a thread is the part of that one queue the thread filled, which is why the forward pass's kernels and the backward pass's never overlap. A program that uses several streams can overlap, and its kernels are then drawn over one another on the lane.
+
+**Time by kernel.** The spans are rows of `GET /api/functions/stats` (kind `gpu`) and of the MCP tool `perfr_function_stats`: count, total and average per kernel. Both take `tid`, which keeps what was measured on one thread, so `tid` of `pt_autograd_0` is the backward pass by kernel. In that nanoGPT run the backward pass was 11.2 s of GPU time, 57% of it matrix multiplies, 28% the compiled elementwise kernels and 12% attention; the main thread's 16.4 s were 49%, 32% and 9%, with 7% in copies and 3% in the optimizer.
+
+How it is read: the service loads its agent into the target, as for a hook, and the agent opens NVIDIA's CUPTI, the library its own profilers use, from beside the CUDA runtime the program has loaded (PyTorch's wheels ship it; a CUDA toolkit has it in `extras/CUPTI/lib64`). CUPTI calls the agent on the thread that enters `cuLaunchKernel` or a copy, which is how a kernel's thread is known, and hands over what the GPU has finished ten times a second, with times on the capture's clock. No function of the program or the driver is patched.
+
+Measured on nanoGPT (PyTorch 2.15, CUDA 13, RTX 4090): 16,000 kernels and copies a second, no change in the time of a training step that two runs each way could tell from the noise (16.3 and 17.9 ms without, 17.2 and 17.7 ms with), and 2% on an evaluation pass.
+
+What it does not see, and what to know:
+
+- A program that has not loaded CUDA when the capture starts: start the capture once it has. The status line says `GPU kernels are not recorded: the program has not loaded CUDA`.
+- Work that was already queued when the capture started, and a launch through a driver call the agent does not watch: such a record has no thread and is left out.
+- A program in which another profiler holds CUPTI (PyTorch's own profiler while it is recording): CUPTI takes one subscriber, and the status line says so.
+- What happens inside a kernel. A kernel is one span.
+- Other GPUs than NVIDIA's, and Windows and macOS services.
+- A program that carries its own copy of perfr's API in a library other than the one the service loads, for the reason given for Output.
+
+The status line of the capture says `recording GPU kernels with CUPTI <version>`, or `GPU kernels are not recorded:` and why; a capture that asked for nothing else still runs. The body field is `gpu_kernels`, `true` to ask for it; the MCP tool `perfr_start_capture` takes the same field.
+
+There is no e2e scenario: it needs an NVIDIA GPU. The agent's reading of CUPTI's records, its names and its search for the library have unit tests (`crates/perfr-lib/src/gpu.rs`), and the service's side of the spans has one in `scopes.rs`.
 
 ## Python programs
 

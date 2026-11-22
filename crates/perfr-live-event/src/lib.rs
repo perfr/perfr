@@ -82,6 +82,11 @@ pub mod extra {
     /// not a measured call: its duration is the sampling period, and the
     /// Live functions table leaves it out.
     pub const SAMPLED_FRAME: u8 = 1;
+    /// An `API_TRACK` span that is work the GPU ran for the thread it is
+    /// under: a kernel, a copy, a fill. It is part of the lane's key, so
+    /// these spans have a lane of their own beside the thread's other
+    /// async spans, and that lane is labelled GPU.
+    pub const GPU_WORK: u8 = 2;
 }
 
 /// `ThreadStateSlice::ThreadState` values from `capture.proto`.
@@ -245,6 +250,18 @@ impl LiveEvent {
                 kind: self.kind,
                 depth: (self.name_id & 0xFF) as u8,
                 extra: ((self.name_id >> 8) & 0xFF) as u8,
+            };
+        }
+        if self.kind == kind::API_TRACK && self.extra == extra::GPU_WORK {
+            // What the GPU ran for the thread overlaps, in time, the async
+            // spans the thread has of its own, and a lane's events may not
+            // overlap: a lane apart, which is also what gets it its label.
+            return LaneKey {
+                pid: self.pid,
+                tid: self.tid,
+                kind: self.kind,
+                depth: self.depth,
+                extra: extra::GPU_WORK,
             };
         }
         LaneKey {

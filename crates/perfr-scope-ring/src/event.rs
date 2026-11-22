@@ -78,6 +78,11 @@ pub mod flags {
     pub const ASYNC: u8 = 1 << 2;
     /// Scope originated in a dynamic instrumentation callback.
     pub const DYNAMIC: u8 = 1 << 3;
+    /// A span of work the GPU ran for the thread it is recorded under: a
+    /// kernel, a copy, a fill. Drawn on a lane of its own, labelled GPU.
+    /// The bit is one of those a [`super::kind::LOG`] record keeps its
+    /// level in; a log is never a span, so they do not meet.
+    pub const GPU: u8 = 1 << 4;
 }
 
 /// One event, exactly [`EVENT_SIZE`] (56) bytes and `repr(C)`: with the

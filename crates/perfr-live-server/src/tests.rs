@@ -254,6 +254,7 @@ fn capture_start_json_includes_sampling_and_hooks() {
         machine_health: true,
         python_stacks: None,
         program_output: false,
+        gpu_kernels: false,
     };
     let json = body.to_json();
     assert!(json.contains("\"pid\":42"));

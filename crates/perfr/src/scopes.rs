@@ -125,6 +125,8 @@ struct Open {
     depth: u8,
     is_async: bool,
     dynamic: bool,
+    /// Work the GPU ran for the thread: see `extra::GPU_WORK`.
+    gpu: bool,
 }
 
 /// One instrumented process's segment and the reader state over it.
@@ -243,6 +245,9 @@ pub struct ScopeSource {
     /// Name ids of hooks the Frida agent switched off for firing over its
     /// call-rate limit (a `\x02` marker record), in the order they arrived.
     pub auto_unhooked: Vec<u32>,
+    /// Names the agent numbered itself, by that number: see
+    /// [`name_definition`].
+    agent_names: HashMap<u32, u32>,
     /// Whether a process has been told that it marks more series of frames
     /// than are followed ([`MAX_FRAME_SERIES`]). Said once a capture.
     frame_series_refused: bool,
@@ -277,6 +282,7 @@ impl ScopeSource {
             name_text_bytes: 0,
             events_without_name: 0,
             auto_unhooked: Vec::new(),
+            agent_names: HashMap::new(),
             frame_series_refused: false,
         }
     }
@@ -667,8 +673,23 @@ impl ScopeSource {
         // rather than its text (`\x01` + 8 hex digits, see frida.rs), so a
         // 200-character Unreal name costs one record instead of eight; a
         // `\x02` token is the agent reporting it switched that hook off.
+        //
+        // A name the agent comes by on its own, a GPU kernel's, it numbers
+        // itself: `\x04` + 8 hex digits + the text says what a number
+        // means and names this record, and `\x03` + the digits is that
+        // name again in one record. The text is sent again now and then,
+        // so a record that came before it, or after a lap took it, has no
+        // name only until the next.
+        if let Some((number, text)) = name_definition(name) {
+            let id = self.name_id(text);
+            self.agent_names.insert(number, id);
+        }
         let name_id = match name_token(name) {
             Some((1, id)) => id,
+            Some((3, number)) => match self.agent_names.get(&number) {
+                Some(id) => *id,
+                None => self.name_id(NAME_NOT_SEEN.as_bytes()),
+            },
             Some((2, id)) => {
                 // The hook switched itself off: an instant on the thread's
                 // track, where and when it happened, named for it
@@ -691,7 +712,10 @@ impl ScopeSource {
                 self.events_pushed += 1;
                 return;
             }
-            _ => self.name_id(name),
+            _ => match name_definition(name) {
+                Some((number, _)) => self.agent_names[&number],
+                None => self.name_id(name),
+            },
         };
         // Bound the open set before borrowing the segment: a START whose STOP
         // never arrives stays open forever, so an unbounded run of them would
@@ -726,6 +750,7 @@ impl ScopeSource {
                         depth,
                         is_async,
                         dynamic: event.flags & flags::DYNAMIC != 0,
+                        gpu: is_async && event.flags & flags::GPU != 0,
                     },
                 );
             }
@@ -995,7 +1020,7 @@ fn span(open: Open, end_ns: u64) -> LiveEvent {
         pid: open.pid,
         kind: if open.is_async { kind::API_TRACK } else { kind::API_SCOPE },
         depth: open.depth,
-        extra: 0,
+        extra: if open.gpu { perfr_live_event::extra::GPU_WORK } else { 0 },
         _pad: if open.dynamic { perfr_live_event::event_flags::DYNAMIC } else { 0 },
         name_id: open.name_id,
     }
@@ -1137,10 +1162,25 @@ fn kind_label(kind_id: u8) -> &'static str {
     }
 }
 
+/// What a record is called when it names itself by a number of the agent's
+/// whose text has not come yet.
+const NAME_NOT_SEEN: &str = "(name not received yet)";
+
+/// `(number, text)` of a record that says what one of the agent's own
+/// numbers means: the control byte 4, the number as 8 hex digits, the text.
+fn name_definition(name: &[u8]) -> Option<(u32, &[u8])> {
+    if name.len() <= 9 || name[0] != 4 {
+        return None;
+    }
+    let hex = std::str::from_utf8(&name[1..9]).ok()?;
+    Some((u32::from_str_radix(hex, 16).ok()?, &name[9..]))
+}
+
 /// `(kind, id)` of a name token: a control byte (1 = named by id, 2 = hook
-/// switched off) followed by the id as 8 hex digits. Anything else is text.
+/// switched off, 3 = named by a number of the agent's own) followed by the
+/// id as 8 hex digits. Anything else is text.
 fn name_token(name: &[u8]) -> Option<(u8, u32)> {
-    if name.len() != 9 || !(name[0] == 1 || name[0] == 2) {
+    if name.len() != 9 || !(1..=3).contains(&name[0]) {
         return None;
     }
     let hex = std::str::from_utf8(&name[1..]).ok()?;
@@ -1161,8 +1201,13 @@ mod token_tests {
         assert_eq!(name_token(name_token_text(1, 0x1234_abcd).as_bytes()), Some((1, 0x1234_abcd)));
         assert_eq!(name_token(name_token_text(2, 7).as_bytes()), Some((2, 7)));
         assert_eq!(name_token(b"FEngineLoop::Tick"), None);
+        // A number of the agent's own, and the record that says what it means.
+        assert_eq!(name_token(b"\x03000000ff"), Some((3, 0xff)));
+        assert_eq!(super::name_definition(b"\x04000000fftriton_poi_fused_gelu_7"), Some((0xff, &b"triton_poi_fused_gelu_7"[..])));
+        assert_eq!(super::name_definition(b"\x04000000ff"), None, "a definition has text");
+        assert_eq!(super::name_definition(b"\x03000000ff"), None);
         assert_eq!(name_token(b"\x0100000zzz"), None);
-        assert_eq!(name_token(b"\x03deadbeef"), None);
+        assert_eq!(name_token(b"\x05deadbeef"), None);
     }
 }
 
@@ -1637,5 +1682,44 @@ mod log_tests {
         assert!(texts.contains(&(long, level::ERROR, false)), "{texts:?}");
         assert!(texts.contains(&("api-short-line".to_string(), level::INFO, false)), "{texts:?}");
         assert!(batch.iter().all(|e| e.kind != kind::DROP), "nothing was lost, so nothing says so");
+    }
+
+    #[test]
+    fn gpu_work_is_drawn_under_the_thread_it_was_for_by_number_or_by_text() {
+        let (_serial, service, mut source) = source();
+        // What the agent does for a GPU kernel: the text once, with the
+        // number it stands for, then the number alone; all of it on the
+        // track of the thread that launched the kernel, not of the caller.
+        let kernel = "triton_poi_fused_gelu_7";
+        perfr_api::gpu_span(4242, format!("\x04000000ab{kernel}"), 1_000, 1_500);
+        perfr_api::gpu_span(4242, "\x03000000ab", 2_000, 2_750);
+        perfr_api::gpu_span(4343, "memset", 3_000, 3_100);
+        // A number whose text never came.
+        perfr_api::gpu_span(4343, "\x03000000ff", 4_000, 4_100);
+        // An async span of the program's own, on the calling thread.
+        perfr_api::span_async("upload", 5_000, 5_100);
+        let mut batch = Vec::new();
+        source.drain_now(perfr_scope_ring::shm::now_monotonic_ns(), &mut batch);
+        let spans: Vec<(u32, u64, u64, String)> = batch
+            .iter()
+            .filter(|e| e.kind == kind::API_TRACK && e.extra == perfr_live_event::extra::GPU_WORK)
+            .map(|e| (e.tid, e.start_ns, e.duration_ns, text_of(&service, e)))
+            .collect();
+        assert_eq!(
+            spans,
+            [
+                (4242, 1_000, 500, kernel.to_string()),
+                (4242, 2_000, 750, kernel.to_string()),
+                (4343, 3_000, 100, "memset".to_string()),
+                (4343, 4_000, 100, NAME_NOT_SEEN.to_string()),
+            ]
+        );
+        // And marked as GPU work, which gives it a lane of its own: the
+        // program's own async span is not.
+        assert!(batch.iter().filter(|e| e.kind == kind::API_TRACK && e.extra == perfr_live_event::extra::GPU_WORK).count() == 4);
+        let own: Vec<&LiveEvent> = batch.iter().filter(|e| e.kind == kind::API_TRACK && e.extra == 0).collect();
+        assert_eq!(own.len(), 1);
+        assert_eq!(text_of(&service, own[0]), "upload");
+        assert_ne!(own[0].lane_key(), LiveEvent { tid: own[0].tid, pid: own[0].pid, extra: perfr_live_event::extra::GPU_WORK, ..*own[0] }.lane_key());
     }
 }

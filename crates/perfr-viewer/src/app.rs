@@ -1406,6 +1406,9 @@ pub struct PerfrLiveApp {
     /// Python frames, thread names and the GIL row when the target is a
     /// Python program.
     opt_python: bool,
+    /// COLLECT, Output: what the program prints, as log lines.
+    /// Off until asked for: the service loads an agent into the program.
+    opt_output: bool,
     sample_period_ms: String,
     unwind_dwarf: bool,
     user_space_hooks: bool,
@@ -2281,6 +2284,7 @@ impl PerfrLiveApp {
             opt_sampling: true,
             opt_health: true,
             opt_python: true,
+            opt_output: false,
             sample_period_ms: "1.0".into(),
             unwind_dwarf: true,
             user_space_hooks: true,
@@ -4012,6 +4016,7 @@ impl PerfrLiveApp {
             auto_profile: self.auto_profile,
             machine_health: self.opt_health,
             python_stacks: self.opt_python,
+            program_output: self.opt_output,
         }
     }
 
@@ -6103,6 +6108,16 @@ impl PerfrLiveApp {
                 .clicked()
             {
                 self.opt_python = !self.opt_python;
+            }
+            if pill(ui, "Output", self.opt_output)
+                .on_hover_text(
+                    "What the program prints to its standard output and error, as log lines on the \
+                     threads that wrote them. An agent is loaded into the program to read it, as \
+                     for a hook (Linux and macOS services)",
+                )
+                .clicked()
+            {
+                self.opt_output = !self.opt_output;
             }
             ui.add(
                 egui::TextEdit::singleline(&mut self.sample_period_ms)

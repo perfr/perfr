@@ -215,6 +215,16 @@ opens on first load with a service and closes with its ×. Its rows:
   `python_stacks.py` on Windows
   (`crates/perfr-pystack/tests/reader.rs`). `windows-rust` ran that test
   on CPython 3.12.10.
+- **Output** (a COLLECT toggle, off by default, Linux and macOS
+  services): what the target writes to its standard output and standard
+  error becomes log lines of the threads that wrote them, with nothing
+  changed in the program. The lines are recorded as written, at the info
+  level: no level and no value is read out of their words. The
+  service loads its agent into the target to read it, as for a hook, and
+  probes the entry of `write` only, so samples taken inside it still
+  unwind. See [Capture](capture.html#what-the-program-prints). The e2e
+  scenario is `program-output`
+  (`tools/test-programs/PerfrProgramOutput`).
 - **UNWIND** is a two-way switch, **DWARF** or **FP**. **HOOKS** is another:
   **Frida** (the default) or **Uprobes**. Frida's note reads "requires
   permission to attach to the target". Uprobes reads "requires Linux

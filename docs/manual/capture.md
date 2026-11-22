@@ -24,6 +24,7 @@ Settings, **COLLECT**:
 | **Sample** | Callstack sampling | A stack sample per period |
 | **Health** | Node Health | The machine's CPU, memory, pressure, disks, network and GPU, twice a second |
 | **Python** | When the target is a Python program | Its Python functions in the stack samples, Python's names for its threads, and who holds the GIL |
+| **Output** | What the program prints | Its standard output and error as log lines. Off by default |
 
 The field beside Sample is a period in milliseconds (`ms`). It starts at `1.0`. The viewer sends it as `samples_per_second`. The service on main does not read that field: a Linux or Windows capture samples at a fixed 1 kHz.
 
@@ -56,6 +57,28 @@ Each group has a header on the rail. The triangle on it folds the group: its gra
 The three pressure graphs are the kernel's PSI `some` totals (`/proc/pressure`), differenced over each interval rather than read as the kernel's ten-second average, so a stall of 100 ms shows as a 20 percent step and not as a ripple. They need a kernel built with `CONFIG_PSI`. The GPU graphs come from sysfs for AMD cards (`gpu_busy_percent`) and from the NVML helper (`perfr-gpu`, beside `perfr`) for NVIDIA; an Intel GPU has neither. A source the machine lacks leaves its graphs out.
 
 Every graph of the track starts at zero. The percentages that are a share of a whole end at 100, the pressures at 10, the rates at 1; a larger value in view raises the top. A sample is about ten `pread` calls on files the service keeps open, some 70 µs on a 32-core machine. On macOS and Windows the switch does nothing yet.
+
+## What the program prints
+
+A training loop prints its loss every few steps, a server prints the requests it answers, a build prints the step it is on. With **Output** on, a Linux or macOS service records what the target writes to its standard output and standard error as log lines of the capture, with nothing changed in the program.
+
+Each line is a log line of the thread that wrote it, at the time of the `write` that completed it: a tick on that thread's sample bar and a row of the **Logs** panel, like a line logged through the API. The colour codes a terminal would have eaten are taken out. A carriage return ends a line as a newline does, so a progress bar that redraws itself is a line per redraw.
+
+Nothing is read into the words of a line. Every line is recorded at the info level, whichever of the two it was written to, and a number in it stays text. A program that wants a level on a line or a graph of a value says so through the [API](index.html#instrument-your-code), one line of Python each: `perfr.log(perfr.WARN, "...")`, `perfr.value("loss", loss)`.
+
+How it is read: the service loads its agent into the target, as it does for a Frida hook, and the agent puts a probe on the entry of the C library's `write`. Only the entry: the return is not touched, so a stack sample taken inside `write` unwinds as it did. A write to a descriptor other than 1 or 2 costs the probe and one comparison. Past 2,000 lines in a second the rest of that second is counted and not recorded, and a line longer than 2,048 bytes is cut and marked.
+
+What it does not see:
+
+- A program that writes with a system call of its own and not through the C library (Go), with `writev`, or to a duplicate of the descriptor under another number.
+- Output that the program has not written yet. A program whose standard output is a file or a pipe usually keeps 4 or 8 KiB of it back, so its lines arrive in bursts and every line of a burst has the time of that burst. To a terminal, or with the buffering off (`python -u`, `PYTHONUNBUFFERED=1`, `stdbuf -oL`), a line is written when it is printed.
+- A line still waiting for its newline when the capture stops.
+- A program that carries its own copy of perfr's API in a library other than the one the service loads: the agent logs through its own copy, which then has no segment. The status line says so.
+- Windows targets.
+
+The status line of the capture says `recording what the program prints`, or `what the program prints is not recorded:` and why; a capture that asked for nothing else still runs. The body field is `program_output`, `true` to ask for it; the MCP tool `perfr_start_capture` takes the same field.
+
+The e2e scenario is `program-output` (`tools/test-programs/PerfrProgramOutput`).
 
 ## Python programs
 

@@ -20,6 +20,8 @@ extern "C" {
     fn perfr_gum_ignore(ignore: i32);
     fn perfr_gum_attach(address: u64, generation: u32, name: *const c_char, unhook_token: *const c_char, repair_returns: i32, status: *mut i32) -> *mut c_void;
     fn perfr_gum_detach(listener: *mut c_void);
+    #[cfg(unix)]
+    fn perfr_gum_attach_output(status: *mut i32) -> *mut c_void;
     fn perfr_gum_set_call_limit(max_calls_per_s: u64);
     fn perfr_gum_resolve(path: *const c_char, offset: u64) -> u64;
     fn perfr_gum_symbols(
@@ -100,6 +102,8 @@ struct Capture {
 }
 impl Drop for Capture {
     fn drop(&mut self) {
+        #[cfg(unix)]
+        super::output::stop(self.generation);
         // Stop accepts no more callbacks before removing entry redirects.
         super::perfr_frida_close(self.generation);
         for listener in self.listeners.drain(..) {
@@ -171,7 +175,10 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
         listeners: Vec::new(),
     };
     let hooks = config["hooks"].as_array().ok_or("missing hooks")?;
-    if hooks.is_empty() || hooks.len() > 16 {
+    // What the capture wants besides hooks: on its own it is reason enough
+    // to be here.
+    let wants_output = config["output"].as_bool().unwrap_or(false);
+    if (hooks.is_empty() && !wants_output) || hooks.len() > 16 {
         return Err("select between 1 and 16 hooks".into());
     }
     // Past this many calls a second a hook mutes itself (gum.c); 0 = never.
@@ -215,12 +222,22 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
         }
         capture.listeners.push(listener);
     }
-    writeln!(
-        stream,
-        "{}",
-        json!({"armed":capture.listeners.len(),"arch":std::env::consts::ARCH,
-            "repair_returns":config["repair_returns"].as_bool().unwrap_or(false) && cfg!(all(target_os = "linux", target_arch = "x86_64"))})
-    )?;
+    let armed = capture.listeners.len();
+    // The program's output, when asked for: `Ok` or why not. It is recorded
+    // through this library's own copy of the scope API, which a program that
+    // brought another copy has left without a segment.
+    let output: Option<Result<(), String>> = wants_output.then(|| attach_output(&mut capture));
+    let mut ready = json!({"armed":armed,"arch":std::env::consts::ARCH,
+        "repair_returns":config["repair_returns"].as_bool().unwrap_or(false) && cfg!(all(target_os = "linux", target_arch = "x86_64"))});
+    match &output {
+        Some(Ok(())) => ready["output"] = json!(true),
+        Some(Err(why)) => {
+            ready["output"] = json!(false);
+            ready["output_error"] = json!(why);
+        }
+        None => {}
+    }
+    writeln!(stream, "{ready}")?;
     line.clear();
     // EOF (the controller dropped the pipe) is a stop, like an explicit
     // "stop" line; detach either way.
@@ -244,6 +261,30 @@ fn run(stream: &mut ControlStream) -> Result<(), Box<dyn std::error::Error>> {
     profile::record(stream, profiling, "Frida: detach trampolines", start, profile::now_ns());
     let _ = writeln!(stream, "{}", json!({"stopped":true}));
     Ok(())
+}
+
+/// Puts the probe on `write` and starts handing its lines to this capture.
+#[cfg(unix)]
+fn attach_output(capture: &mut Capture) -> Result<(), String> {
+    if !perfr_api::initialized() {
+        return Err("the program has a perfr API of its own, which this agent cannot log through".into());
+    }
+    let mut status = 0;
+    let listener = unsafe { perfr_gum_attach_output(&mut status) };
+    if listener.is_null() {
+        return Err(if status == -1 {
+            "no `write` function was found in the program's C library".to_string()
+        } else {
+            format!("Gum rejected the probe on `write`: attach status {status}")
+        });
+    }
+    capture.listeners.push(listener);
+    super::output::start(capture.generation);
+    Ok(())
+}
+#[cfg(not(unix))]
+fn attach_output(_: &mut Capture) -> Result<(), String> {
+    Err("the program's output is not recorded on this platform yet".into())
 }
 
 /// `Capture` holds Gum listener pointers. Detach runs on a side thread so an

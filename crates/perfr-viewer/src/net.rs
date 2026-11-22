@@ -290,6 +290,8 @@ pub struct CaptureStart {
     /// leaves it to the service, which does it when the target is one; off
     /// is sent as a refusal.
     pub python_stacks: bool,
+    /// What the program prints, as log lines. Sent only when on.
+    pub program_output: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -630,8 +632,10 @@ pub fn capture_start_body(req: &CaptureStart) -> String {
     // Absent is "when the target is a Python program", which is what the
     // switch being on means; only a refusal is said.
     let python = if req.python_stacks { "" } else { r#","python_stacks":false"# };
+    // Off is what a service that has never heard of it does too.
+    let output = if req.program_output { r#","program_output":true"# } else { "" };
     format!(
-        r#"{{"pid":{},"enable_api":{},"context_switches":{},"thread_states":{},"sampling":{},"samples_per_second":{},"unwinding":"{}","dynamic_instrumentation_method":"{}","instrumented_functions":[{fns}],"show_all_processes":{},"uprobe_duplicate_filter":{},"auto_profile":{},"machine_health":{}{python}}}"#,
+        r#"{{"pid":{},"enable_api":{},"context_switches":{},"thread_states":{},"sampling":{},"samples_per_second":{},"unwinding":"{}","dynamic_instrumentation_method":"{}","instrumented_functions":[{fns}],"show_all_processes":{},"uprobe_duplicate_filter":{},"auto_profile":{},"machine_health":{}{python}{output}}}"#,
         req.pid,
         req.enable_api,
         req.context_switches,
@@ -1672,7 +1676,17 @@ mod tests {
             auto_profile: false,
             machine_health: true,
             python_stacks: true,
+            program_output: false,
         }
+    }
+
+    #[test]
+    fn the_programs_output_is_asked_for_only_when_switched_on() {
+        let off = capture_start_body(&capture_start());
+        assert!(!off.contains("program_output"), "{off}");
+        let on = capture_start_body(&CaptureStart { program_output: true, ..capture_start() });
+        let v: serde_json::Value = serde_json::from_str(&on).unwrap();
+        assert_eq!(v["program_output"], true);
     }
 
     #[test]

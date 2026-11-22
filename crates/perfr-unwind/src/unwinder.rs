@@ -250,6 +250,7 @@ impl ProcessUnwinder {
     }
 
     /// Stop before a known return trampoline instead of inventing its caller.
+    /// `return_trampolines` is sorted: it is searched for every frame.
     pub fn unwind_into_avoiding(
         &mut self, regs: StartRegs, stack_base: u64, stack: &[u8],
         max_frames: usize, frames: &mut Vec<u64>, return_trampolines: &[u64],
@@ -273,8 +274,15 @@ impl ProcessUnwinder {
         loop {
             match iterator.next() {
                 Ok(Some(frame)) => {
-                    if return_trampolines.iter().any(|address| address.checked_sub(1) == Some(frame.address_for_lookup()) || (frames.is_empty() && *address == frame.address_for_lookup())) {
-                        if frames.is_empty() { frames.push(frame.address_for_lookup()); }
+                    // A return address is looked up one byte back; the
+                    // sampled pc, which a thread about to run a trampoline
+                    // has, is looked up as it is.
+                    let lookup = frame.address_for_lookup();
+                    let is_one = |address: u64| return_trampolines.binary_search(&address).is_ok();
+                    if lookup.checked_add(1).is_some_and(is_one) || (frames.is_empty() && is_one(lookup)) {
+                        if frames.is_empty() {
+                            frames.push(lookup);
+                        }
                         return UnwindEnd::UnresolvedReturn;
                     }
                     if frames.len() >= max_frames {
@@ -308,10 +316,12 @@ mod tests {
         let mut stack = Vec::new();
         for word in [0x8010u64, 0x2000, 0, 0x3000] { stack.extend(word.to_le_bytes()); }
         let mut frames = Vec::new();
-        let end = unwinder.unwind_into_avoiding(regs, 0x8000, &stack, 32, &mut frames, &[0x2000]);
+        // Sorted, and the one that matters neither first nor last.
+        let trampolines = [0x1800, 0x2000, 0x7000];
+        let end = unwinder.unwind_into_avoiding(regs, 0x8000, &stack, 32, &mut frames, &trampolines);
         assert_eq!(end, UnwindEnd::UnresolvedReturn);
         assert_eq!(frames, [0x1000]);
-        let end = unwinder.unwind_into_avoiding(StartRegs { ip: 0x2000, ..regs }, 0x8000, &stack, 32, &mut frames, &[0x2000]);
+        let end = unwinder.unwind_into_avoiding(StartRegs { ip: 0x2000, ..regs }, 0x8000, &stack, 32, &mut frames, &trampolines);
         assert_eq!(end, UnwindEnd::UnresolvedReturn);
         assert_eq!(frames, [0x2000]);
     }

@@ -230,6 +230,10 @@ pub struct FridaSession {
     max_calls_per_s: u64,
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     returns: Option<crate::frida_returns::Returns>,
+    /// The journal's losses when the last sample had been read. The hooks
+    /// stay armed a while longer, and what they lose then is nobody's.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    returns_finished: Option<u64>,
 }
 impl FridaSession {
     /// `name_ids` name each hook's spans; `label_ids` name the marker a hook
@@ -249,12 +253,18 @@ impl FridaSession {
             .tempfile_in(lease_dir)
             .map_err(|e| e.to_string())?;
         let mapping = Transport::create(file.as_file(), pid as u32).map_err(|e| e.to_string())?;
+        // Every Linux capture samples, so every one journals its hooks'
+        // returns for the sampler. The journal's megabyte is allocated
+        // here and not left for the target's first call to fault in.
         let repair_returns = cfg!(all(target_os = "linux", target_arch = "x86_64"));
-        if repair_returns { mapping.enable_return_repair(); }
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        let returns = if repair_returns {
-            Some(crate::frida_returns::Returns::new(perfr_frida_transport::returns::Journal::open(file.as_file()).map_err(|e| e.to_string())?))
-        } else { None };
+        let returns = {
+            let journal = perfr_frida_transport::returns::Journal::create(file.as_file()).map_err(|e| {
+                format!("Frida: no room in {} for the capture's return journal: {e}", file.path().display())
+            })?;
+            mapping.enable_return_repair();
+            Some(crate::frida_returns::Returns::new(journal, pid as u32))
+        };
         // A privileged Linux service must allow its unprivileged target to
         // open the capture file. No permissions outside this new file change.
         #[cfg(target_os = "linux")]
@@ -311,52 +321,21 @@ impl FridaSession {
             max_calls_per_s,
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             returns,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            returns_finished: None,
         })
     }
+    /// Reads what the hooks have journaled since the last pass.
     pub fn poll_returns(&mut self) {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        if let Some(r) = self.returns.as_mut() {
+        if let Some(r) = self.returns.as_mut().filter(|_| self.returns_finished.is_none()) {
             // An unexpected detach stops metadata publication. Old open
             // records must not be mistaken for subsequent calls at that slot.
-            r.invalid |= !self.stopped && (!self.mapping.active() || r.journal.closed());
+            if !self.stopped && (!self.mapping.active() || r.journal.closed()) {
+                r.give_up("the hooks were detached while the capture was running");
+            }
             r.poll();
         }
-    }
-    pub fn sample_horizon(&self) -> u64 {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        if let Some(r) = self.returns.as_ref() { return r.horizon; }
-        u64::MAX
-    }
-    pub fn patch_returns(&self, tid: u32, sp: u64, time: u64, stack: &mut [u8]) -> bool {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        if let Some(r) = self.returns.as_ref() {
-            return (self.stopped || (self.mapping.active() && !r.journal.closed())) && r.patch(tid, sp, time, stack);
-        }
-        let _ = (tid, sp, time, stack);
-        true
-    }
-    pub fn return_trampolines(&self) -> &[u64] {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        if let Some(r) = self.returns.as_ref() { return &r.trampolines; }
-        &[]
-    }
-    pub fn note_incomplete_return(&self) {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        if let Some(r) = self.returns.as_ref() { r.incomplete_samples.set(r.incomplete_samples.get() + 1); }
-    }
-    pub fn retire_returns(&mut self, horizon: u64) {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        if let Some(r) = self.returns.as_mut() { r.retire(horizon); }
-        let _ = horizon;
-    }
-    pub fn finish_returns(&mut self, stop_ns: u64) {
-        self.poll_returns();
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        if let Some(r) = self.returns.as_mut() {
-            // Do not wait forever for a publisher in a stopped target.
-            if r.horizon < stop_ns { r.invalid = true; }
-        }
-        let _ = stop_ns;
     }
     pub fn poll(&mut self) {
         if !self.stopped {
@@ -387,8 +366,30 @@ impl FridaSession {
         let mut line = format!("Frida: {} completed API scopes", self.calls);
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if let Some(r) = self.returns.as_ref() {
-            line.push_str(&format!("; {} sampled return slots repaired, {} incomplete samples", r.patched_slots.get(), r.incomplete_samples.get()));
-            if r.invalid { line.push_str("; return history unavailable: keeping samples leaf-only (journal loss, unexpected detach, unsupported redirect, or unfinished publication)"); }
+            line.push_str(&format!(
+                "; {} sampled return slots repaired, {} incomplete samples",
+                r.patched_slots.get(),
+                r.incomplete_samples.get()
+            ));
+            let lost = self.returns_finished.unwrap_or_else(|| r.journal.lost());
+            if lost > 0 {
+                // Not the end of anything: stacks stop at those calls.
+                line.push_str(&format!(
+                    "; the return journal was full for {lost} records ({} thread histories cut short)",
+                    r.histories_cut
+                ));
+            }
+            match r.trouble() {
+                Some(why) if r.is_leaf_only() => {
+                    line.push_str(&format!("; samples are leaf-only: {why}"));
+                }
+                Some(why) => {
+                    line.push_str(&format!(
+                        "; return history unavailable, sampled stacks stop at hooked functions: {why}"
+                    ));
+                }
+                None => {}
+            }
         }
         if shared_records_lost > 0 {
             // The shared scope ring lapped: STOPs were among the losses and
@@ -412,6 +413,76 @@ impl FridaSession {
             line.push_str(&format!("; {e}"));
         }
         line
+    }
+}
+
+/// What the sampler asks of the hooks' return journal. Only the Linux
+/// capture loop samples a process that Frida has hooked.
+#[cfg(target_os = "linux")]
+impl FridaSession {
+    /// Samples up to here can be unwound now: the journal has been read
+    /// that far.
+    pub fn sample_horizon(&self) -> u64 {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if let Some(r) = self.returns.as_ref() {
+            return r.horizon();
+        }
+        u64::MAX
+    }
+    /// Puts back the return addresses the hooks replaced, in a sample's
+    /// copy of the stack. False when the stack must not be walked.
+    pub fn patch_returns(&self, tid: u32, sp: u64, time: u64, stack: &mut [u8]) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if let Some(r) = self.returns.as_ref() {
+            return r.patch(tid, sp, time, stack);
+        }
+        let _ = (tid, sp, time, stack);
+        true
+    }
+    /// Sorted: what `ProcessUnwinder::unwind_into_avoiding` takes.
+    pub fn return_trampolines(&self) -> &[u64] {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if let Some(r) = self.returns.as_ref() {
+            return &r.trampolines;
+        }
+        &[]
+    }
+    pub fn note_incomplete_return(&self) {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if let Some(r) = self.returns.as_ref() {
+            r.incomplete_samples.set(r.incomplete_samples.get() + 1);
+        }
+    }
+    pub fn retire_returns(&mut self, horizon: u64) {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if let Some(r) = self.returns.as_mut() {
+            r.retire(horizon);
+        }
+        let _ = horizon;
+    }
+    /// Reads the journal up to `stop_ns`, when the last sample was taken,
+    /// and then no further. The hooks are not touched: they go on timing
+    /// calls until `stop`.
+    pub fn finish_returns(&mut self, stop_ns: u64) {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            // A record being written as the pass went by is written a
+            // moment later. Do not wait forever for a stopped target.
+            for _ in 0..50 {
+                self.poll_returns();
+                if self.returns.as_ref().is_none_or(|r| r.horizon() >= stop_ns) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            if let Some(r) = self.returns.as_mut() {
+                if r.horizon() < stop_ns {
+                    r.give_up("a journal record was still unwritten when sampling stopped");
+                }
+                self.returns_finished = Some(r.journal.lost());
+            }
+        }
+        let _ = stop_ns;
     }
 }
 

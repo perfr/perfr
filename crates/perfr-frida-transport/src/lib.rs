@@ -9,11 +9,14 @@ pub mod profile;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod returns;
 
-fn file_size() -> usize {
+/// A lease is its control block alone, or that and a return journal the
+/// controller added behind it for a capture that samples.
+fn is_lease_size(len: u64) -> bool {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    { returns::FILE_SIZE }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-    { std::mem::size_of::<Control>() }
+    if len == returns::FILE_SIZE as u64 {
+        return true;
+    }
+    len == std::mem::size_of::<Control>() as u64
 }
 #[cfg(windows)]
 use std::ffi::c_void;
@@ -41,7 +44,7 @@ unsafe impl Sync for Transport {}
 impl Transport {
     pub fn create(file: &File, pid: u32) -> io::Result<Self> {
         file.set_len(0)?;
-        file.set_len(file_size() as u64)?;
+        file.set_len(std::mem::size_of::<Control>() as u64)?;
         let mapping = Self::map(file)?;
         unsafe {
             mapping.base.write(Control {
@@ -70,7 +73,7 @@ impl Transport {
     #[cfg(unix)]
     fn map(file: &File) -> io::Result<Self> {
         let len = std::mem::size_of::<Control>();
-        if file.metadata()?.len() != file_size() as u64 {
+        if !is_lease_size(file.metadata()?.len()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid Frida capture lease size",
@@ -98,7 +101,7 @@ impl Transport {
     fn map(file: &File) -> io::Result<Self> {
         use std::os::windows::io::AsRawHandle;
         let len = std::mem::size_of::<Control>();
-        if file.metadata()?.len() != file_size() as u64 {
+        if !is_lease_size(file.metadata()?.len()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid Frida capture lease size",
@@ -129,8 +132,14 @@ impl Transport {
     fn control(&self) -> &Control {
         unsafe { &*self.base }
     }
-    pub fn enable_return_repair(&self) { self.control().repair_returns.store(1, Ordering::Release); }
-    pub fn return_repair_enabled(&self) -> bool { self.control().repair_returns.load(Ordering::Acquire) != 0 }
+    /// Says the lease file carries a return journal (`returns::Journal`)
+    /// the agent is to write. Set after the journal is in the file.
+    pub fn enable_return_repair(&self) {
+        self.control().repair_returns.store(1, Ordering::Release);
+    }
+    pub fn return_repair_enabled(&self) -> bool {
+        self.control().repair_returns.load(Ordering::Acquire) != 0
+    }
     pub fn active(&self) -> bool {
         self.control().active.load(Ordering::Acquire) != 0
     }
@@ -186,5 +195,25 @@ mod tests {
         reader.disable();
         assert!(!writer.active());
         assert!(Transport::open(&tempfile::tempfile().unwrap(), 123).is_err());
+    }
+    #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn a_lease_is_its_control_block_with_or_without_a_journal_behind_it() {
+        let file = tempfile::tempfile().unwrap();
+        let lease = Transport::create(&file, 123).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), std::mem::size_of::<Control>() as u64);
+        assert!(!Transport::open(&file, 123).unwrap().return_repair_enabled());
+        // The controller adds the journal, and only then says it is there.
+        let journal = returns::Journal::create(&file).unwrap();
+        lease.enable_return_repair();
+        assert_eq!(file.metadata().unwrap().len(), returns::FILE_SIZE as u64);
+        let agent = Transport::open(&file, 123).unwrap();
+        assert!(agent.return_repair_enabled());
+        assert!(agent.active(), "the control block is where it was");
+        assert!(returns::Journal::open(&file).unwrap().trampolines().is_empty());
+        drop(journal);
+        // Any other length is not a lease.
+        file.set_len(returns::FILE_SIZE as u64 - 1).unwrap();
+        assert!(Transport::open(&file, 123).is_err());
     }
 }

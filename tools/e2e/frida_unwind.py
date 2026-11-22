@@ -259,6 +259,90 @@ def main():
                 ),
                 flush=True,
             )
+            # A hook called far faster than its return journal is read. What
+            # that costs is frames above the hot function, on the threads that
+            # are in it: nothing wrong anywhere, and nothing at all on a thread
+            # with no hook on its stack.
+            hot = [
+                f
+                for f in functions
+                if f["name"].split("(")[0] == "perfr_unwind_hot"
+            ]
+            assert len(hot) == 1, functions
+            req(
+                "/api/capture/start",
+                dict(
+                    config,
+                    instrumented_functions=[
+                        {"function_id": f["function_id"]} for f in hooks + hot
+                    ],
+                ),
+            )
+            target.stdin.write("s")
+            target.stdin.flush()
+            assert read_line_within(target, 60) == "done"
+            time.sleep(0.15)
+            req("/api/capture/stop", {})
+            stacks = req("/api/sampling/callstacks?limit=32")
+            while len(stacks["stacks"]) < stacks["total_stacks"]:
+                page = req(
+                    f"/api/sampling/callstacks?limit=32&offset={len(stacks['stacks'])}"
+                )
+                assert page["stacks"]
+                stacks["stacks"].extend(page["stacks"])
+            status = req("/api/status")
+            (out / "stress-stacks.json").write_text(json.dumps(stacks, indent=2))
+            (out / "stress-status.json").write_text(json.dumps(status, indent=2))
+            line = status["instrumentation"]
+
+            def leaf_is(name):
+                return [s for s in stacks["stacks"] if s["frames"][-1] == name]
+
+            def count(selected):
+                return sum(s["count"] for s in selected)
+
+            plain = leaf_is("perfr_unwind_plain_leaf")
+            plain_whole = [
+                s
+                for s in plain
+                if s["frames"][-3:-1] == ["perfr_unwind_stress_worker", "perfr_unwind_plain"]
+            ]
+            recursion = leaf_is("perfr_unwind_leaf")
+            recursion_whole = [
+                s
+                for s in recursion
+                if s["frames"][-7:-1]
+                == ["perfr_unwind_stress_worker", "perfr_unwind_beta"]
+                + ["perfr_unwind_recursive"] * 4
+            ]
+            spinning = leaf_is("perfr_unwind_hot")
+            # Inside the hot function a stack is cut at it or goes on to its
+            # one caller. A frame from anywhere else would be an invented one.
+            invented = [
+                s
+                for s in spinning
+                if len(s["frames"]) > 1 and s["frames"][-2] != "perfr_unwind_hot_caller"
+            ]
+            stress = {
+                "status": line,
+                "plain_samples": count(plain),
+                "plain_complete": count(plain_whole),
+                "recursion_samples": count(recursion),
+                "recursion_complete": count(recursion_whole),
+                "hot_samples": count(spinning),
+                "hot_cut_at_the_hook": count([s for s in spinning if len(s["frames"]) == 1]),
+            }
+            print(json.dumps({"stress": stress}), flush=True)
+            assert "leaf-only" not in line and "return history unavailable" not in line, line
+            assert not invented, invented
+            assert count(plain) >= 30, stress
+            assert count(plain_whole) / count(plain) > 0.95, stress
+            assert count(recursion) >= 30, stress
+            # The hot hook is muted within its first hundred milliseconds and
+            # then leaves half the journal alone; before that, this thread's
+            # calls compete with it for room.
+            assert count(recursion_whole) / count(recursion) > 0.8, stress
+            results.append({"mode": "stress", **stress})
             (out / "results.json").write_text(json.dumps(results, indent=2) + "\n")
         finally:
             for child in (target, service):

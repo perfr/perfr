@@ -1467,10 +1467,12 @@ fn push_sample(
         session.patch_user_stack(tid as i32, start.sp, time, stack);
     }
     let mut whole = false;
-    let repair_valid = frida_returns.is_none_or(|r| r.patch_returns(tid, start.sp, time, stack));
-    // frames[0] is the sampled pc. Missing history is leaf-only, not a
-    // plausible but untrustworthy caller chain through a trampoline.
-    if !repair_valid {
+    let walkable = frida_returns.is_none_or(|r| r.patch_returns(tid, start.sp, time, stack));
+    // frames[0] is the sampled pc. A thread that may be inside a hook whose
+    // trampoline nobody can recognise is that pc alone, not a plausible but
+    // untrustworthy caller chain through the trampoline. A call the history
+    // has no entry for is something less: the walk below stops at it.
+    if !walkable {
         frames.clear();
         frames.push(start.ip);
         counters.unwind_failed += 1;
@@ -3062,12 +3064,17 @@ fn capture_loop(
         perfr_api::span_async(format!("DROPPED {lost} events"), start, crate::now_monotonic_ns());
     }
 
-    // Freeze copied samples before the final metadata checkpoint. Detach
-    // closes the writer mapping only after active publication guards finish.
-    for thread in &threads { let _ = perfr_perf_ring::ring::disable_fd(thread.sample.fd()); }
+    // Freeze copied samples, then read the return journal up to there: the
+    // tail below is unwound against a history that covers every sample.
+    // The hooks themselves stay armed until the scopes are finished, far
+    // below. Detached here, a hooked call in flight would lose its STOP
+    // and be drawn to wherever the symbol wait and the rest of the
+    // shutdown had got to, seconds past its real end.
+    for thread in &threads {
+        let _ = perfr_perf_ring::ring::disable_fd(thread.sample.fd());
+    }
     let sampling_stopped_ns = crate::now_monotonic_ns();
     if let Some(session) = frida.as_mut() {
-        session.stop();
         session.finish_returns(sampling_stopped_ns);
     }
 
@@ -3172,6 +3179,7 @@ fn capture_loop(
     }
 
     if let Some(session) = frida.as_mut() {
+        session.stop();
         session.poll();
         service.set_instrumentation_status(session.status(scopes.events_lost, &scopes.auto_unhooked));
     }

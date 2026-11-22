@@ -134,25 +134,71 @@ The hosted Mac tests run both collector and development target as root to avoid
 interactive task-port authorization prompts; this does not validate unprivileged
 attachment. ARM Linux and Rosetta runtime validation remain pending.
 
-Linux x86-64 timing hooks now repair intercepted return addresses in copied
-perf stacks before DWARF unwinding. The agent journals each invocation's thread,
-stack slot, original return address, verified Gum trampoline, and entry/exit time.
-The collector retains history until older samples are consumed and patches only
-slots still holding the expected trampoline. Real target stacks are unchanged;
-entry/exit timing remains enabled. Trampoline discovery checks the pinned Gum
-entry redirect against its public invocation-stack translation API; unsupported
-redirects disable repair. New trampoline addresses are registered under the
-capture-transition lock before their first use, including late old callbacks.
-Return history also waits for Python enrichment before retirement.
+Linux x86-64 timing hooks repair intercepted return addresses in copied perf
+stacks before DWARF unwinding. The agent journals each invocation's thread,
+stack slot, original return address, Gum trampoline, and entry and exit time,
+in a part of the capture's lease file that only the service reads. The service
+keeps that history until older samples have been consumed, Python enrichment
+included, and patches only slots that still hold the expected trampoline. Real
+target stacks are unchanged; entry and exit timing remains enabled.
+
+A hook finds its return trampoline on its first call, by checking the pinned
+Gum entry redirect against Gum's public invocation-stack translation API, and
+registers it before Gum replaces that call's return slot. A registered
+trampoline stays registered for the life of the process, because a call that
+began under it may not have returned; every capture's unwinder stops at one it
+has no history for. 4096 can be registered.
+
+What a sample gets when the history is short of something, from least lost to
+most:
+
+- **A call with no entry** (the journal had no room, the hook is muted and
+  gave way, or the call began under an earlier capture): the walk stops at
+  that call. The frames inside it are right; its callers are missing.
+- **A thread that lost an exit record**: its open entries are closed at the
+  last instant the journal is known to have been complete, and are calls with
+  no entry from then on. Its later calls are journaled as usual, and no other
+  thread is affected.
+- **A hook whose trampoline could not be identified** (a redirect the agent
+  does not understand, or 4096 already registered): a thread is leaf-only
+  while it is inside a call to that hook, in this capture and in any other
+  that opens before the call returns.
+- **A journal that can no longer be read** (a thread stopped for 250 ms in
+  the middle of writing a record, the hooks were detached unexpectedly, or
+  more than 262,144 calls were in flight at once): nothing is patched and
+  walks stop at the registered trampolines. Samples become leaf-only only if
+  a hook with an unidentified trampoline is in play as well.
+
+None of these invents a caller, and each is named in the instrumentation
+status. Calls spanning captures therefore remain partial.
+
+The journal is eight rings of 4096 records, and a thread writes to the one
+its id picks: a thread that calls a hook faster than the service reads fills
+its own ring, and the few threads that share it, not everyone's. A hook muted
+for passing the call-rate limit still has its returns intercepted by Gum, so
+it still journals, but only into the first half of its ring. The journal's
+two megabytes are allocated in `/tmp` when the hooks are armed, and arming
+fails if there is no room: a sparse file would instead fault in the target on
+its first write.
+
+Journaling adds 100 to 160 ns to a call on one thread and about 170 ns with
+eight threads calling at once (`cargo test -p perfr-lib --release
+what_a_sampled_call -- --nocapture`, on a 13900KF). With one ring for every
+thread the eight-thread figure was 1.1 µs. Its cost inside a real hooked
+workload has not been measured.
+
+A target in another PID namespace names its threads differently from the
+sampler. The service translates through `NSpid` in `/proc/<pid>/task/*/status`;
+this path has unit tests and has not been run against a containerised target.
 
 `tools/e2e/frida_unwind.py` checks full sampled caller chains and all 480 timed
-calls with recursive nesting in the same capture, across two threads and repeated
-captures, with frame pointers omitted. Unit tests cover delayed samples, reused
-slots, tail-call chains, concurrent publication, and overflow. Missing history
-stops a walk at a known trampoline; lost or unsupported metadata makes samples
-leaf-only and is reported in instrumentation status. Calls spanning captures can
-therefore remain partial. The journal is bounded; a publisher stalled for 250 ms
-invalidates repair for that capture instead of accumulating samples indefinitely.
+calls with recursive nesting in the same capture, across two threads and
+repeated captures, with frame pointers omitted; that a call held across two
+captures stays partial; and that a function hooked while two threads call it
+flat out costs the other threads nothing: full chains on a thread with no hook
+on its stack, and on one running the hooked recursion. Unit tests cover delayed
+samples, reused slots, tail-call chains, concurrent publication, a full ring,
+a lost exit, an unidentified trampoline and a stalled writer.
 
 This repairs return substitution, not missing unwind tables for relocated
 instructions, generated code, or hook callbacks. It does not certify C++ exception
@@ -197,6 +243,3 @@ Upstream references: [Frida modes](https://frida.re/docs/modes/),
 [Gum](https://github.com/frida/frida-gum),
 [Native C API](https://frida.re/docs/c-api/),
 [Apple hardened runtime](https://developer.apple.com/documentation/xcode/configuring-the-hardened-runtime/).
-
-See `docs/blog/frida-unwinding.html` for the mechanism, measured before/after
-call stacks, limitations, and a reproducible test command.

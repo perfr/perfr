@@ -16,9 +16,11 @@
 
 extern uint64_t perfr_frida_start(uint32_t, const char *, size_t);
 extern void perfr_frida_stop(uint32_t, uint64_t);
-extern void perfr_frida_register_return(uint64_t);
-extern uint64_t perfr_frida_return_enter(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t);
-extern void perfr_frida_return_leave(uint32_t, uint64_t);
+extern int perfr_frida_register_return(uint64_t);
+extern uint64_t perfr_frida_return_enter(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, int);
+extern void perfr_frida_return_leave(uint32_t, uint32_t, uint64_t);
+extern uint64_t perfr_frida_return_taint(uint32_t, uint32_t);
+extern void perfr_frida_return_untaint(uint32_t, uint32_t, uint64_t);
 // Calls a second past which a hook mutes itself: keeps counting nothing,
 // emits nothing, and tells the service once via its unhook token. A function
 // this hot floods the shared ring and takes every other hook's spans with it.
@@ -34,7 +36,9 @@ typedef struct {
   volatile gint64 window_start_us;
   volatile gint muted;
 } Hook;
-typedef struct { uint32_t generation; uint64_t handle, return_token; } Invocation;
+// `tainted` is a call through a hook whose return trampoline is not known:
+// `return_token` is then its taint's, not a journal entry's.
+typedef struct { uint32_t generation, tid; uint64_t handle, return_token; int tainted; } Invocation;
 // The OS's own once: nothing of GLib may run before gum_init_embedded has
 // set up its thread backend (on Windows that backend is a table of function
 // pointers that an uninitialized g_once_init_enter calls through -- a null
@@ -86,7 +90,8 @@ static uint64_t record_entry(Hook * h) {
 }
 // Resolve the installed entry redirect using x86 encodings, then ask Gum
 // which nearby address is its return trampoline. No private Gum structure
-// layout is read. Unsupported redirects fail closed through the journal.
+// layout is read. A redirect this does not understand leaves the hook with
+// no known trampoline, and its calls taint their thread (see enter).
 // This is done once per hook; the callback's own invocation is already on
 // Gum's stack, before Gum replaces the application's return slot.
 #if defined(__linux__) && defined(__x86_64__)
@@ -123,8 +128,9 @@ static gpointer return_trampoline(GumInvocationContext * ic, Hook * h) {
   if (cached == NULL) {
     gpointer found = discover_return_trampoline(ic);
     // Register before publishing the cache and before Gum patches the slot,
-    // even if this callback races Stop or belongs to an older capture.
-    perfr_frida_register_return((uint64_t)(uintptr_t)found);
+    // even if this callback races Stop or belongs to an older capture. One
+    // that cannot be registered is no better than one that was not found.
+    if (found != NULL && !perfr_frida_register_return((uint64_t)(uintptr_t)found)) found = NULL;
     cached = found != NULL ? found : GSIZE_TO_POINTER(1);
     g_atomic_pointer_compare_and_exchange(&h->return_trampoline, NULL, cached);
     cached = g_atomic_pointer_get(&h->return_trampoline);
@@ -132,27 +138,51 @@ static gpointer return_trampoline(GumInvocationContext * ic, Hook * h) {
   return cached == GSIZE_TO_POINTER(1) ? NULL : cached;
 }
 #endif
+#if defined(__linux__) && defined(__x86_64__)
+// The thread's id, asked for once: gettid is a system call, and every call
+// through a hook needs the answer. A fork's child would have the parent's,
+// and the child's callbacks are ignored before they get here.
+static __thread uint32_t own_tid;
+static uint32_t current_tid(GumInvocationContext * ic) {
+  if (own_tid == 0) own_tid = (uint32_t)gum_invocation_context_get_thread_id(ic);
+  return own_tid;
+}
+#endif
 static void enter(GumInvocationContext * ic, gpointer data) {
   Hook * h = data;
   Invocation * call = gum_invocation_context_get_listener_invocation_data(ic, sizeof(Invocation));
   call->generation = h->generation;
+  call->tid = 0;
   call->return_token = 0;
+  call->tainted = 0;
 #if defined(__linux__) && defined(__x86_64__)
   if (h->repair_returns) {
-    call->return_token = perfr_frida_return_enter(h->generation,
-        (uint32_t)gum_invocation_context_get_thread_id(ic), ic->cpu_context->rsp,
-        (uint64_t)(uintptr_t)gum_invocation_context_get_return_address(ic),
-        (uint64_t)(uintptr_t)return_trampoline(ic, h));
+    // Kept in the invocation: leave needs it too.
+    call->tid = current_tid(ic);
+    gpointer trampoline = return_trampoline(ic, h);
+    if (trampoline != NULL) {
+      // Even a muted timing hook still intercepts returns, so it still
+      // journals them: but as the first to give way when the journal is
+      // filling, since it is the one filling it.
+      call->return_token = perfr_frida_return_enter(h->generation, call->tid,
+          ic->cpu_context->rsp,
+          (uint64_t)(uintptr_t)gum_invocation_context_get_return_address(ic),
+          (uint64_t)(uintptr_t)trampoline, h->muted);
+    } else {
+      call->tainted = 1;
+      call->return_token = perfr_frida_return_taint(h->generation, call->tid);
+    }
   }
 #endif
-  // Even a muted timing hook still intercepts returns: metadata must not
-  // depend on whether a scope was emitted or got a nonzero handle.
   call->handle = record_entry(h);
 }
 static void leave(GumInvocationContext * ic, gpointer data) {
   (void)data;
   Invocation * call = gum_invocation_context_get_listener_invocation_data(ic, sizeof(Invocation));
-  perfr_frida_return_leave(call->generation, call->return_token);
+#if defined(__linux__) && defined(__x86_64__)
+  if (call->tainted) perfr_frida_return_untaint(call->generation, call->tid, call->return_token);
+  else if (call->return_token != 0) perfr_frida_return_leave(call->generation, call->tid, call->return_token);
+#endif
   perfr_frida_stop(call->generation, call->handle);
 }
 static void free_hook(gpointer data) {

@@ -548,6 +548,7 @@ impl Mcp {
         let sampling = arg_bool(args, "sampling").unwrap_or(self.platform.sampling);
         let scheduler = arg_bool(args, "scheduler").unwrap_or(self.platform.scheduler);
         let auto_profile = arg_bool(args, "auto_profile").unwrap_or(false);
+        let program_output = arg_bool(args, "program_output").unwrap_or(false);
         let rate = arg_f64(args, "samples_per_second").unwrap_or(1000.0).clamp(1.0, 10_000.0);
         let hooks = self.session.lock().map_err(|_| "session poisoned".to_string())?.hooks.clone();
         let body = json!({
@@ -560,6 +561,7 @@ impl Mcp {
             "dynamic_instrumentation_method": instrumentation,
             "instrumented_functions": hooks.iter().map(|h| json!({"function_id": h.function_id})).collect::<Vec<_>>(),
             "auto_profile": auto_profile,
+            "program_output": program_output,
         });
         self.http.post_ok("/api/capture/start", &body, Duration::from_secs(120))?;
         Ok(json!({
@@ -571,6 +573,7 @@ impl Mcp {
             "samples_per_second": rate,
             "instrumentation": instrumentation,
             "auto_profile": auto_profile,
+            "program_output": program_output,
             "hooks": hooks.len(),
             "hook_names": hooks.iter().map(|h| clip(&h.name)).collect::<Vec<_>>(),
         }))
@@ -910,7 +913,8 @@ pub fn tool_specs() -> Vec<Value> {
                     "scheduler": { "type": "boolean", "description": "Context switches and thread states. Default on for Linux and Windows, unsupported on macOS." },
                     "samples_per_second": { "type": "number", "description": "Sample rate. Default 1000. Clamped to 1..10000." },
                     "instrumentation": { "type": "string", "enum": ["frida", "kernel_uprobes"], "description": "Default frida." },
-                    "auto_profile": { "type": "boolean", "description": "Let the service pick hooks. Linux only. Default false." }
+                    "auto_profile": { "type": "boolean", "description": "Let the service pick hooks. Linux only. Default false." },
+                    "program_output": { "type": "boolean", "description": "Record what the program writes to stdout and stderr as log lines (read them with perfr_logs). Loads an agent into the program, as a hook does. Linux and macOS. Default false." }
                 },
                 "additionalProperties": false,
             }),

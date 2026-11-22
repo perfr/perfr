@@ -1098,6 +1098,11 @@ pub struct StartBody {
     /// like one (an interpreter linked in under another name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub python_stacks: Option<bool>,
+    /// What the program writes to its standard output and error, as log
+    /// lines. Off by default: an agent is loaded into the program to read
+    /// it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub program_output: bool,
 }
 
 fn default_true() -> bool {

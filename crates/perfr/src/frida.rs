@@ -228,6 +228,9 @@ pub struct FridaSession {
     /// Hook display names by the name id their START tokens carry.
     names_by_id: HashMap<u32, String>,
     max_calls_per_s: u64,
+    /// The program's output, when the capture asked for it: recorded, or
+    /// why the agent could not.
+    pub output: Option<Result<(), String>>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     returns: Option<crate::frida_returns::Returns>,
     /// The journal's losses when the last sample had been read. The hooks
@@ -239,7 +242,18 @@ impl FridaSession {
     /// `name_ids` name each hook's spans; `label_ids` name the marker a hook
     /// leaves on the timeline when it switches itself off ("auto-unhooked:
     /// <function>"), both interned by the service up front.
-    pub fn arm(pid: i32, hooks: &[HookSpec], name_ids: &[u32], label_ids: &[u32], max_calls_per_s: u64) -> Result<Self, String> {
+    ///
+    /// `output` asks the agent to record what the program writes to its
+    /// standard output and error as log lines; with it, `hooks` may be
+    /// empty.
+    pub fn arm(
+        pid: i32,
+        hooks: &[HookSpec],
+        name_ids: &[u32],
+        label_ids: &[u32],
+        max_calls_per_s: u64,
+        output: bool,
+    ) -> Result<Self, String> {
         let _phase = perfr_api::scope("Frida: arm hooks");
         if pid <= 0 || pid as u32 == std::process::id() {
             return Err("Frida requires a target process other than perfr".into());
@@ -255,15 +269,19 @@ impl FridaSession {
         let mapping = Transport::create(file.as_file(), pid as u32).map_err(|e| e.to_string())?;
         // Every Linux capture samples, so every one journals its hooks'
         // returns for the sampler. The journal's megabyte is allocated
-        // here and not left for the target's first call to fault in.
-        let repair_returns = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+        // here and not left for the target's first call to fault in. An
+        // agent loaded for what the program prints alone hooks no return:
+        // it gets no journal, and the status line says nothing of one.
+        let repair_returns = cfg!(all(target_os = "linux", target_arch = "x86_64")) && !hooks.is_empty();
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        let returns = {
+        let returns = if repair_returns {
             let journal = perfr_frida_transport::returns::Journal::create(file.as_file()).map_err(|e| {
                 format!("Frida: no room in {} for the capture's return journal: {e}", file.path().display())
             })?;
             mapping.enable_return_repair();
             Some(crate::frida_returns::Returns::new(journal, pid as u32))
+        } else {
+            None
         };
         // A privileged Linux service must allow its unprivileged target to
         // open the capture file. No permissions outside this new file change.
@@ -301,7 +319,7 @@ impl FridaSession {
             .collect();
         let helper = Helper::launch(
             serde_json::json!({"pid":pid,"agent":agent,"transport":file.path(),"hooks":hooks,
-                "max_calls_per_s":max_calls_per_s,"repair_returns":repair_returns}),
+                "max_calls_per_s":max_calls_per_s,"repair_returns":repair_returns,"output":output}),
         )?;
         let ready = helper.response()?;
         if repair_returns && ready["repair_returns"].as_bool() != Some(true) {
@@ -310,6 +328,10 @@ impl FridaSession {
         if ready["armed"].as_u64() != Some(hooks.len() as u64) {
             return Err(format!("Frida did not arm every hook: {ready}"));
         }
+        let output = output.then(|| match ready["output"].as_bool() {
+            Some(true) => Ok(()),
+            _ => Err(ready["output_error"].as_str().unwrap_or("the agent did not say why").to_string()),
+        });
         Ok(Self {
             helper,
             mapping,
@@ -319,6 +341,7 @@ impl FridaSession {
             stopped: false,
             names_by_id,
             max_calls_per_s,
+            output,
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             returns,
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -408,6 +431,11 @@ impl FridaSession {
                 self.max_calls_per_s,
                 names.join(", ")
             ));
+        }
+        match &self.output {
+            Some(Ok(())) => line.push_str("; recording what the program prints"),
+            Some(Err(why)) => line.push_str(&format!("; what the program prints is not recorded: {why}")),
+            None => {}
         }
         if let Some(e) = &self.error {
             line.push_str(&format!("; {e}"));

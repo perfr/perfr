@@ -5,6 +5,8 @@
 //! Native lifecycle guard around the target’s perfr start/stop API.
 #[cfg(feature = "native")]
 mod native;
+#[cfg(all(feature = "native", unix))]
+mod output;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod returns;
 use perfr_frida_transport::Transport;
@@ -77,6 +79,13 @@ fn session() -> Option<&'static Session> {
     // SAFETY: only `perfr_frida_open` stores a non-null pointer, to a
     // leaked box that is never freed.
     unsafe { SESSION.load(Ordering::Acquire).as_ref() }
+}
+
+/// Whether `generation` is the capture hooks report to, and it is still on.
+#[cfg(all(feature = "native", unix))]
+#[inline]
+fn session_is(generation: u32) -> bool {
+    session().is_some_and(|s| s.generation == generation && s.mapping.active())
 }
 
 /// Returns zero on failure, otherwise a generation identifying this capture.

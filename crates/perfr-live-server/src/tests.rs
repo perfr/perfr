@@ -253,6 +253,7 @@ fn capture_start_json_includes_sampling_and_hooks() {
         auto_profile: false,
         machine_health: true,
         python_stacks: None,
+        program_output: false,
     };
     let json = body.to_json();
     assert!(json.contains("\"pid\":42"));

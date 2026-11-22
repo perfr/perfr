@@ -676,6 +676,56 @@ def _check_thread_folds(run, pid):
     check(opened_bars == bars, "the sample bars are not where they were before any fold")
 
 
+@scenario("program-output", "A program that only prints: its lines as log lines of the thread that printed them")
+def program_output(run):
+    program = os.path.join(REPO, "tools/test-programs/PerfrProgramOutput/program_output.py")
+    # The agent that reads the output is the one that hooks: build it if the
+    # tree has none. The program itself loads nothing of perfr's.
+    _api_library()
+    app = Target([sys.executable, program])
+    try:
+        time.sleep(0.5)
+        run.service.post("/api/capture/start", {"pid": app.pid, "program_output": True})
+        time.sleep(5.0)
+        status = run.service.get("/api/status").get("instrumentation", "")
+        if "is not recorded" in status:
+            # The agent could not be loaded into the program: a machine
+            # that forbids ptrace to the service, as for a hook.
+            run.service.post("/api/capture/stop")
+            return f"skipped: {status}"
+        run.open_viewer("?collapse=scheduler&tracks=python")
+        run.shot("61-program-output", settle=3.0)
+        run.service.post("/api/capture/stop")
+        time.sleep(1.5)
+        check("recording what the program prints" in run.service.get("/api/status").get("instrumentation", ""),
+              "the status line does not say the output is recorded")
+
+        logs = run.service.get("/api/logs?limit=500")["logs"]
+        mine = [line for line in logs if line["pid"] == app.pid]
+        texts = [line["message"] for line in mine]
+        check_at_least(len([t for t in texts if t.startswith("iter ")]), 30, "lines of standard output")
+        check(any(t.startswith("step ") and "val loss" in t for t in texts), f"no `step` line: {texts[:5]}")
+        # Standard error too, without the colour codes.
+        warnings = [line for line in mine if "UserWarning" in line["message"]]
+        check(warnings, "nothing from standard error")
+        check(all(line["message"] == "UserWarning: this line is yellow on a terminal" for line in warnings),
+              f"the colour codes were kept: {warnings[0]['message']!r}")
+        # As written: no level is read out of a line's words.
+        levels = {line["level"] for line in mine}
+        check(levels == {"info"}, f"a printed line has a level nobody gave it: {levels}")
+        # On the thread that printed: the program's only one.
+        check({line["tid"] for line in mine} == {app.pid}, "a line is on another thread than the one that printed it")
+        # A number in a line stays text: the program has no value lane.
+        if run.chrome is not None:
+            run.open_viewer("?collapse=scheduler&tracks=python")
+            time.sleep(2.0)
+            rows = [key for key in run.ui() if key.startswith(f"row:lane:{app.pid}:")]
+            check(not rows, f"a value lane nobody asked for: {rows}")
+        return f"{len(mine)} lines, {len(warnings)} from standard error"
+    finally:
+        app.stop()
+
+
 @scenario("python-stacks", "A Python program: its functions in the samples, Python's thread names, a row for the GIL, and its own scopes")
 def python_stacks(run):
     # This suite starts target/release/perfr, reads /proc and is not run on

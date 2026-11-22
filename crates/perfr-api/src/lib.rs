@@ -109,6 +109,15 @@ pub fn capturing() -> bool {
     active_segment().is_some()
 }
 
+/// Whether this copy of the API has a segment of its own: [`init`] ran here
+/// and succeeded. An injected agent asks before recording through its own
+/// copy; in a program that brought another copy of the API, this one has no
+/// segment and everything it is handed goes nowhere.
+#[doc(hidden)]
+pub fn initialized() -> bool {
+    segment().is_some()
+}
+
 /// Serialises `init`. A compare-exchange on the pointer is not enough:
 /// creating a segment unlinks any existing one of the same name first, so two
 /// threads initialising at once would have the loser destroy the winner's

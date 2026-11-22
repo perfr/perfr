@@ -207,6 +207,32 @@ void * perfr_gum_attach(uint64_t address, uint32_t generation, const char * name
   if (*status != GUM_ATTACH_OK) { g_object_unref(listener); return NULL; }
   return listener;
 }
+#ifndef _WIN32
+// What the program prints. A probe, not a call listener: only the entry of
+// `write` is instrumented, so its return address is left alone and a stack
+// sample taken inside it still unwinds.
+extern void perfr_output_write(int fd, const void * buf, size_t count);
+static void output_written(GumInvocationContext * ic, gpointer data) {
+  (void)data;
+  int fd = GPOINTER_TO_INT(gum_invocation_context_get_nth_argument(ic, 0));
+  if (fd != 1 && fd != 2) return;
+  size_t count = GPOINTER_TO_SIZE(gum_invocation_context_get_nth_argument(ic, 2));
+  if (count == 0) return;
+  perfr_output_write(fd, gum_invocation_context_get_nth_argument(ic, 1), count);
+}
+// Returns the listener, or NULL with `status` set: -1 when this C library
+// has no `write` to find, otherwise Gum's attach status.
+void * perfr_gum_attach_output(int * status) {
+  GumAddress address = gum_module_find_global_export_by_name("write");
+  if (address == 0) { *status = -1; return NULL; }
+  GumInvocationListener * listener = gum_make_probe_listener(output_written, NULL, NULL);
+  GumInterceptor * i = gum_interceptor_obtain();
+  *status = gum_interceptor_attach(i, GSIZE_TO_POINTER(address), listener, NULL);
+  g_object_unref(i);
+  if (*status != GUM_ATTACH_OK) { g_object_unref(listener); return NULL; }
+  return listener;
+}
+#endif
 void perfr_gum_detach(void * listener) {
   GumInterceptor * i = gum_interceptor_obtain();
   gum_interceptor_detach(i, listener);

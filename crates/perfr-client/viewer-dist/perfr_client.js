@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import { perfrPickTrackOrder, perfrSaveTrackOrder } from './snippets/perfr-viewer-e5ae10a0f7bc743d/inline0.js';
-import { perfrPickPresets, perfrSavePreset } from './snippets/perfr-viewer-e5ae10a0f7bc743d/inline1.js';
+import { perfrPickPresets, perfrSavePreset } from './snippets/perfr-viewer-e5ae10a0f7bc743d/inline0.js';
+import { perfrPickTrackOrder, perfrSaveTrackOrder } from './snippets/perfr-viewer-e5ae10a0f7bc743d/inline1.js';
 import { startWorkers } from './snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src/workerHelpers.no-bundler.js';
 
 let wasm;
@@ -3367,8 +3367,8 @@ function __wbg_get_imports() {
         const ret = makeMutClosure(arg0, arg1, 132, __wbg_adapter_38);
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper2223 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 338, __wbg_adapter_43);
+    imports.wbg.__wbindgen_closure_wrapper2412 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 364, __wbg_adapter_43);
         return ret;
     };
     imports.wbg.__wbindgen_closure_wrapper4580 = function(arg0, arg1, arg2) {

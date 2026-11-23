@@ -1,5 +1,9 @@
 # Measuring the native live client
 
+What instrumentation costs the program it is in, per manual scope and per
+hooked call, is measured by [`overhead/`](overhead/README.md). The rest of
+this page is about the client.
+
 `live_client.py` drives the existing benchmark producer and launches a real
 native window, using `perfr-client`'s `live_bench` example. This measures the
 shared client/viewer receiving packed WebSocket events, with ordinary GPU

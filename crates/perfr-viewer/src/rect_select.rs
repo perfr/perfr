@@ -113,6 +113,26 @@ impl RectStats {
     }
 }
 
+/// How many samples a rectangle holds, and on how many threads' tracks.
+pub fn samples_line(samples: u64, threads: usize) -> String {
+    format!(
+        "{samples} sample{} on {threads} thread{}",
+        if samples == 1 { "" } else { "s" },
+        if threads == 1 { "" } else { "s" },
+    )
+}
+
+/// The readout at the rectangle's corner: the scopes' line, with the
+/// samples after it when the rectangle holds any, and the samples alone,
+/// over the `span_ns` the rectangle covers, when it holds no scope.
+pub fn badge(stats: &RectStats, samples: u64, sampled_threads: usize, span_ns: u64) -> String {
+    match (stats.count, samples) {
+        (_, 0) => stats.one_line(),
+        (0, _) => format!("{} · {}", samples_line(samples, sampled_threads), fmt_dur(span_ns)),
+        _ => format!("{} · {samples} sample{}", stats.one_line(), if samples == 1 { "" } else { "s" }),
+    }
+}
+
 struct FnAgg {
     name_id: u32,
     count: usize,
@@ -504,6 +524,17 @@ mod tests {
         // A wide one shows the name whole, padded no further than it needs.
         assert_eq!(r.name_cols(400), long.chars().count());
         assert!(row(&r.screen_text(r.name_cols(400))).contains(&long));
+    }
+
+    #[test]
+    fn the_badge_counts_the_samples_and_stands_on_them_when_there_is_no_scope() {
+        let scopes = RectStats { count: 3, functions: 2, threads: 1, window_ns: 9_000, ..RectStats::default() };
+        assert_eq!(badge(&scopes, 0, 2, 5_000), scopes.one_line(), "no samples: the scopes' line as it was");
+        assert_eq!(badge(&scopes, 41, 2, 5_000), format!("{} · 41 samples", scopes.one_line()));
+        assert_eq!(badge(&scopes, 1, 1, 5_000), format!("{} · 1 sample", scopes.one_line()));
+        // No scope under the rectangle: the samples, over the rectangle's span.
+        assert_eq!(badge(&RectStats::default(), 41, 2, 2_500_000), "41 samples on 2 threads · 2.50 ms");
+        assert_eq!(samples_line(1, 1), "1 sample on 1 thread");
     }
 
     #[test]

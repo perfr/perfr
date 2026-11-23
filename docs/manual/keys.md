@@ -40,7 +40,7 @@ More also lists “Pan time: A / D”, “Zoom: W / S” and “Scroll tracks: �
 | Left-drag | A thread’s sample bar | Select that thread’s samples |
 | Right-drag | Anywhere, including the ruler | Select every thread’s samples in the range |
 | Shift+drag | Sample bar or right-drag | Add to the sample selection |
-| Ctrl+drag or ⌘+drag | Tracks | Marquee-select scopes and copy the report. Does not zoom |
+| Ctrl+drag or ⌘+drag | Tracks | Marquee-select scopes and copy the report, and put the sampling report over the samples inside. Does not zoom |
 | Double-click | A scope | Zoom to 1.1× its duration |
 | Double-click | Ruler | Fit, same as Home |
 | Click | Thread header | Focus that thread, or release it |

@@ -420,8 +420,9 @@ opens on first load with a service and closes with its ×. Its rows:
   scoped to the thread. A **right-drag anywhere** -- the ruler, a bar, or
   empty space -- selects every thread's samples in the window, drawn
   full-height. Ctrl+drag (or ⌘+drag) draws a marquee over scopes and
-  copies a text report; it does not zoom. Several drags
-  accumulate (Shift adds).
+  copies a text report; it does not zoom. The samples inside the
+  marquee, on the threads whose tracks it crosses, become the
+  selection as well. Several drags accumulate (Shift adds).
 - **Hook from the report.** Right-clicking a function in the Flat report
   or in a call tree offers "Hook function for dynamic instrumentation"
   (or "Unhook function"). The function joins the capture row's hook list,

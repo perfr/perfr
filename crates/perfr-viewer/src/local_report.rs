@@ -28,18 +28,27 @@ pub type Ranges = [(u64, u64, Option<u32>)];
 /// The callstacks inside `ranges`: `(tid, frames outermost first)` with how
 /// many samples had exactly that stack, plus the sample total and span.
 fn fold(index: &TrackIndex, ranges: &Ranges) -> (HashMap<(u32, Vec<u32>), u64>, u64, u64, u64) {
-    let inside = |tid: u32, t: u64| {
-        ranges.is_empty() || ranges.iter().any(|(a, b, r)| t >= *a && t <= *b && r.is_none_or(|x| x == tid))
-    };
     // (tid, time) -> frames by depth
     let mut by_sample: HashMap<(u32, u64), Vec<(u8, u32)>> = HashMap::new();
     let mut total = 0u64;
     let (mut first, mut last) = (u64::MAX, 0u64);
     for (key, lane) in index.lanes() {
+        if key.kind != kind::SAMPLE && key.kind != kind::FUNCTION_CALL {
+            continue;
+        }
+        // A lane is one thread's, so only the windows on that thread (or on
+        // every thread) can hold its events. A rectangle is a window a
+        // thread: without this each event was tried against every thread's.
+        let mine: Vec<(u64, u64)> =
+            ranges.iter().filter(|(_, _, r)| r.is_none_or(|x| x == key.tid)).map(|(a, b, _)| (*a, *b)).collect();
+        if !ranges.is_empty() && mine.is_empty() {
+            continue;
+        }
+        let inside = |t: u64| ranges.is_empty() || mine.iter().any(|(a, b)| t >= *a && t <= *b);
         match key.kind {
             kind::SAMPLE => {
                 for e in lane.events() {
-                    if inside(e.tid, e.start_ns) {
+                    if inside(e.start_ns) {
                         total += 1;
                         first = first.min(e.start_ns);
                         last = last.max(e.start_ns);
@@ -48,7 +57,7 @@ fn fold(index: &TrackIndex, ranges: &Ranges) -> (HashMap<(u32, Vec<u32>), u64>, 
             }
             kind::FUNCTION_CALL => {
                 for e in lane.events() {
-                    if e.extra == perfr_live_event::extra::SAMPLED_FRAME && inside(e.tid, e.start_ns) {
+                    if e.extra == perfr_live_event::extra::SAMPLED_FRAME && inside(e.start_ns) {
                         by_sample.entry((e.tid, e.start_ns)).or_default().push((e.depth, e.name_id));
                     }
                 }

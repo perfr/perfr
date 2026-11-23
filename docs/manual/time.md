@@ -30,7 +30,9 @@ Click a row for its duration histogram, on a log scale, pinned under the table. 
 
 Right-drag a range and the flame graph and the trees recompute for that window, across every thread. Left-drag on one thread’s sample bar limits the report to that thread. Shift adds another range. The Selection tab is that report; More → “Rectangle selection report” opens it too.
 
-The rectangle from Ctrl+drag or ⌘+drag is a different gesture. It gathers scopes (manual scopes and hooked calls, not samples or scheduler slices), shows the summary, and copies the text.
+The rectangle from Ctrl+drag or ⌘+drag does both. It gathers scopes (manual scopes and hooked calls, not samples or scheduler slices), shows the summary, and copies the text. It also selects the samples inside it: the rectangle's time span on every thread whose track it crosses, so Flat, Flame, Top-down and Bottom-up recompute for those threads over that span. A thread counts when the rectangle touches its track or its async block. Graphs, cores and the process row belong to no thread, and a rectangle over those alone leaves the report as it was.
+
+The rectangle's readout counts the samples after the scopes, and the Selection tab has a **Sampling report** button that opens Flat on them. A rectangle that holds samples and no scope opens Flat by itself. The selected spans are marked on each thread's sample bar. Clearing the rectangle, or Escape, puts the report back over what it was. A right-drag or a drag on a sample bar afterwards replaces the rectangle's samples, and Shift adds to them. The Self pane's rectangle lists scopes only: the viewer's own frames are not sampled.
 
 @clip 08-selection-report | Time-range selection | Right-drag selecting a time range so the report recomputes for that window
 

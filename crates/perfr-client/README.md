@@ -89,7 +89,9 @@ Other global shortcuts are inactive while typing in a text field.
 Inspector shares the resizable right pane with function reports and holds viewer
 statistics, FPS, stream rate, ring settings and symbol-loading errors/retry.
 Ctrl-drag over scopes opens the rectangle report in the same pane's **Selection**
-tab. Copy and clear remain available there.
+tab. Copy and clear remain available there. The sampling tabs are then over the
+samples inside the rectangle, on the threads whose tracks it crosses; the
+Selection tab's **Sampling report** button opens them.
 
 Symbol status shows a live elapsed timer while loading, then the final count and
 service-measured duration. Linux reports counts as modules finish indexing; the

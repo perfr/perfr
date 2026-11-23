@@ -572,7 +572,7 @@ fn a_selection_on_an_opened_stream_is_reported_from_the_file() {
     page.frames(2);
     // Select the first two samples: nothing but this page can answer for
     // them, and the service is never asked, so its report would never come.
-    page.app.sample_sels.push(TimeMeasure { start_ns: 4_000_000, stop_ns: 6_500_000, label_y: 0.0, sample_tid: None });
+    page.app.sample_sels.push(TimeMeasure { start_ns: 4_000_000, stop_ns: 6_500_000, label_y: 0.0, sample_tid: None, from_rect: false });
     page.frames(2);
     assert_eq!(page.app.sampling_ranges.len(), 1);
     assert_eq!(page.app.sampling.as_ref().map(|r| r.samples), Some(2));
@@ -1594,7 +1594,7 @@ fn app_with_everything_set() -> PerfrLiveApp {
     app.accept_stream(capture_stream(status_frame(false, false), vec![scope(100, 101, 5_000, 1_000, 7)]));
     app.tracks.ensure_catalogue(&app.index);
     let pick = ScopePick::from_event(scope(100, 101, 5_000, 1_000, 7));
-    let measure = TimeMeasure { start_ns: 5_000, stop_ns: 5_500, label_y: 0.0, sample_tid: None };
+    let measure = TimeMeasure { start_ns: 5_000, stop_ns: 5_500, label_y: 0.0, sample_tid: None, from_rect: false };
     app.selected = Some(pick);
     app.hover = Some(pick);
     app.selected_thread = Some((100, 101));
@@ -1911,7 +1911,7 @@ fn a_capture_that_stops_asks_for_its_report_once() {
     page.app.start_record();
     page.app.apply_status(service_status(true));
     page.frames(3);
-    page.app.sample_sels.push(TimeMeasure { start_ns: 1, stop_ns: 2, label_y: 0.0, sample_tid: None });
+    page.app.sample_sels.push(TimeMeasure { start_ns: 1, stop_ns: 2, label_y: 0.0, sample_tid: None, from_rect: false });
     page.frames(2);
     let asked = page.app.report_requests;
     page.app.stop_record();
@@ -1923,12 +1923,144 @@ fn a_capture_that_stops_asks_for_its_report_once() {
     assert!(page.app.sample_sels.is_empty() && page.app.sampling_ranges.is_empty(), "the report is over the whole capture");
 }
 
+/// Three threads with a 5 ms scope each from 2 ms, and samples: thread 101
+/// at 2.5, 3.5 and 7.5 ms, thread 102 at 3 ms, thread 103 at 3, 4 and 8.5 ms.
+fn sampled_three_thread_page() -> Page {
+    let at = |tid: u32, tenths_ms: u64| sample(100, tid, tenths_ms * 100_000);
+    three_thread_page_with(vec![at(101, 25), at(101, 35), at(101, 75), at(102, 30), at(103, 30), at(103, 40), at(103, 85)])
+}
+
+/// The top and bottom, in the timeline's body, of thread `tid`'s track.
+fn track_band(page: &Page, tid: u32) -> (f32, f32) {
+    page.app
+        .tracks
+        .rows()
+        .iter()
+        .find_map(|r| match r.id {
+            RowId::Thread(t) if t.tid == tid => Some((r.y, r.y + r.height)),
+            _ => None,
+        })
+        .expect("the thread has a track")
+}
+
+/// Commits a rectangle over `ms.0..ms.1` of the capture and `y.0..y.1` of
+/// the body, as the release of a Ctrl-drag does.
+fn select_rect(page: &mut Page, ms: (f32, f32), y: (f32, f32)) {
+    // A body 1000 px wide showing 0..10 ms: 100 px a millisecond.
+    (page.app.t0, page.app.t1) = (0.0, 10_000_000.0);
+    let body = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 600.0));
+    let ctx = page.ctx.clone();
+    page.app.commit_rect_selection(Pos2::new(ms.0 * 100.0, y.0), Pos2::new(ms.1 * 100.0, y.1), body, &ctx);
+}
+
+#[test]
+fn a_rectangle_selects_the_samples_of_the_threads_it_crosses() {
+    let mut page = sampled_three_thread_page();
+    let (top, _) = track_band(&page, 101);
+    let (_, bottom) = track_band(&page, 102);
+    assert!(top < bottom, "101 is drawn above 102");
+    select_rect(&mut page, (2.0, 5.0), (top + 1.0, bottom - 1.0));
+    let rect = page.app.rect_result.clone().expect("the rectangle is kept");
+    // 101 at 2.5 and 3.5 ms and 102 at 3 ms: not 101's at 7.5 ms, which is
+    // after the rectangle, nor 103's, whose track it does not reach.
+    assert_eq!((rect.samples, rect.sampled_threads), (3, 2));
+    assert_eq!(rect.stats.count, 2, "the scopes it covers are still listed");
+    assert_eq!(page.app.report_tab, ReportTab::Selection);
+    page.frames(2);
+    let mut ranges = page.app.sampling_ranges.clone();
+    ranges.sort();
+    assert_eq!(ranges, vec![(rect.t0_ns, rect.t1_ns, Some(101)), (rect.t0_ns, rect.t1_ns, Some(102))]);
+    assert_eq!(page.app.local_sample_count, 3);
+    assert_eq!(describe_selection(&page.app.sampling_ranges), "2 threads, 3.0 ms selected");
+    // The rectangle's selection goes with the rectangle.
+    page.app.clear_rect_result();
+    page.frames(2);
+    assert!(page.app.sample_sels.is_empty() && page.app.sampling_ranges.is_empty(), "the report is over the whole capture again");
+}
+
+#[test]
+fn a_rectangle_replaces_a_dragged_selection_and_leaves_a_later_one_when_it_goes() {
+    let mut page = sampled_three_thread_page();
+    let dragged = TimeMeasure { start_ns: 1, stop_ns: 2, label_y: 0.0, sample_tid: None, from_rect: false };
+    page.app.sample_sels.push(dragged);
+    let (top, bottom) = track_band(&page, 103);
+    select_rect(&mut page, (2.0, 5.0), (top + 1.0, bottom - 1.0));
+    assert_eq!(page.app.sample_sels.len(), 1);
+    assert!(page.app.sample_sels[0].from_rect && page.app.sample_sels[0].sample_tid == Some(103));
+    // A Shift-drag adds to it; clearing the rectangle takes only its own.
+    page.app.sample_sels.push(dragged);
+    page.app.clear_rect_result();
+    assert_eq!(page.app.sample_sels.len(), 1);
+    assert!(!page.app.sample_sels[0].from_rect);
+}
+
+#[test]
+fn a_rectangle_over_samples_and_no_scope_opens_the_sampling_report() {
+    let mut page = sampled_three_thread_page();
+    page.app.report_open = false;
+    let (top, bottom) = track_band(&page, 103);
+    // 8 to 9.5 ms: the scopes ended at 7, and 103 was sampled at 8.5.
+    select_rect(&mut page, (8.0, 9.5), (top + 1.0, bottom - 1.0));
+    let rect = page.app.rect_result.clone().unwrap();
+    assert_eq!((rect.stats.count, rect.samples, rect.sampled_threads), (0, 1, 1));
+    assert!(page.app.report_open);
+    assert_eq!(page.app.report_tab, ReportTab::Flat);
+    // Already on a tab that reads samples: it is left where it is.
+    page.app.report_tab = ReportTab::BottomUp;
+    select_rect(&mut page, (8.0, 9.5), (top + 1.0, bottom - 1.0));
+    assert_eq!(page.app.report_tab, ReportTab::BottomUp);
+}
+
+#[test]
+fn a_rectangle_over_no_thread_leaves_the_sampling_selection_alone() {
+    let mut page = sampled_three_thread_page();
+    let dragged = TimeMeasure { start_ns: 1, stop_ns: 2, label_y: 0.0, sample_tid: None, from_rect: false };
+    page.app.sample_sels.push(dragged);
+    let process = page
+        .app
+        .tracks
+        .rows()
+        .iter()
+        .find(|r| matches!(r.id, RowId::Process(_)))
+        .map(|r| (r.y + 1.0, r.y + r.height - 1.0))
+        .expect("the process has a header row");
+    select_rect(&mut page, (2.0, 5.0), process);
+    let rect = page.app.rect_result.clone().unwrap();
+    assert_eq!((rect.samples, rect.sampled_threads), (0, 0));
+    assert_eq!(page.app.sample_sels.len(), 1);
+    assert!(!page.app.sample_sels[0].from_rect);
+}
+
+#[test]
+fn a_rectangle_on_an_opened_stream_is_reported_from_the_file() {
+    let frame = |tid: u32, at_ns: u64| LiveEvent {
+        kind: kind::FUNCTION_CALL,
+        extra: perfr_live_event::extra::SAMPLED_FRAME,
+        ..scope(100, tid, at_ns, 1_000_000, 7)
+    };
+    let mut events = Vec::new();
+    for (tid, at_ns) in [(101, 2_500_000), (101, 3_500_000), (101, 7_500_000), (102, 3_000_000)] {
+        events.push(sample(100, tid, at_ns));
+        events.push(frame(tid, at_ns));
+    }
+    let mut page = Page::with(|app| app.apply_status(service_status(false)));
+    page.app.accept_stream(capture_stream(status_frame(false, false), events));
+    page.frames(3);
+    assert_eq!(page.app.sampling.as_ref().map(|r| r.samples), Some(4), "the whole file to begin with");
+    let (top, bottom) = track_band(&page, 101);
+    select_rect(&mut page, (2.0, 5.0), (top + 1.0, bottom - 1.0));
+    page.frames(2);
+    let report = page.app.sampling.as_ref().expect("the file answers for the rectangle");
+    assert_eq!(report.samples, 2, "thread 101's two samples inside the rectangle");
+    assert_eq!(report.rows.iter().map(|r| (r.name.as_str(), r.self_count)).collect::<Vec<_>>(), vec![("work", 2)]);
+}
+
 /// A page holding a stream, with a time range selected and the Share
 /// dialog at its confirm step over the held bytes.
 fn share_confirm_app(stream_bytes: Vec<u8>) -> PerfrLiveApp {
     let mut app = static_app();
     app.accept_stream(stream_bytes);
-    app.sample_sels = vec![TimeMeasure { start_ns: 5_000_000_000, stop_ns: 5_500_000_000, label_y: 0.0, sample_tid: None }];
+    app.sample_sels = vec![TimeMeasure { start_ns: 5_000_000_000, stop_ns: 5_500_000_000, label_y: 0.0, sample_tid: None, from_rect: false }];
     app.share_open = true;
     app.share_ui = ShareUi::Confirm;
     app.share_draft = Some(ShareDraft::loaded());

@@ -1559,14 +1559,19 @@ struct RectResult {
     /// The report as the pane shows it, with the name column it was written
     /// for: long names elided so the numbers after them stay in view.
     screen_text: (usize, String),
+    /// The samples inside the rectangle, which the sampling report is now
+    /// over, and how many threads' tracks it crosses.
+    samples: u64,
+    sampled_threads: usize,
 }
 
 /// A marquee's stats for `window.__perfr_sel`, or null.
 fn rect_json(rect: &Option<RectResult>) -> String {
     match rect {
         Some(r) => format!(
-            "{{\"count\":{},\"functions\":{},\"threads\":{},\"total_ns\":{},\"window_ns\":{}}}",
+            "{{\"count\":{},\"functions\":{},\"threads\":{},\"total_ns\":{},\"window_ns\":{},\"samples\":{},\"sampled_threads\":{}}}",
             r.stats.count, r.stats.functions, r.stats.threads, r.stats.total_ns, r.stats.window_ns,
+            r.samples, r.sampled_threads,
         ),
         None => "null".to_string(),
     }
@@ -1585,6 +1590,10 @@ struct TimeMeasure {
     /// across the process. Dragging anywhere else keeps the process-wide
     /// meaning, which is what the ruler and the empty space below tracks do.
     sample_tid: Option<u32>,
+    /// Selected by the rectangle, one for each thread it crosses, not by a
+    /// drag along the time axis: it goes when the rectangle does, and is
+    /// drawn on its thread's sample bar or not at all.
+    from_rect: bool,
 }
 
 /// The four ways perfr lets you read a capture's samples.
@@ -1659,6 +1668,11 @@ impl ReportTab {
             ReportTab::BottomUp => "bottom_up",
             _ => "top_down",
         }
+    }
+
+    /// Whether the tab shows the sampling report over the selection.
+    fn reads_samples(self) -> bool {
+        matches!(self, ReportTab::Flat | ReportTab::Flame | ReportTab::TopDown | ReportTab::BottomUp)
     }
 }
 
@@ -9002,7 +9016,7 @@ impl PerfrLiveApp {
             self.live_focus = None;
             self.clear_selection();
             self.rect_drag = None;
-            self.rect_result = None;
+            self.clear_rect_result();
         }
         let (a, d, left, right, up, down, w, s) = ctx.input(|i| {
             // Ctrl+S, Ctrl+A, Cmd+W and the like are the browser's.
@@ -9324,7 +9338,7 @@ impl PerfrLiveApp {
         if let Some(p) = response.interact_pointer_pos() {
             let local = Pos2::new(p.x - body.left(), p.y - body.top());
             self.rect_drag = Some((local, local));
-            self.rect_result = None;
+            self.clear_rect_result();
             self.follow = false;
         }
     }
@@ -9347,15 +9361,45 @@ impl PerfrLiveApp {
         }
     }
 
+    /// Forgets the committed rectangle, and with it the samples it selected.
+    fn clear_rect_result(&mut self) {
+        self.rect_result = None;
+        self.sample_sels.retain(|m| !m.from_rect);
+    }
+
+    /// Makes the samples inside a rectangle the sampling report's selection:
+    /// its time span on every thread whose track it crosses, the way a drag
+    /// along one thread's sample bar selects that thread's. Returns how many
+    /// samples and threads that is. A rectangle over no thread selects
+    /// nothing, and the report stays over what it was.
+    fn select_samples_in_rect(&mut self, t0_ns: u64, t1_ns: u64, y0: f32, y1: f32) -> (u64, usize) {
+        let sels: Vec<TimeMeasure> = self
+            .tracks
+            .threads_in_band(y0, y1)
+            .into_iter()
+            .filter(|t| !is_self_pid(t.pid))
+            .map(|t| TimeMeasure { start_ns: t0_ns, stop_ns: t1_ns, label_y: y0, sample_tid: Some(t.tid), from_rect: true })
+            .collect();
+        if sels.is_empty() || t0_ns == t1_ns {
+            return (0, 0);
+        }
+        let ranges: Vec<(u64, u64, Option<u32>)> = sels.iter().map(|m| (m.start_ns, m.stop_ns, m.sample_tid)).collect();
+        let samples = count_samples_in(&self.index, &ranges);
+        self.measure = None;
+        self.sample_sels = sels;
+        (samples, ranges.len())
+    }
+
     /// Gather the scopes the marquee covers from this frame's on-screen
     /// instances, summarise them, copy the text to the clipboard, and keep the
     /// rectangle drawn with its stats. `a`/`b` are body-local points; the
     /// horizontal extent is stored as a time span so the rectangle stays locked
-    /// to the capture under a later pan or zoom.
+    /// to the capture under a later pan or zoom. The samples inside it become
+    /// the sampling report's selection.
     fn commit_rect_selection(&mut self, a: Pos2, b: Pos2, body: Rect, ctx: &egui::Context) {
         // Too small to be a drag: treat it as a click that clears the marquee.
         if (a.x - b.x).abs() < 3.0 && (a.y - b.y).abs() < 3.0 {
-            self.rect_result = None;
+            self.clear_rect_result();
             return;
         }
         let t0 = self.t0.max(0.0) as u64;
@@ -9379,7 +9423,18 @@ impl PerfrLiveApp {
         // Body-local x -> absolute -> capture time, so the band re-projects.
         let t0_ns = time_at_x(body.left() + a.x.min(b.x), body, self.t0, self.t1);
         let t1_ns = time_at_x(body.left() + a.x.max(b.x), body, self.t0, self.t1);
-        if stats.count > 0 { self.open_right_tab(ReportTab::Selection); }
+        // The Self pane's timeline is the viewer's own frames: no samples.
+        let (samples, sampled_threads) = if self.in_self_pane {
+            (0, 0)
+        } else {
+            self.select_samples_in_rect(t0_ns, t1_ns, a.y.min(b.y), a.y.max(b.y))
+        };
+        if stats.count > 0 {
+            self.open_right_tab(ReportTab::Selection);
+        } else if samples > 0 && !(self.report_open && self.report_tab.reads_samples()) {
+            // Nothing for the Selection tab to list: show what was sampled.
+            self.open_right_tab(ReportTab::Flat);
+        }
         // Both timelines keep their own marquee (the Self pane draws on
         // swapped-in state); the Selection tab follows the newest one.
         self.rect_in_self_pane = self.in_self_pane;
@@ -9392,6 +9447,8 @@ impl PerfrLiveApp {
             report_text: text,
             report,
             screen_text: (0, String::new()),
+            samples,
+            sampled_threads,
         });
     }
 
@@ -9431,7 +9488,7 @@ impl PerfrLiveApp {
             let x0 = x_at_time(res.t0_ns, body, view_t0, view_t1);
             let x1 = x_at_time(res.t1_ns, body, view_t0, view_t1);
             let rect = outline([x0, body.top() + res.y0, x1, body.top() + res.y1], 26);
-            let mut line = res.stats.one_line();
+            let mut line = crate::rect_select::badge(&res.stats, res.samples, res.sampled_threads, res.t1_ns.saturating_sub(res.t0_ns));
             if res.stats.count > 0 && self.now_s - self.rect_copied_at < 1.5 {
                 line.push_str("  ·  copied ✓");
             }
@@ -9564,6 +9621,7 @@ impl PerfrLiveApp {
                     stop_ns: t,
                     label_y: p.y,
                     sample_tid,
+                    from_rect: false,
                 });
                 self.measure_dragging = true;
                 self.follow = false;
@@ -9917,24 +9975,32 @@ impl PerfrLiveApp {
         // Drawn outside the Self pane's swap, so its marquee is in `self_tl`.
         let from_self = self.rect_in_self_pane && self.self_pane_open && self.self_tl.rect_result.is_some();
         let slot = if from_self { &mut self.self_tl.rect_result } else { &mut self.rect_result };
-        let Some(res) = slot.as_mut().filter(|r| r.stats.count > 0 && !r.report_text.is_empty()) else {
+        let listed = |r: &RectResult| r.stats.count > 0 && !r.report_text.is_empty();
+        let Some(res) = slot.as_mut().filter(|r| listed(r) || r.samples > 0) else {
             ui.label("Ctrl-drag over scopes to select a rectangle, in the capture or the Self pane.");
             return;
         };
-        // Written again only when the pane's width in characters changes.
-        let char_w = ui.fonts(|f| f.glyph_width(&FontId::monospace(11.0), '0')).max(1.0);
-        let name_cols = res.report.name_cols((ui.available_width() / char_w).floor() as usize);
-        if res.screen_text.0 != name_cols || res.screen_text.1.is_empty() {
-            res.screen_text = (name_cols, res.report.screen_text(name_cols));
+        let has_scopes = listed(res);
+        if has_scopes {
+            // Written again only when the pane's width in characters changes.
+            let char_w = ui.fonts(|f| f.glyph_width(&FontId::monospace(11.0), '0')).max(1.0);
+            let name_cols = res.report.name_cols((ui.available_width() / char_w).floor() as usize);
+            if res.screen_text.0 != name_cols || res.screen_text.1.is_empty() {
+                res.screen_text = (name_cols, res.report.screen_text(name_cols));
+            }
         }
         let (report_text, screen_text, one_line) =
             (res.report_text.clone(), res.screen_text.1.clone(), res.stats.one_line());
+        let sampled = (res.samples > 0).then(|| crate::rect_select::samples_line(res.samples, res.sampled_threads));
         let copied_at = if from_self { self.self_tl.rect_copied_at } else { self.rect_copied_at };
         ui.horizontal(|ui| {
             let clear = ui.small_button("Clear").on_hover_text("Clear the selection");
             note_ui_rect("selection:clear", clear.rect);
             if clear.clicked() {
-                if from_self { self.self_tl.rect_result = None } else { self.rect_result = None }
+                if from_self { self.self_tl.rect_result = None } else { self.clear_rect_result() }
+            }
+            if !has_scopes {
+                return;
             }
             let flashing = self.now_s - copied_at < 1.5;
             let copy = ui.small_button(if flashing { "Copied" } else { "Copy" })
@@ -9947,6 +10013,21 @@ impl PerfrLiveApp {
         });
         if from_self {
             ui.label(RichText::new("In the Self pane: the viewer's own frames").color(theme::ACCENT()).size(11.0));
+        }
+        // The sampling tabs are over the rectangle too: say so, one click away.
+        if let Some(line) = sampled {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(line).color(theme::MUTED()).size(11.0));
+                let open = ui.small_button("Sampling report").on_hover_text("What was sampled inside the rectangle");
+                note_ui_rect("selection:sampling", open.rect);
+                if open.clicked() {
+                    self.open_right_tab(ReportTab::Flat);
+                }
+            });
+        }
+        if !has_scopes {
+            ui.label(RichText::new("No scopes in the rectangle.").color(theme::MUTED()).size(11.0));
+            return;
         }
         ui.label(RichText::new(one_line).color(theme::MUTED()).size(11.0));
         ui.add_space(6.0);
@@ -15995,6 +16076,10 @@ fn paint_selection_overlay(
         .copied()
         .chain(active)
         .filter(|m| m.start_ns != m.stop_ns)
+        // A rectangle's selection marks the sample bars it counts. Where
+        // there is no bar to mark, the rectangle itself is the picture: a
+        // full-height band would say every thread.
+        .filter(|m| !m.from_rect || m.sample_tid.and_then(sample_band).is_some())
         .collect();
     if bands.is_empty() {
         return;
@@ -16136,6 +16221,10 @@ fn describe_selection(ranges: &[(u64, u64, Option<u32>)]) -> String {
             format!("thread {tid}, {:.1} ms selected", (b.saturating_sub(*a)) as f64 / 1e6)
         }
         [(a, b, None)] => format!("over {:.1} ms selected", (b.saturating_sub(*a)) as f64 / 1e6),
+        // One window on several threads is what a rectangle selects.
+        [(a, b, Some(_)), rest @ ..] if rest.iter().all(|(c, d, tid)| c == a && d == b && tid.is_some()) => {
+            format!("{} threads, {:.1} ms selected", ranges.len(), (b.saturating_sub(*a)) as f64 / 1e6)
+        }
         _ => format!("{} selections, {ms:.1} ms total", ranges.len()),
     }
 }

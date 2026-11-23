@@ -37,12 +37,12 @@ These keys do nothing while a text field has focus, except **Escape**, which cle
 | Left-drag on a thread’s sample bar | Select that thread’s samples. The report recomputes for them |
 | Right-drag anywhere | Select every thread’s samples in that range (ruler, frame strip, bar, or empty space). The span’s length is written between two arrows under the ruler; when the span is narrower than that text, the arrows stand outside it pointing in and the text goes beside them |
 | Shift+drag | Add to the sample selection |
-| Ctrl+drag or ⌘+drag | Draw a rectangle over scopes. On release the scopes inside are summarised and copied to the clipboard. The per-function summary covers all of them; the individual list stops at 500 and says how many more there were |
+| Ctrl+drag or ⌘+drag | Draw a rectangle over scopes. On release the scopes inside are summarised and copied to the clipboard. The per-function summary covers all of them; the individual list stops at 500 and says how many more there were. The sampling report is then over the rectangle too: its time span, on the threads whose tracks it crosses |
 | Right-click a scope | Menu: **Sampling report for this scope**, **Highlight every instance** |
 
 Ctrl+drag does not zoom. The old note that said it did was wrong.
 
-**Escape** clears the scope search, a Live-row highlight, the selection, and a rectangle drag, all at once.
+**Escape** clears the scope search, a Live-row highlight, the selection, and a rectangle with the samples it selected, all at once.
 
 ## Frames
 

@@ -1333,6 +1333,23 @@ impl TrackStrip {
         self.row_at_y(y)
     }
 
+    /// The threads whose tracks the band from `y0` to `y1` crosses, top
+    /// first: a thread's row with the lanes packed under it, or its async
+    /// block. Graphs, cores and the process and machine rows are no
+    /// thread's time, and a band over those alone gives none.
+    pub fn threads_in_band(&self, y0: f32, y1: f32) -> Vec<ThreadId> {
+        let (top, bottom) = (y0.min(y1), y0.max(y1));
+        let mut seen: HashSet<ThreadId> = HashSet::new();
+        let mut out = Vec::new();
+        for row in &self.cached_rows {
+            let (RowId::Thread(t) | RowId::Async(t)) = row.id else { continue };
+            if row.y < bottom && row.y + row.height > top && seen.insert(t) {
+                out.push(t);
+            }
+        }
+        out
+    }
+
     pub fn thread_band(&self, t: ThreadId) -> Option<(f32, f32)> {
         let y = *self.y.get(&RowId::Thread(t))?;
         Some((y, self.thread_block_h(t)))

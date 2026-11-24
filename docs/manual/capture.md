@@ -23,6 +23,7 @@ Settings, **COLLECT**:
 | **API** | Manual perfr.h API scopes | Scopes from `perfr.h`, Rust and Python |
 | **Sample** | Callstack sampling | A stack sample per period |
 | **Health** | Node Health | The machine's CPU, memory, pressure, disks, network and GPU, twice a second |
+| **Children** | Sample the processes the captured ones launch | Stack samples of every process a captured one has launched or launches, as of the processes themselves. On by default, Linux services |
 | **Python** | When the target is a Python program | Its Python functions in the stack samples, Python's names for its threads, and who holds the GIL |
 | **Output** | What the program prints | Its standard output and error as log lines. Off by default |
 | **GPU** | GPU kernels | Every CUDA kernel and memory copy, as a span on a GPU lane under the thread that launched it, when the GPU ran it. Off by default |
@@ -30,6 +31,24 @@ Settings, **COLLECT**:
 The field beside Sample is a period in milliseconds (`ms`). It starts at `1.0`. The viewer sends it as `samples_per_second`. The service on main does not read that field: a Linux or Windows capture samples at a fixed 1 kHz.
 
 > The COLLECT switches are sent with the capture start. On this service a Linux capture always samples, always opens the scheduler and thread-state rings when the kernel allows it, and always reads manual scopes; a Windows capture does the same through the kernel logger when the service is elevated. Turning a switch off does not drop that stream yet.
+
+## Several processes
+
+A capture follows the processes it was started on and the processes those launch. Nothing has to be set up for the second half: a build of a program that forks workers, a script that starts a server, a launcher that starts the game, are sampled whole.
+
+**What a process launches.** With **Children** on (the default), every process a captured one has launched is sampled with it: the ones already running when Record is pressed, and each new one from the pass in which the kernel announces it, a few milliseconds after it starts. Each gets its own rows, under its own name, with its own callstacks: a child that is another program (`fork`, then `exec`) is named and unwound as that program, a child that is a copy of its parent (`fork` alone, as Python's `multiprocessing` does on Linux) as the copy, and a Python child has its Python functions in its samples like a Python target. The sampling report covers them all; select one thread's samples, or drag a rectangle over the rows of one process, to read one of them. With **Children** off the children keep their rows and thread states and have no samples. The body field is `sample_children`.
+
+**Processes that did not launch each other.** A Python script that ticks a native simulation started from another terminal is two processes neither of which is the other's child. The process list takes more than one: the row of a process selects it, as before, and the box at the left of any other row, or a **Ctrl+click** on the row, ticks that one as well. The list stays open while boxes are ticked, and the ticked processes move to its top, where they stay while the rest is sorted by CPU again every second. The button then reads `1234  python3  +1`, and its hover lists the others.
+
+The *selected* process is the one whose functions the Functions tab lists and whose functions are hooked: **Output**, **GPU**, auto-profiling and the hook crash report are about it too. The others are sampled, given rows and followed into their children. Clicking the row of a ticked process makes it the selected one and keeps the rest; unticking the selected one hands its place to the first of the others.
+
+The capture ends by itself when the last of the processes it was started on has exited. One of several exiting does not end it.
+
+Up to 64 processes are sampled at once. A target that launches a compiler a millisecond does not take the capture with it: the children past the limit get rows and no samples, and the service's log says how many. A child's unwind tables and symbols are read on a thread of the service's own, one process at a time, and its samples wait for them with their timestamps. A child that detaches from its parent (a double `fork`) within a few milliseconds of starting can be missed.
+
+The body fields are `pid` for the selected process and `pids` for all of them. `GET /api/status` answers with `target_pid` and `target_pids`. A viewer opened on a capture that was started elsewhere ticks what the capture was started on. In `window.__perfr_sel` the two are `selected_pid` and `also_pids`, and in `window.__perfr_ui` a row of the list is `process:<pid>`, its box `process-tick:<pid>`, and `ticked-process:<pid>` is there for the ones that are ticked.
+
+Sampling several processes is Linux. On Windows the samples are the selected process's; the others, and what any of them launches, have rows and thread states. On macOS there is no sampling to share.
 
 ## Node Health
 

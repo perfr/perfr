@@ -551,9 +551,22 @@ impl Mcp {
         let program_output = arg_bool(args, "program_output").unwrap_or(false);
         let gpu_kernels = arg_bool(args, "gpu_kernels").unwrap_or(false);
         let rate = arg_f64(args, "samples_per_second").unwrap_or(1000.0).clamp(1.0, 10_000.0);
+        // Other processes to capture with `pid`: sampled and given rows
+        // like it. The hooks stay in `pid`.
+        let mut also_pids: Vec<u32> = Vec::new();
+        for other in args.get("also_pids").and_then(|v| v.as_array()).into_iter().flatten() {
+            let other = json_u64(other).and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0);
+            let other = other.ok_or("also_pids is a list of process ids")?;
+            if other != pid && !also_pids.contains(&other) {
+                also_pids.push(other);
+            }
+        }
+        let sample_children = arg_bool(args, "sample_children").unwrap_or(true);
         let hooks = self.session.lock().map_err(|_| "session poisoned".to_string())?.hooks.clone();
         let body = json!({
             "pid": pid,
+            "pids": std::iter::once(pid).chain(also_pids.iter().copied()).collect::<Vec<u32>>(),
+            "sample_children": sample_children,
             "enable_api": true,
             "sampling": sampling,
             "context_switches": scheduler,
@@ -570,6 +583,8 @@ impl Mcp {
             "started": true,
             "supported": true,
             "pid": pid,
+            "also_pids": also_pids,
+            "sample_children": sample_children,
             "sampling": sampling,
             "scheduler": scheduler,
             "samples_per_second": rate,
@@ -915,6 +930,8 @@ pub fn tool_specs() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "pid": { "type": "integer", "description": "Defaults to the attached process." },
+                    "also_pids": { "type": "array", "items": { "type": "integer" }, "description": "Other processes to capture with pid, for a program that is several: each is sampled and gets its own rows, and perfr_sampling_report covers them all. The hooks stay in pid. Sampling several processes is Linux only; elsewhere the others get rows without samples." },
+                    "sample_children": { "type": "boolean", "description": "Also sample the processes the captured ones launch, the ones already running included. Linux only. Default true." },
                     "sampling": { "type": "boolean", "description": "Call-stack samples. Default on for Linux and Windows, unsupported on macOS." },
                     "scheduler": { "type": "boolean", "description": "Context switches and thread states. Default on for Linux and Windows, unsupported on macOS." },
                     "samples_per_second": { "type": "number", "description": "Sample rate. Default 1000. Clamped to 1..10000." },

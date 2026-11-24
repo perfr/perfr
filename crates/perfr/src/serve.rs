@@ -687,6 +687,15 @@ fn hook_list_lines(pid: i32, engine: crate::frida::Engine, hooks: &[HookSpec], s
 #[derive(Debug, PartialEq)]
 struct StartRequest {
     pid: i32,
+    /// The other processes of the capture, after `pid`: `pids` as sent,
+    /// without `pid` and without repeats. Sampled like `pid` and given rows
+    /// like it; the hooks, and everything else that is of one process, are
+    /// of `pid`. A request that names only `pids` has its first as `pid`.
+    also_pids: Vec<i32>,
+    /// Sample the processes the targets launch, the ones they have already
+    /// launched included. Absent means yes: work routinely lives in a child
+    /// process, and its rows are shown either way.
+    sample_children: bool,
     /// `dynamic_instrumentation_method`, as sent; see `frida::Engine::parse`.
     method: String,
     /// The function ids ticked in the hook picker.
@@ -726,8 +735,22 @@ impl StartRequest {
     fn parse(body: &str) -> StartRequest {
         let value = serde_json::from_str::<serde_json::Value>(body).unwrap_or(serde_json::Value::Null);
         let flag = |name: &str| value.get(name).and_then(|v| v.as_bool());
+        let as_pid = |p: &serde_json::Value| p.as_i64().and_then(|p| i32::try_from(p).ok()).filter(|p| *p > 0);
+        let mut also_pids: Vec<i32> = Vec::new();
+        for pid in value.get("pids").and_then(|v| v.as_array()).into_iter().flatten().filter_map(as_pid) {
+            if !also_pids.contains(&pid) {
+                also_pids.push(pid);
+            }
+        }
+        let mut pid = value.get("pid").and_then(|p| p.as_i64()).unwrap_or(0) as i32;
+        if pid == 0 && !also_pids.is_empty() {
+            pid = also_pids.remove(0);
+        }
+        also_pids.retain(|other| *other != pid);
         StartRequest {
-            pid: value.get("pid").and_then(|p| p.as_i64()).unwrap_or(0) as i32,
+            pid,
+            also_pids,
+            sample_children: flag("sample_children").unwrap_or(true),
             method: value
                 .get("dynamic_instrumentation_method")
                 .and_then(|v| v.as_str())
@@ -958,6 +981,9 @@ fn open_bundle(
     let bounds = bundle.time_bounds();
     let start = bundle.slice_ns.map(|(a, _)| a).or(bounds.map(|(a, _)| a)).unwrap_or(0);
     target.store(bundle.target_pid as i32, Ordering::Relaxed);
+    // A file names one process; the others of the capture before are not
+    // this one's.
+    service.set_capture_targets(&[bundle.target_pid]);
     service.mark_capture_started(bundle.target_pid, start);
     for (id, name) in bundle.names() {
         service.intern_id(id, &name);
@@ -1039,6 +1065,451 @@ struct SampledThread {
 #[cfg(target_os = "linux")]
 fn retire_dead_threads(threads: &mut Vec<SampledThread>) {
     threads.retain(|t| !t.dead);
+}
+
+/// How many processes a capture samples at once: the ones it was started
+/// on and the ones those launch. Each costs two rings per thread, an
+/// unwinder and its symbols, so a target that is a build system, launching
+/// a compiler a millisecond, does not take the capture with it: the
+/// children past this are not sampled, and the capture says how many.
+#[cfg(target_os = "linux")]
+const MAX_SAMPLED_PROCESSES: usize = 64;
+
+/// How many samples of one process wait, stacks and all, for an unwinder
+/// that is still being built (a child's, see [`SampledProcess`]). Four
+/// seconds of one busy thread; the ones past it are their sampled pc alone.
+#[cfg(target_os = "linux")]
+const MAX_HELD_FOR_UNWINDER: usize = 4096;
+
+/// How many launches of a child get a log line of their own.
+#[cfg(target_os = "linux")]
+const CHILDREN_LOGGED: u64 = 32;
+
+/// Opens the two rings of a sampled thread, and counts the ones the kernel
+/// refused.
+#[cfg(target_os = "linux")]
+struct RingOpener {
+    period_ns: u64,
+    sample_failures: RingOpenFailures,
+    task_failures: RingOpenFailures,
+}
+
+#[cfg(target_os = "linux")]
+impl RingOpener {
+    fn new(period_ns: u64) -> RingOpener {
+        RingOpener {
+            period_ns,
+            sample_failures: RingOpenFailures::default(),
+            task_failures: RingOpenFailures::default(),
+        }
+    }
+
+    /// One sampled thread = two per-task rings: the sampling ring, and a
+    /// task-event ring (`mmap_task`: PERF_RECORD_FORK / EXIT / MMAP for that
+    /// task) that says when the thread clones another, when it forks a
+    /// process and when it maps code (see the task-event block of the
+    /// loop). A fork record names the new tid and it is sampled from that
+    /// pass on, the way C++ perfr's tracer reacts to PERF_RECORD_FORK,
+    /// rather than found by polling /proc. A per-task event with `inherit`
+    /// would follow children by itself, but the kernel refuses to mmap one
+    /// (cpu -1 + inherit), and per-CPU inherited events cost threads x CPUs
+    /// rings. A slow /proc scan stays as the safety net for a clone that
+    /// lands between a thread's birth and its own task ring being armed; it
+    /// logs when it finds anything, so a gap would show.
+    ///
+    /// `sample_now` is false for the threads found during setup. A sampling
+    /// ring holds 65 ms of one thread's CPU, and the rest of the setup --
+    /// the unwinder, the scheduler rings, the hooks -- takes longer than
+    /// that before the first pass can read anything: a thread sampled from
+    /// here on kept those 65 ms and lost what followed, a few hundred
+    /// milliseconds of every busy thread at the start of every capture.
+    /// Their sampling is switched on where the loop starts instead. The task
+    /// rings are enabled here, so no thread born meanwhile goes unnoticed.
+    fn sample_thread(&mut self, threads: &mut Vec<SampledThread>, tid: i32, sample_now: bool) -> bool {
+        if threads.iter().any(|t| t.tid == tid && !t.dead) {
+            return false;
+        }
+        let sample = match perfr_perf_ring::ring::open_stack_sample(self.period_ns, SAMPLE_STACK_BYTES, tid, -1, 4096) {
+            Ok(sample) => sample,
+            Err(error) => {
+                self.sample_failures.note(format_args!("the sampling ring of thread {tid}"), &error);
+                return false;
+            }
+        };
+        if sample_now {
+            if let Err(error) = sample.enable() {
+                self.sample_failures.note(format_args!("the sampling ring of thread {tid}"), &error);
+                return false;
+            }
+        }
+        let task = match perfr_perf_ring::ring::open_mmap_task(tid, -1, 64) {
+            Ok(task) => Some(task),
+            Err(error) => {
+                // Sampled all the same; its forks, exit and new code are
+                // then found by the slower /proc scan or not at all.
+                self.task_failures.note(format_args!("the task-event ring of thread {tid}"), &error);
+                None
+            }
+        };
+        if let Some(task) = &task {
+            let _ = task.enable();
+        }
+        threads.push(SampledThread { tid, sample, task, dead: false });
+        true
+    }
+
+    /// Samples every thread of `pid` that is not sampled yet; how many
+    /// that was.
+    fn scan_threads(&mut self, pid: i32, threads: &mut Vec<SampledThread>, sample_now: bool) -> usize {
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else { return 0 };
+        let mut opened = 0;
+        for entry in tasks.flatten() {
+            if let Some(tid) = entry.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) {
+                if self.sample_thread(threads, tid, sample_now) {
+                    opened += 1;
+                }
+            }
+        }
+        opened
+    }
+}
+
+/// What the capture asks of the thread that builds unwinders and symbols.
+/// A process is named by the serial it was adopted under, not by its pid:
+/// a pid comes round again.
+#[cfg(target_os = "linux")]
+enum AttachJob {
+    /// The unwinder of a process with these maps.
+    Unwinder { serial: u64, maps: Arc<Vec<u8>> },
+    /// The symbols of a process: of these maps, or of its maps as they are
+    /// when the job is taken up.
+    Symbols { serial: u64, pid: i32, maps: Option<Arc<Vec<u8>>> },
+}
+
+#[cfg(target_os = "linux")]
+enum Attached {
+    Unwinder(u64, ProcessUnwinder),
+    Symbols(u64, Symbolizer),
+}
+
+/// The thread that builds what a sampled process needs before its samples
+/// can be unwound and named: one for the whole capture, taking the
+/// processes in turn.
+///
+/// The symbols never were loaded on the capture thread: a big split debug
+/// file would delay the whole capture, so it starts with an empty
+/// symbolizer and swaps the real one in. A child's unwinder is built here
+/// too. Reading the unwind tables of everything a process maps is a few
+/// milliseconds for a small program and some hundreds for a Python
+/// interpreter with a framework loaded, and a target that forks eight
+/// workers would have stopped the capture thread, the one that has to be
+/// back at the kernel's rings every few milliseconds, for eight times that.
+///
+/// One thread, not one per process: a target that launches a process a
+/// millisecond then costs the service one core, and what cannot be built
+/// in time waits its turn.
+#[cfg(target_os = "linux")]
+struct AttachWorker {
+    jobs: std::sync::mpsc::Sender<AttachJob>,
+    built: std::sync::mpsc::Receiver<Attached>,
+}
+
+#[cfg(target_os = "linux")]
+impl AttachWorker {
+    fn start() -> Option<AttachWorker> {
+        let (jobs, todo) = std::sync::mpsc::channel::<AttachJob>();
+        let (done, built) = std::sync::mpsc::channel::<Attached>();
+        let spawned = std::thread::Builder::new().name("perfr-symbolize".to_string()).spawn(move || {
+            for job in todo {
+                // Something is always sent back: a process whose build
+                // panicked would otherwise wait for it to the capture's end.
+                let out = match job {
+                    AttachJob::Unwinder { serial, maps } => Attached::Unwinder(
+                        serial,
+                        std::panic::catch_unwind(|| ProcessUnwinder::from_maps_content(&maps))
+                            .unwrap_or_else(|_| ProcessUnwinder::from_maps_content(b"")),
+                    ),
+                    AttachJob::Symbols { serial, pid, maps } => Attached::Symbols(
+                        serial,
+                        std::panic::catch_unwind(|| match &maps {
+                            Some(maps) => Symbolizer::from_maps_content(maps),
+                            None => Symbolizer::for_pid(pid),
+                        })
+                        .unwrap_or_else(|_| Symbolizer::empty()),
+                    ),
+                };
+                // The capture is over: what is still queued is for nobody.
+                if done.send(out).is_err() {
+                    break;
+                }
+            }
+        });
+        match spawned {
+            Ok(_) => Some(AttachWorker { jobs, built }),
+            Err(error) => {
+                log::warn!("the symbol loads could not be started: {error}");
+                None
+            }
+        }
+    }
+}
+
+/// One sampled process's symbols, and which of its samples they can name.
+///
+/// Samples are not named until the symbolizer is ready: the empty one
+/// names every address as bare hex, so a function sampled both before and
+/// after the load split into a hex ghost and its real name. They are read
+/// and unwound from the first pass all the same (`drain_samples`), and
+/// their frames wait: they keep their timestamps and appear, correctly
+/// named, once the symbols land.
+///
+/// A process keeps mapping code while it is captured, so the first load is
+/// not the only one: each time the unwinder takes on a module mapped
+/// since, the symbolizer is built again from the maps as they are then --
+/// cheaply, the files it already read are cached -- and swapped in.
+#[cfg(target_os = "linux")]
+struct ProcessSymbols {
+    symbolizer: Symbolizer,
+    /// The instant up to which the symbolizer in hand can name samples:
+    /// zero until the first load lands, `u64::MAX` when it is current, and
+    /// otherwise when the first module it does not know was mapped.
+    named_through_ns: u64,
+    /// When the earliest module was mapped that no load has yet been
+    /// started for.
+    stale_since_ns: Option<u64>,
+    /// When the load under way was asked for.
+    load_started_ns: Option<u64>,
+}
+
+#[cfg(target_os = "linux")]
+impl ProcessSymbols {
+    fn new() -> ProcessSymbols {
+        ProcessSymbols {
+            symbolizer: Symbolizer::empty(),
+            named_through_ns: 0,
+            stale_since_ns: None,
+            load_started_ns: None,
+        }
+    }
+
+    /// Asks for a load. `asked_ns` is taken before the maps the load works
+    /// from are read, so it knows whatever was mapped before then. When no
+    /// load can be had the samples are named by address, not kept waiting.
+    fn request(&mut self, attach: Option<&AttachWorker>, serial: u64, pid: i32, maps: Option<Arc<Vec<u8>>>, asked_ns: u64) {
+        let sent = attach.is_some_and(|worker| worker.jobs.send(AttachJob::Symbols { serial, pid, maps }).is_ok());
+        if sent {
+            self.load_started_ns = Some(asked_ns);
+        } else {
+            self.named_through_ns = u64::MAX;
+        }
+    }
+
+    /// The load that new code asked for, once the one under way is in.
+    fn reload_if_stale(&mut self, attach: Option<&AttachWorker>, serial: u64, pid: i32) {
+        if self.stale_since_ns.is_some() && self.load_started_ns.is_none() {
+            self.stale_since_ns = None;
+            self.request(attach, serial, pid, None, crate::now_monotonic_ns());
+        }
+    }
+
+    /// A load finished: the samples unwound while it built get their names
+    /// in the next drain. Even a stripped binary resolves to module+offset
+    /// here, not bare hex.
+    fn landed(&mut self, built: Symbolizer) {
+        self.symbolizer = built;
+        let started_ns = self.load_started_ns.take().unwrap_or(0);
+        self.named_through_ns = match self.stale_since_ns {
+            // More code was mapped while this one was being built. It
+            // read the maps after it was asked for, so it knows whatever
+            // was mapped before that; the first module mapped later is
+            // where its knowledge ends.
+            Some(mapped_ns) => mapped_ns.max(started_ns),
+            None => u64::MAX,
+        };
+    }
+
+    /// Code was mapped at `mapped_ns` that the symbolizer in hand would
+    /// name by address: the samples from there on wait for the next load.
+    fn code_mapped(&mut self, mapped_ns: u64) {
+        self.named_through_ns = self.named_through_ns.min(mapped_ns);
+        self.stale_since_ns = Some(self.stale_since_ns.map_or(mapped_ns, |since| since.min(mapped_ns)));
+    }
+}
+
+/// One process under sampling: one the capture was started on, or one such
+/// a process launched. Everything a sample needs is the process's own --
+/// two processes have two address spaces, so an unwinder, a symbolizer and
+/// the cache of what an address resolved to cannot be shared between them.
+#[cfg(target_os = "linux")]
+struct SampledProcess {
+    /// What the attach worker's answers are addressed to.
+    serial: u64,
+    pid: i32,
+    /// The capture was started on it; the others are children.
+    target: bool,
+    threads: Vec<SampledThread>,
+    /// A ring opened when it was adopted. Without one (no permission) its
+    /// threads are not looked for again.
+    sampled: bool,
+    unwinder: Option<ProcessUnwinder>,
+    /// The unwinder is being built: the samples wait for it, stacks and all.
+    unwinder_pending: bool,
+    symbols: ProcessSymbols,
+    /// Sampled pcs repeat: a hot loop is the same few thousand addresses
+    /// over and over. Resolving one means two module scans, a symbol search
+    /// and two string allocations, then a hash of the name -- all to arrive
+    /// at an id that address already had. Remembered per address, for as
+    /// long as the symbolizer in hand is the same one.
+    pc_ids: crate::report::FastMap<u64, u32>,
+    /// In a Python program a native stack is the interpreter; its Python
+    /// stacks are read alongside and joined to the samples (`python.rs`).
+    python: Option<PythonStacks>,
+    scratch: SampleScratch,
+    /// Code it mapped that the unwinder has not been shown yet.
+    mapped: Vec<MmapRecord>,
+    /// Executable mappings that have already caused a look at the maps, by
+    /// file and address, so that one the unwinder cannot use (a file that is
+    /// gone again by the time the maps are read) asks only once.
+    announced_mappings: std::collections::HashSet<(Vec<u8>, u64)>,
+    last_thread_scan_ns: u64,
+    /// It has exited. It stays until the samples it left are named.
+    exited: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl SampledProcess {
+    /// Starts sampling `pid`: its threads' rings, then its maps, then what
+    /// is built from them. In that order: code mapped after the rings are
+    /// open is announced in them, so nothing mapped falls between the maps
+    /// as read here and the first announcement.
+    ///
+    /// A target's unwinder is built here and now, during the capture's
+    /// setup; a child's on the attach worker, its samples waiting.
+    /// `at_start` is whether the loop has yet to begin (see
+    /// [`RingOpener::sample_thread`]). `None` for a child no ring opened
+    /// for: it has exited already, or may not be sampled.
+    #[allow(clippy::too_many_arguments)]
+    fn adopt(
+        serial: u64,
+        pid: i32,
+        target: bool,
+        at_start: bool,
+        opener: &mut RingOpener,
+        attach: Option<&AttachWorker>,
+        period_ns: u64,
+        python_stacks: Option<bool>,
+    ) -> Option<SampledProcess> {
+        let mut threads = Vec::new();
+        opener.scan_threads(pid, &mut threads, !at_start);
+        if threads.is_empty() && !target {
+            return None;
+        }
+        let sampled = !threads.is_empty();
+        let asked_ns = crate::now_monotonic_ns();
+        let maps = std::fs::read(format!("/proc/{pid}/maps")).map(Arc::new);
+        let mut process = SampledProcess {
+            serial,
+            pid,
+            target,
+            threads,
+            sampled,
+            unwinder: None,
+            unwinder_pending: false,
+            symbols: ProcessSymbols::new(),
+            pc_ids: crate::report::FastMap::default(),
+            // Started whether or not the sampling rings opened: Python's
+            // thread names and the GIL row need no samples. A child is
+            // read when it has an interpreter mapped, unless the capture
+            // was told to read none.
+            python: PythonStacks::start(pid, period_ns, if target { python_stacks } else { python_stacks.filter(|on| !on) }),
+            scratch: SampleScratch::new(),
+            mapped: Vec::new(),
+            announced_mappings: std::collections::HashSet::new(),
+            last_thread_scan_ns: asked_ns,
+            exited: false,
+        };
+        match maps {
+            Ok(maps) => {
+                let queued = !target
+                    && attach.is_some_and(|worker| {
+                        worker.jobs.send(AttachJob::Unwinder { serial, maps: maps.clone() }).is_ok()
+                    });
+                if queued {
+                    process.unwinder_pending = true;
+                    process.scratch.held_limit = MAX_HELD_FOR_UNWINDER;
+                } else {
+                    let _phase = perfr_api::scope("open unwinder");
+                    process.unwinder = Some(ProcessUnwinder::from_maps_content(&maps));
+                }
+                process.symbols.request(attach, serial, pid, Some(maps), asked_ns);
+            }
+            Err(error) => {
+                // Not fatal, and worth saying out loud for a target: without
+                // an unwinder there are no callstacks, but the sample bar
+                // still works -- each sample is a tick named by the function
+                // it was in. A child whose maps cannot be read has exited.
+                if target {
+                    log::warn!("no unwinder for pid {pid} ({error}); sample ticks only, no callstacks");
+                }
+                process.symbols.named_through_ns = u64::MAX;
+            }
+        }
+        Some(process)
+    }
+
+    /// The reorder horizon of its samples: `shared` is what the hooks of
+    /// the capture ask for, which only the process they are in waits on.
+    fn horizon_ns(&self, shared: u64, now_ns: u64) -> u64 {
+        if self.unwinder_pending {
+            return 0;
+        }
+        // An exited process's Python reader has read its last.
+        if self.exited {
+            return u64::MAX;
+        }
+        shared.min(self.python.as_ref().map_or(u64::MAX, |python| python.horizon_ns(now_ns)))
+    }
+
+    /// Whether every sample it took has been pushed.
+    fn settled(&self) -> bool {
+        !self.unwinder_pending && self.scratch.held.is_empty() && self.scratch.unnamed.is_empty()
+    }
+}
+
+/// How full the fullest sampling ring of any thread is.
+#[cfg(target_os = "linux")]
+fn worst_sample_ring_fill(processes: &[SampledProcess]) -> f32 {
+    processes
+        .iter()
+        .flat_map(|process| process.threads.iter())
+        .map(|thread| thread.sample.fill_fraction())
+        .fold(0.0f32, f32::max)
+}
+
+/// Hands what the attach worker built to the process it was built for. One
+/// that has been let go since has no use for it.
+#[cfg(target_os = "linux")]
+fn take_attached(processes: &mut [SampledProcess], built: Attached) {
+    match built {
+        Attached::Unwinder(serial, unwinder) => {
+            if let Some(process) = processes.iter_mut().find(|p| p.serial == serial) {
+                process.unwinder = Some(unwinder);
+                process.unwinder_pending = false;
+                process.scratch.held_limit = usize::MAX;
+            }
+        }
+        Attached::Symbols(serial, symbolizer) => {
+            if let Some(process) = processes.iter_mut().find(|p| p.serial == serial) {
+                if process.target {
+                    announce_symbols(&symbolizer);
+                }
+                process.symbols.landed(symbolizer);
+                // An address the previous symbolizer had no module for was
+                // cached as its hex form; the new one may know it.
+                process.pc_ids.clear();
+            }
+        }
+    }
 }
 
 /// What a capture's sampling rings yielded, for the summary at its end.
@@ -1244,6 +1715,24 @@ struct SampleScratch {
     unnamed: Vec<UnnamedSample>,
     /// The frames of the sample being unwound.
     frames: Vec<u64>,
+    /// How many samples `held` may keep. Without bound for the reorder
+    /// window, which is a tenth of a second; bounded while they wait for an
+    /// unwinder ([`MAX_HELD_FOR_UNWINDER`]).
+    held_limit: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl SampleScratch {
+    fn new() -> SampleScratch {
+        SampleScratch {
+            stack: Vec::new(),
+            held: Vec::new(),
+            pool: Vec::new(),
+            unnamed: Vec::new(),
+            frames: Vec::new(),
+            held_limit: usize::MAX,
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1374,7 +1863,7 @@ fn drain_samples(
                 }
                 return;
             }
-            if sample.time <= horizon_ns {
+            if sample.time <= horizon_ns || scratch.held.len() >= scratch.held_limit {
                 push_sample(
                     sample.time,
                     sample.tid,
@@ -1970,6 +2459,8 @@ fn capture_loop(
     symbols: Arc<Mutex<SymbolState>>,
     machine_health: bool,
     python_stacks: Option<bool>,
+    also_pids: Vec<i32>,
+    sample_children: bool,
 ) {
     // The hook specs the engines arm; the armed set also carries each hook's
     // size and safety verdict, kept for the crash journal.
@@ -1987,20 +2478,26 @@ fn capture_loop(
             }
         }
     });
-    // Sampling follows the chosen process; scheduling is machine-wide.
+    // Sampling follows the chosen processes; scheduling is machine-wide.
     const SAMPLE_HZ: u64 = 1000;
     let period_ns = 1_000_000_000 / SAMPLE_HZ;
     let mut names = FrameNames::new(service.clone(), store.clone());
-    // Sampled pcs repeat: a hot loop is the same few thousand addresses over
-    // and over. Resolving one means two module scans, a symbol search and two
-    // string allocations, then a hash of the name -- all to arrive at an id
-    // that address already had. Remember the id per address instead; the
-    // symbolizer is fixed for the life of this capture, so the cache is too.
-    let mut pc_ids: crate::report::FastMap<u64, u32> = crate::report::FastMap::default();
     // A capture need not have a target: then it is the scheduler, the
     // service's own scopes, and every process instrumenting itself. Sampling,
     // unwinding, symbols and hooks all follow a process, so they are skipped.
     let has_target = target_pid > 0;
+    // The processes the capture was started on. The first is the one whose
+    // functions are hooked, and the one the hook engines, auto-profiling
+    // and the GPU helper are told; all of them are sampled, and so is what
+    // they launch.
+    let mut targets: Vec<i32> = Vec::new();
+    for pid in std::iter::once(target_pid).chain(also_pids) {
+        if has_target && pid > 0 && !targets.contains(&pid) {
+            targets.push(pid);
+        }
+    }
+    let target_ids: Vec<u32> = targets.iter().map(|pid| *pid as u32).collect();
+    service.set_capture_targets(&target_ids);
     // The scope reader and epoch were established before Frida attachment.
     service.mark_capture_started(target_pid.max(0) as u32, capture_start_ns);
     // What each core is, for the scheduler's lanes. Said after the start:
@@ -2021,176 +2518,91 @@ fn capture_loop(
             service.push_events(&early);
         }
     }
-    // Do not block the capture on symbol loading: start with an empty
-    // symbolizer (every address resolves to its hex form) and build the real
-    // one on a background thread. This is what keeps a big split debug file
-    // from delaying the whole capture. Symbolizer::for_pid emits its own
-    // "load symbols (N modules)" scope around the parallel per-file loads.
-    let mut symbolizer = Symbolizer::empty();
-    // Samples are not named until the symbolizer is ready: the empty one
-    // names every address as bare hex, so a function sampled both before and
-    // after the load split into a hex ghost and its real name. They are read
-    // and unwound from the first pass all the same (`drain_samples`), and
-    // their frames wait: they keep their timestamps and appear, correctly
-    // named, once the symbols land. Scheduling and thread states need no
-    // symbols and stream from the first pass.
-    //
-    // The target keeps mapping code while it is captured, so this is not the
-    // only load: each time the unwinder takes on a module mapped since, the
-    // symbolizer is built again from the maps as they are then -- cheaply,
-    // the files it already read are cached -- and swapped in.
-    // `named_through_ns` is the instant up to which the symbolizer in hand
-    // can name samples: zero until the first load lands, `u64::MAX` when it
-    // is current, and otherwise when the first module it does not know was
-    // mapped. `symbols_stale_since_ns` is when the earliest module was
-    // mapped that no load has yet been started for.
-    let mut named_through_ns: u64 = 0;
-    let mut symbols_stale_since_ns: Option<u64> = None;
-    let mut symbol_load_started_ns: Option<u64> = None;
-    let (symbolizer_tx, symbolizer_rx) = std::sync::mpsc::channel::<Symbolizer>();
-    let start_symbol_load = |started_ns: &mut Option<u64>| {
-        let tx = symbolizer_tx.clone();
-        // Taken before the thread exists: the load reads the maps no
-        // earlier than this, so it knows whatever was mapped before it.
-        let now_ns = crate::now_monotonic_ns();
-        let spawned = std::thread::Builder::new().name("perfr-symbolize".to_string()).spawn(move || {
-            let _ = tx.send(Symbolizer::for_pid(target_pid));
-        });
-        match spawned {
-            Ok(_) => *started_ns = Some(now_ns),
-            Err(error) => log::warn!("the symbol load could not be started: {error}"),
-        }
-    };
-    if has_target {
-        start_symbol_load(&mut symbol_load_started_ns);
-        if symbol_load_started_ns.is_none() {
-            // No symbols are coming: name by address rather than wait.
-            named_through_ns = u64::MAX;
-        }
-    }
-    // One sampled thread = two per-task rings: the sampling ring, and a
-    // task-event ring (`mmap_task`: PERF_RECORD_FORK / EXIT / MMAP for that
-    // task) that says when the thread clones another and when it maps code
-    // (see the task-event block of the loop). A fork record names
-    // the new tid and it is sampled from that pass on, the way C++ perfr's
-    // tracer reacts to PERF_RECORD_FORK, rather than found by polling
-    // /proc. A per-task event with `inherit` would follow children by
-    // itself, but the kernel refuses to mmap one (cpu -1 + inherit), and
-    // per-CPU inherited events cost threads x CPUs rings. A slow /proc
-    // scan stays as the safety net for a clone that lands between a
-    // thread's birth and its own task ring being armed; it logs when it
-    // finds anything, so a gap would show.
-    //
-    // `sample_now` is false for the threads found during setup. A sampling
-    // ring holds 65 ms of one thread's CPU, and the rest of the setup --
-    // the unwinder, the scheduler rings, the hooks -- takes longer than
-    // that before the first pass can read anything: a thread sampled from
-    // here on kept those 65 ms and lost what followed, a few hundred
-    // milliseconds of every busy thread at the start of every capture.
-    // Their sampling is switched on where the loop starts instead. The task
-    // rings are enabled here, so no thread born meanwhile goes unnoticed.
-    let mut threads: Vec<SampledThread> = Vec::new();
-    // In cells because both closures below report into them.
-    let sample_ring_failures = std::cell::RefCell::new(RingOpenFailures::default());
-    let task_ring_failures = std::cell::RefCell::new(RingOpenFailures::default());
-    let sample_thread = |threads: &mut Vec<SampledThread>, tid: i32, sample_now: bool| -> bool {
-        if threads.iter().any(|t| t.tid == tid && !t.dead) {
-            return false;
-        }
-        let sample = match perfr_perf_ring::ring::open_stack_sample(period_ns, SAMPLE_STACK_BYTES, tid, -1, 4096) {
-            Ok(sample) => sample,
-            Err(error) => {
-                sample_ring_failures.borrow_mut().note(format_args!("the sampling ring of thread {tid}"), &error);
-                return false;
-            }
-        };
-        if sample_now {
-            if let Err(error) = sample.enable() {
-                sample_ring_failures.borrow_mut().note(format_args!("the sampling ring of thread {tid}"), &error);
-                return false;
+    // Which processes get rows. Scheduling is traced machine-wide either way;
+    // this decides whose slices are also projected onto a thread bar. It is
+    // also where the processes the targets have already launched are read.
+    let mut visible = VisibleProcesses::new(&target_ids, show_all_processes);
+    // Do not block the capture on symbol loading: every process starts with
+    // an empty symbolizer and the real one is built on a thread of its own
+    // (`AttachWorker`, `ProcessSymbols`). This is what keeps a big split
+    // debug file from delaying the whole capture. The build emits its own
+    // "load symbols (N files)" scope around the parallel per-file loads.
+    // Scheduling and thread states need no symbols and stream from the
+    // first pass.
+    crate::symbolize::begin_capture();
+    let attach = has_target.then(AttachWorker::start).flatten();
+    let mut opener = RingOpener::new(period_ns);
+    let mut processes: Vec<SampledProcess> = Vec::new();
+    // Every process sampling was tried for, so that one that could not be
+    // sampled, or went past the limit, is not asked about again each second.
+    let mut considered: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut next_serial: u64 = 0;
+    let mut children_sampled: u64 = 0;
+    let mut children_past_limit: u64 = 0;
+    {
+        let _phase = perfr_api::scope("open sampling rings");
+        for pid in targets.iter().copied() {
+            considered.insert(pid as u32);
+            next_serial += 1;
+            if let Some(process) =
+                SampledProcess::adopt(next_serial, pid, true, true, &mut opener, attach.as_ref(), period_ns, python_stacks)
+            {
+                if !process.sampled {
+                    log::warn!("no sampling rings for pid {pid} (permissions?)");
+                }
+                processes.push(process);
             }
         }
-        let task = match perfr_perf_ring::ring::open_mmap_task(tid, -1, 64) {
-            Ok(task) => Some(task),
-            Err(error) => {
-                // Sampled all the same; its forks, exit and new code are
-                // then found by the slower /proc scan or not at all.
-                task_ring_failures.borrow_mut().note(format_args!("the task-event ring of thread {tid}"), &error);
-                None
-            }
-        };
-        if let Some(task) = &task {
-            let _ = task.enable();
-        }
-        threads.push(SampledThread { tid, sample, task, dead: false });
-        true
-    };
-    let scan_threads = |threads: &mut Vec<SampledThread>, sample_now: bool| -> usize {
-        let Ok(tasks) = std::fs::read_dir(format!("/proc/{target_pid}/task")) else { return 0 };
-        let mut opened = 0;
-        for entry in tasks.flatten() {
-            if let Some(tid) = entry.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) {
-                if sample_thread(threads, tid, sample_now) {
-                    opened += 1;
+        // What the targets launched before the capture: sampled like what
+        // they launch during it.
+        if sample_children {
+            for pid in visible.family() {
+                if !considered.insert(pid) {
+                    continue;
+                }
+                if processes.len() >= MAX_SAMPLED_PROCESSES {
+                    children_past_limit += 1;
+                    continue;
+                }
+                next_serial += 1;
+                if let Some(process) = SampledProcess::adopt(
+                    next_serial,
+                    pid as i32,
+                    false,
+                    true,
+                    &mut opener,
+                    attach.as_ref(),
+                    period_ns,
+                    python_stacks,
+                ) {
+                    children_sampled += 1;
+                    processes.push(process);
                 }
             }
         }
-        opened
-    };
-    if has_target {
-        let _phase = perfr_api::scope("open sampling rings");
-        scan_threads(&mut threads, false);
     }
     const THREAD_SCAN_EVERY_NS: u64 = 2_000_000_000;
-    let mut last_thread_scan_ns: u64 = crate::now_monotonic_ns();
-    let sampling_works = !threads.is_empty();
-    // In a Python program a native stack is the interpreter; its Python
-    // stacks are read alongside and joined to the samples (`python.rs`).
-    // Started whether or not the sampling rings opened: Python's thread
-    // names and the GIL row need no samples.
-    let mut python = PythonStacks::start(target_pid, period_ns, python_stacks);
-    if has_target && threads.is_empty() {
-        log::warn!("no sampling rings for pid {target_pid} (permissions?)");
-    }
     {
-        let (unsampled, unfollowed) = (sample_ring_failures.borrow().failed, task_ring_failures.borrow().failed);
+        let (unsampled, unfollowed) = (opener.sample_failures.failed, opener.task_failures.failed);
+        let opened: usize = processes.iter().map(|p| p.threads.len()).sum();
         if unsampled + unfollowed > 0 {
             log::warn!(
-                "sampling rings opened for {} of {} thread(s) of pid {target_pid}; \
+                "sampling rings opened for {opened} of {} thread(s) of pid {target_pid}{}; \
                  {unfollowed} of those without a task-event ring",
-                threads.len(),
-                threads.len() as u64 + unsampled
+                opened as u64 + unsampled,
+                if processes.len() > 1 { format!(" and {} more process(es)", processes.len() - 1) } else { String::new() }
             );
         }
-    }
-    let mut unwinder = {
-        let _phase = perfr_api::scope("open unwinder");
-        match (has_target, ProcessUnwinder::for_pid(target_pid)) {
-            (false, _) => None,
-            (true, Ok(unwinder)) => Some(unwinder),
-            (true, Err(error)) => {
-                // Not fatal, and worth saying out loud: without an unwinder
-                // there are no callstacks, but the sample bar still works --
-                // each sample is a tick named by the function it was in.
-                log::warn!("no unwinder for pid {target_pid} ({error}); \
-                           sample ticks only, no callstacks");
-                None
-            }
+        log::info!(
+            "{opened} sampling ring(s) at {SAMPLE_HZ} Hz in {} process(es), unwinder {}",
+            processes.len(),
+            if processes.iter().any(|p| p.target && p.unwinder.is_some()) { "ready" } else { "unavailable" }
+        );
+        if children_sampled > 0 {
+            log::info!("{children_sampled} process(es) the target had already launched are sampled with it");
         }
-    };
-    log::info!(
-        "{} sampling ring(s) at {SAMPLE_HZ} Hz, unwinder {}",
-        threads.len(),
-        if unwinder.is_some() { "ready" } else { "unavailable" }
-    );
+    }
     let sample_flags = SampleFlags::stack_sample();
-    let mut sample_scratch = SampleScratch {
-        stack: Vec::new(),
-        held: Vec::new(),
-        pool: Vec::new(),
-        unnamed: Vec::new(),
-        frames: Vec::new(),
-    };
     // The per-CPU rings go on the CPUs that are online, by number: with one
     // offline in the middle, counting from zero opens a CPU that is not
     // there and never the last one that is.
@@ -2222,9 +2634,6 @@ fn capture_loop(
         );
     }
 
-    // Which processes get rows. Scheduling is traced machine-wide either way;
-    // this decides whose slices are also projected onto a thread bar.
-    let mut visible = VisibleProcesses::new(target_pid, show_all_processes);
     // `scopes` (the manual-instrumentation drain) was created up front so the
     // service's own setup scopes are recorded; a target's or descendant's
     // segment is discovered and opened lazily during the loop.
@@ -2236,9 +2645,11 @@ fn capture_loop(
     }
     if has_target {
         log::info!(
-            "showing pid {target_pid} and {} related process(es); \
+            "showing pid {}{} and {} related process(es); \
              the Scheduler track stays machine-wide",
-            visible.len().saturating_sub(1)
+            target_pid,
+            targets[1..].iter().map(|pid| format!(", pid {pid}")).collect::<String>(),
+            visible.len().saturating_sub(targets.len())
         );
     } else {
         log::info!(
@@ -2379,10 +2790,6 @@ fn capture_loop(
     let mut switches = ContextSwitchManager::new();
     let mut switch_failed_drains: u64 = 0;
     let mut task_failed_drains: u64 = 0;
-    // Executable mappings that have already caused a look at the maps, by
-    // file and address, so that one the unwinder cannot use (a file that is
-    // gone again by the time the maps are read) asks only once.
-    let mut announced_mappings: std::collections::HashSet<(Vec<u8>, u64)> = std::collections::HashSet::new();
     let mut modules_mapped_late: u64 = 0;
     // Records the kernel dropped because a ring was full, by kind of ring.
     // The sampling rings' count is in `samples`, the tracepoints' in the
@@ -2453,31 +2860,47 @@ fn capture_loop(
     let mut dropping_since_ns: Option<u64> = None;
     let mut dropping_start_lost: u64 = 0;
 
-    // The target's liveness is read from /proc a few times a second, not
+    // The targets' liveness is read from /proc a few times a second, not
     // every pass: cheap, and fast enough that a capture ends within a
     // refresh of the process list when its process does.
     let mut last_alive_check_ns: u64 = 0;
+    let mut targets_alive: Vec<bool> = vec![true; targets.len()];
+    // The processes the targets launch are also looked for in /proc once a
+    // second, for the ones no fork record announced.
+    let mut last_family_scan_ns: u64 = crate::now_monotonic_ns();
     // Auto-profiling, from the first pass it is on (`auto_profile.rs`).
     let mut auto: Option<AutoRun> = None;
     // The setup is done and the loop is about to read: start sampling the
     // threads it found (see `sample_thread`).
-    threads.retain(|thread| match thread.sample.enable() {
-        Ok(()) => true,
-        Err(error) => {
-            log::warn!("sampling of thread {} could not be switched on: {error}", thread.tid);
-            false
-        }
-    });
+    for process in processes.iter_mut() {
+        process.threads.retain(|thread| match thread.sample.enable() {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("sampling of thread {} could not be switched on: {error}", thread.tid);
+                false
+            }
+        });
+    }
     while running.load(Ordering::Relaxed) {
         let _pass = perfr_api::scope("capture pass");
-        let target_gone = has_target && {
+        // `target_gone` is the process the hooks are in; the capture goes
+        // on for as long as any process it was started on is running.
+        let (target_gone, targets_gone) = if has_target {
             let now = crate::now_monotonic_ns();
             if now.saturating_sub(last_alive_check_ns) >= 250_000_000 {
                 last_alive_check_ns = now;
-                !crate::hook_journal::process_alive(target_pid)
-            } else {
-                false
+                for (pid, alive) in targets.iter().zip(targets_alive.iter_mut()) {
+                    if *alive && !crate::hook_journal::process_alive(*pid) {
+                        *alive = false;
+                        if targets.len() > 1 {
+                            log::info!("pid {pid} exited");
+                        }
+                    }
+                }
             }
+            (!targets_alive[0], targets_alive.iter().all(|alive| !alive))
+        } else {
+            (false, false)
         };
         // Did a hook just kill the target? If the process is gone while a
         // capture with hooks armed is still running, read the kernel's crash
@@ -2501,38 +2924,26 @@ fn capture_loop(
         // longer exists -- which left the viewer showing a recording of a
         // process the refresh had already dropped. The loop's tail below
         // flushes and marks the capture finished.
-        if target_gone {
-            log::warn!("target pid {target_pid} exited; capture stopped");
-            service.set_instrumentation_status(format!("target {target_pid} exited; capture stopped"));
+        if targets_gone {
+            let who = if targets.len() == 1 {
+                format!("target {target_pid}")
+            } else {
+                format!("targets {}", targets.iter().map(|pid| pid.to_string()).collect::<Vec<_>>().join(", "))
+            };
+            log::warn!("{who} exited; capture stopped");
+            service.set_instrumentation_status(format!("{who} exited; capture stopped"));
             running.store(false, Ordering::Relaxed);
             continue;
         }
-        // The background symbol load finished: swap it in, and the samples
-        // unwound while it built get their names in the drain below. Even a
-        // stripped binary resolves to module+offset here, not bare hex.
-        if let Ok(built) = symbolizer_rx.try_recv() {
-            announce_symbols(&built);
-            symbolizer = built;
-            // An address the previous symbolizer had no module for was
-            // cached as its hex form; the new one may know it.
-            pc_ids.clear();
-            let started_ns = symbol_load_started_ns.take().unwrap_or(0);
-            named_through_ns = match symbols_stale_since_ns {
-                // More code was mapped while this one was being built. It
-                // read the maps after it was started, so it knows whatever
-                // was mapped before that; the first module mapped later is
-                // where its knowledge ends.
-                Some(mapped_ns) => mapped_ns.max(started_ns),
-                None => u64::MAX,
-            };
-        }
-        if symbols_stale_since_ns.is_some() && symbol_load_started_ns.is_none() {
-            symbols_stale_since_ns = None;
-            start_symbol_load(&mut symbol_load_started_ns);
-            if symbol_load_started_ns.is_none() {
-                // No load will land to release the samples that wait.
-                named_through_ns = u64::MAX;
+        // What the attach worker finished since the last pass: a child's
+        // unwinder, any process's symbols.
+        if let Some(worker) = attach.as_ref() {
+            while let Ok(built) = worker.built.try_recv() {
+                take_attached(&mut processes, built);
             }
+        }
+        for process in processes.iter_mut() {
+            process.symbols.reload_if_stale(attach.as_ref(), process.serial, process.pid);
         }
         batch.clear();
         // Children appear mid-capture; the refresh is rate-limited internally.
@@ -2640,124 +3051,244 @@ fn capture_loop(
             }
         }
         drop(_switches);
-        if sampling_works {
+        {
             // Thread births and deaths, from every sampled thread's task
             // ring: a fork is sampled from this pass, an exit frees its
-            // rings once the sample drain below has read them.
+            // rings once the sample drain below has read them. A fork that
+            // made a process is in the same ring, under the new pid.
             let _task = perfr_api::scope("read task events");
-            let mut born: Vec<i32> = Vec::new();
-            let mut lost_now: u64 = 0;
-            // Code the target mapped since the last pass.
-            let mut mapped: Vec<MmapRecord> = Vec::new();
-            for thread in threads.iter_mut() {
-                let Some(task) = thread.task.as_mut() else { continue };
-                let (own_tid, dead) = (thread.tid, &mut thread.dead);
-                let read = task.drain(|kind, record| {
-                    if kind == record_type::MMAP {
-                        if let Some(mmap) = parse_mmap(record) {
-                            // Only files: there are no unwind tables to
-                            // read for anonymous (JIT) code.
-                            if mmap.pid == target_pid && mmap.executable && mmap.filename.first() == Some(&b'/') {
-                                mapped.push(mmap);
+            let mut launched: Vec<(i32, i32)> = Vec::new();
+            for process in processes.iter_mut().filter(|p| p.sampled && !p.exited) {
+                let pid = process.pid;
+                let mut born: Vec<i32> = Vec::new();
+                let mut lost_now: u64 = 0;
+                // Code the process mapped since the last pass.
+                let mapped = &mut process.mapped;
+                for thread in process.threads.iter_mut() {
+                    let Some(task) = thread.task.as_mut() else { continue };
+                    let (own_tid, dead) = (thread.tid, &mut thread.dead);
+                    let read = task.drain(|kind, record| {
+                        if kind == record_type::MMAP {
+                            if let Some(mmap) = parse_mmap(record) {
+                                // Only files: there are no unwind tables to
+                                // read for anonymous (JIT) code.
+                                if mmap.pid == pid && mmap.executable && mmap.filename.first() == Some(&b'/') {
+                                    mapped.push(mmap);
+                                }
+                            }
+                            return;
+                        }
+                        if kind != record_type::FORK && kind != record_type::EXIT {
+                            return;
+                        }
+                        let Some(fe) = ForkExit::parse(record) else { return };
+                        let tid = { fe.tid } as i32;
+                        if { fe.pid } as i32 != pid {
+                            // Not a thread of this process: a process it
+                            // launched, which the fork gave a pid of its own.
+                            if kind == record_type::FORK {
+                                launched.push(({ fe.pid } as i32, pid));
+                            }
+                            return;
+                        }
+                        if kind == record_type::FORK {
+                            born.push(tid);
+                        } else if tid == own_tid {
+                            *dead = true;
+                        }
+                    });
+                    match read {
+                        Ok(drained) => lost_now += drained.lost,
+                        Err(error) => note_ring_error(&mut task_failed_drains, "task-event", &error),
+                    }
+                }
+                if lost_now > 0 {
+                    if task_events_lost == 0 {
+                        log::warn!("the kernel dropped {lost_now} task event(s): a thread's task ring was full");
+                    }
+                    task_events_lost += lost_now;
+                    // A dropped fork is a thread nobody announced: the scan
+                    // below finds it, so it runs now instead of on its timer. A
+                    // dropped exit is a thread that would keep its rings to the
+                    // end of the capture: /proc says which are gone. A dropped
+                    // launch is found by the walk of the targets' children.
+                    process.last_thread_scan_ns = 0;
+                    last_family_scan_ns = 0;
+                    if let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) {
+                        let alive: std::collections::HashSet<i32> = tasks
+                            .flatten()
+                            .filter_map(|entry| entry.file_name().to_str().and_then(|s| s.parse().ok()))
+                            .collect();
+                        for thread in process.threads.iter_mut().filter(|t| !alive.contains(&t.tid)) {
+                            thread.dead = true;
+                        }
+                    }
+                }
+                // New code: a plugin, an interpreter's extension module, a
+                // level's worth of game, or all of it when the process is
+                // a child that has just called exec. The unwinder and the
+                // symbolizer were built from the maps as they were when the
+                // process was adopted, and without this every sample in
+                // such a module was a stack cut off at its first frame,
+                // named by a bare address. The unwinder takes the module on
+                // here, before this pass unwinds the samples that may be in
+                // it; the symbolizer is rebuilt in the background.
+                //
+                // The kernel announces a mapping again whenever its protection
+                // changes, which a hook engine does to every page it patches, so
+                // the maps are read only for a file (or a place) not seen yet.
+                if let Some(unwinder) = process.unwinder.as_mut() {
+                    let announced = &mut process.announced_mappings;
+                    process.mapped.retain(|mmap| {
+                        !unwinder.covers(&mmap.filename, mmap.address, mmap.address.saturating_add(mmap.length))
+                            && announced.insert((mmap.filename.clone(), mmap.address))
+                    });
+                    if !process.mapped.is_empty() {
+                        let _load = perfr_api::scope("load new modules");
+                        match unwinder.refresh(pid) {
+                            Ok(change) if change.added + change.removed > 0 => {
+                                let what = format!(
+                                    "pid {pid} mapped new code ({}{}): {} module(s) loaded for unwinding, {} dropped; reloading symbols",
+                                    String::from_utf8_lossy(&process.mapped[0].filename),
+                                    if process.mapped.len() > 1 {
+                                        format!(" and {} more", process.mapped.len() - 1)
+                                    } else {
+                                        String::new()
+                                    },
+                                    change.added,
+                                    change.removed
+                                );
+                                if process.target {
+                                    log::info!("{what}");
+                                } else {
+                                    log::debug!("{what}");
+                                }
+                                modules_mapped_late += change.added as u64;
+                                // A sample taken after the mapping may be in the
+                                // new code, which the symbolizer in hand would
+                                // name by address: from there on they wait.
+                                let mapped_ns = process.mapped.iter().map(|mmap| mmap.timestamp).min().unwrap_or(0);
+                                process.symbols.code_mapped(mapped_ns);
+                                // Modules went as well as came: the process
+                                // called exec, and is another program under
+                                // another name. Said now, for a child that
+                                // does not live to the next reading of names.
+                                if change.removed > 0 {
+                                    comm_names.refresh(
+                                        &[pid as u32],
+                                        |pid, name| service.set_process_name(pid, name),
+                                        |pid, tid, name| service.set_thread_name(pid, tid, name),
+                                    );
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => log::debug!("could not re-read the maps of pid {pid}: {error}"),
+                        }
+                        // A child that was launched to run Python has an
+                        // interpreter only now that it has called exec.
+                        if process.python.is_none()
+                            && python_stacks != Some(false)
+                            && process.mapped.iter().any(|mmap| {
+                                std::str::from_utf8(&mmap.filename).is_ok_and(perfr_pystack::is_python_image)
+                            })
+                        {
+                            process.python = PythonStacks::start(pid, period_ns, None);
+                        }
+                    }
+                    process.mapped.clear();
+                } else if !process.unwinder_pending {
+                    process.mapped.clear();
+                }
+                for tid in born {
+                    if opener.sample_thread(&mut process.threads, tid, true) {
+                        if process.target {
+                            log::info!("thread {tid} born, sampling it ({} threads)", process.threads.len());
+                        } else {
+                            log::debug!("thread {tid} of pid {pid} born, sampling it ({} threads)", process.threads.len());
+                        }
+                        // A thread of a child is known to be the child's
+                        // by its name being told: the names are otherwise
+                        // read once a second, and a thread shorter-lived
+                        // than that would be taken for the target's when
+                        // the capture is saved.
+                        if pid != target_pid {
+                            if let Some(name) = crate::names::thread_comm(pid as u32, tid as u32) {
+                                service.set_thread_name(pid as u32, tid as u32, &name);
                             }
                         }
-                        return;
                     }
-                    if kind != record_type::FORK && kind != record_type::EXIT {
-                        return;
-                    }
-                    let Some(fe) = ForkExit::parse(record) else { return };
-                    if { fe.pid } as i32 != target_pid {
-                        return;
-                    }
-                    let tid = { fe.tid } as i32;
-                    if kind == record_type::FORK {
-                        born.push(tid);
-                    } else if tid == own_tid {
-                        *dead = true;
-                    }
-                });
-                match read {
-                    Ok(drained) => lost_now += drained.lost,
-                    Err(error) => note_ring_error(&mut task_failed_drains, "task-event", &error),
                 }
-            }
-            if lost_now > 0 {
-                if task_events_lost == 0 {
-                    log::warn!("the kernel dropped {lost_now} task event(s): a thread's task ring was full");
-                }
-                task_events_lost += lost_now;
-                // A dropped fork is a thread nobody announced: the scan
-                // below finds it, so it runs now instead of on its timer. A
-                // dropped exit is a thread that would keep its rings to the
-                // end of the capture: /proc says which are gone.
-                last_thread_scan_ns = 0;
-                if let Ok(tasks) = std::fs::read_dir(format!("/proc/{target_pid}/task")) {
-                    let alive: std::collections::HashSet<i32> = tasks
-                        .flatten()
-                        .filter_map(|entry| entry.file_name().to_str().and_then(|s| s.parse().ok()))
-                        .collect();
-                    for thread in threads.iter_mut().filter(|t| !alive.contains(&t.tid)) {
-                        thread.dead = true;
+                let now = crate::now_monotonic_ns();
+                if now.saturating_sub(process.last_thread_scan_ns) >= THREAD_SCAN_EVERY_NS {
+                    process.last_thread_scan_ns = now;
+                    let _scan = perfr_api::scope("scan threads");
+                    let opened = opener.scan_threads(pid, &mut process.threads, true);
+                    if opened > 0 {
+                        log::info!(
+                            "the /proc scan found {opened} thread(s) of pid {pid} no fork record announced ({} threads)",
+                            process.threads.len()
+                        );
                     }
                 }
             }
-            // New code: a plugin, an interpreter's extension module, a
-            // level's worth of game. The unwinder and the symbolizer were
-            // built from the maps as they were when the capture started, and
-            // without this every sample in such a module was a stack cut
-            // off at its first frame, named by a bare address. The unwinder
-            // takes the module on here, before this pass unwinds the samples
-            // that may be in it; the symbolizer is rebuilt in the background.
-            //
-            // The kernel announces a mapping again whenever its protection
-            // changes, which a hook engine does to every page it patches, so
-            // the maps are read only for a file (or a place) not seen yet.
-            if let Some(unwinder) = unwinder.as_mut() {
-                mapped.retain(|mmap| {
-                    !unwinder.covers(&mmap.filename, mmap.address, mmap.address.saturating_add(mmap.length))
-                        && announced_mappings.insert((mmap.filename.clone(), mmap.address))
-                });
-                if !mapped.is_empty() {
-                    let _load = perfr_api::scope("load new modules");
-                    match unwinder.refresh(target_pid) {
-                        Ok(change) if change.added + change.removed > 0 => {
-                            log::info!(
-                                "the target mapped new code ({}{}): {} module(s) loaded for unwinding, {} dropped; reloading symbols",
-                                String::from_utf8_lossy(&mapped[0].filename),
-                                if mapped.len() > 1 { format!(" and {} more", mapped.len() - 1) } else { String::new() },
-                                change.added,
-                                change.removed
+            // The processes the targets launched: the ones a fork record
+            // just announced, and once a second the ones a walk of /proc
+            // finds under the targets, for a launch whose record was lost
+            // or was made before its parent's rings were open.
+            if sample_children {
+                let now = crate::now_monotonic_ns();
+                if now.saturating_sub(last_family_scan_ns) >= 1_000_000_000 {
+                    last_family_scan_ns = now;
+                    launched.extend(visible.family().into_iter().map(|pid| (pid as i32, 0)));
+                }
+                for (pid, parent) in launched {
+                    if pid <= 0 || !considered.insert(pid as u32) {
+                        continue;
+                    }
+                    // Its rows, and its thread states at the next focus
+                    // refresh, whether or not it can be sampled.
+                    visible.add_child(pid as u32);
+                    if processes.iter().filter(|p| !p.exited).count() >= MAX_SAMPLED_PROCESSES {
+                        if children_past_limit == 0 {
+                            log::warn!(
+                                "{MAX_SAMPLED_PROCESSES} processes are being sampled; \
+                                 the ones the target launches from here on are not"
                             );
-                            modules_mapped_late += change.added as u64;
-                            // A sample taken after the mapping may be in the
-                            // new code, which the symbolizer in hand would
-                            // name by address: from there on they wait.
-                            let mapped_ns = mapped.iter().map(|mmap| mmap.timestamp).min().unwrap_or(0);
-                            named_through_ns = named_through_ns.min(mapped_ns);
-                            symbols_stale_since_ns =
-                                Some(symbols_stale_since_ns.map_or(mapped_ns, |since| since.min(mapped_ns)));
                         }
-                        Ok(_) => {}
-                        Err(error) => log::debug!("could not re-read the maps of pid {target_pid}: {error}"),
+                        children_past_limit += 1;
+                        continue;
                     }
-                }
-            }
-            for tid in born {
-                if sample_thread(&mut threads, tid, true) {
-                    log::info!("thread {tid} born, sampling it ({} threads)", threads.len());
-                }
-            }
-            let now = crate::now_monotonic_ns();
-            if now.saturating_sub(last_thread_scan_ns) >= THREAD_SCAN_EVERY_NS {
-                last_thread_scan_ns = now;
-                let _scan = perfr_api::scope("scan threads");
-                let opened = scan_threads(&mut threads, true);
-                if opened > 0 {
-                    log::info!(
-                        "the /proc scan found {opened} thread(s) no fork record announced ({} threads)",
-                        threads.len()
+                    next_serial += 1;
+                    let Some(process) = SampledProcess::adopt(
+                        next_serial,
+                        pid,
+                        false,
+                        false,
+                        &mut opener,
+                        attach.as_ref(),
+                        period_ns,
+                        python_stacks,
+                    ) else {
+                        continue;
+                    };
+                    children_sampled += 1;
+                    if children_sampled <= CHILDREN_LOGGED {
+                        let by = if parent > 0 { format!(" by pid {parent}") } else { String::new() };
+                        log::info!(
+                            "pid {pid} launched{by}: sampling it ({} thread(s), {} processes){}",
+                            process.threads.len(),
+                            processes.len() + 1,
+                            if children_sampled == CHILDREN_LOGGED { "; further launches are not logged" } else { "" }
+                        );
+                    }
+                    // Named now, not at the next refresh: a child that runs
+                    // for less than a second would have a row with no name.
+                    comm_names.refresh(
+                        &[pid as u32],
+                        |pid, name| service.set_process_name(pid, name),
+                        |pid, tid, name| service.set_thread_name(pid, tid, name),
                     );
+                    processes.push(process);
                 }
             }
         }
@@ -2797,39 +3328,70 @@ fn capture_loop(
         if let Some(session) = frida.as_mut() { session.poll_returns(); }
         // Retain return history until every consumer, including Python
         // enrichment, has released its older copied samples.
-        let sample_horizon = uprobes.as_ref().map(|s| s.sample_horizon(probe_now_ns)).unwrap_or(u64::MAX)
-            .min(frida.as_ref().map_or(u64::MAX, |s| s.sample_horizon()))
-            .min(python.as_ref().map_or(u64::MAX, |python| python.horizon_ns(probe_now_ns)));
+        // What the hooks ask the samples of their process to wait for.
+        let hook_horizon = uprobes.as_ref().map(|s| s.sample_horizon(probe_now_ns)).unwrap_or(u64::MAX)
+            .min(frida.as_ref().map_or(u64::MAX, |s| s.sample_horizon()));
+        let mut sample_horizon = hook_horizon;
         // Read and unwound every pass; named once the symbols are ready, so
         // they arrive named rather than as bare addresses.
         let _samples = perfr_api::scope("read samples");
-        if sampling_works {
-            drain_samples(
-                &mut threads,
-                unwinder.as_mut(),
-                &symbolizer,
-                named_through_ns,
-                &mut pc_ids,
-                &mut names,
-                &store,
-                target_pid,
-                period_ns,
-                sample_flags,
-                &mut samples,
-                &mut batch,
-                // A sample waits for the Python reading that follows it.
-                sample_horizon,
-                uprobes.as_ref(),
-                frida.as_ref(),
-                &mut sample_scratch,
-                python.as_mut(),
-            );
+        for process in processes.iter_mut() {
+            // The hooks are in the first target: only its stacks have
+            // return addresses to put back.
+            let hooked = process.pid == target_pid;
+            // A sample waits for the Python reading that follows it.
+            let horizon = process.horizon_ns(if hooked { hook_horizon } else { u64::MAX }, probe_now_ns);
+            if hooked {
+                sample_horizon = horizon;
+            }
+            if process.sampled {
+                drain_samples(
+                    &mut process.threads,
+                    process.unwinder.as_mut(),
+                    &process.symbols.symbolizer,
+                    process.symbols.named_through_ns,
+                    &mut process.pc_ids,
+                    &mut names,
+                    &store,
+                    process.pid,
+                    period_ns,
+                    sample_flags,
+                    &mut samples,
+                    &mut batch,
+                    horizon,
+                    if hooked { uprobes.as_ref() } else { None },
+                    if hooked { frida.as_ref() } else { None },
+                    &mut process.scratch,
+                    process.python.as_mut(),
+                );
+            }
+            if let Some(python) = process.python.as_mut() {
+                python.pump(&service, &mut names, &mut comm_names, &mut batch);
+            }
+            retire_dead_threads(&mut process.threads);
+            // Every thread's exit has been read and /proc agrees: the
+            // process is over. What it left waiting is read out in the
+            // passes that follow, and then it is let go.
+            if process.sampled
+                && !process.exited
+                && process.threads.is_empty()
+                && !crate::hook_journal::process_alive(process.pid)
+            {
+                process.exited = true;
+            }
         }
+        // The ones that have exited and have nothing left to push. A target
+        // stays: the capture's end reads its Python reader out.
+        processes.retain_mut(|process| {
+            if !(process.exited && !process.target && process.settled()) {
+                return true;
+            }
+            if let Some(python) = process.python.as_mut() {
+                python.finish(&service, &mut names, &mut comm_names, &mut batch);
+            }
+            false
+        });
         if let Some(session) = frida.as_mut() { session.retire_returns(sample_horizon); }
-        if let Some(python) = python.as_mut() {
-            python.pump(&service, &mut names, &mut comm_names, &mut batch);
-        }
-        retire_dead_threads(&mut threads);
         drop(_samples);
         if let Some(session) = uprobes.as_mut() {
             session.retire_returns_before(sample_horizon);
@@ -2976,7 +3538,7 @@ fn capture_loop(
             perfr_api::value("perf switch rings fill %", f64::from(worst(&switch_rings)) * 100.0);
             perfr_api::value(
                 "perf sample rings fill %",
-                f64::from(threads.iter().map(|t| t.sample.fill_fraction()).fold(0.0f32, f32::max)) * 100.0,
+                f64::from(worst_sample_ring_fill(&processes)) * 100.0,
             );
             perfr_api::value("scope rings fill %", f64::from(scopes.fill_fraction()) * 100.0);
             // Troubleshooting the shared scope path: how many records the rings
@@ -3074,9 +3636,7 @@ fn capture_loop(
         // the base interval at half-full down to `min_drain` at a lap. Below
         // half-full nothing is at risk, so pay the full interval and keep the
         // viewer batches large.
-        let fill = scopes.fill_fraction().max(
-            threads.iter().map(|t| t.sample.fill_fraction()).fold(0.0f32, f32::max),
-        );
+        let fill = scopes.fill_fraction().max(worst_sample_ring_fill(&processes));
         let boosting = fill >= DRAIN_BOOST_AT;
         // Open the boost marker on the rising edge, close it on the falling
         // edge; one async span covers the whole stretch.
@@ -3117,7 +3677,7 @@ fn capture_loop(
     // below. Detached here, a hooked call in flight would lose its STOP
     // and be drawn to wherever the symbol wait and the rest of the
     // shutdown had got to, seconds past its real end.
-    for thread in &threads {
+    for thread in processes.iter().flat_map(|process| process.threads.iter()) {
         let _ = perfr_perf_ring::ring::disable_fd(thread.sample.fd());
     }
     let sampling_stopped_ns = crate::now_monotonic_ns();
@@ -3135,69 +3695,89 @@ fn capture_loop(
     // of a big binary, stopped within a second or two -- has every sample
     // it took waiting for names. Wait for the load, within reason; one that
     // is still not done has them named by address rather than lost.
-    if sampling_works {
+    {
         let mut tail: Vec<LiveEvent> = Vec::new();
-        drain_samples(
-            &mut threads,
-            unwinder.as_mut(),
-            &symbolizer,
-            named_through_ns,
-            &mut pc_ids,
-            &mut names,
-            &store,
-            target_pid,
-            period_ns,
-            sample_flags,
-            &mut samples,
-            &mut tail,
-            u64::MAX,
-            uprobes.as_ref(),
-            frida.as_ref(),
-            &mut sample_scratch,
-            python.as_mut(),
-        );
-        if named_through_ns != u64::MAX {
-            // Modules mapped in the last pass have no load under way yet.
-            if symbols_stale_since_ns.is_some() && symbol_load_started_ns.is_none() {
-                start_symbol_load(&mut symbol_load_started_ns);
-            }
-            if symbol_load_started_ns.is_some() {
-                let _wait = perfr_api::scope("wait for symbols");
-                match symbolizer_rx.recv_timeout(std::time::Duration::from_secs(10)) {
-                    Ok(built) => {
-                        announce_symbols(&built);
-                        symbolizer = built;
-                        pc_ids.clear();
-                    }
-                    Err(_) => log::warn!(
-                        "symbols were still loading when the capture stopped; \
-                         its samples are named by address"
-                    ),
+        // One wait for everything the attach worker still owes, within
+        // reason: first the unwinders of children adopted in the last
+        // moments, whose samples are still stacks, then the symbols.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let wait_while = |processes: &mut Vec<SampledProcess>, waiting: &dyn Fn(&SampledProcess) -> bool| -> bool {
+            let Some(worker) = attach.as_ref() else { return false };
+            while processes.iter().any(waiting) {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                match worker.built.recv_timeout(left) {
+                    Ok(built) => take_attached(processes, built),
+                    Err(_) => return false,
                 }
             }
-            name_waiting_samples(
-                &symbolizer,
-                u64::MAX,
-                &mut pc_ids,
+            true
+        };
+        if processes.iter().any(|p| p.unwinder_pending) {
+            let _wait = perfr_api::scope("wait for unwinders");
+            wait_while(&mut processes, &|p| p.unwinder_pending);
+        }
+        for process in processes.iter_mut() {
+            // An unwinder that did not come leaves its samples their pc.
+            process.unwinder_pending = false;
+            if !process.sampled {
+                continue;
+            }
+            let hooked = process.pid == target_pid;
+            drain_samples(
+                &mut process.threads,
+                process.unwinder.as_mut(),
+                &process.symbols.symbolizer,
+                process.symbols.named_through_ns,
+                &mut process.pc_ids,
                 &mut names,
                 &store,
-                target_pid,
+                process.pid,
+                period_ns,
+                sample_flags,
+                &mut samples,
+                &mut tail,
+                u64::MAX,
+                if hooked { uprobes.as_ref() } else { None },
+                if hooked { frida.as_ref() } else { None },
+                &mut process.scratch,
+                process.python.as_mut(),
+            );
+            // Modules mapped in the last pass have no load under way yet.
+            if !process.scratch.unnamed.is_empty() {
+                process.symbols.reload_if_stale(attach.as_ref(), process.serial, process.pid);
+            }
+        }
+        // A load matters here only to a process with samples waiting on it.
+        let loading = |p: &SampledProcess| p.symbols.load_started_ns.is_some() && !p.scratch.unnamed.is_empty();
+        if processes.iter().any(loading) {
+            let _wait = perfr_api::scope("wait for symbols");
+            if !wait_while(&mut processes, &loading) {
+                log::warn!(
+                    "symbols were still loading when the capture stopped; \
+                     the samples that waited for them are named by address"
+                );
+            }
+        }
+        for process in processes.iter_mut() {
+            name_waiting_samples(
+                &process.symbols.symbolizer,
+                u64::MAX,
+                &mut process.pc_ids,
+                &mut names,
+                &store,
+                process.pid,
                 period_ns,
                 &mut tail,
-                &mut sample_scratch,
+                &mut process.scratch,
                 &mut samples,
-                python.as_mut(),
+                process.python.as_mut(),
             );
+            // Every sample has been joined to its Python stack: the reader
+            // can go, push the last GIL span, and say what it saw.
+            if let Some(python) = process.python.as_mut() {
+                python.finish(&service, &mut names, &mut comm_names, &mut tail);
+            }
         }
-        if !tail.is_empty() {
-            service.push_events(&tail);
-        }
-    }
-    // Every sample has been joined to its Python stack: the reader can go,
-    // push the last GIL span, and say what it saw.
-    if let Some(python) = python.as_mut() {
-        let mut tail: Vec<LiveEvent> = Vec::new();
-        python.finish(&service, &mut names, &mut comm_names, &mut tail);
         if !tail.is_empty() {
             service.push_events(&tail);
         }
@@ -3342,13 +3922,22 @@ fn capture_loop(
         );
     }
     {
-        let (unsampled, unfollowed) = (sample_ring_failures.borrow().failed, task_ring_failures.borrow().failed);
+        let (unsampled, unfollowed) = (opener.sample_failures.failed, opener.task_failures.failed);
         if unsampled + unfollowed > 0 {
             log::warn!(
                 "{unsampled} thread(s) could not be sampled and {unfollowed} could not be followed \
                  (their rings did not open; the first failure of each cause is logged above)"
             );
         }
+    }
+    if children_sampled > 0 {
+        log::info!("{children_sampled} process(es) the target launched were sampled with it");
+    }
+    if children_past_limit > 0 {
+        log::warn!(
+            "{children_past_limit} process(es) the target launched were not sampled: \
+             {MAX_SAMPLED_PROCESSES} were being sampled already"
+        );
     }
     if modules_mapped_late > 0 {
         log::info!("{modules_mapped_late} module(s) were mapped during the capture and loaded as they appeared");
@@ -3784,6 +4373,8 @@ pub fn run_on(
             let uprobe_duplicate_filter = request.uprobe_duplicate_filter;
             let machine_health = request.machine_health;
             let python_stacks = request.python_stacks;
+            let also_pids = request.also_pids.clone();
+            let sample_children = request.sample_children;
             let taps = crate::frida::Taps {
                 output: request.program_output && pid > 0,
                 gpu: request.gpu_kernels && pid > 0,
@@ -3948,6 +4539,8 @@ pub fn run_on(
                         symbols,
                         machine_health,
                         python_stacks,
+                        also_pids,
+                        sample_children,
                     );
                     // However the capture ended: its hook journal has done
                     // its job unless a crash report now points at it.
@@ -3958,7 +4551,10 @@ pub fn run_on(
                     error.to_string()
                 })?;
             *worker = Some(CaptureSlot { running: capture_running, handle });
-            log::info!("capture started (pid {pid})");
+            log::info!(
+                "capture started (pid {pid}{})",
+                request.also_pids.iter().map(|other| format!(", pid {other}")).collect::<String>()
+            );
             Ok(())
         }),
         stop_capture: Arc::new(move || {
@@ -4581,13 +5177,7 @@ mod tests {
                 names: FrameNames::new(service, store.clone()),
                 store,
                 counters: SampleCounters::default(),
-                scratch: SampleScratch {
-                    stack: Vec::new(),
-                    held: Vec::new(),
-                    pool: Vec::new(),
-                    unnamed: Vec::new(),
-                    frames: Vec::new(),
-                },
+                scratch: SampleScratch::new(),
             }
         }
 
@@ -4969,10 +5559,119 @@ mod tests {
         assert_eq!(on_core.start_ns, 0, "saturating, not wrapped");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn samples_that_wait_for_an_unwinder_are_held_up_to_a_limit_and_then_are_their_pc() {
+        let mut rig = SampleRig::new(&[4001]);
+        // A child whose unwinder is still being built: nothing can be
+        // unwound, so nothing is let through the horizon.
+        rig.unwinder = None;
+        rig.scratch.held_limit = 2;
+        for time in [1_000, 2_000, 3_000] {
+            assert!(rig.ring(4001).publish(&stack_sample_record(4001, time, 0x401000, &[0u8; 64])));
+        }
+        let pushed = rig.drain(0);
+        assert_eq!(rig.scratch.held.len(), 2);
+        assert_eq!(pushed.iter().filter(|e| e.kind == kind::SAMPLE).map(|e| e.start_ns).collect::<Vec<_>>(), [3_000]);
+        assert_eq!(rig.counters.not_unwound, 1, "the one past the limit has no callstack");
+        // The unwinder arrives: the two that waited are unwound with it.
+        rig.unwinder = Some(ProcessUnwinder::from_maps_content(b""));
+        rig.scratch.held_limit = usize::MAX;
+        let mut waited: Vec<u64> =
+            rig.drain(u64::MAX).iter().filter(|e| e.kind == kind::SAMPLE).map(|e| e.start_ns).collect();
+        waited.sort_unstable();
+        assert_eq!(waited, [1_000, 2_000]);
+        assert_eq!(rig.counters.not_unwound, 1);
+        assert!(rig.scratch.held.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_symbols_name_samples_up_to_the_code_they_have_not_seen() {
+        let mut symbols = ProcessSymbols::new();
+        assert_eq!(symbols.named_through_ns, 0, "nothing is named before the first load");
+        // No worker to load them: named by address, not kept waiting.
+        symbols.request(None, 1, 4000, None, 100);
+        assert_eq!((symbols.named_through_ns, symbols.load_started_ns), (u64::MAX, None));
+
+        let worker = AttachWorker::start().expect("a thread");
+        let mut symbols = ProcessSymbols::new();
+        symbols.request(Some(&worker), 1, 4000, Some(Arc::new(Vec::new())), 100);
+        assert_eq!((symbols.named_through_ns, symbols.load_started_ns), (0, Some(100)));
+        // Code mapped while the load runs, after it read the maps: the
+        // load names what came before, and another is due.
+        symbols.code_mapped(500);
+        symbols.code_mapped(300);
+        symbols.reload_if_stale(Some(&worker), 1, 4000);
+        assert_eq!(symbols.load_started_ns, Some(100), "one load at a time");
+        symbols.landed(Symbolizer::empty());
+        assert_eq!((symbols.named_through_ns, symbols.load_started_ns), (300, None));
+        symbols.reload_if_stale(Some(&worker), 1, 4000);
+        assert!(symbols.load_started_ns.is_some() && symbols.stale_since_ns.is_none());
+        symbols.landed(Symbolizer::empty());
+        assert_eq!(symbols.named_through_ns, u64::MAX);
+        // Code mapped before the load was asked for is code it has seen.
+        symbols.code_mapped(700);
+        symbols.request(Some(&worker), 1, 4000, None, 900);
+        symbols.landed(Symbolizer::empty());
+        assert_eq!(symbols.named_through_ns, 900);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_attach_worker_answers_each_process_by_its_serial_and_stops_with_the_capture() {
+        let worker = AttachWorker::start().expect("a thread");
+        let maps = Arc::new(std::fs::read("/proc/self/maps").unwrap());
+        worker.jobs.send(AttachJob::Unwinder { serial: 7, maps: maps.clone() }).unwrap();
+        worker.jobs.send(AttachJob::Symbols { serial: 8, pid: 0, maps: Some(Arc::new(Vec::new())) }).unwrap();
+        let wait = std::time::Duration::from_secs(60);
+        match worker.built.recv_timeout(wait) {
+            Ok(Attached::Unwinder(7, unwinder)) => assert!(unwinder.modules_loaded() > 0),
+            _ => panic!("the unwinder of serial 7 comes first"),
+        }
+        assert!(matches!(worker.built.recv_timeout(wait), Ok(Attached::Symbols(8, _))));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_is_adopted_with_its_threads_and_a_process_that_is_gone_is_not() {
+        let mut child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = child.id() as i32;
+        let mut opener = RingOpener::new(1_000_000);
+        let worker = AttachWorker::start();
+        let adopted = SampledProcess::adopt(1, pid, false, false, &mut opener, worker.as_ref(), 1_000_000, None);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        // Where the kernel lets nobody sample (perf_event_paranoid), there
+        // is no ring and so no child; a target is kept all the same.
+        if let Some(mut process) = adopted {
+            assert!(process.sampled && !process.target && process.threads.len() == 1);
+            assert!(process.unwinder_pending && process.unwinder.is_none(), "a child's unwinder is built off the loop");
+            assert_eq!(process.horizon_ns(u64::MAX, 0), 0, "its samples wait for the unwinder");
+            assert!(!process.settled());
+            let built = worker.as_ref().unwrap().built.recv_timeout(std::time::Duration::from_secs(60)).unwrap();
+            take_attached(std::slice::from_mut(&mut process), built);
+            assert!(!process.unwinder_pending && process.unwinder.is_some());
+            assert_eq!(process.scratch.held_limit, usize::MAX);
+            assert_eq!(process.horizon_ns(5, 0), 5);
+            process.exited = true;
+            assert_eq!(process.horizon_ns(5, 0), u64::MAX, "nothing more is coming to wait for");
+        } else {
+            assert!(opener.sample_failures.failed > 0, "a live child with no ring is a ring the kernel refused");
+        }
+        // The same pid, now that nothing has it.
+        assert!(SampledProcess::adopt(2, pid, false, false, &mut opener, worker.as_ref(), 1_000_000, None).is_none());
+        let target = SampledProcess::adopt(3, pid, true, true, &mut opener, worker.as_ref(), 1_000_000, None).unwrap();
+        assert!(target.target && !target.sampled && target.unwinder.is_none());
+        assert_eq!(target.symbols.named_through_ns, u64::MAX, "no maps, so no symbols to wait for");
+    }
+
     #[test]
     fn a_capture_request_is_read_field_by_field_with_an_older_viewers_defaults() {
         let request = |pid: i32| StartRequest {
             pid,
+            also_pids: Vec::new(),
+            sample_children: true,
             method: String::new(),
             function_ids: Vec::new(),
             show_all_processes: false,
@@ -4987,6 +5686,8 @@ mod tests {
         // What the server sends: its typed body, as JSON.
         let full = perfr_live_server::http::StartBody {
             pid: 4242,
+            pids: vec![4242, 17, 17, 99],
+            sample_children: false,
             enable_api: true,
             context_switches: true,
             thread_states: true,
@@ -5007,6 +5708,8 @@ mod tests {
         assert_eq!(
             StartRequest::parse(&full.to_json()),
             StartRequest {
+                also_pids: vec![17, 99],
+                sample_children: false,
                 method: "kernel_uprobes".into(),
                 show_all_processes: true,
                 auto_profile: true,
@@ -5028,6 +5731,19 @@ mod tests {
         // the target is.
         assert_eq!(StartRequest::parse(r#"{"pid":7,"python_stacks":true}"#).python_stacks, Some(true));
         assert_eq!(StartRequest::parse(r#"{"pid":7,"python_stacks":"yes"}"#).python_stacks, None);
+        // Several processes: the first is the one the hooks are in, whether
+        // `pid` says so or the list does, and none is named twice.
+        let several = |body: &str| {
+            let request = StartRequest::parse(body);
+            (request.pid, request.also_pids)
+        };
+        assert_eq!(several(r#"{"pid":7,"pids":[9,7,11]}"#), (7, vec![9, 11]));
+        assert_eq!(several(r#"{"pid":0,"pids":[9,7,9]}"#), (9, vec![7]));
+        assert_eq!(several(r#"{"pids":[9]}"#), (9, vec![]));
+        assert_eq!(several(r#"{"pid":7,"pids":[0,-4,"9",4294967296,8]}"#), (7, vec![8]));
+        assert_eq!(several(r#"{"pid":7,"pids":9}"#), (7, vec![]));
+        assert!(!StartRequest::parse(r#"{"pid":7,"sample_children":false}"#).sample_children);
+        assert!(StartRequest::parse(r#"{"pid":7,"sample_children":0}"#).sample_children);
         // What an older viewer sends, and what is not a request at all.
         assert_eq!(StartRequest::parse(r#"{"pid":7}"#), request(7));
         for not_a_request in ["not json at all", "", "[]", r#"{"pid":"7"}"#] {

@@ -301,6 +301,8 @@ pub struct LiveService {
     dropped_before_start: AtomicU64,
     /// The pid the running (or last) capture targets; 0 when none.
     capture_pid: AtomicU64,
+    /// Every process the capture was started on, `capture_pid` first.
+    capture_targets: Mutex<Vec<u32>>,
     index_cache: Mutex<Option<CachedIndex>>,
     pub(crate) timeline_cache: Mutex<Option<CachedTimeline>>,
     /// The machines linked to this service (`peers.rs`): empty on a
@@ -521,6 +523,7 @@ impl LiveService {
             capture_starts: AtomicU64::new(0),
             dropped_before_start: AtomicU64::new(0),
             capture_pid: AtomicU64::new(0),
+            capture_targets: Mutex::new(Vec::new()),
             index_cache: Mutex::new(None),
             timeline_cache: Mutex::new(None),
             peers: peers::Peers::default(),
@@ -677,6 +680,7 @@ impl LiveService {
         self.capture_start_ns.store(0, Ordering::Relaxed);
         self.dropped_before_start.store(0, Ordering::Relaxed);
         self.capture_pid.store(0, Ordering::Relaxed);
+        self.capture_targets.lock().clear();
         self.live_end_ns.store(0, Ordering::Relaxed);
         self.broadcast_frame(&LiveFrame::CaptureStarted { pid: 0, start_ns: 0 });
         self.broadcast_frame(&LiveFrame::CaptureFinished);
@@ -1205,6 +1209,26 @@ impl LiveService {
     /// The pid of the running or last capture; 0 when there is none.
     pub fn capture_pid(&self) -> u32 {
         self.capture_pid.load(Ordering::Relaxed) as u32
+    }
+
+    /// Says which processes a capture was started on: the first is the one
+    /// `capture_pid` names, and a capture of one process has that one alone.
+    pub fn set_capture_targets(&self, pids: &[u32]) {
+        *self.capture_targets.lock() = pids.to_vec();
+    }
+
+    /// The processes of the running or last capture. When nobody said (an
+    /// opened capture, another platform's loop) it is `capture_pid` alone.
+    pub fn capture_targets(&self) -> Vec<u32> {
+        let pid = self.capture_pid();
+        let said = self.capture_targets.lock().clone();
+        if said.first() == Some(&pid) {
+            said
+        } else if pid > 0 {
+            vec![pid]
+        } else {
+            Vec::new()
+        }
     }
 
     /// Idempotent: the capture worker marks the end itself (it may end on its

@@ -41,7 +41,7 @@ Open `http://127.0.0.1:44766/`. The service listens on this machine only. `--hos
 ## Attach and record
 
 1. Press **Settings** (hover: “Capture settings”).
-2. Pick the process. **Ctrl+Shift+P** (⌘⇧P on macOS) opens the same list. Up and Down move the highlight, Enter selects.
+2. Pick the process. **Ctrl+Shift+P** (⌘⇧P on macOS) opens the same list. Up and Down move the highlight, Enter selects. A program that is several processes is captured as one: tick the box of each of the others. [Several processes](capture.html#several-processes) has the rest.
 3. Under **COLLECT** the viewer shows **CSW** (context switches, the scheduler track), **States** (thread state slices), **API** (manual `perfr.h` scopes) and **Sample** (callstack sampling), plus a period field that starts at `1.0`. On this service a Linux capture always samples at 1 kHz, opens the scheduler and thread-state rings when the kernel allows it, and reads manual scopes; a Windows capture does the same through the kernel logger when the service runs elevated. The switches and the period are sent and not applied yet.
 4. Under **HOOKS**, **Frida** is the default. Switch to **Uprobes** for kernel probes. [Capture](capture.html) is the rest of that row.
 5. Press the red **Record** button, or **X**. On a narrow window the same control reads **Rec**. While a capture is running it is **Stop**.

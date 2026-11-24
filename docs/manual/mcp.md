@@ -96,7 +96,7 @@ Call `perfr_capabilities` first. It reports the platform, whether the service is
 | `perfr_search_functions` | One page of functions. Pass `function_id` to arm |
 | `perfr_arm_hooks` | The set the next capture will instrument. Not installed yet |
 | `perfr_unhook` | Remove functions from that set, or clear it |
-| `perfr_start_capture` | Start. Installs the armed hooks. Replaces the previous capture |
+| `perfr_start_capture` | Start. Installs the armed hooks. Replaces the previous capture. `also_pids` names other processes to sample with the attached one; what any of them launches is sampled too unless `sample_children` is false (Linux) |
 | `perfr_stop_capture` | Stop. The events stay until the next start |
 | `perfr_capture_status` | Running or not, event count, instrumentation line |
 | `perfr_sampling_report` | Hottest sampled functions, one page. For a Python target on a Linux or Windows service these include its Python functions, named `function (file.py:line)` |

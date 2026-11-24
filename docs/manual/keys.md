@@ -17,7 +17,7 @@ Taken from the viewer’s key handler and the track gestures. A text field keeps
 | **Alt+Left** / **Alt+Right** | Previous / next story step |
 | **Home** | Fit the capture to its content. The window is at least 1 µs wide |
 | **Ctrl+O** / **⌘O** | Open a file |
-| **Ctrl+Shift+P** / **⌘⇧P** | Open the process list. Up, Down and Enter move and select inside it |
+| **Ctrl+Shift+P** / **⌘⇧P** | Open the process list. Up, Down and Enter move and select inside it. **Ctrl+Enter** (⌘Enter), or **Ctrl+click** on a row, ticks the process: it is captured with the selected one |
 | **Escape** | Clear the scope search, a Live highlight, the selection and a rectangle drag |
 | **A** / **D** | Pan in time. Turns Follow off |
 | **Left** / **Right** | Pan in time when nothing is selected. With a selection, nudge it |

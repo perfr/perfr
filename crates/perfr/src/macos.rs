@@ -243,6 +243,9 @@ pub fn capture_loop(
     // The health track reads Linux's /proc and /sys (`health.rs`).
     _machine_health: bool,
     _python_stacks: Option<bool>,
+    // The other processes of the capture: rows, as there is no sampling.
+    also_pids: Vec<i32>,
+    _sample_children: bool,
 ) {
     if gpu_helper.is_some() {
         log::warn!("GPU helper capture is not supported on macOS");
@@ -261,7 +264,10 @@ pub fn capture_loop(
         }
     }
     let mut last_alive_check_ns: u64 = 0;
-    let mut visible = VisibleProcesses::new(target_pid, show_all_processes);
+    let targets: Vec<u32> =
+        std::iter::once(target_pid).chain(also_pids).filter(|pid| has_target && *pid > 0).map(|pid| pid as u32).collect();
+    service.set_capture_targets(&targets);
+    let mut visible = VisibleProcesses::new(&targets, show_all_processes);
     visible.add_instrumented(std::process::id());
     let mut names = crate::names::NameSync::default();
     let mut stats = crate::selfstat::SelfStat::default();
@@ -390,6 +396,9 @@ pub(super) fn capture_file(args: crate::Args) -> Result<(), String> {
         Arc::new(std::sync::Mutex::new(crate::serve::SymbolState::default())),
         false,
         None,
+        // A file capture is of one process.
+        Vec::new(),
+        true,
     );
     let _ = timer.join();
     let (_, events) = service.ring().snapshot();

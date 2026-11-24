@@ -51,6 +51,14 @@ jobs:
       # the configuration a new checkout has. frida-rust tests the real one.
       - name: Test every crate
         run: tools/ci.sh test
+      # A runner's kernel lets nobody sample (kernel.perf_event_paranoid), so
+      # the captures above took no samples and the tests that look at them
+      # looked at none. Here it is allowed, and they are told that no
+      # samples is a failure.
+      - name: Test the captures that sample
+        run: |
+          sudo sysctl -w kernel.perf_event_paranoid=-1
+          PERFR_TEST_REQUIRE_SAMPLES=1 cargo test --locked -p perfr --test capture_lifecycle
       - name: Check the viewer for wasm32
         run: tools/ci.sh wasm
 

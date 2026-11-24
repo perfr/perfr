@@ -878,6 +878,11 @@ pub fn capture_loop(
     // The health track reads Linux's /proc and /sys (`health.rs`).
     _machine_health: bool,
     python_stacks: Option<bool>,
+    // The other processes of the capture get rows and thread states; the
+    // samples kept are the first one's (see `Etw::samples`), and so a
+    // process it launches is not sampled either.
+    also_pids: Vec<i32>,
+    _sample_children: bool,
 ) {
     if gpu_helper.is_some() {
         log::warn!("GPU helper capture is not supported on Windows");
@@ -915,7 +920,11 @@ pub fn capture_loop(
             service.push_events(&early);
         }
     }
-    let mut visible = VisibleProcesses::new(target_pid, show_all_processes);
+    let targets: Vec<u32> =
+        std::iter::once(target_pid).chain(also_pids).filter(|pid| has_target && *pid > 0).map(|pid| pid as u32).collect();
+    service.set_capture_targets(&targets);
+    crate::symbolize::begin_capture();
+    let mut visible = VisibleProcesses::new(&targets, show_all_processes);
     visible.add_instrumented(self_pid);
     if frida.is_some() {
         visible.add_instrumented(target_pid as u32);
@@ -1259,6 +1268,9 @@ pub(super) fn capture_file(args: crate::Args) -> Result<(), String> {
         Arc::new(Mutex::new(SymbolState::default())),
         false,
         None,
+        // A file capture is of one process.
+        Vec::new(),
+        true,
     );
     let _ = timer.join();
     let (_, events) = service.ring().snapshot();

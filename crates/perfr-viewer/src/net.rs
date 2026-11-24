@@ -65,6 +65,10 @@ pub struct StatusJson {
     /// The pid the running or last capture targets; 0 when none.
     #[serde(default)]
     pub target_pid: u32,
+    /// Every process that capture was started on, `target_pid` first. Empty
+    /// from a service that captures one process.
+    #[serde(default)]
+    pub target_pids: Vec<u32>,
     /// The service's own pid; 0 from an older service.
     #[serde(default)]
     pub service_pid: u32,
@@ -274,6 +278,11 @@ pub fn parse_modules_json(text: &str) -> Result<ModulesJson, String> {
 #[derive(Clone, Debug)]
 pub struct CaptureStart {
     pub pid: u32,
+    /// The other processes of the capture, sampled with `pid`. Sent, with
+    /// `pid` at their head, only when there are any.
+    pub also_pids: Vec<u32>,
+    /// Sample what the processes launch. Sent only as a refusal.
+    pub sample_children: bool,
     pub enable_api: bool,
     pub context_switches: bool,
     pub thread_states: bool,
@@ -638,8 +647,18 @@ pub fn capture_start_body(req: &CaptureStart) -> String {
     // Off is what a service that has never heard of it does too.
     let output = if req.program_output { r#","program_output":true"# } else { "" };
     let gpu = if req.gpu_kernels { r#","gpu_kernels":true"# } else { "" };
+    // One process is what every service understands; the list is for a
+    // capture of several, and a service that has not heard of it captures
+    // the first.
+    let pids = if req.also_pids.is_empty() {
+        String::new()
+    } else {
+        let all: Vec<String> = std::iter::once(req.pid).chain(req.also_pids.iter().copied()).map(|pid| pid.to_string()).collect();
+        format!(r#","pids":[{}]"#, all.join(","))
+    };
+    let children = if req.sample_children { "" } else { r#","sample_children":false"# };
     format!(
-        r#"{{"pid":{},"enable_api":{},"context_switches":{},"thread_states":{},"sampling":{},"samples_per_second":{},"unwinding":"{}","dynamic_instrumentation_method":"{}","instrumented_functions":[{fns}],"show_all_processes":{},"uprobe_duplicate_filter":{},"auto_profile":{},"machine_health":{}{python}{output}{gpu}}}"#,
+        r#"{{"pid":{},"enable_api":{},"context_switches":{},"thread_states":{},"sampling":{},"samples_per_second":{},"unwinding":"{}","dynamic_instrumentation_method":"{}","instrumented_functions":[{fns}],"show_all_processes":{},"uprobe_duplicate_filter":{},"auto_profile":{},"machine_health":{}{python}{output}{gpu}{pids}{children}}}"#,
         req.pid,
         req.enable_api,
         req.context_switches,
@@ -1667,6 +1686,8 @@ mod tests {
     fn capture_start() -> CaptureStart {
         CaptureStart {
             pid: 4242,
+            also_pids: Vec::new(),
+            sample_children: true,
             enable_api: true,
             context_switches: true,
             thread_states: false,
@@ -1683,6 +1704,21 @@ mod tests {
             program_output: false,
             gpu_kernels: false,
         }
+    }
+
+    #[test]
+    fn the_other_processes_are_named_only_when_there_are_any() {
+        // One process: the body every service has always been sent.
+        let one = capture_start_body(&capture_start());
+        assert!(!one.contains("pids") && !one.contains("sample_children"), "{one}");
+        let several = capture_start_body(&CaptureStart { also_pids: vec![17, 99], ..capture_start() });
+        let v: serde_json::Value = serde_json::from_str(&several).unwrap();
+        assert_eq!(v["pid"], 4242, "the first is still the one an older service captures");
+        assert_eq!(v["pids"], serde_json::json!([4242, 17, 99]));
+        // Children are sampled unless the capture says not to.
+        let alone = capture_start_body(&CaptureStart { sample_children: false, ..capture_start() });
+        let v: serde_json::Value = serde_json::from_str(&alone).unwrap();
+        assert_eq!(v["sample_children"], false);
     }
 
     #[test]

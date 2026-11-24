@@ -4541,3 +4541,110 @@ fn a_slice_says_which_lane_it_is_on_in_one_line() {
     assert!(page.shows("Core: 3 (C1 · T1, up to 4.60 GHz, 12 MB L3)"), "{:?}", page.texts.iter().filter(|t| t.contains("Core")).collect::<Vec<_>>());
     assert!(!page.shows("MACHINE"), "the rest is on the lane, not on every slice");
 }
+
+/// A connected page whose service has listed three processes.
+fn picker_page() -> Page {
+    let process = |pid: u32, name: &str, cpu: f32| crate::net::ProcessJson {
+        pid,
+        name: name.into(),
+        cpu,
+        path: format!("/usr/bin/{name}"),
+    };
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.apply_process_list(vec![process(100, "python", 30.0), process(200, "sim", 20.0), process(300, "other", 10.0)]);
+    });
+    page.frames(2);
+    page
+}
+
+fn click_on(page: &mut Page, label: &str) {
+    let at = page.rect_of(label).unwrap_or_else(|| panic!("{label} is not on screen: {:?}", page.labels())).center();
+    page.click(at);
+}
+
+fn picked(page: &Page) -> (Option<u32>, Vec<u32>) {
+    (page.app.selected_pid, page.app.also_pids.clone())
+}
+
+#[test]
+fn the_process_picker_ticks_several_processes_and_the_capture_is_asked_for_all_of_them() {
+    let mut page = picker_page();
+    click_on(&mut page, "Process");
+    click_on(&mut page, "process:100");
+    assert_eq!(picked(&page), (Some(100), vec![]));
+    assert!(page.rect_of("process:200").is_none(), "a row is the answer, and the list closes on it");
+
+    // A box adds a process and leaves the list open for the next.
+    click_on(&mut page, "Process");
+    click_on(&mut page, "process-tick:300");
+    assert_eq!(picked(&page), (Some(100), vec![300]));
+    assert!(page.rect_of("process-tick:200").is_some(), "the list closed on a box");
+    // So does a row with Ctrl held.
+    let at = page.rect_of("process:200").unwrap().center();
+    page.frame_with(vec![Event::PointerMoved(at)], Modifiers::CTRL);
+    page.frame_with(vec![pointer_button(at, true)], Modifiers::CTRL);
+    page.frame_with(vec![pointer_button(at, false)], Modifiers::CTRL);
+    page.frame(Vec::new());
+    assert_eq!(picked(&page), (Some(100), vec![300, 200]));
+    for pid in [100, 200, 300] {
+        assert!(page.rect_of(&format!("ticked-process:{pid}")).is_some(), "{pid} is not shown ticked");
+    }
+    // The button says how many go with the selected one, and the list
+    // which of the ticked that is.
+    assert!(page.shows("100  python  +2"), "{:?}", page.texts);
+    assert!(page.shows("30.0%  100  python  · selected"), "{:?}", page.texts);
+
+    // The capture is asked for all three, the selected one first.
+    let request = page.app.capture_start(100);
+    assert_eq!((request.pid, request.also_pids.clone(), request.sample_children), (100, vec![300, 200], true));
+    let body: serde_json::Value = serde_json::from_str(&crate::net::capture_start_body(&request)).unwrap();
+    assert_eq!(body["pids"], serde_json::json!([100, 300, 200]));
+    // A capture with no target has no other processes either.
+    assert!(page.app.capture_start(0).also_pids.is_empty());
+
+    // The row of a ticked process makes it the selected one, and nothing
+    // leaves the capture.
+    click_on(&mut page, "process:200");
+    assert_eq!(picked(&page), (Some(200), vec![300, 100]));
+    // Its box takes the selected one out: the first of the others is next.
+    click_on(&mut page, "Process");
+    click_on(&mut page, "process-tick:200");
+    assert_eq!(picked(&page), (Some(300), vec![100]));
+    // And the row of a process that is not ticked is that process alone.
+    click_on(&mut page, "process:200");
+    assert_eq!(picked(&page), (Some(200), vec![]));
+}
+
+#[test]
+fn the_ticked_processes_lead_the_picker_whatever_the_cpu_order_is() {
+    let mut page = picker_page();
+    page.app.selected_pid = Some(300);
+    page.app.also_pids = vec![200];
+    click_on(&mut page, "Process");
+    let top = |page: &Page, pid: u32| page.rect_of(&format!("process:{pid}")).expect("a row").top();
+    // By CPU alone it would be 100, 200, 300.
+    assert!(top(&page, 200) < top(&page, 100) && top(&page, 300) < top(&page, 100));
+    assert!(top(&page, 200) < top(&page, 300), "the ticked keep the list's order among themselves");
+}
+
+#[test]
+fn a_capture_of_several_processes_started_elsewhere_ticks_them_all() {
+    let mut app = connected_app();
+    app.apply_status(StatusJson { target_pid: 100, target_pids: vec![100, 200, 300], ..service_status(true) });
+    assert_eq!((app.selected_pid, app.also_pids.clone()), (Some(100), vec![200, 300]));
+    // What was picked here stays as it is.
+    let mut app = connected_app();
+    app.selected_pid = Some(7);
+    app.also_pids = vec![8];
+    app.apply_status(StatusJson { target_pid: 100, target_pids: vec![100, 200], ..service_status(true) });
+    assert_eq!((app.selected_pid, app.also_pids.clone()), (Some(7), vec![8]));
+}
+
+#[test]
+fn the_children_switch_is_sent_with_the_capture() {
+    let mut app = connected_app();
+    assert!(app.capture_start(100).sample_children, "children are sampled unless switched off");
+    app.opt_children = false;
+    assert!(!app.capture_start(100).sample_children);
+}

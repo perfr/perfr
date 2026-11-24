@@ -15,8 +15,9 @@
 //! pid -- so the Scheduler track keeps showing everything either way. What
 //! this decides is only which processes grow thread rows of their own:
 //!
-//! - the target, and anything it spawned, because work routinely lives in a
-//!   child process and filtering to the exact pid once meant showing nothing;
+//! - the targets (a capture can be started on several processes), and
+//!   anything they spawned, because work routinely lives in a child process
+//!   and filtering to the exact pid once meant showing nothing;
 //! - any process carrying instrumentation, dynamic or manual, since a span
 //!   somebody asked for is by definition of interest;
 //! - the service itself.
@@ -42,8 +43,11 @@ use crate::windows::read_parent_map;
 const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub struct VisibleProcesses {
-    /// Zero when the capture has no target.
-    target: u32,
+    /// The processes the capture was started on. Empty when it has none.
+    targets: Vec<u32>,
+    /// The targets and everything they spawned: what is sampled. It only
+    /// ever grows, like `allowed`, which also holds what instruments itself.
+    family: HashSet<u32>,
     allowed: HashSet<u32>,
     last_refresh: std::time::Instant,
     /// A rebuild of the descendant set that is under way on another thread.
@@ -53,10 +57,10 @@ pub struct VisibleProcesses {
 impl VisibleProcesses {
     /// `_all` is the capture's "every process" request, kept for the wire
     /// format; it no longer widens the rows (see the module doc).
-    pub fn new(target_pid: i32, _all: bool) -> VisibleProcesses {
-        let target = target_pid.max(0) as u32;
+    pub fn new(targets: &[u32], _all: bool) -> VisibleProcesses {
         let mut visible = VisibleProcesses {
-            target,
+            targets: targets.iter().copied().filter(|pid| *pid != 0).collect(),
+            family: HashSet::new(),
             allowed: HashSet::new(),
             last_refresh: std::time::Instant::now(),
             refreshing: None,
@@ -82,7 +86,29 @@ impl VisibleProcesses {
         self.allowed.contains(&pid)
     }
 
-    /// The processes of interest -- the target, its descendants, and anything
+    /// Whether `pid` is a target or was spawned by one.
+    #[cfg(test)]
+    pub fn in_family(&self, pid: u32) -> bool {
+        self.family.contains(&pid)
+    }
+
+    /// The targets and what they spawned, in pid order.
+    #[cfg(any(test, target_os = "linux"))]
+    pub fn family(&self) -> Vec<u32> {
+        let mut pids: Vec<u32> = self.family.iter().copied().collect();
+        pids.sort_unstable();
+        pids
+    }
+
+    /// Adds a process to the family ahead of the next walk: one whose birth
+    /// the capture was told of as it happened.
+    #[cfg(any(test, target_os = "linux"))]
+    pub fn add_child(&mut self, pid: u32) {
+        self.family.insert(pid);
+        self.allowed.insert(pid);
+    }
+
+    /// The processes of interest -- the targets, their descendants, and anything
     /// instrumented. Both the rows and the set whose thread states are traced.
     pub fn pids(&self) -> Vec<u32> {
         let mut pids: Vec<u32> = self.allowed.iter().copied().collect();
@@ -117,13 +143,13 @@ impl VisibleProcesses {
             return;
         }
         self.last_refresh = std::time::Instant::now();
-        if self.target == 0 {
+        if self.targets.is_empty() {
             return;
         }
-        let target = self.target;
+        let targets = self.targets.clone();
         let (sender, receiver) = std::sync::mpsc::channel();
         let walk = std::thread::Builder::new().name("perfr-visible".to_string()).spawn(move || {
-            let _ = sender.send(descendants_of(target, &read_parent_map()));
+            let _ = sender.send(descendants_of_all(&targets, &read_parent_map()));
         });
         match walk {
             Ok(_) => self.refreshing = Some(receiver),
@@ -134,18 +160,19 @@ impl VisibleProcesses {
 
     fn refresh_now(&mut self) {
         self.last_refresh = std::time::Instant::now();
-        if self.target == 0 {
+        if self.targets.is_empty() {
             return;
         }
-        let descendants = descendants_of(self.target, &read_parent_map());
+        let descendants = descendants_of_all(&self.targets, &read_parent_map());
         self.allow(descendants);
     }
 
     /// Instrumented pids added by hand must survive a refresh; only the
     /// descendant half is recomputed, and it only ever grows.
     fn allow(&mut self, descendants: HashSet<u32>) {
-        self.allowed.extend(descendants);
-        self.allowed.insert(self.target);
+        self.family.extend(descendants);
+        self.family.extend(self.targets.iter().copied());
+        self.allowed.extend(self.family.iter().copied());
     }
 }
 
@@ -192,6 +219,16 @@ pub fn descendants_of(root: u32, parents: &[(u32, u32)]) -> HashSet<u32> {
     found
 }
 
+/// Everything reachable downwards from any of `roots`. A root that another
+/// root spawned is in the result; one that nothing here spawned is not.
+fn descendants_of_all(roots: &[u32], parents: &[(u32, u32)]) -> HashSet<u32> {
+    let mut found = HashSet::new();
+    for root in roots {
+        found.extend(descendants_of(*root, parents));
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,6 +250,30 @@ mod tests {
     }
 
     #[test]
+    fn several_targets_each_bring_what_they_spawned() {
+        // 1 spawned 2, 5 spawned 6 and 7, and 9 is nobody's.
+        let parents = vec![(2, 1), (6, 5), (7, 6), (9, 8)];
+        assert_eq!(descendants_of_all(&[1, 5], &parents), HashSet::from([2, 6, 7]));
+        // A target another target spawned is found as its child too.
+        assert_eq!(descendants_of_all(&[5, 6], &parents), HashSet::from([6, 7]));
+        assert!(descendants_of_all(&[], &parents).is_empty());
+    }
+
+    #[test]
+    fn the_family_is_the_targets_and_their_children_and_not_what_instruments_itself() {
+        let me = std::process::id();
+        let mut visible = VisibleProcesses::new(&[me, 0], false);
+        assert!(visible.in_family(me));
+        assert!(!visible.in_family(0), "no pid is not a target");
+        visible.add_instrumented(4_242);
+        assert!(visible.contains(4_242) && !visible.in_family(4_242));
+        // A child the capture heard of before the walk found it.
+        visible.add_child(4_243);
+        assert!(visible.contains(4_243) && visible.in_family(4_243));
+        assert!(visible.family().contains(&me) && visible.family().contains(&4_243));
+    }
+
+    #[test]
     fn a_parent_cycle_does_not_hang() {
         // Not physically possible, but /proc is read incrementally and can
         // report a snapshot no single instant ever had.
@@ -225,14 +286,14 @@ mod tests {
     fn asking_for_everything_does_not_widen_the_rows() {
         // The request is honoured for the scheduler track, which is always
         // machine-wide; rows stay with the target set.
-        let visible = VisibleProcesses::new(1, true);
+        let visible = VisibleProcesses::new(&[1], true);
         assert!(visible.contains(1));
         assert!(!visible.contains(999_999));
     }
 
     #[test]
     fn a_capture_without_a_target_shows_only_what_instruments_itself() {
-        let mut visible = VisibleProcesses::new(0, false);
+        let mut visible = VisibleProcesses::new(&[], false);
         assert!(visible.pids().is_empty());
         assert!(!visible.contains(1));
         visible.add_instrumented(4_242);
@@ -242,7 +303,7 @@ mod tests {
 
     #[test]
     fn an_instrumented_process_stays_visible() {
-        let mut visible = VisibleProcesses::new(1, false);
+        let mut visible = VisibleProcesses::new(&[1], false);
         assert!(!visible.contains(4_242));
         visible.add_instrumented(4_242);
         assert!(visible.contains(4_242));
@@ -256,7 +317,7 @@ mod tests {
     #[test]
     fn a_child_started_during_the_capture_becomes_visible_within_a_refresh() {
         let me = std::process::id();
-        let mut visible = VisibleProcesses::new(me as i32, false);
+        let mut visible = VisibleProcesses::new(&[me], false);
         let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
         assert!(!visible.contains(child.id()), "it did not exist when the set was built");
         // The capture loop calls this every pass; a refresh comes due once a
@@ -267,7 +328,7 @@ mod tests {
             visible.maybe_refresh();
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        let seen = visible.contains(child.id());
+        let seen = visible.contains(child.id()) && visible.in_family(child.id());
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(seen, "a process the target spawned never got its row");
@@ -279,7 +340,7 @@ mod tests {
     #[test]
     #[ignore = "a measurement, not a check"]
     fn cost_of_a_refresh_that_is_due() {
-        let mut visible = VisibleProcesses::new(std::process::id() as i32, false);
+        let mut visible = VisibleProcesses::new(&[std::process::id()], false);
         let processes = read_parent_map().len();
         for _ in 0..5 {
             visible.last_refresh = std::time::Instant::now() - REFRESH_INTERVAL * 2;
@@ -294,7 +355,7 @@ mod tests {
     #[test]
     fn this_process_sees_itself_and_not_the_whole_machine() {
         let me = std::process::id();
-        let visible = VisibleProcesses::new(me as i32, false);
+        let visible = VisibleProcesses::new(&[me], false);
         assert!(visible.contains(me));
         // pid 1 is not a descendant of a test binary.
         assert!(!visible.contains(1), "the machine should not be visible by default");

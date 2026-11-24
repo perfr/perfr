@@ -453,7 +453,8 @@ It is not a new capture file format.
 (`SymbolHelper` + `FindSymbolsFilePath`). Function search is
 `GET /api/functions/search?q=&limit=` and never dumps the symbol table.
 
-`POST /api/capture/start` JSON: `pid`, `enable_api`, `context_switches`,
+`POST /api/capture/start` JSON: `pid`, `pids` (every process of a capture
+of several, `pid` among them), `sample_children`, `enable_api`, `context_switches`,
 `thread_states`, `sampling`, `samples_per_second`, `unwinding`
 (`dwarf` \| `frame_pointers`), `dynamic_instrumentation_method`
 (`user_space` \| `kernel_uprobes`), `instrumented_functions: [{function_id}]`.

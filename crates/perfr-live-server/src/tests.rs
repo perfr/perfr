@@ -239,6 +239,8 @@ fn demo_emits_three_processes_not_self_pids() {
 fn capture_start_json_includes_sampling_and_hooks() {
     let body = crate::http::StartBody {
         pid: 42,
+        pids: Vec::new(),
+        sample_children: true,
         enable_api: true,
         context_switches: true,
         thread_states: true,
@@ -1256,6 +1258,56 @@ fn hooks_with_start(start: impl Fn(&str) -> Result<(), String> + Send + Sync + '
         source_json: Arc::new(|_| Ok("{}".into())),
         example_disassembly_json: Arc::new(|| Ok("{}".into())),
     }
+}
+
+#[test]
+fn a_record_of_several_processes_reaches_the_capture_and_the_status_names_them() {
+    let (svc, served) = serve_small();
+    let asked: std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>> = Default::default();
+    let (hook_asked, hook_svc) = (asked.clone(), svc.clone());
+    svc.set_hooks(hooks_with_start(move |body| {
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        // The capture says which processes it took on, as its loop does.
+        let pids: Vec<u32> =
+            body["pids"].as_array().into_iter().flatten().filter_map(|pid| pid.as_u64()).map(|pid| pid as u32).collect();
+        hook_svc.set_capture_targets(&pids);
+        hook_asked.lock().push(body);
+        Ok(())
+    }));
+    let status = |_: &LiveService| -> serde_json::Value {
+        serde_json::from_str(&send_json(&served, "GET", "/api/status", "").1).expect("the status is JSON")
+    };
+    assert_eq!(status(&svc)["target_pids"], serde_json::json!([]));
+
+    // The others come through as sent, and so does the refusal to sample
+    // what they launch.
+    let body = r#"{"pid":42,"pids":[42,43,44],"sample_children":false}"#;
+    assert_eq!(send_json(&served, "POST", "/api/capture/start", body).0, 200);
+    assert_eq!(asked.lock()[0]["pids"], serde_json::json!([42, 43, 44]));
+    assert_eq!(asked.lock()[0]["sample_children"], false);
+    assert_eq!(status(&svc)["target_pid"], 42);
+    assert_eq!(status(&svc)["target_pids"], serde_json::json!([42, 43, 44]));
+    svc.mark_capture_finished();
+
+    // One process, from a viewer that has never heard of several: no list,
+    // children sampled, and the status names that process alone -- not
+    // the three of the capture before.
+    assert_eq!(send_json(&served, "POST", "/api/capture/start", r#"{"pid":50}"#).0, 200);
+    assert!(asked.lock()[1].get("pids").is_none(), "{}", asked.lock()[1]);
+    assert_eq!(asked.lock()[1]["sample_children"], true);
+    assert_eq!(status(&svc)["target_pids"], serde_json::json!([50]));
+    svc.mark_capture_finished();
+
+    // A process of a linked machine is that machine's to capture: here it
+    // is not one of the others.
+    let remote = (1u32 << 24) | 77;
+    let body = format!(r#"{{"pid":42,"pids":[42,{remote},43]}}"#);
+    assert_eq!(send_json(&served, "POST", "/api/capture/start", &body).0, 200);
+    assert_eq!(asked.lock()[2]["pids"], serde_json::json!([42, 43]));
+    svc.mark_capture_finished();
+
+    assert_eq!(send_json(&served, "POST", "/api/capture/clear", "").0, 200);
+    assert_eq!(status(&svc)["target_pids"], serde_json::json!([]));
 }
 
 #[test]

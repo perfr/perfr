@@ -167,6 +167,8 @@ struct StatusBody {
     dropped_before_start: u64,
     /// The pid the capture targets; 0 when none was started.
     target_pid: u32,
+    /// Every process the capture was started on, `target_pid` first.
+    target_pids: Vec<u32>,
     /// The service's own pid, so the viewer can put its rows last.
     service_pid: u32,
     /// Machines linked to this one (`GET /api/peers` lists them).
@@ -207,6 +209,7 @@ impl StatusBody {
             capture_start_ns: svc.capture_start_ns(),
             dropped_before_start: svc.dropped_before_start(),
             target_pid: svc.capture_pid(),
+            target_pids: svc.capture_targets(),
             service_pid: std::process::id(),
             peers: svc.peers.len(),
         }
@@ -1060,6 +1063,14 @@ async fn sampling_report(
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StartBody {
     pub pid: u32,
+    /// Every process of the capture, for one of several: `pid` and the
+    /// others, in any order. All are sampled and given rows; the hooks are
+    /// in `pid`. With a `pid` of 0, the first of these is it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pids: Vec<u32>,
+    /// Sample the processes the targets launch as well. On by default.
+    #[serde(default = "default_true")]
+    pub sample_children: bool,
     #[serde(default = "default_true")]
     pub enable_api: bool,
     #[serde(default = "default_true")]
@@ -1156,6 +1167,9 @@ async fn capture_start(
         local.instrumented_functions.clear();
         local.auto_profile = false;
     }
+    // The others are this machine's or nobody's: a linked machine is told
+    // one process, the one `pid` names.
+    local.pids.retain(|pid| crate::peers::machine_of(*pid).is_none());
     let json = local.to_json();
     let auto_profile = AutoProfileChoice::propose(&svc, local.auto_profile);
     let starts_before = svc.capture_starts();

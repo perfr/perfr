@@ -126,8 +126,80 @@ fn process_matches_filter(pid: u32, name: &str, path: &str, query: &str) -> bool
 
 /// Keep the current pick across a process-list refresh. If that pid exited,
 /// leave the selection empty — do not silently substitute another process.
-fn selection_after_process_refresh(selected: Option<u32>, incoming: &[ProcessJson]) -> Option<u32> {
-    selected.filter(|pid| incoming.iter().any(|p| p.pid == *pid))
+/// The other ticked processes are the user's picks too: those that exited
+/// are dropped, and when the selected one did, the first of the rest takes
+/// its place.
+fn selection_after_process_refresh(
+    selected: Option<u32>,
+    also: &[u32],
+    incoming: &[ProcessJson],
+) -> (Option<u32>, Vec<u32>) {
+    let running = |pid: &u32| incoming.iter().any(|p| p.pid == *pid);
+    let mut also: Vec<u32> = also.iter().copied().filter(running).collect();
+    match selected.filter(running) {
+        Some(pid) => (Some(pid), also),
+        None if also.is_empty() => (None, also),
+        None => (Some(also.remove(0)), also),
+    }
+}
+
+/// What was clicked in the process picker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessPick {
+    /// A process's row: that process, alone. Unless it is one of the ticked
+    /// already, which is asking for it to be the selected one of them.
+    Row(u32),
+    /// Its box, or its row with Ctrl held: in the capture or out of it.
+    Tick(u32),
+}
+
+/// The selection after a pick: the selected process, whose functions are
+/// listed and hooked, and the others that are captured with it.
+fn pick_process(selected: Option<u32>, also: &[u32], pick: ProcessPick) -> (Option<u32>, Vec<u32>) {
+    let mut also = also.to_vec();
+    match pick {
+        ProcessPick::Row(pid) if selected == Some(pid) => (selected, also),
+        ProcessPick::Row(pid) => match also.iter().position(|other| *other == pid) {
+            // The two trade places, so the rest keep theirs.
+            Some(at) => {
+                match selected {
+                    Some(previous) => also[at] = previous,
+                    None => {
+                        also.remove(at);
+                    }
+                }
+                (Some(pid), also)
+            }
+            None => (Some(pid), Vec::new()),
+        },
+        ProcessPick::Tick(pid) if selected == Some(pid) => {
+            if also.is_empty() {
+                (None, also)
+            } else {
+                (Some(also.remove(0)), also)
+            }
+        }
+        ProcessPick::Tick(pid) => {
+            match also.iter().position(|other| *other == pid) {
+                Some(at) => {
+                    also.remove(at);
+                }
+                None if selected.is_none() => return (Some(pid), also),
+                None => also.push(pid),
+            }
+            (selected, also)
+        }
+    }
+}
+
+/// The order the picker lists processes in: the ticked first, then the rest
+/// as they come (busiest first). The list is sorted again every second, and
+/// without this what was ticked a moment ago is somewhere else in it.
+fn picker_order(processes: &[ProcessJson], selected: Option<u32>, also: &[u32]) -> Vec<usize> {
+    let ticked = |p: &ProcessJson| selected == Some(p.pid) || also.contains(&p.pid);
+    let mut order: Vec<usize> = (0..processes.len()).filter(|i| ticked(&processes[*i])).collect();
+    order.extend((0..processes.len()).filter(|i| !ticked(&processes[*i])));
+    order
 }
 
 /// Demo convenience: the first process list may select pid 1. Never before
@@ -953,6 +1025,9 @@ pub struct PerfrLiveApp {
     host: Host,
     processes: Vec<ProcessJson>,
     selected_pid: Option<u32>,
+    /// The other processes ticked in the picker: captured with the selected
+    /// one, in the order they were ticked.
+    also_pids: Vec<u32>,
     /// The last capture target picked automatically (see `adopt_capture_target`).
     adopted_target_pid: Option<u32>,
     /// The target the stream file being read or on screen names in its
@@ -1403,6 +1478,8 @@ pub struct PerfrLiveApp {
     /// The Node Health track: the machine's CPU, memory, pressure, disks,
     /// network and GPU, sampled by the service twice a second.
     opt_health: bool,
+    /// Sample the processes the captured ones launch.
+    opt_children: bool,
     /// Python frames, thread names and the GIL row when the target is a
     /// Python program.
     opt_python: bool,
@@ -1865,7 +1942,7 @@ impl PerfrLiveApp {
         // Same string `perfr --version` prints. A harness reads it as `build`.
         let build = perfr_build_info::version_line();
         let text = format!(
-            "{{\"thread\":{},\"scope\":{},\"focus\":{},\"measure\":{},\"ranges\":[{}],\"report_open\":{},\"tweaks\":{},\"tab\":\"{}\",\"hellos\":{},\"wire\":{},\"ws_bps\":{:.0},\"report_w\":{:.0},\"report_collapsed\":{},\"scope_menu\":{},\"scope_report\":{},\"view\":[{:.0},{:.0}],\"content\":{},\"events\":{},\"hooks\":[{}],\"capture_start\":{},\"report_filter\":{},\"track_filter\":{},\"prims\":{},\"flame_zoom\":{},\"selected_pid\":{},\"recording\":{},\"capture_elapsed\":{:.3},\"pointer\":{},\"build\":{},\"draw\":{},\"code\":{},\"rect\":{},\"rect_self\":{},\"theme\":{},\"renderer\":{},\"report_copied\":{},\"report_sel\":{},\"stream_bytes\":{},\"ring_bytes\":{},\"evicted_before\":{},\"evicted_done\":{},\"wasm_mem\":{:.0}}}",
+            "{{\"thread\":{},\"scope\":{},\"focus\":{},\"measure\":{},\"ranges\":[{}],\"report_open\":{},\"tweaks\":{},\"tab\":\"{}\",\"hellos\":{},\"wire\":{},\"ws_bps\":{:.0},\"report_w\":{:.0},\"report_collapsed\":{},\"scope_menu\":{},\"scope_report\":{},\"view\":[{:.0},{:.0}],\"content\":{},\"events\":{},\"hooks\":[{}],\"capture_start\":{},\"report_filter\":{},\"track_filter\":{},\"prims\":{},\"flame_zoom\":{},\"selected_pid\":{},\"also_pids\":[{}],\"recording\":{},\"capture_elapsed\":{:.3},\"pointer\":{},\"build\":{},\"draw\":{},\"code\":{},\"rect\":{},\"rect_self\":{},\"theme\":{},\"renderer\":{},\"report_copied\":{},\"report_sel\":{},\"stream_bytes\":{},\"ring_bytes\":{},\"evicted_before\":{},\"evicted_done\":{},\"wasm_mem\":{:.0}}}",
             match self.selected_thread {
                 Some((p, t)) => format!("[{p},{t}]"),
                 None => "null".to_string(),
@@ -1923,6 +2000,7 @@ impl PerfrLiveApp {
             self.last_n_prims,
             self.flame_zoom.len(),
             match self.selected_pid { Some(p) => p.to_string(), None => "null".to_string() },
+            self.also_pids.iter().map(|pid| pid.to_string()).collect::<Vec<_>>().join(","),
             self.recording || self.status.capturing,
             self.capture_timer.shown_s,
             self.pointer_readout.clone(),
@@ -2127,6 +2205,7 @@ impl PerfrLiveApp {
             host: host.clone(),
             processes: Vec::new(),
             selected_pid: None,
+            also_pids: Vec::new(),
             adopted_target_pid: None,
             stream_target: None,
             last_activity_sort_s: -1.0e9,
@@ -2300,6 +2379,7 @@ impl PerfrLiveApp {
             opt_thread_states: true,
             opt_sampling: true,
             opt_health: true,
+            opt_children: true,
             opt_python: true,
             opt_output: false,
             opt_gpu: false,
@@ -4009,6 +4089,9 @@ impl PerfrLiveApp {
     fn capture_start(&self, pid: u32) -> CaptureStart {
         CaptureStart {
             pid,
+            // Of a capture without a target there are no others either.
+            also_pids: if pid > 0 { self.also_pids.clone() } else { Vec::new() },
+            sample_children: self.opt_children,
             enable_api: self.opt_api,
             context_switches: self.opt_csw,
             thread_states: self.opt_thread_states,
@@ -4182,6 +4265,10 @@ impl PerfrLiveApp {
         if self.has_service() {
             let (selected, adopted) =
                 adopt_capture_target(self.selected_pid, self.adopted_target_pid, s.target_pid);
+            // A capture of several processes brings the others with it.
+            if selected != self.selected_pid && selected == Some(s.target_pid) {
+                self.also_pids = s.target_pids.iter().copied().filter(|pid| *pid != s.target_pid).collect();
+            }
             self.selected_pid = selected;
             self.adopted_target_pid = adopted;
         }
@@ -4257,7 +4344,8 @@ impl PerfrLiveApp {
 
     fn apply_process_list(&mut self, incoming: Vec<ProcessJson>) {
         let was_empty = self.processes.is_empty();
-        self.selected_pid = selection_after_process_refresh(self.selected_pid, &incoming);
+        (self.selected_pid, self.also_pids) =
+            selection_after_process_refresh(self.selected_pid, &self.also_pids, &incoming);
         self.processes = incoming;
         self.merge_trace_processes();
         sort_processes_by_cpu(&mut self.processes);
@@ -4737,6 +4825,7 @@ impl PerfrLiveApp {
                     spill_path: self.status.spill_path.clone(),
                     machine: self.status.machine.clone(),
                     target_pid: self.status.target_pid,
+                    target_pids: self.status.target_pids.clone(),
                     service_pid: self.status.service_pid,
                     hooks: self.status.hooks,
                     // This frame is the WebSocket's stats push, which carries
@@ -5968,7 +6057,10 @@ impl PerfrLiveApp {
         let selected_text = match self.selected_pid {
             Some(pid) => {
                 let p = self.processes.iter().find(|p| p.pid == pid);
+                // The others are a count: the button is two hundred pixels.
+                let others = self.also_pids.len();
                 match p {
+                    Some(p) if others > 0 => format!("{}  {}  +{others}", p.pid, p.name),
                     Some(p) => {
                         if p.path.is_empty() {
                             format!("{}  {}", p.pid, p.name)
@@ -5976,6 +6068,7 @@ impl PerfrLiveApp {
                             format!("{}  {}  {:.0}%", p.pid, p.name, p.cpu)
                         }
                     }
+                    None if others > 0 => format!("{pid}  +{others}"),
                     None => format!("{pid}"),
                 }
             }
@@ -5996,7 +6089,15 @@ impl PerfrLiveApp {
         note_ui_rect("Process", button.rect);
         let shortcut = ui.input_mut(|i| i.consume_key(
             egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::P));
-        button.clone().on_hover_text("Select process (Ctrl+Shift+P / ⌘⇧P)");
+        let mut hint = String::from(
+            "Select process (Ctrl+Shift+P / ⌘⇧P). Tick the box of another, or Ctrl+click it, \
+             to capture it as well: its samples and its rows, and those of what it launches",
+        );
+        for pid in &self.also_pids {
+            let name = self.processes.iter().find(|p| p.pid == *pid).map_or("", |p| p.name.as_str());
+            hint.push_str(&format!("\nwith {pid}  {name}"));
+        }
+        button.clone().on_hover_text(hint);
         let opening = shortcut || (button.clicked() && !egui::Popup::is_id_open(ui.ctx(), popup_id));
         if opening { self.process_keyboard_pid = None; }
         let popup = egui::Popup::from_response(&button)
@@ -6007,11 +6108,13 @@ impl PerfrLiveApp {
         popup.show(|ui| {
             // Consume navigation before TextEdit sees it, so focus stays in
             // the filter while the highlighted process moves.
-            let (up, down, enter) = ui.input_mut(|i| (
+            let (up, down, tick_key, enter) = ui.input_mut(|i| (
                 i.consume_key(egui::Modifiers::NONE, Key::ArrowUp),
                 i.consume_key(egui::Modifiers::NONE, Key::ArrowDown),
+                i.consume_key(egui::Modifiers::COMMAND, Key::Enter),
                 i.consume_key(egui::Modifiers::NONE, Key::Enter),
             ));
+            let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
             let filter = ui.add(
                 egui::TextEdit::singleline(&mut self.process_filter)
                     .id(filter_id)
@@ -6025,7 +6128,8 @@ impl PerfrLiveApp {
             }
             note_ui_rect("process-filter", filter.rect);
             let q = self.process_filter.clone();
-            let matching: Vec<u32> = self.processes.iter()
+            let order = picker_order(&self.processes, self.selected_pid, &self.also_pids);
+            let matching: Vec<u32> = order.iter().map(|i| &self.processes[*i])
                 .filter(|p| process_matches_filter(p.pid, &p.name, &p.path, &q))
                 .map(|p| p.pid).collect();
             if filter.changed() { self.process_keyboard_pid = None; }
@@ -6035,7 +6139,11 @@ impl PerfrLiveApp {
                 else if up { index.saturating_sub(1) } else { index };
             let active_pid = matching.get(index).copied();
             if up || down { self.process_keyboard_pid = active_pid; }
-            let mut pick = if enter { active_pid } else { None };
+            let mut pick = match active_pid {
+                Some(pid) if tick_key => Some(ProcessPick::Tick(pid)),
+                Some(pid) if enter => Some(ProcessPick::Row(pid)),
+                _ => None,
+            };
             // Reserve room for twenty rows instead of inheriting a short
             // viewport from the popup's previous size or its toolbar anchor.
             let row_pitch = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
@@ -6050,14 +6158,34 @@ impl PerfrLiveApp {
                 .max_height(list_height)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    for p in &self.processes {
+                    for p in order.iter().map(|i| &self.processes[*i]) {
                         if !process_matches_filter(p.pid, &p.name, &p.path, &q) {
                             continue;
                         }
-                        let label = format!("{:.1}%  {}  {}", p.cpu, p.pid, p.name);
                         let selected = active_pid == Some(p.pid);
-                        ui.push_id(p.pid, |ui| {
-                            let row = ui.selectable_label(selected, label).on_hover_text(&p.path);
+                        let is_selected = self.selected_pid == Some(p.pid);
+                        // Among several ticked, which one the hooks and
+                        // the Functions tab are of has to be said.
+                        let label = if is_selected && !self.also_pids.is_empty() {
+                            format!("{:.1}%  {}  {}  · selected", p.cpu, p.pid, p.name)
+                        } else {
+                            format!("{:.1}%  {}  {}", p.cpu, p.pid, p.name)
+                        };
+                        let mut ticked = is_selected || self.also_pids.contains(&p.pid);
+                        ui.push_id(p.pid, |ui| ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            let tick = ui.checkbox(&mut ticked, "").on_hover_text(if is_selected {
+                                "The selected process: its functions are the ones listed and hooked"
+                            } else {
+                                "Capture this process as well"
+                            });
+                            note_ui_rect(&format!("process-tick:{}", p.pid), tick.rect);
+                            if ticked {
+                                note_ui_rect(&format!("ticked-process:{}", p.pid), tick.rect);
+                            }
+                            if tick.changed() { pick = Some(ProcessPick::Tick(p.pid)); }
+                            let text = if is_selected { RichText::new(label).strong() } else { RichText::new(label) };
+                            let row = ui.selectable_label(selected, text).on_hover_text(&p.path);
                             note_ui_rect(&format!("process:{}", p.pid), row.rect);
                             if selected {
                                 note_ui_rect(&format!("active-process:{}", p.pid), row.rect);
@@ -6068,13 +6196,19 @@ impl PerfrLiveApp {
                             if ui.is_rect_visible(row.rect) {
                                 note_ui_rect(&format!("visible-process:{}", p.pid), row.rect);
                             }
-                            if row.clicked() { pick = Some(p.pid); }
-                        });
+                            if row.clicked() {
+                                pick = Some(if ctrl { ProcessPick::Tick(p.pid) } else { ProcessPick::Row(p.pid) });
+                            }
+                        }));
                     }
                 });
-            if let Some(pid) = pick {
-                self.selected_pid = Some(pid);
-                egui::Popup::close_id(ui.ctx(), popup_id);
+            if let Some(pick) = pick {
+                (self.selected_pid, self.also_pids) = pick_process(self.selected_pid, &self.also_pids, pick);
+                // A row is the answer; a box is one of several, and the
+                // list stays for the next.
+                if matches!(pick, ProcessPick::Row(_)) {
+                    egui::Popup::close_id(ui.ctx(), popup_id);
+                }
             }
         });
     }
@@ -6117,6 +6251,15 @@ impl PerfrLiveApp {
                 .clicked()
             {
                 self.opt_health = !self.opt_health;
+            }
+            if pill(ui, "Children", self.opt_children)
+                .on_hover_text(
+                    "Sample the processes the captured ones launch as well, the ones already running \
+                     included. Their rows are shown either way (Linux services)",
+                )
+                .clicked()
+            {
+                self.opt_children = !self.opt_children;
             }
             if pill(ui, "Python", self.opt_python)
                 .on_hover_text(
@@ -16885,7 +17028,7 @@ mod tests {
         rows[2].cpu = 90.0;
         sort_processes_by_cpu(&mut rows);
         assert_eq!(rows.iter().map(|p| p.pid).collect::<Vec<_>>(), [3, 2, 1]);
-        assert_eq!(selection_after_process_refresh(Some(2), &rows), Some(2));
+        assert_eq!(selection_after_process_refresh(Some(2), &[], &rows).0, Some(2));
     }
 
     #[test]
@@ -16950,9 +17093,51 @@ mod tests {
     #[test]
     fn process_refresh_keeps_selection_or_clears_if_gone() {
         let list = [proc(10, "a", ""), proc(20, "b", "")];
-        assert_eq!(selection_after_process_refresh(Some(20), &list), Some(20));
-        assert_eq!(selection_after_process_refresh(Some(99), &list), None);
-        assert_eq!(selection_after_process_refresh(None, &list), None);
+        assert_eq!(selection_after_process_refresh(Some(20), &[], &list), (Some(20), vec![]));
+        assert_eq!(selection_after_process_refresh(Some(99), &[], &list), (None, vec![]));
+        assert_eq!(selection_after_process_refresh(None, &[], &list), (None, vec![]));
+    }
+
+    #[test]
+    fn process_refresh_keeps_the_other_ticked_processes_that_still_run() {
+        let list = [proc(10, "a", ""), proc(20, "b", ""), proc(30, "c", "")];
+        assert_eq!(selection_after_process_refresh(Some(20), &[30, 99, 10], &list), (Some(20), vec![30, 10]));
+        // The selected one exited: the first of the others the user ticked
+        // is selected, which is not a process nobody asked for.
+        assert_eq!(selection_after_process_refresh(Some(99), &[98, 30, 10], &list), (Some(30), vec![10]));
+        assert_eq!(selection_after_process_refresh(Some(99), &[98], &list), (None, vec![]));
+    }
+
+    #[test]
+    fn a_row_selects_one_process_and_a_box_adds_or_removes_one() {
+        use ProcessPick::{Row, Tick};
+        // A row is that process alone, as it always was.
+        assert_eq!(pick_process(None, &[], Row(10)), (Some(10), vec![]));
+        assert_eq!(pick_process(Some(10), &[], Row(20)), (Some(20), vec![]));
+        assert_eq!(pick_process(Some(10), &[20, 30], Row(40)), (Some(40), vec![]));
+        assert_eq!(pick_process(Some(10), &[20, 30], Row(10)), (Some(10), vec![20, 30]));
+        // A box adds to what is selected, and is the selection when
+        // nothing is.
+        assert_eq!(pick_process(None, &[], Tick(10)), (Some(10), vec![]));
+        assert_eq!(pick_process(Some(10), &[], Tick(20)), (Some(10), vec![20]));
+        assert_eq!(pick_process(Some(10), &[20], Tick(30)), (Some(10), vec![20, 30]));
+        // And takes away: one of the others, or the selected one, whose
+        // place the first of the others takes.
+        assert_eq!(pick_process(Some(10), &[20, 30], Tick(20)), (Some(10), vec![30]));
+        assert_eq!(pick_process(Some(10), &[20, 30], Tick(10)), (Some(20), vec![30]));
+        assert_eq!(pick_process(Some(10), &[], Tick(10)), (None, vec![]));
+        // The row of a ticked process makes it the selected one of them:
+        // the two trade places and nothing leaves the capture.
+        assert_eq!(pick_process(Some(10), &[20, 30], Row(30)), (Some(30), vec![20, 10]));
+    }
+
+    #[test]
+    fn the_picker_lists_the_ticked_processes_first_and_the_rest_as_they_come() {
+        let list = [proc(10, "a", ""), proc(20, "b", ""), proc(30, "c", ""), proc(40, "d", "")];
+        let pids = |order: Vec<usize>| order.into_iter().map(|i| list[i].pid).collect::<Vec<_>>();
+        assert_eq!(pids(picker_order(&list, None, &[])), [10, 20, 30, 40]);
+        assert_eq!(pids(picker_order(&list, Some(30), &[])), [30, 10, 20, 40]);
+        assert_eq!(pids(picker_order(&list, Some(40), &[20, 99])), [20, 40, 10, 30]);
     }
 
     #[test]

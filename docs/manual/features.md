@@ -180,7 +180,14 @@ hooked, then the interface knobs (report spacing, font, track scale). It
 opens on first load with a service and closes with its ×. Its rows:
 
 - **Process picker** lists every process the service sees, live; the
-  Refresh pill re-reads `/proc`. The **Symbols** pill next to it shows the
+  Refresh pill re-reads `/proc`. A row selects a process. The box at its
+  left, or a Ctrl+click on it, ticks another one to be captured with
+  it, for a program that is several processes none of which launched
+  the others: each is sampled and has its own rows, and the capture ends
+  when the last of them exits. The ticked processes lead the list, and the
+  button counts them (`1234  python3  +1`). The hooks and the Functions
+  tab are of the selected one. See
+  [Capture](capture.html#several-processes). The **Symbols** pill next to it shows the
   state for the selected process (`symbols loading`, `ready N fn M mod`,
   or an error) and a click loads or reloads them. Symbols load on their
   own as soon as a process is selected, and the service loads them itself
@@ -196,7 +203,12 @@ opens on first load with a service and closes with its ×. Its rows:
   fork record a clone produces names the new thread, which is sampled
   from that pass on, as C++ perfr reacts to PERF_RECORD_FORK. A slow
   scan of the thread list is the safety net and logs if it ever finds
-  a thread no fork record announced.
+  a thread no fork record announced. **Children** (on by default, Linux
+  services): a fork record that names a new process is a child, which
+  is sampled from that pass on too, like the children that were already
+  running, each with an unwinder and symbols of its own, read off the
+  capture thread; up to 64 processes at once. A walk of `/proc` under
+  the targets once a second is the safety net there.
 - **Python** (a COLLECT toggle, on by default, Linux and Windows
   services): when the target has a Python interpreter mapped, its Python
   stacks are read from outside with py-spy, about a thousand times a second

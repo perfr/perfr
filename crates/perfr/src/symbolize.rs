@@ -110,14 +110,72 @@ impl FileIdentity {
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
 const VDSO: &str = "[vdso]";
 
-/// The files of the last symbolizer built. A capture rebuilds its symbolizer
-/// from scratch, and a game's 1 GB debug file is the same one the previous
-/// capture of it read a minute ago: the next build takes each file it still
-/// needs from here and reads only what is new or changed on disk. Replaced
-/// wholesale on every build, so it never holds more than one process's
-/// worth of symbols.
+/// The files symbolizers were built from, in this capture and the one
+/// before. A capture rebuilds its symbolizer from scratch, and a game's 1 GB
+/// debug file is the same one the previous capture of it read a minute ago:
+/// a build takes each file it needs from here and reads only what is new or
+/// changed on disk.
+///
+/// A capture builds one symbolizer for every process it samples, and builds
+/// them again when a process maps new code, so the cache is the union of
+/// what they need, not the files of the last build: with that, two
+/// processes took turns emptying it of each other's files. What bounds it
+/// is the capture: a file no build of a whole capture asked for is let go
+/// when the next one starts.
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
-static FILE_CACHE: Mutex<Vec<(FileIdentity, Arc<LoadedFile>)>> = Mutex::new(Vec::new());
+struct FileCache {
+    /// Counts captures.
+    capture: u64,
+    files: Vec<CachedFile>,
+}
+
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+struct CachedFile {
+    identity: FileIdentity,
+    file: Arc<LoadedFile>,
+    /// The capture a build last took it in.
+    used_in: u64,
+}
+
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+impl FileCache {
+    const fn new() -> FileCache {
+        FileCache { capture: 0, files: Vec::new() }
+    }
+
+    /// A capture starts: the files the one that just ended never asked for
+    /// are forgotten.
+    fn begin_capture(&mut self) {
+        let ending = self.capture;
+        self.files.retain(|cached| cached.used_in >= ending);
+        self.capture += 1;
+    }
+
+    /// The file, when the one on disk is still the one that was read.
+    fn get(&mut self, identity: &FileIdentity) -> Option<Arc<LoadedFile>> {
+        let capture = self.capture;
+        let cached = self.files.iter_mut().find(|cached| cached.identity == *identity)?;
+        cached.used_in = capture;
+        Some(cached.file.clone())
+    }
+
+    /// Keeps a file just read, in place of an older reading of its path.
+    fn put(&mut self, identity: FileIdentity, file: Arc<LoadedFile>) {
+        self.files.retain(|cached| cached.identity.key != identity.key);
+        self.files.push(CachedFile { identity, file, used_in: self.capture });
+    }
+}
+
+/// Locked for the length of a build, so that two processes' builds that
+/// need the same file do not both read it: the second waits and finds it.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+static FILE_CACHE: Mutex<FileCache> = Mutex::new(FileCache::new());
+
+/// Tells the symbol cache that a capture starts (see [`FileCache`]).
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub fn begin_capture() {
+    FILE_CACHE.lock().unwrap_or_else(|e| e.into_inner()).begin_capture();
+}
 
 /// One executable mapping's coordinates, before its symbols are loaded: the
 /// unit of work parallelised across [`crate::par_map`]. Plain data, so `Sync`.
@@ -226,7 +284,16 @@ impl Symbolizer {
         let Ok(content) = std::fs::read(format!("/proc/{pid}/maps")) else {
             return Symbolizer { modules: Vec::new() };
         };
-        Symbolizer { modules: Self::modules_of(&parse_maps(&content), Self::load_files) }
+        Self::from_maps_content(&content)
+    }
+
+    /// Builds a symbolizer from the content of a `/proc/<pid>/maps` read
+    /// earlier. The files are still there when a process is not: a child
+    /// that ran for a tenth of a second has exited by the time its symbols
+    /// are loaded, and its samples are named from the maps it had.
+    #[cfg(not(windows))]
+    pub fn from_maps_content(content: &[u8]) -> Symbolizer {
+        Symbolizer { modules: Self::modules_of(&parse_maps(content), Self::load_files) }
     }
 
     /// The modules of a process with these mappings; `load` is where the
@@ -305,15 +372,15 @@ impl Symbolizer {
 
     /// The symbol tables of `keys` (file paths, or [`VDSO`]): from the cache
     /// where the file on disk is unchanged since it was read, loaded in
-    /// parallel otherwise. The cache is left holding exactly these.
+    /// parallel otherwise and kept there.
     fn load_files(keys: &[String]) -> Vec<(String, Arc<LoadedFile>)> {
-        let identities: Vec<FileIdentity> = keys.iter().map(|key| FileIdentity::of(key)).collect();
-        let previous = std::mem::take(&mut *FILE_CACHE.lock().unwrap_or_else(|e| e.into_inner()));
-        let mut files: Vec<(FileIdentity, Arc<LoadedFile>)> = Vec::with_capacity(identities.len());
+        let mut cache = FILE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut files: Vec<(String, Arc<LoadedFile>)> = Vec::with_capacity(keys.len());
         let mut missing: Vec<FileIdentity> = Vec::new();
-        for identity in identities {
-            match previous.iter().find(|(known, _)| *known == identity) {
-                Some((_, file)) => files.push((identity, file.clone())),
+        for key in keys {
+            let identity = FileIdentity::of(key);
+            match cache.get(&identity) {
+                Some(file) => files.push((identity.key, file)),
                 None => missing.push(identity),
             }
         }
@@ -328,12 +395,15 @@ impl Symbolizer {
             ));
             // `par_map` hands results back in completion order, so each
             // carries the identity it was loaded for.
-            files.extend(crate::par_map(&missing, |identity| {
+            let loaded = crate::par_map(&missing, |identity| {
                 (identity.clone(), Arc::new(Self::load_file(&identity.key)))
-            }));
+            });
+            for (identity, file) in loaded {
+                files.push((identity.key.clone(), file.clone()));
+                cache.put(identity, file);
+            }
         }
-        *FILE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = files.clone();
-        files.into_iter().map(|(identity, file)| (identity.key, file)).collect()
+        files
     }
 
     /// Loads one file's symbols, on a worker thread. A self-profile scope
@@ -1217,6 +1287,61 @@ mod tests {
             ms2 * 1e6 / pcs.len() as f64,
             pc_ids.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod file_cache {
+    use super::*;
+
+    fn identity(key: &str, len: u64) -> FileIdentity {
+        FileIdentity { key: key.to_string(), len, mtime_ns: 0 }
+    }
+
+    fn file(symbol: &str) -> Arc<LoadedFile> {
+        Arc::new(LoadedFile { segments: Vec::new(), symbols: vec![(0, 1, symbol.to_string())], image_base: 0 })
+    }
+
+    #[test]
+    fn the_cache_keeps_every_process_files_and_not_only_the_last_builds() {
+        // Two processes of one capture, built in turn: the second build
+        // used to leave the cache with its own files alone, and the first
+        // process's next build read its files from disk again.
+        let mut cache = FileCache::new();
+        cache.begin_capture();
+        cache.put(identity("/bin/python", 10), file("py"));
+        cache.put(identity("/lib/libc.so", 20), file("libc"));
+        cache.put(identity("/bin/sim", 30), file("sim"));
+        assert!(cache.get(&identity("/lib/libc.so", 20)).is_some());
+        assert_eq!(cache.get(&identity("/bin/python", 10)).unwrap().symbols[0].2, "py");
+        assert_eq!(cache.get(&identity("/bin/sim", 30)).unwrap().symbols[0].2, "sim");
+    }
+
+    #[test]
+    fn a_file_that_changed_on_disk_is_read_again_and_replaces_the_old_reading() {
+        let mut cache = FileCache::new();
+        cache.put(identity("/bin/app", 10), file("old"));
+        assert!(cache.get(&identity("/bin/app", 11)).is_none(), "another length is another file");
+        cache.put(identity("/bin/app", 11), file("new"));
+        assert!(cache.get(&identity("/bin/app", 10)).is_none());
+        assert_eq!(cache.get(&identity("/bin/app", 11)).unwrap().symbols[0].2, "new");
+        assert_eq!(cache.files.len(), 1);
+    }
+
+    #[test]
+    fn a_file_no_build_of_a_whole_capture_asked_for_is_let_go_at_the_next() {
+        let mut cache = FileCache::new();
+        cache.begin_capture();
+        cache.put(identity("/bin/game", 10), file("game"));
+        cache.put(identity("/bin/tool", 20), file("tool"));
+        // The next capture is of the game again: its file is still here.
+        cache.begin_capture();
+        assert!(cache.get(&identity("/bin/game", 10)).is_some());
+        assert_eq!(cache.files.len(), 2, "the tool's is kept for the capture after the one that read it");
+        // And the one after that: the tool was not asked for in a whole capture.
+        cache.begin_capture();
+        assert!(cache.get(&identity("/bin/tool", 20)).is_none());
+        assert!(cache.get(&identity("/bin/game", 10)).is_some());
     }
 }
 

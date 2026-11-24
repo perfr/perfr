@@ -923,7 +923,10 @@ mod tests {
         tool(&mcp, 9, "perfr_stop_capture", json!({}));
         let cleared = tool(&mcp, 10, "perfr_unhook", json!({"all": true}));
         assert_eq!(cleared["armed"], 0);
-        tool(&mcp, 11, "perfr_start_capture", json!({}));
+        // A capture of several processes: the attached one, named once,
+        // and the others.
+        let several = tool(&mcp, 11, "perfr_start_capture", json!({"also_pids": [12, 9, 12, 14], "sample_children": false}));
+        assert_eq!(several["also_pids"], json!([12, 14]));
         let starts: Vec<Value> = hits
             .lock()
             .unwrap()
@@ -936,6 +939,9 @@ mod tests {
         assert_eq!(starts[0]["sampling"], true);
         assert_eq!(starts[0]["context_switches"], true);
         assert_eq!(starts[1]["instrumented_functions"].as_array().unwrap().len(), 0);
+        // One process is itself alone, with its children sampled.
+        assert_eq!((&starts[0]["pids"], &starts[0]["sample_children"]), (&json!([9]), &json!(true)));
+        assert_eq!((&starts[1]["pids"], &starts[1]["sample_children"]), (&json!([9, 12, 14]), &json!(false)));
     }
 
     #[test]

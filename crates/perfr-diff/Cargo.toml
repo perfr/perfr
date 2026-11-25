@@ -1,0 +1,24 @@
+# Copyright (c) 2026 The perfr Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+[package]
+name = "perfr-diff"
+version = "0.1.0"
+description = "What changed between two captures, with the statistics to say how sure"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# No capture format in here: the service turns a bundle into a
+# `CaptureInput`, and the viewer reads the result with the same types, so
+# this crate has to build for wasm32 and must not pull in Arrow.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

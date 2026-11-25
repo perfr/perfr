@@ -38,6 +38,7 @@ mod frida;
 mod frida_returns;
 mod code;
 mod demangle;
+mod diff;
 mod functions;
 #[cfg(target_os = "linux")]
 mod health;

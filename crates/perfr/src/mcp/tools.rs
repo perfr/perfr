@@ -259,6 +259,7 @@ impl Mcp {
             "perfr_story_hotspots" => self.story_hotspots(args),
             "perfr_story_cpu" => self.story_cpu(args),
             "perfr_logs" => self.logs(args),
+            "perfr_diff" => self.diff(args),
             _ => Err(format!("unknown tool {name}")),
         }
     }
@@ -618,6 +619,61 @@ impl Mcp {
         }
     }
 
+    /// What changed between saved captures, or between one and the capture
+    /// the service holds. Files are read here; the service is only asked
+    /// when its own capture is one of the sides.
+    fn diff(&self, args: &Value) -> Result<Value, String> {
+        let files = |key: &str| -> Result<Vec<String>, String> {
+            let not_paths = || format!("{key} is the path of a .perfr.zip, or a list of them");
+            match args.get(key) {
+                None | Some(Value::Null) => Ok(Vec::new()),
+                Some(Value::String(path)) => Ok(vec![path.clone()]),
+                Some(Value::Array(paths)) => {
+                    paths.iter().map(|path| path.as_str().map(str::to_string).ok_or_else(not_paths)).collect()
+                }
+                Some(_) => Err(not_paths()),
+            }
+        };
+        let (base, new) = (files("base")?, files("new")?);
+        if base.is_empty() {
+            return Err("base is the capture to compare against: the path of a .perfr.zip".into());
+        }
+        let number = |key: &str| args.get(key).and_then(Value::as_f64);
+        let per = arg_str(args, "per").unwrap_or("");
+        let limit = page_limit(args, 10, 40);
+        let diff: perfr_diff::Diff = if new.is_empty() {
+            let [path] = base.as_slice() else {
+                return Err("without new, base is one capture: it is compared with the one the service holds".into());
+            };
+            let bytes = std::fs::read(path).map_err(|error| format!("{path}: {error}"))?;
+            let name = std::path::Path::new(path).file_name().map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned());
+            let mut query = format!("/api/diff?name={}&per={}", urlencode(&name), urlencode(per));
+            for key in ["confidence", "threshold", "min_share"] {
+                if let Some(value) = number(key) {
+                    query.push_str(&format!("&{key}={value}"));
+                }
+            }
+            let raw = self.http.exchange("POST", &query, Some(bytes), Duration::from_secs(120))?;
+            if raw.status == 501 {
+                return Err("this service does not compare captures; give new, a second .perfr.zip".into());
+            }
+            serde_json::from_value(parse_body(&raw)?).map_err(|error| format!("bad comparison from perfr: {error}"))?
+        } else {
+            let options = crate::diff::options(per, number("confidence"), number("threshold"), number("min_share"))?;
+            crate::diff::compare_files(&base, &new, &options)?
+        };
+        let text = perfr_diff::text::render(&diff, &perfr_diff::text::TextOptions { top: limit, markdown: false });
+        Ok(json!({
+            "regressed": diff.regressed(),
+            "headline": perfr_diff::text::headline(&diff),
+            "rows_slower": diff.outcome.regressed,
+            "rows_faster": diff.outcome.improved,
+            "rows_tested": diff.outcome.tested,
+            "units": diff.method.units,
+            "report": text,
+        }))
+    }
+
     fn callstacks(&self, args: &Value) -> Result<Value, String> {
         if !self.platform.sampling {
             return Ok(unsupported_feature("callstacks"));
@@ -974,6 +1030,24 @@ pub fn tool_specs() -> Vec<Value> {
                     "limit": { "type": "integer", "description": "Page size. Default 8, max 20." },
                     "offset": { "type": "integer", "description": "Stacks to skip. Default 0." }
                 },
+                "additionalProperties": false,
+            }),
+        ),
+        tool(
+            "perfr_diff",
+            "What changed between two captures, and how sure: every sampled function, scope, hooked function and frame series with its value on both sides, the interval of the difference, and a verdict (slower, faster, no change) that holds false findings to 5% across the whole report. base and new are .perfr.zip paths on this machine; leave new out to compare base with the capture the service holds. report is the comparison as text, verdict first. With one capture a side the intervals are those of these two captures; give three or more a side (lists) to measure what differs from run to run, which is what a regression test needs. Does not change the capture.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "base": { "description": "The capture to compare against: a .perfr.zip path, or a list of them.", "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
+                    "new": { "description": "The capture to judge: a path or a list. Omit for the capture the service holds.", "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
+                    "per": { "type": "string", "description": "What time is counted against: second (default), capture (the same work in each capture), sample (shares of all samples), or the name of a scope or frame series (time per frame)." },
+                    "confidence": { "type": "number", "description": "Of the intervals, as a fraction. Default 0.95." },
+                    "threshold": { "type": "number", "description": "The change a verdict needs, in percent. Default 5." },
+                    "min_share": { "type": "number", "description": "The share of a capture a row needs to be tested, in percent. Default 0.5." },
+                    "limit": { "type": "integer", "description": "Rows a table of the report shows. Default 10, max 40." }
+                },
+                "required": ["base"],
                 "additionalProperties": false,
             }),
         ),

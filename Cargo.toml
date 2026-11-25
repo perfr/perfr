@@ -21,6 +21,7 @@ members = [
     "crates/perfr-api",
     "crates/perfr-build-info",
     "crates/perfr-capture",
+    "crates/perfr-diff",
     "crates/perfr-etw",
     "crates/perfr-lib",
     "crates/perfr-lib-windows",

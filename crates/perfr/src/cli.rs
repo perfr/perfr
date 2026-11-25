@@ -11,6 +11,7 @@
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
+use crate::diff::{DiffOpts, Format as DiffFormat};
 use crate::preflight::SetupOpts;
 use crate::share::{LoginOpts, ShareOpts};
 use crate::skill::{SkillAction, SkillEnv};
@@ -22,6 +23,7 @@ Examples:
   perfr serve --host 127.0.0.1
   perfr capture --pid 1234 --duration-ms 5000 --out capture.pod
   perfr slice in.perfr.zip out.perfr.zip 0 1000000000
+  perfr diff before.perfr.zip after.perfr.zip
   perfr share capture.perfr.zip
   perfr mcp
   perfr skill install
@@ -36,7 +38,7 @@ perfr runs on Linux, macOS, and Windows. Sampling and the scheduler need
 Linux, or an elevated Windows prompt. macOS records manual scopes and Frida hooks.";
 
 const SUBCOMMANDS: &[&str] = &[
-    "serve", "capture", "slice", "share", "login", "logout", "mcp", "skill", "update", "doctor", "setup", "version",
+    "serve", "capture", "slice", "diff", "share", "login", "logout", "mcp", "skill", "update", "doctor", "setup", "version",
 ];
 
 #[derive(Clone, Debug)]
@@ -124,6 +126,7 @@ pub fn command() -> Command {
         .subcommand(serve_cmd())
         .subcommand(capture_cmd())
         .subcommand(slice_cmd())
+        .subcommand(diff_cmd())
         .subcommand(share_cmd())
         .subcommand(login_cmd())
         .subcommand(logout_cmd())
@@ -157,6 +160,7 @@ pub fn render_top_help(color: bool) -> String {
                 ("serve", "Serve the live viewer"),
                 ("capture", "Write a capture file for one process"),
                 ("slice", "Cut a saved capture to a time window"),
+                ("diff", "Say what changed between two captures, and how sure"),
             ],
         ),
         (
@@ -256,6 +260,13 @@ fn clap_front(args: &[String]) -> Front {
         Some(("serve", sub)) => Front::Serve(serve_opts(sub)),
         Some(("capture", sub)) => Front::Capture(capture_opts(sub)),
         Some(("slice", sub)) => Front::Slice(slice_opts(sub)),
+        Some(("diff", sub)) => Front::Exit(match diff_opts(sub) {
+            Ok(opts) => crate::diff::run(opts),
+            Err(error) => {
+                eprintln!("perfr diff: {error}");
+                2
+            }
+        }),
         Some(("share", sub)) => Front::Exit(crate::share::run_share(share_opts(sub))),
         Some(("login", sub)) => Front::Exit(crate::share::run_login(login_opts(sub))),
         Some(("logout", sub)) => Front::Exit(crate::share::run_logout(login_opts(sub))),
@@ -295,6 +306,41 @@ fn capture_opts(matches: &ArgMatches) -> CaptureOpts {
         gpu_helper: matches.get_one::<String>("gpu-helper").cloned(),
         no_preflight: matches.get_flag("no-preflight"),
     }
+}
+
+/// Two files, or `--base` and `--new` with as many as each side has.
+fn diff_opts(matches: &ArgMatches) -> Result<DiffOpts, String> {
+    let list = |name: &str| -> Vec<String> { matches.get_many::<String>(name).map(|values| values.cloned().collect()).unwrap_or_default() };
+    let (files, mut base, mut new) = (list("files"), list("base"), list("new"));
+    match files.as_slice() {
+        [] => {}
+        [first, second] if base.is_empty() && new.is_empty() => {
+            base.push(first.clone());
+            new.push(second.clone());
+        }
+        [_, _] => return Err("give two files, or --base and --new, not both".to_string()),
+        _ => return Err("give the base capture and the new one; several a side go after --base and --new".to_string()),
+    }
+    if base.is_empty() || new.is_empty() {
+        return Err("give the base capture and the new one: perfr diff before.perfr.zip after.perfr.zip".to_string());
+    }
+    let format = match (matches.get_flag("json"), matches.get_flag("markdown")) {
+        (true, true) => return Err("--json or --markdown, not both".to_string()),
+        (true, false) => DiffFormat::Json,
+        (false, true) => DiffFormat::Markdown,
+        (false, false) => DiffFormat::Text,
+    };
+    Ok(DiffOpts {
+        base,
+        new,
+        per: matches.get_one::<String>("per").cloned().unwrap_or_default(),
+        confidence: matches.get_one::<f64>("confidence").copied().unwrap_or(0.95),
+        threshold: matches.get_one::<f64>("threshold").copied().unwrap_or(5.0),
+        min_share: matches.get_one::<f64>("min-share").copied().unwrap_or(0.5),
+        top: matches.get_one::<usize>("top").copied().unwrap_or(15),
+        format,
+        fail_on_regression: matches.get_flag("fail-on-regression"),
+    })
 }
 
 fn slice_opts(matches: &ArgMatches) -> SliceOpts {
@@ -543,6 +589,75 @@ fn slice_cmd() -> Command {
                 .required(true)
                 .value_parser(clap::value_parser!(u64))
                 .help("Window end, nanoseconds"),
+        )
+}
+
+fn diff_cmd() -> Command {
+    Command::new("diff")
+        .about("Say what changed between two captures, and how sure")
+        .long_about(
+            "Compare saved captures (.perfr.zip): every sampled function, every scope,\n\
+             hooked function and frame series, and the call tree, each with its value on\n\
+             both sides, the interval of the difference and a verdict.\n\n\
+             A verdict is a difference beyond chance and beyond --threshold. Chance is\n\
+             measured inside each capture, by cutting it into batches in time; with three\n\
+             or more captures a side it is measured between captures, which is what tells\n\
+             a slower build from a slower run.",
+        )
+        .after_help(
+            "Examples:\n  \
+             perfr diff before.perfr.zip after.perfr.zip\n  \
+             perfr diff before.perfr.zip after.perfr.zip --per frame\n  \
+             perfr diff --base main-1.perfr.zip main-2.perfr.zip main-3.perfr.zip \\\n             \
+             --new pr-1.perfr.zip pr-2.perfr.zip pr-3.perfr.zip --fail-on-regression\n  \
+             perfr diff before.perfr.zip after.perfr.zip --markdown > comment.md\n\n\
+             Exit status: 0, or 1 when --fail-on-regression found something slower;\n\
+             2 when the comparison could not be made.",
+        )
+        .arg(Arg::new("files").value_name("BASE NEW").num_args(0..=2).help("The capture to compare against, then the one to judge"))
+        .arg(Arg::new("base").long("base").value_name("FILE").num_args(1..).help("Captures of the base side, when there are several"))
+        .arg(Arg::new("new").long("new").value_name("FILE").num_args(1..).help("Captures of the new side"))
+        .arg(
+            Arg::new("per")
+                .long("per")
+                .value_name("UNIT")
+                .help("What time is counted against: second (the default), capture, sample (shares of all samples), or the name of a scope or frame series"),
+        )
+        .arg(
+            Arg::new("confidence")
+                .long("confidence")
+                .value_name("FRACTION")
+                .value_parser(clap::value_parser!(f64))
+                .help("Confidence of the intervals; one minus it is the rate of false findings [default: 0.95]"),
+        )
+        .arg(
+            Arg::new("threshold")
+                .long("threshold")
+                .value_name("PERCENT")
+                .value_parser(clap::value_parser!(f64))
+                .help("The change a verdict needs [default: 5]"),
+        )
+        .arg(
+            Arg::new("min-share")
+                .long("min-share")
+                .value_name("PERCENT")
+                .value_parser(clap::value_parser!(f64))
+                .help("The share of a capture a row needs to be tested [default: 0.5]"),
+        )
+        .arg(
+            Arg::new("top")
+                .long("top")
+                .value_name("N")
+                .value_parser(clap::value_parser!(usize))
+                .help("Rows a table shows [default: 15]"),
+        )
+        .arg(Arg::new("json").long("json").action(ArgAction::SetTrue).help("Print the whole comparison as JSON"))
+        .arg(Arg::new("markdown").long("markdown").action(ArgAction::SetTrue).help("Print Markdown, for a pull request"))
+        .arg(
+            Arg::new("fail-on-regression")
+                .long("fail-on-regression")
+                .action(ArgAction::SetTrue)
+                .help("Exit with status 1 when something got slower"),
         )
 }
 
@@ -863,7 +978,7 @@ mod tests {
             assert!(help.contains(heading), "missing {heading}:\n{help}");
         }
         let order = [
-            "serve", "capture", "slice", "share", "login", "logout", "mcp", "skill", "doctor", "setup", "update", "version",
+            "serve", "capture", "slice", "diff", "share", "login", "logout", "mcp", "skill", "doctor", "setup", "update", "version",
         ];
         let mut at = 0;
         for name in order {

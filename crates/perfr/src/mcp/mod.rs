@@ -514,6 +514,14 @@ mod tests {
         if method == "POST" && path == "/api/symbols/load" {
             return (200, "{}".into());
         }
+        if method == "POST" && path == "/api/diff" {
+            let diff = perfr_diff::Diff {
+                outcome: perfr_diff::Outcome { regressed: 1, improved: 0, tested: 3 },
+                method: perfr_diff::Method { units: "batches".to_string(), ..Default::default() },
+                ..Default::default()
+            };
+            return (200, serde_json::to_string(&diff).unwrap());
+        }
         if method == "GET" && path == "/api/symbols/status" {
             return (200, r#"{"status":"ready","function_count":3,"module_count":1}"#.into());
         }
@@ -727,6 +735,80 @@ mod tests {
         assert!(error.contains("not a directory"), "{error}");
     }
 
+    /// A capture of one scope called a hundred times for `tick_ns` each.
+    fn scope_capture(dir: &std::path::Path, name: &str, tick_ns: u64) -> String {
+        let events = (0..100u64)
+            .map(|i| perfr_capture::EventRow {
+                event: perfr_live_event::LiveEvent {
+                    start_ns: 1_000 + i * 10_000_000,
+                    duration_ns: tick_ns + (i % 7) * 1_000,
+                    tid: 5,
+                    pid: 4,
+                    kind: perfr_live_event::kind::API_SCOPE,
+                    name_id: 1,
+                    ..Default::default()
+                },
+                name: "tick".to_string(),
+            })
+            .collect();
+        let bundle = perfr_capture::CaptureBundle {
+            target_pid: 4,
+            slice_ns: None,
+            processes: Vec::new(),
+            threads: Vec::new(),
+            events,
+            samples: Vec::new(),
+            frames: Vec::new(),
+            track_order: String::new(),
+            cores: Vec::new(),
+            topology: Vec::new(),
+        };
+        let path = dir.join(name);
+        std::fs::write(&path, bundle.to_zip().unwrap()).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn two_saved_captures_are_compared_without_the_service_and_one_with_the_capture_it_holds() {
+        let routes = Arc::new(Mutex::new(Vec::new()));
+        let url = spawn_service(routes.clone());
+        let mcp = mcp(&url);
+        let dir = tempfile::tempdir().unwrap();
+        let fast = scope_capture(dir.path(), "fast.perfr.zip", 1_000_000);
+        let slow = scope_capture(dir.path(), "slow.perfr.zip", 1_300_000);
+
+        let found = tool(&mcp, 1, "perfr_diff", json!({"base": fast, "new": slow}));
+        assert_eq!(found["regressed"], true, "{found}");
+        assert_eq!((found["rows_slower"].as_u64(), found["rows_tested"].as_u64()), (Some(1), Some(1)));
+        let report = found["report"].as_str().unwrap();
+        assert!(report.starts_with("REGRESSED: 1 row slower"), "{report}");
+        assert!(report.lines().any(|line| line.trim_start().starts_with("tick") && line.contains('▲') && line.contains("+30")), "{report}");
+        assert!(routes.lock().unwrap().iter().all(|hit| !hit.path.starts_with("/api/diff")), "the files were enough");
+        let same = tool(&mcp, 2, "perfr_diff", json!({"base": [fast.clone()], "new": [fast.clone()], "per": "capture", "threshold": 1}));
+        assert_eq!((same["regressed"].as_bool(), same["headline"].as_str().map(|h| h.starts_with("NO CHANGE"))), (Some(false), Some(true)));
+
+        // Without `new` the service is sent the file and compares it with
+        // what it holds.
+        let held = tool(&mcp, 3, "perfr_diff", json!({"base": fast, "per": "frame time", "confidence": 0.99, "threshold": 2.5}));
+        assert_eq!((held["regressed"].as_bool(), held["units"].as_str()), (Some(true), Some("batches")));
+        let hits = routes.lock().unwrap();
+        let hit = hits.iter().find(|hit| hit.path.starts_with("/api/diff")).expect("the service was asked");
+        assert_eq!(hit.path, "/api/diff?name=fast.perfr.zip&per=frame%20time&confidence=0.99&threshold=2.5");
+        assert!(hit.body.starts_with("PK"), "the capture is the body");
+        drop(hits);
+
+        for (args, said) in [
+            (json!({}), "base is the capture to compare against"),
+            (json!({"base": 7}), "base is the path of a .perfr.zip"),
+            (json!({"base": [fast.clone(), slow.clone()]}), "without new, base is one capture"),
+            (json!({"base": "/nowhere/a.perfr.zip", "new": slow}), "/nowhere/a.perfr.zip"),
+            (json!({"base": fast, "new": slow, "confidence": 7}), "confidence is a fraction"),
+        ] {
+            let error = refused(&mcp, "perfr_diff", args.clone());
+            assert!(error.contains(said), "{args}: {error}");
+        }
+    }
+
     #[test]
     fn initialize_lists_the_tools_with_schemas() {
         let routes = Arc::new(Mutex::new(Vec::new()));
@@ -739,7 +821,7 @@ mod tests {
         assert!(mcp.handle(&json!({"jsonrpc":"2.0","method":"notifications/initialized"})).is_none());
         let listed = call(&mcp, 2, "tools/list", json!({}));
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 29);
+        assert_eq!(tools.len(), 30);
         assert!(tools.iter().any(|spec| spec["name"] == "perfr_logs"));
         for spec in tools {
             assert!(spec["description"].as_str().unwrap().len() > 40, "{spec}");

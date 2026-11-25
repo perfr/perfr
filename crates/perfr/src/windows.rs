@@ -920,8 +920,7 @@ pub fn capture_loop(
             service.push_events(&early);
         }
     }
-    let targets: Vec<u32> =
-        std::iter::once(target_pid).chain(also_pids).filter(|pid| has_target && *pid > 0).map(|pid| pid as u32).collect();
+    let targets = crate::serve::capture_targets(target_pid, &also_pids);
     service.set_capture_targets(&targets);
     crate::symbolize::begin_capture();
     let mut visible = VisibleProcesses::new(&targets, show_all_processes);

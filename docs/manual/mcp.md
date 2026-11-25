@@ -103,6 +103,7 @@ Call `perfr_capabilities` first. It reports the platform, whether the service is
 | `perfr_callstacks` | Hottest distinct stacks, outermost frame first, Python and native frames together for a Python target |
 | `perfr_function_stats` | Count, total, average, min, max, stddev for hooks and manual scopes, and frame times for a program that marks its frames (`kind` `frame`) |
 | `perfr_logs` | Log lines in a time range, or those logged inside a named scope, folded with counts |
+| `perfr_diff` | What changed between two saved captures, or between one and the capture the service holds: the verdict and the report as text. See [Comparing two captures](diff.md) |
 
 Pages are small on purpose. A raw report or the event ring is not a useful tool result. `offset` walks the next page. Search refuses an offset that would read past 200 hits: narrow the query.
 

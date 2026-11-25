@@ -459,6 +459,9 @@ pub struct Inbox {
     /// The code views: a disassembly and a source file, or why not.
     pub disassembly: Option<Result<crate::code::Disassembly, String>>,
     pub source: Option<Result<crate::code::SourceFile, String>>,
+    /// What changed between a baseline and the service's capture, or why
+    /// the service could not say.
+    pub diff: Option<Result<perfr_diff::Diff, String>>,
 }
 
 /// How many bytes of the event stream may wait in the inbox while the page
@@ -831,6 +834,7 @@ impl Inbox {
             preset_functions: std::mem::take(&mut self.preset_functions),
             disassembly: self.disassembly.take(),
             source: self.source.take(),
+            diff: self.diff.take(),
         }
     }
 }
@@ -930,6 +934,14 @@ pub trait Backend {
     #[cfg(target_arch = "wasm32")]
     fn import_capture_file(&self, _file: web_sys::File) {}
     fn clear_capture(&self) {}
+    /// Posts a `.perfr.zip` to the service to be compared with the capture
+    /// it holds; `query` says how (`POST /api/diff`). The answer is
+    /// [`Inbox::diff`].
+    fn diff_capture(&self, _bytes: std::sync::Arc<Vec<u8>>, _query: String) {}
+    /// As [`diff_capture`](Self::diff_capture), reading the browser `File`
+    /// first.
+    #[cfg(target_arch = "wasm32")]
+    fn diff_capture_file(&self, _file: web_sys::File, _query: String) {}
 
     // Sharing a capture with the website.
 

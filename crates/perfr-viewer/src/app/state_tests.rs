@@ -3346,9 +3346,11 @@ fn the_viewers_report_has_no_functions_tab() {
     open_report(&mut viewer);
     assert!(viewer.shows("Flat"), "the report is open: {:?}", viewer.texts);
     assert!(!viewer.shows("Functions"), "Functions lists what a service indexed: {:?}", viewer.texts);
+    assert!(!viewer.shows("Compare"), "comparing is the service's work: {:?}", viewer.texts);
     let mut client = Page::new();
     open_report(&mut client);
     assert!(client.shows("Functions"), "{:?}", client.texts);
+    assert!(client.shows("Compare"), "{:?}", client.texts);
 }
 
 #[test]
@@ -4647,4 +4649,179 @@ fn the_children_switch_is_sent_with_the_capture() {
     assert!(app.capture_start(100).sample_children, "children are sampled unless switched off");
     app.opt_children = false;
     assert!(!app.capture_start(100).sample_children);
+}
+
+/// A comparison as the service answers it: the solver slower, its caller
+/// with it, a scope slower per call, and a function that did not change.
+fn compared() -> perfr_diff::Diff {
+    use perfr_diff::{Diff, FunctionRow, Method, Metric, Outcome, Quantile, ScopeRow, Side, SpanKind, TreeNode, Verdict};
+    let metric = |base: f64, new: f64, verdict: Verdict| Metric {
+        base,
+        new,
+        delta: new - base,
+        delta_ci: None,
+        change: Some(new / base - 1.0),
+        change_ci: Some((new / base - 1.05, new / base - 0.95)),
+        p: Some(0.0001),
+        q: Some(if verdict == Verdict::Unchanged { 0.8 } else { 0.0004 }),
+        verdict,
+    };
+    let side = |name: &str, samples: u64| Side {
+        captures: vec![name.to_string()],
+        seconds: 4.0,
+        samples,
+        sample_period_ns: Some(1_000_000),
+        spans: 500,
+    };
+    let function = |name: &str, own: Metric, inclusive: Metric| FunctionRow {
+        name: name.to_string(),
+        module: "game".to_string(),
+        self_samples: (own.base as u64 * 4, own.new as u64 * 4),
+        inclusive_samples: (inclusive.base as u64 * 4, inclusive.new as u64 * 4),
+        self_time: own,
+        inclusive,
+    };
+    let node = |name: &str, inclusive: Metric, children: Vec<TreeNode>| TreeNode {
+        name: name.to_string(),
+        module: String::new(),
+        samples: (inclusive.base as u64 * 4, inclusive.new as u64 * 4),
+        inclusive,
+        children,
+    };
+    let slow = Verdict::Regressed;
+    let solve = metric(250.0, 350.0, slow);
+    let all = metric(550.0, 650.0, slow);
+    Diff {
+        base: side("before.perfr.zip", 2200),
+        new: side("this capture", 2600),
+        method: Method {
+            per: "second".to_string(),
+            function_unit: "ms".to_string(),
+            cpu_unit: "cores".to_string(),
+            confidence: 0.95,
+            threshold: 0.05,
+            min_share: 0.005,
+            units: "batches".to_string(),
+            notes: vec!["Each capture is cut into batches in time.".to_string()],
+        },
+        outcome: Outcome { regressed: 3, improved: 0, tested: 4 },
+        cpu: Some(metric(0.55, 0.65, slow)),
+        functions: vec![
+            function("solve", solve, solve),
+            function("draw", metric(300.0, 301.0, Verdict::Unchanged), metric(300.0, 301.0, Verdict::Unchanged)),
+            function("main", Metric::default(), all),
+        ],
+        functions_omitted: 0,
+        scopes: vec![ScopeRow {
+            name: "physics".to_string(),
+            kind: SpanKind::Scope,
+            calls: (250, 250),
+            mean: metric(5e6, 6e6, slow),
+            median: Quantile { base: 5e6, new: 6e6, change: Some(0.2), change_ci: Some((0.18, 0.22)) },
+            p95: Quantile { base: 6e6, new: 7e6, change: Some(0.17), change_ci: Some((0.1, 0.2)) },
+            total: metric(312.0, 375.0, slow),
+        }],
+        scopes_omitted: 0,
+        tree: Some(node("all samples", all, vec![node("main", all, vec![node("solve", solve, vec![])])])),
+    }
+}
+
+fn compare_page() -> Page {
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.open_right_tab(ReportTab::Compare);
+    });
+    page.frames(3);
+    page
+}
+
+#[test]
+fn the_compare_tab_sends_the_baseline_and_draws_the_verdicts_it_is_answered() {
+    let mut page = compare_page();
+    let readout: serde_json::Value = serde_json::from_str(&page.app.sel_readout).expect("__perfr_sel is JSON");
+    assert_eq!(readout["tab"], "Compare");
+    assert!(page.shows("No baseline yet."), "{:?}", page.texts);
+    assert!(page.app.compare.asked.is_empty());
+
+    let baseline = compare::Baseline::Bytes(std::sync::Arc::new(b"PK".to_vec()));
+    page.app.set_baseline("before run.perfr.zip".to_string(), baseline);
+    assert_eq!(page.app.compare.asked, ["name=before%20run.perfr.zip&per=second"]);
+    page.frames(2);
+    assert!(page.shows("Comparing…") && page.shows("before run.perfr.zip"), "{:?}", page.texts);
+
+    page.app.apply_compare(Ok(compared()));
+    page.frames(2);
+    assert!(!page.shows("Comparing…"));
+    assert!(page.shows("REGRESSED: 3 rows slower, of 4 tested."), "{:?}", page.texts);
+    assert!(page.shows("base: before.perfr.zip, 4.00 s, 2,200 samples, 500 spans"), "{:?}", page.texts);
+    // The solver's row: its time in both, the change, the interval, q.
+    let solve = page.rect_of("compare:function:solve").expect("the function that got slower has a row");
+    for cell in ["250.00 ms", "350.00 ms", "+40.0%", "[+35.0%, +45.0%]", "<0.001", "solve", "game"] {
+        assert!(page.shows(cell), "{cell} in {:?}", page.texts);
+    }
+    // What did not change is left out until asked for; a caller is listed
+    // for what it calls; the scope and the place in the tree are there.
+    assert!(page.rect_of("compare:function:draw").is_none());
+    let main = page.rect_of("compare:function:main").expect("the caller has a row");
+    assert!(main.top() > solve.top());
+    assert!(page.shows("Functions, with what they call (CPU time per s)"), "{:?}", page.texts);
+    assert!(page.rect_of("compare:scope:physics").is_some() && page.shows("5.00 ms") && page.shows("250 calls"));
+    assert!(page.rect_of("compare:tree:solve").unwrap().top() > page.rect_of("compare:tree:main").unwrap().top());
+    assert!(page.shows("+100.00 ms"), "the tree says by how much: {:?}", page.texts);
+
+    click_on(&mut page, "Changed only");
+    page.frames(2);
+    assert!(page.rect_of("compare:function:draw").is_some(), "{:?}", page.labels());
+    assert!(page.app.compare.asked.len() == 1, "showing more rows asks nothing");
+
+    // The filter of the panel narrows the rows.
+    page.app.report_filter = "sol".to_string();
+    page.frames(2);
+    assert!(page.rect_of("compare:function:solve").is_some() && page.rect_of("compare:function:draw").is_none());
+    assert!(page.rect_of("compare:scope:physics").is_none());
+}
+
+#[test]
+fn counting_another_way_or_the_other_way_round_asks_the_service_again() {
+    let mut page = compare_page();
+    page.app.set_baseline("before.perfr.zip".to_string(), compare::Baseline::Bytes(std::sync::Arc::new(Vec::new())));
+    page.app.apply_compare(Ok(compared()));
+    page.frames(2);
+
+    click_on(&mut page, "per frame");
+    assert_eq!(page.app.compare.asked.last().unwrap(), "name=before.perfr.zip&per=frame");
+    assert!(page.app.compare.pending);
+    // The capture has no frames: the service says so, and what was on
+    // screen answered another question.
+    page.app.apply_compare(Err("400: this capture: no scope or frame named \"frame\" to count against".to_string()));
+    page.frames(2);
+    assert!(page.shows("400: this capture: no scope or frame named \"frame\" to count against"), "{:?}", page.texts);
+    assert!(page.rect_of("compare:function:solve").is_none() && !page.shows("Comparing…"));
+    // The same unit again asks nothing.
+    click_on(&mut page, "per frame");
+    assert_eq!(page.app.compare.asked.len(), 2);
+
+    click_on(&mut page, "shares");
+    click_on(&mut page, "This capture is the base");
+    assert_eq!(page.app.compare.asked.last().unwrap(), "name=before.perfr.zip&per=sample&current=base");
+    click_on(&mut page, "Compare again");
+    assert_eq!(page.app.compare.asked.len(), 5);
+    page.app.apply_compare(Ok(compared()));
+    page.frames(2);
+    assert!(page.rect_of("compare:function:solve").is_some() && page.app.compare.error.is_empty());
+}
+
+#[test]
+fn a_function_of_the_comparison_opens_this_captures_report_on_it() {
+    let mut page = compare_page();
+    page.app.apply_compare(Ok(compared()));
+    page.frames(2);
+    click_on(&mut page, "compare:function:solve");
+    page.frames(2);
+    assert_eq!(page.app.report_tab, ReportTab::Flat);
+    assert_eq!(page.app.report_filter, "solve");
+    // The comparison is still there to come back to.
+    click_on(&mut page, "Compare");
+    page.frames(2);
+    assert!(page.rect_of("compare:function:solve").is_some());
 }

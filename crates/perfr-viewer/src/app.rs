@@ -1456,6 +1456,8 @@ pub struct PerfrLiveApp {
     /// The report is over every instance of this scope (name id, name)
     /// rather than a time selection.
     scope_report: Option<(u32, String)>,
+    /// The Compare tab: the baseline, how to compare, and the answer.
+    compare: compare::CompareState,
     /// The self-profile pane's own timeline state. Drawn by the same
     /// `timeline()` as the capture: its fields are swapped into place for
     /// the duration of the pane's draw and swapped back after.
@@ -1704,6 +1706,8 @@ enum ReportTab {
     Code,
     Inspector,
     Selection,
+    /// What changed between this capture and another (`app/compare.rs`).
+    Compare,
 }
 
 impl ReportTab {
@@ -1721,6 +1725,7 @@ impl ReportTab {
             "code" => Some(ReportTab::Code),
             "inspector" => Some(ReportTab::Inspector),
             "selection" => Some(ReportTab::Selection),
+            "compare" | "diff" => Some(ReportTab::Compare),
             _ => None,
         }
     }
@@ -1737,6 +1742,7 @@ impl ReportTab {
             ReportTab::Code => "Code",
             ReportTab::Inspector => "Inspector",
             ReportTab::Selection => "Selection",
+            ReportTab::Compare => "Compare",
         }
     }
 
@@ -2305,7 +2311,7 @@ impl PerfrLiveApp {
             column_rasters: 0,
             report_tab: crate::dev::query_report_tab_from_location()
                 .and_then(|v| ReportTab::from_query(&v))
-                .filter(|tab| host.service() || !matches!(tab, ReportTab::Functions | ReportTab::Code))
+                .filter(|tab| host.service() || !matches!(tab, ReportTab::Functions | ReportTab::Code | ReportTab::Compare))
                 .unwrap_or(ReportTab::Flat),
             tree: None,
             tree_expanded: std::collections::HashSet::new(),
@@ -2367,6 +2373,7 @@ impl PerfrLiveApp {
             flame_menu: None,
             scope_menu_fresh: false,
             scope_report: None,
+            compare: compare::CompareState::default(),
             self_tl: TimelineState::fresh(),
             rect_in_self_pane: false,
             gpu_slot: 0,
@@ -4451,6 +4458,9 @@ impl PerfrLiveApp {
             self.apply_service_reports(inbox.sampling, inbox.tree);
             if let Some(m) = inbox.modules {
                 self.modules = Some(m);
+            }
+            if let Some(answer) = inbox.diff {
+                self.apply_compare(answer);
             }
             if let Some(result) = inbox.disassembly {
                 self.code_loading = false;
@@ -10232,6 +10242,7 @@ impl PerfrLiveApp {
                     let title = match (&report, self.report_tab) {
                         (_, ReportTab::Inspector) => "Inspector".into(),
                         (_, ReportTab::Selection) => "Rectangle selection".into(),
+                        (_, ReportTab::Compare) => "Compare with another capture".into(),
                         (_, ReportTab::Live) => self.live_title(),
                         (Some(_), _) => format!("Sampling report — {samples} samples"),
                         // The tree tabs have their own sample count even
@@ -10249,7 +10260,7 @@ impl PerfrLiveApp {
                         ),
                     };
                     ui.label(RichText::new(title).color(theme::TEXT()).size(12.0));
-                    let desc = if matches!(self.report_tab, ReportTab::Inspector | ReportTab::Selection) { String::new() }
+                    let desc = if matches!(self.report_tab, ReportTab::Inspector | ReportTab::Selection | ReportTab::Compare) { String::new() }
                     else if self.report_tab == ReportTab::Live {
                         describe_selection(&self.sampling_ranges)
                     } else {
@@ -10271,7 +10282,7 @@ impl PerfrLiveApp {
                 });
                 ui.add_space(2.0);
                 ui.horizontal_wrapped(|ui| {
-                    const TABS: [ReportTab; 10] = [
+                    const TABS: [ReportTab; 11] = [
                         ReportTab::Live,
                         ReportTab::Flat,
                         ReportTab::Flame,
@@ -10282,13 +10293,16 @@ impl PerfrLiveApp {
                         ReportTab::Code,
                         ReportTab::Inspector,
                         ReportTab::Selection,
+                        ReportTab::Compare,
                     ];
                     // Functions lists what the service indexed, to hook from,
                     // and Code shows the source and disassembly it serves.
                     let tabs: Vec<ReportTab> = TABS
                         .iter()
                         .copied()
-                        .filter(|t| self.host.service() || !matches!(t, ReportTab::Functions | ReportTab::Code))
+                        .filter(|t| {
+                            self.host.service() || !matches!(t, ReportTab::Functions | ReportTab::Code | ReportTab::Compare)
+                        })
                         .collect();
                     let labels: Vec<&str> = tabs.iter().map(|t| t.label()).collect();
                     let current = tabs.iter().position(|t| *t == self.report_tab).unwrap_or(0);
@@ -10299,7 +10313,7 @@ impl PerfrLiveApp {
                             self.report_tab = tab;
                             // Switching between top-down and bottom-up needs a
                             // different tree; switching to or from Flat does not.
-                            if !matches!(tab, ReportTab::Inspector | ReportTab::Selection)
+                            if !matches!(tab, ReportTab::Inspector | ReportTab::Selection | ReportTab::Compare)
                                 && (tab.mode() != was_tree_mode || self.tree.is_none()) {
                                 self.tree_expanded.clear();
                                 if self.capture_is_local() {
@@ -10423,6 +10437,10 @@ impl PerfrLiveApp {
                     });
                     return;
                 }
+                if self.report_tab == ReportTab::Compare {
+                    self.compare_panel(ui);
+                    return;
+                }
                 if self.report_tab == ReportTab::Code && self.host.service() {
                     self.code_toolbar(ui);
                 }
@@ -10443,7 +10461,7 @@ impl PerfrLiveApp {
                                 ReportTab::Flat => self.flat_report_rows(ui, report.as_ref()),
                                 ReportTab::TopDown | ReportTab::BottomUp => self.call_tree_rows(ui),
                                 ReportTab::Modules => self.module_rows(ui),
-                                ReportTab::Live | ReportTab::Inspector | ReportTab::Selection => {}
+                                ReportTab::Live | ReportTab::Inspector | ReportTab::Selection | ReportTab::Compare => {}
                                 ReportTab::Flame => self.flame_rows(ui),
                                 ReportTab::Functions | ReportTab::Code if !self.host.service() => {}
                                 ReportTab::Functions => self.function_rows(ui),
@@ -12546,7 +12564,7 @@ impl PerfrLiveApp {
                         self.measure = None;
                         self.sampling_ranges.clear();
                         self.scope_report = Some((pick.name_id, name.clone()));
-                        let tab = if matches!(self.report_tab, ReportTab::Live | ReportTab::Modules) {
+                        let tab = if matches!(self.report_tab, ReportTab::Live | ReportTab::Modules | ReportTab::Compare) {
                             ReportTab::Flat
                         } else {
                             self.report_tab
@@ -13263,6 +13281,7 @@ impl eframe::App for PerfrLiveApp {
             self.sync_fullscreen(ctx);
             self.take_dropped_traces(ctx);
             self.pump_trace_load();
+            self.pump_baseline();
             {
                 let _net = devf.scope(TID_NET, NAME_NET);
                 {
@@ -16850,6 +16869,8 @@ fn format_elapsed(s: f64) -> String {
         format!("{minutes:.0}:{tenths:04.1}")
     }
 }
+
+mod compare;
 
 #[cfg(test)]
 mod state_tests;

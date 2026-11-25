@@ -232,6 +232,10 @@ The budget starts at 1000 scopes/s (`auto_profile_scopes_per_s` in `~/.config/pe
 
 The capture-start body takes `"auto_profile": true`. `POST /api/auto_profile` with `{"on": true}` or `{"on": false}` toggles it, and `/api/status` reports `auto_profile` and `auto_profile_status`.
 
+## Compare with another capture
+
+The report panel's **Compare** tab says what changed between the capture on screen and a saved one, with an interval and a verdict for every function and scope. `perfr diff` does the same for two files. [Comparing two captures](diff.md) has both.
+
 ## Save a slice
 
 Select a time range on the timeline, then use **Save → Selected slice (.perfr.zip)**.

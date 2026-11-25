@@ -63,6 +63,9 @@ wasm-threads = ["perfr-live-render/parallel", "dep:wasm-bindgen-rayon"]
 perfr-build-info = { path = "../perfr-build-info" }
 perfr-live-event = { path = "../perfr-live-event" }
 perfr-story = { path = "../perfr-story" }
+# The comparison of two captures as the service answers it, and how its
+# figures are written. No capture format in it: serde only.
+perfr-diff = { path = "../perfr-diff" }
 perfr-live-chrome = { path = "../perfr-live-chrome" }
 perfr-live-protocol = { path = "../perfr-live-protocol" }
 perfr-live-render = { path = "../perfr-live-render" }

@@ -316,22 +316,21 @@ fn has_change(node: &TreeNode) -> bool {
     node.inclusive.changed() || node.children.iter().any(has_change)
 }
 
-fn tree_lines(units: &Units<'_>, node: &TreeNode, depth: usize, budget: &mut usize, out: &mut Vec<String>) {
-    if *budget == 0 {
-        return;
-    }
-    *budget -= 1;
-    let metric = &node.inclusive;
-    let module = if node.module.is_empty() { String::new() } else { format!("  [{}]", node.module) };
-    out.push(format!(
-        "{:>12} {} {}{}{module}",
-        units.function_delta(metric.delta),
-        mark(metric.verdict),
-        "  ".repeat(depth),
-        node.name,
-    ));
-    // A run of frames that each do nothing but call the next says one
-    // thing: its first frame is shown, and then where it ends.
+/// One line of the call tree as a report shows it.
+#[derive(Clone, Copy, Debug)]
+pub struct TreeLine<'a> {
+    pub depth: usize,
+    pub node: &'a TreeNode,
+    /// Frames left out right under this one: a run that each did nothing
+    /// but call the next.
+    pub folded: usize,
+}
+
+/// The tree cut down to where something changed: a node is shown when it
+/// or something under it has a verdict, at most `budget` of them. A run of
+/// frames that each only call the next is its first frame and then where
+/// it ends. The second value says whether the budget cut it short.
+pub fn tree_lines(tree: &TreeNode, budget: usize) -> (Vec<TreeLine<'_>>, bool) {
     fn shown(node: &TreeNode) -> Vec<&TreeNode> {
         node.children.iter().filter(|child| has_change(child)).collect()
     }
@@ -341,23 +340,58 @@ fn tree_lines(units: &Units<'_>, node: &TreeNode, depth: usize, budget: &mut usi
             _ => None,
         }
     }
-    let mut last = node;
-    let mut folded = 0;
-    while let Some(next) = only_child(last).filter(|next| only_child(next).is_some()) {
-        last = next;
-        folded += 1;
+    fn walk<'a>(node: &'a TreeNode, depth: usize, budget: &mut usize, out: &mut Vec<TreeLine<'a>>) {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        let mut last = node;
+        let mut folded = 0;
+        while let Some(next) = only_child(last).filter(|next| only_child(next).is_some()) {
+            last = next;
+            folded += 1;
+        }
+        out.push(TreeLine { depth, node, folded });
+        for child in shown(last) {
+            walk(child, depth + 1, budget, out);
+        }
     }
-    if folded > 0 && *budget > 0 {
+    let mut lines = Vec::new();
+    if !has_change(tree) {
+        return (lines, false);
+    }
+    let mut left = budget;
+    walk(tree, 0, &mut left, &mut lines);
+    (lines, left == 0)
+}
+
+fn tree_text(units: &Units<'_>, tree: &TreeNode, budget: usize) -> Vec<String> {
+    let (lines, cut) = tree_lines(tree, budget);
+    let mut out = Vec::new();
+    for line in lines {
+        let metric = &line.node.inclusive;
+        let module = if line.node.module.is_empty() { String::new() } else { format!("  [{}]", line.node.module) };
         out.push(format!(
-            "{:>12}   {}... {folded} more frame{} with nothing of their own",
-            "",
-            "  ".repeat(depth + 1),
-            if folded == 1 { "" } else { "s" }
+            "{:>12} {} {}{}{module}",
+            units.function_delta(metric.delta),
+            mark(metric.verdict),
+            "  ".repeat(line.depth),
+            line.node.name,
         ));
+        if line.folded > 0 {
+            out.push(format!(
+                "{:>12}   {}... {} more frame{} with nothing of their own",
+                "",
+                "  ".repeat(line.depth + 1),
+                line.folded,
+                if line.folded == 1 { "" } else { "s" }
+            ));
+        }
     }
-    for child in shown(last) {
-        tree_lines(units, child, depth + 1, budget, out);
+    if cut {
+        out.push("             ...".to_string());
     }
+    out
 }
 
 /// The whole report.
@@ -439,13 +473,7 @@ pub fn render(diff: &Diff, options: &TextOptions) -> String {
 
     if let Some(tree) = diff.tree.as_ref().filter(|tree| has_change(tree)) {
         heading(&mut out, &format!("Where in the call tree ({}, with callees)", units.function_heading()));
-        let mut lines = Vec::new();
-        let mut budget = options.top * 3;
-        tree_lines(&units, tree, 0, &mut budget, &mut lines);
-        if budget == 0 {
-            lines.push("             ...".to_string());
-        }
-        block(&mut out, &lines);
+        block(&mut out, &tree_text(&units, tree, options.top * 3));
     }
 
     heading(&mut out, "How to read this");
@@ -508,14 +536,21 @@ mod tests {
         let quiet = node("idle", (50, 50), Verdict::Unchanged, vec![]);
         let root = node("all samples", (70, 90), Verdict::Untested, vec![chain, quiet]);
         let diff = Diff { method: crate::model::Method { function_unit: "share".into(), ..Default::default() }, ..Default::default() };
-        let mut lines = Vec::new();
-        tree_lines(&Units::new(&diff), &root, 0, &mut 50, &mut lines);
+        let lines = tree_text(&Units::new(&diff), &root, 50);
         let names: Vec<&str> = lines.iter().map(|line| line.trim_start().trim_start_matches("+1.00 pp").trim()).collect();
         assert_eq!(names, ["all samples", "▲   a", "... 2 more frames with nothing of their own", "▲     d", "▲       solve"], "{lines:#?}");
-        // The budget cuts it short.
-        let mut short = Vec::new();
-        tree_lines(&Units::new(&diff), &root, 0, &mut 2, &mut short);
-        assert_eq!(short.len(), 2);
+        let (structured, cut) = tree_lines(&root, 50);
+        assert_eq!(structured.iter().map(|line| (line.depth, line.node.name.as_str(), line.folded)).collect::<Vec<_>>(), [(0, "all samples", 0), (1, "a", 2), (2, "d", 0), (3, "solve", 0)]);
+        assert!(!cut);
+        // The budget cuts it short, and says so.
+        let (short, cut) = tree_lines(&root, 2);
+        assert_eq!((short.len(), cut), (2, true));
+        // Nothing changed: nothing to show.
+        assert!(tree_lines(&quiet_only(), 50).0.is_empty());
+    }
+
+    fn quiet_only() -> TreeNode {
+        node("all samples", (5, 5), Verdict::Untested, vec![node("idle", (5, 5), Verdict::Unchanged, vec![])])
     }
 
     #[test]

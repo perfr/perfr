@@ -41,6 +41,7 @@ ALLOWED = {
     "perfr-live-render",
     "perfr-live-chrome",
     "perfr-story",
+    "perfr-diff",
     "perfr-build-info",
 }
 # Text the code view shows as examples when nothing is captured: two files

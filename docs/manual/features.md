@@ -135,6 +135,13 @@ Left to right, in clusters separated by thin rules. A filled pill is on.
   exists), or the `.perfr.stream` a web page embeds. See section 7.
 - **Clear** (the bin icon) empties the capture everywhere: every event on
   the service and in the page. Refused while a capture is running.
+- **Compare** (a tab of the report panel) says what changed between the
+  capture on screen and a saved one: every sampled function, scope and
+  frame series with its value in both, the interval of the difference and
+  a verdict that takes chance into account. `perfr diff a.perfr.zip
+  b.perfr.zip` prints the same for two files, and its exit status can
+  stand for the verdict in a regression test. See
+  [Comparing two captures](diff.md).
   Screenshot: `20-cleared.png`.
 - **Settings**, the gear next to the bin, opens the settings window
   (section 3); the target process reads next to it. **Report**

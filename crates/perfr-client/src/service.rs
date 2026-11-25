@@ -56,6 +56,7 @@ pub struct ServiceNet {
     tree_seq: Latest,
     disassembly_seq: Latest,
     source_seq: Latest,
+    diff_seq: Latest,
 }
 
 impl ServiceNet {
@@ -80,7 +81,7 @@ impl ServiceNet {
             report_seq: Latest::default(),
             tree_seq: Latest::default(),
             disassembly_seq: Latest::default(),
-            source_seq: Latest::default(),
+            source_seq: Latest::default(), diff_seq: Latest::default(),
         }
     }
 
@@ -104,7 +105,7 @@ impl ServiceNet {
             report_seq: Latest::default(),
             tree_seq: Latest::default(),
             disassembly_seq: Latest::default(),
-            source_seq: Latest::default(),
+            source_seq: Latest::default(), diff_seq: Latest::default(),
         }
     }
 
@@ -117,7 +118,7 @@ impl ServiceNet {
             http, inbox, ws, offline: false,
             http_busy: Arc::default(), view_busy: Arc::default(),
             report_seq: Latest::default(), tree_seq: Latest::default(),
-            disassembly_seq: Latest::default(), source_seq: Latest::default(),
+            disassembly_seq: Latest::default(), source_seq: Latest::default(), diff_seq: Latest::default(),
         }
     }
 
@@ -932,6 +933,52 @@ impl Backend for ServiceNet {
         self.http.spawn(move |http| async move {
             if let Err(e) = http.send_bytes("/api/capture/import", &bytes, "application/zip").await {
                 inbox.lock().unwrap_or_else(|p| p.into_inner()).error = Some(format!("open capture: {e}"));
+            }
+        });
+    }
+
+    /// Posts a `.perfr.zip` to be compared with the capture the service
+    /// holds. Only the answer to the latest question is delivered: a
+    /// comparison of a large capture takes long enough for the next one
+    /// to be asked meanwhile.
+    fn diff_capture(&self, bytes: Arc<Vec<u8>>, query: String) {
+        if self.offline {
+            return;
+        }
+        let inbox = self.inbox.clone();
+        let (latest, seq) = (self.diff_seq.clone(), self.diff_seq.next());
+        self.http.spawn(move |http| async move {
+            let result = http
+                .send_bytes(&format!("/api/diff?{query}"), &bytes, "application/zip")
+                .await
+                .and_then(|text| serde_json::from_str::<perfr_diff::Diff>(&text).map_err(|e| format!("/api/diff: {e}")));
+            if latest.is(seq) {
+                inbox.lock().unwrap_or_else(|p| p.into_inner()).diff = Some(result);
+            }
+        });
+    }
+
+    /// As [`diff_capture`](Self::diff_capture), reading the browser `File`
+    /// first.
+    #[cfg(target_arch = "wasm32")]
+    fn diff_capture_file(&self, file: web_sys::File, query: String) {
+        if self.offline {
+            return;
+        }
+        let inbox = self.inbox.clone();
+        let (latest, seq) = (self.diff_seq.clone(), self.diff_seq.next());
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = async {
+                let buf = JsFuture::from(file.array_buffer()).await.map_err(js_err)?;
+                let arr = js_sys::Uint8Array::new(&buf);
+                let mut bytes = vec![0u8; arr.length() as usize];
+                arr.copy_to(&mut bytes);
+                let text = send_bytes(&format!("/api/diff?{query}"), &bytes, "application/zip").await?;
+                serde_json::from_str::<perfr_diff::Diff>(&text).map_err(|e| format!("/api/diff: {e}"))
+            }
+            .await;
+            if latest.is(seq) {
+                inbox.lock().unwrap_or_else(|p| p.into_inner()).diff = Some(result);
             }
         });
     }

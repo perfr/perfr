@@ -11,5 +11,6 @@ The rest of the guide:
 - [Where time goes](time.md)
 - [Systems](systems.md)
 - [Everywhere](everywhere.md): themes, phone, Chrome traces
+- [Comparing two captures](diff.md)
 - [Troubleshooting](troubleshooting.md)
 - [Keys and mouse](keys.md)

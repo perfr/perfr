@@ -190,8 +190,21 @@ pub fn new_pending_file() -> PendingFile {
 /// Open a file picker. WASM streams the File; native reads the path in a thread.
 #[cfg(target_arch = "wasm32")]
 pub fn start_open_dialog(pending: &PendingFile) -> Option<TraceLoad> {
-    wasm_open_dialog(pending);
+    let accept: Vec<String> = TRACE_EXTENSIONS.iter().map(|e| format!(".{e}")).collect();
+    wasm_open_dialog(pending, &format!("{},.perfr.stream,.orbit.stream,application/json", accept.join(",")));
     None
+}
+
+/// A picker for the capture another is compared with: a `.perfr.zip`. The
+/// file lands in `pending`, which is not the slot Open fills.
+#[cfg(target_arch = "wasm32")]
+pub fn start_baseline_dialog(pending: &PendingFile) {
+    wasm_open_dialog(pending, ".zip,application/zip");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn start_baseline_dialog() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().add_filter("perfr capture", &["perfr.zip"]).pick_file()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -236,7 +249,7 @@ pub fn spawn_path_read(name: String, path: std::path::PathBuf, size: Option<u64>
 }
 
 #[cfg(target_arch = "wasm32")]
-fn wasm_open_dialog(pending: &PendingFile) {
+fn wasm_open_dialog(pending: &PendingFile, accept: &str) {
     use wasm_bindgen::JsCast;
     use web_sys::HtmlInputElement;
     let Some(window) = web_sys::window() else {
@@ -252,8 +265,7 @@ fn wasm_open_dialog(pending: &PendingFile) {
         return;
     };
     input.set_type("file");
-    let accept: Vec<String> = TRACE_EXTENSIONS.iter().map(|e| format!(".{e}")).collect();
-    input.set_accept(&format!("{},.perfr.stream,.orbit.stream,application/json", accept.join(",")));
+    input.set_accept(accept);
     let pending = pending.clone();
     let input_clone = input.clone();
     let onchange = wasm_bindgen::closure::Closure::wrap(Box::new(move || {

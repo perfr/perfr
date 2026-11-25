@@ -43,6 +43,7 @@ wasm-threads = ["perfr-viewer/wasm-threads"]
 log = "0.4"
 serde_json = "1.0"
 perfr-live-event = { path = "../perfr-live-event" }
+perfr-diff = { path = "../perfr-diff" }
 # The interface, with the parts that need a service compiled in (`service`).
 # Its defaults stay off: `page`, the viewer's own entry point, is not for
 # this pack (.github/scripts/check-viewer-boundary.py holds that).

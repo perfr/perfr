@@ -115,6 +115,8 @@ pub fn flat_report(index: &TrackIndex, intern: &InternTable, ranges: &Ranges, sc
                 self_percent: percent(self_count, total) as f32,
                 inclusive_percent: percent(*incl, total) as f32,
                 function_id: 0,
+                // A stream names its frames and says nothing more of them.
+                language: String::new(),
             }
         })
         .collect();
@@ -150,6 +152,8 @@ fn node_json(name: String, kind_name: &str, count: u64, exclusive: u64, total: u
         module: String::new(),
         address: 0,
         function_id: 0,
+        // A stream names its frames and says nothing more of them.
+        language: String::new(),
         inclusive: count,
         exclusive,
         inclusive_percent: percent(count, total),

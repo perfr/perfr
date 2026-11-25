@@ -194,7 +194,7 @@ pub fn capture_bundle(
         .collect();
     let frames: Vec<FrameRow> = frames
         .into_iter()
-        .map(|(id, info)| FrameRow { id, name: info.name, module: info.module, address: info.address })
+        .map(|(id, info)| FrameRow { id, name: info.name, module: info.module, address: info.address, language: info.language })
         .collect();
 
     let known_t: HashMap<(u32, u32), &str> =
@@ -406,13 +406,26 @@ mod tests {
     #[test]
     fn sample_only_threads_keep_their_names_when_the_ring_has_no_events() {
         let store = SampleStore::new();
-        store.record_frame(9, FrameInfo { name: "f".into(), module: "m".into(), address: 9, function_id: 0 });
+        store.record_frame(9, FrameInfo { name: "f".into(), module: "m".into(), address: 9, function_id: 0, language: 0 });
         store.push(StoredSample { timestamp_ns: 12, tid: 555, frames: vec![9] });
         let known = vec![((777, 555), "SampleThread".into())];
         let bundle = capture_bundle(&[], &InternTable::default(), &store, &known, &[(777, "Process".into())], 777);
         assert_eq!(bundle.threads, vec![ThreadName { pid: 777, tid: 555, name: "SampleThread".into() }]);
         assert_eq!(bundle.processes, vec![ProcessName { pid: 777, name: "Process".into() }]);
         assert_eq!(bundle.slice(10, 20).threads, bundle.threads);
+    }
+
+    #[test]
+    fn a_saved_capture_keeps_what_language_a_frame_is() {
+        let store = SampleStore::new();
+        let python = perfr_live_event::language::PYTHON;
+        store.record_frame(9, FrameInfo { name: "step (train.py:12)".into(), module: "train.py".into(), language: python, ..FrameInfo::default() });
+        store.record_frame(10, FrameInfo { name: "memcpy".into(), module: "libc.so.6".into(), address: 0x40, ..FrameInfo::default() });
+        store.push(StoredSample { timestamp_ns: 12, tid: 555, frames: vec![10, 9] });
+        let bundle = capture_bundle(&[], &InternTable::default(), &store, &[], &[], 777);
+        let saved = perfr_capture::CaptureBundle::from_zip(&bundle.to_zip().unwrap()).unwrap();
+        let language = |name: &str| saved.frames.iter().find(|frame| frame.name == name).unwrap().language;
+        assert_eq!((language("step (train.py:12)"), language("memcpy")), (python, perfr_live_event::language::NATIVE));
     }
 
     #[test]
@@ -445,7 +458,7 @@ mod tests {
     #[test]
     fn samples_are_filed_under_the_process_their_thread_was_seen_in() {
         let store = SampleStore::new();
-        store.record_frame(9, FrameInfo { name: "f".into(), module: "m".into(), address: 9, function_id: 0 });
+        store.record_frame(9, FrameInfo { name: "f".into(), module: "m".into(), address: 9, function_id: 0, language: 0 });
         for (i, tid) in [555u32, 556, 555, 999, 556].into_iter().enumerate() {
             store.push(StoredSample { timestamp_ns: 10 + i as u64, tid, frames: vec![9] });
         }
@@ -494,7 +507,7 @@ mod tests {
             },
         ];
         let store = SampleStore::new();
-        store.record_frame(9, FrameInfo { name: "f".into(), module: "m".into(), address: 0x9, function_id: 0 });
+        store.record_frame(9, FrameInfo { name: "f".into(), module: "m".into(), address: 0x9, function_id: 0, language: 0 });
         store.push(StoredSample { timestamp_ns: 12, tid: 555, frames: vec![9] });
         let known = vec![((demo_pid, 777), "Known".to_string())];
         let b = capture_bundle(&events, &intern, &store, &known, &[(demo_pid, "ghost".into())], demo_pid);

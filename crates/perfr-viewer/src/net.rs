@@ -124,6 +124,9 @@ pub struct SamplingRow {
     pub inclusive_percent: f32,
     /// The function index's id, for hooking the row; 0 when unknown.
     pub function_id: u64,
+    /// What the row is a function of, when it is not native code:
+    /// `python`. The service says it; nothing here reads it off the name.
+    pub language: String,
 }
 
 /// The whole report for one selection.
@@ -215,6 +218,9 @@ pub struct TreeNodeJson {
     pub address: u64,
     #[serde(default)]
     pub function_id: u64,
+    /// As [`SamplingRow::language`].
+    #[serde(default)]
+    pub language: String,
     #[serde(default)]
     pub inclusive: u64,
     #[serde(default)]

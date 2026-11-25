@@ -203,6 +203,7 @@ impl PythonStacks {
                 module: symbol.file,
                 address: 0,
                 function_id: 0,
+                language: perfr_live_event::language::PYTHON,
             });
         }
         self.name_ids[index]
@@ -507,6 +508,7 @@ mod tests {
                         module: module.to_string(),
                         address: 1,
                         function_id: 9,
+                        language: perfr_live_event::language::NATIVE,
                     })
                 })
                 .collect()
@@ -591,6 +593,11 @@ mod tests {
             (crunch.module.as_str(), crunch.function_id, crunch.address),
             ("w.py", 0, 0)
         );
+        // What tells it from native code is that it says so, not how it is
+        // named: the reports mark it from this.
+        assert_eq!(crunch.language, perfr_live_event::language::PYTHON);
+        let native = &frames.iter().find(|(_, info)| info.name == "PyLong_FromLong").unwrap().1;
+        assert_eq!(native.language, perfr_live_event::language::NATIVE);
         assert_eq!(
             (rig.python.counters.merged, rig.python.counters.steady),
             (1, 0)

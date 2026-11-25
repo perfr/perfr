@@ -10794,16 +10794,35 @@ impl PerfrLiveApp {
             // function
             let name_rect = Rect::from_min_size(Pos2::new(x, row_rect.top()), Vec2::new(name_w, row_h));
             let label = ui.interact(name_rect, ui.id().with(("repname", first + n)), Sense::click());
-            let shown = truncate_to_width(&row.name, name_w - 4.0, font);
+            // A function that is not native code has a small tag after its
+            // name, and the name leaves it room.
+            let tag = language_tag(&row.language);
+            let tag_w = tag.map_or(0.0, |_| LANGUAGE_TAG_W);
+            let shown = truncate_to_width(&row.name, name_w - 4.0 - tag_w, font);
             // An elided name reads whole on hover.
             let label = if shown != row.name { label.on_hover_text(&row.name) } else { label };
-            ui.painter().text(
-                name_rect.left_center(),
-                Align2::LEFT_CENTER,
-                shown,
-                FontId::new(font, FontFamily::Proportional),
-                if hooked { theme::ACCENT() } else { theme::TEXT() },
-            );
+            let name_end = ui
+                .painter()
+                .text(
+                    name_rect.left_center(),
+                    Align2::LEFT_CENTER,
+                    shown,
+                    FontId::new(font, FontFamily::Proportional),
+                    if hooked { theme::ACCENT() } else { theme::TEXT() },
+                )
+                .right();
+            if let Some((tag, what)) = tag {
+                let tag_rect = Rect::from_min_size(Pos2::new(name_end + 5.0, row_rect.top()), Vec2::new(LANGUAGE_TAG_W - 5.0, row_h));
+                ui.painter().text(
+                    tag_rect.left_center(),
+                    Align2::LEFT_CENTER,
+                    tag,
+                    FontId::new(font - LANGUAGE_TAG_SMALLER, FontFamily::Proportional),
+                    LANGUAGE_TAG_COLOR,
+                );
+                ui.interact(tag_rect, ui.id().with(("replang", first + n)), Sense::hover()).on_hover_text(what);
+                note_ui_rect(&format!("language:{}", row.name), tag_rect);
+            }
             note_ui_rect(&format!("report:{}", row.name), name_rect);
             if let Some(action) = hook_menu(
                 self.host.service(),
@@ -11833,6 +11852,12 @@ impl PerfrLiveApp {
                         } else {
                             node.name.clone()
                         });
+                        if let Some((tag, what)) = language_tag(&node.language) {
+                            let tag = ui
+                                .label(RichText::new(tag).color(LANGUAGE_TAG_COLOR).size(self.ui_tweaks.report_font - LANGUAGE_TAG_SMALLER))
+                                .on_hover_text(what);
+                            note_ui_rect(&format!("language:{}", node.name), tag.rect);
+                        }
                         let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
                         toggle |= expandable && name_click_toggles(label.clicked(), ctrl);
                         if !is_thread {
@@ -13697,6 +13722,24 @@ fn row_process_wash(id: RowId, dragging: bool) -> Color32 {
 /// token in `needle` must appear somewhere in `hay`. `needle` is assumed
 /// already lower-cased (callers lower-case the filter once). An empty needle
 /// matches. So "step world" matches "b3Step_World".
+/// The tag a report puts after the name of a function that is not native
+/// code, and what the tag says on hover; nothing for native code. The
+/// language is what the service said of the frame (`perfr_live_event::
+/// language`): a name is never read for it.
+fn language_tag(language: &str) -> Option<(&'static str, &'static str)> {
+    match perfr_live_event::language::named(language) {
+        perfr_live_event::language::PYTHON => Some(("py", "A Python function, read from the interpreter")),
+        _ => None,
+    }
+}
+
+/// The tag is quieter than the name it follows: smaller, and in a gold
+/// that reads on a dark panel and on a light one.
+const LANGUAGE_TAG_COLOR: Color32 = Color32::from_rgb(0xC8, 0xA2, 0x44);
+const LANGUAGE_TAG_SMALLER: f32 = 2.0;
+/// Room a flat row keeps for it after the name, the gap included.
+const LANGUAGE_TAG_W: f32 = 20.0;
+
 fn contains_ci(hay: &str, needle: &str) -> bool {
     let hay = hay.to_lowercase();
     needle.split_whitespace().all(|token| hay.contains(token))

@@ -258,6 +258,7 @@ impl FrameNames {
             module: String::new(),
             address: 0,
             function_id: 0,
+            language: perfr_live_event::language::NATIVE,
         })
     }
 
@@ -284,7 +285,7 @@ impl FrameNames {
                 self.service.intern_id(FRAME_NAME_ID_OTHER, "(other)");
                 self.store.record_frame(
                     FRAME_NAME_ID_OTHER,
-                    FrameInfo { name: "(other)".to_string(), module: String::new(), address: 0, function_id: 0 },
+                    FrameInfo { name: "(other)".to_string(), ..FrameInfo::default() },
                 );
             }
             return FRAME_NAME_ID_OTHER;
@@ -301,6 +302,7 @@ impl FrameNames {
                 module: frame.module.clone(),
                 address: frame.address,
                 function_id: frame.function_id,
+                language: frame.language,
             },
         );
         self.ids.insert(frame.name.clone(), id);
@@ -1032,7 +1034,7 @@ fn open_bundle(
         bundle
             .frames
             .iter()
-            .map(|f| (f.id, FrameInfo { name: f.name.clone(), module: f.module.clone(), address: f.address, function_id: 0 }))
+            .map(|f| (f.id, FrameInfo { name: f.name.clone(), module: f.module.clone(), address: f.address, function_id: 0, language: f.language }))
             .collect(),
     );
     // The order the capture was saved in, after everything else of it: a
@@ -4802,7 +4804,7 @@ mod tests {
     /// A frame as the symbolizer hands it over, for the name-id tests.
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn frame_named(name: &str) -> crate::symbolize::ResolvedFrame {
-        crate::symbolize::ResolvedFrame { name: name.to_string(), module: "m".into(), address: 1, function_id: 0 }
+        crate::symbolize::ResolvedFrame { name: name.to_string(), module: "m".into(), address: 1, function_id: 0, language: 0 }
     }
 
     #[cfg(any(target_os = "linux", target_os = "windows"))]

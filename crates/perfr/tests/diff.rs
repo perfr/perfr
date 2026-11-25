@@ -23,7 +23,7 @@ fn bundle(seed: u64, solve_share: f64, physics_ms: f64) -> CaptureBundle {
         state ^= state << 17;
         (state >> 11) as f64 / (1u64 << 53) as f64
     };
-    let frame = |id: u32, name: &str| FrameRow { id, name: name.to_string(), module: "/opt/game/bin/game".to_string(), address: u64::from(id) * 64 };
+    let frame = |id: u32, name: &str| FrameRow { id, name: name.to_string(), module: "/opt/game/bin/game".to_string(), address: u64::from(id) * 64, language: 0 };
     // A name is stored once per id, as the service's are.
     let event = |kind: u8, name: &str, start_ns: u64, duration_ns: u64| EventRow {
         event: LiveEvent { start_ns, duration_ns, tid: 11, pid: 10, kind, name_id: name.len() as u32, ..LiveEvent::default() },

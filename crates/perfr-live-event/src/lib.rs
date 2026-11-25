@@ -89,6 +89,33 @@ pub mod extra {
     pub const GPU_WORK: u8 = 2;
 }
 
+/// What a sampled frame is a function of. A frame's record says it, from
+/// the reader that found the frame to the row that shows it, so that
+/// nothing has to tell a Python function from the way its name is written.
+pub mod language {
+    /// Machine code: what an unwinder finds.
+    pub const NATIVE: u8 = 0;
+    /// A function of a Python program, read from the interpreter.
+    pub const PYTHON: u8 = 1;
+
+    /// How a report spells a language; nothing for native code, which is
+    /// what a frame is unless it says otherwise.
+    pub fn name(language: u8) -> &'static str {
+        match language {
+            PYTHON => "python",
+            _ => "",
+        }
+    }
+
+    /// The language a report spelled; native for anything else.
+    pub fn named(name: &str) -> u8 {
+        match name {
+            "python" => PYTHON,
+            _ => NATIVE,
+        }
+    }
+}
+
 /// `ThreadStateSlice::ThreadState` values from `capture.proto`.
 pub mod thread_state {
     pub const RUNNING: u8 = 0;

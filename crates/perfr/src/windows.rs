@@ -757,7 +757,7 @@ fn push_sample(
             .map(|pc| {
                 *pc_ids.entry(*pc).or_insert_with(|| {
                     let frame = if *pc == perfr_etw::samples::KERNEL_FRAME {
-                        ResolvedFrame { name: "[kernel]".to_string(), module: String::new(), address: 0, function_id: 0 }
+                        ResolvedFrame { name: "[kernel]".to_string(), module: String::new(), address: 0, function_id: 0, language: 0 }
                     } else {
                         symbolizer.resolve_frame(*pc)
                     };

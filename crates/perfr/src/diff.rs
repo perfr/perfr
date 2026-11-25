@@ -187,7 +187,7 @@ mod tests {
             ],
             // The child was sampled; the service never samples itself.
             samples: vec![SampleRow { timestamp_ns: 100, tid: 41, frames: vec![1] }, SampleRow { timestamp_ns: 110, tid: 5000, frames: vec![1] }],
-            frames: vec![FrameRow { id: 1, name: "work".into(), module: "app".into(), address: 0 }],
+            frames: vec![FrameRow { id: 1, name: "work".into(), module: "app".into(), address: 0, language: 0 }],
             track_order: String::new(),
             cores: Vec::new(),
             topology: Vec::new(),
@@ -224,8 +224,8 @@ mod tests {
             ],
             samples: vec![SampleRow { timestamp_ns: 120, tid: 7, frames: vec![2, 1] }],
             frames: vec![
-                FrameRow { id: 1, name: "main".into(), module: "/bin/app".into(), address: 0x10 },
-                FrameRow { id: 2, name: "solve".into(), module: "/bin/app".into(), address: 0x20 },
+                FrameRow { id: 1, name: "main".into(), module: "/bin/app".into(), address: 0x10, language: 0 },
+                FrameRow { id: 2, name: "solve".into(), module: "/bin/app".into(), address: 0x20, language: 0 },
             ],
             track_order: String::new(),
             cores: Vec::new(),

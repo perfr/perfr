@@ -814,6 +814,7 @@ fn report_tab_frame_times() {
                     self_percent: 0.1,
                     inclusive_percent: 0.2,
                     function_id: i + 1,
+                    ..Default::default()
                 })
                 .collect(),
             ..Default::default()
@@ -918,6 +919,7 @@ fn the_functions_tab_follows_its_filter_sort_list_and_hooks() {
             self_percent: 100.0,
             inclusive_percent: 100.0,
             function_id: 777,
+            ..Default::default()
         }],
         ..Default::default()
     });
@@ -2558,6 +2560,7 @@ fn a_drag_down_the_flat_report_selects_every_row_it_crosses() {
                     self_percent: 10.0 - i as f32 * 0.5,
                     inclusive_percent: 20.0,
                     function_id: i + 1,
+                    ..Default::default()
                 })
                 .collect(),
             ..Default::default()
@@ -4824,4 +4827,70 @@ fn a_function_of_the_comparison_opens_this_captures_report_on_it() {
     click_on(&mut page, "Compare");
     page.frames(2);
     assert!(page.rect_of("compare:function:solve").is_some());
+}
+
+/// A report as the service gives it for a Python program: a native frame,
+/// and two Python functions, one with a name longer than the column.
+fn python_report() -> crate::net::SamplingReport {
+    let json = r#"{"samples":100,"functions":[
+        {"name":"step (train.py:12)","module":"train.py","self":40,"inclusive":60,"self_percent":40.0,"inclusive_percent":60.0,"function_id":0,"language":"python"},
+        {"name":"memcpy","module":"libc.so.6","self":30,"inclusive":30,"self_percent":30.0,"inclusive_percent":30.0,"function_id":7},
+        {"name":"a_function_with_a_name_that_goes_on_well_past_the_width_of_the_column_it_is_shown_in_and_then_some_more (models/transformer/blocks.py:1204)","module":"blocks.py","self":20,"inclusive":20,"self_percent":20.0,"inclusive_percent":20.0,"function_id":0,"language":"python"},
+        {"name":"looks_like (python.py:3)","module":"app","self":10,"inclusive":10,"self_percent":10.0,"inclusive_percent":10.0,"function_id":9}
+    ]}"#;
+    crate::net::parse_sampling_report_json(json).unwrap()
+}
+
+#[test]
+fn a_python_function_has_a_small_tag_after_its_name_in_the_flat_report() {
+    let report = python_report();
+    assert_eq!(report.rows[0].language, "python");
+    assert_eq!(report.rows[1].language, "");
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.sampling = Some(report);
+        app.open_right_tab(ReportTab::Flat);
+    });
+    page.frames(3);
+    assert!(page.shows("py"), "{:?}", page.texts);
+    let name = page.rect_of("report:step (train.py:12)").expect("the row is drawn");
+    let tag = page.rect_of("language:step (train.py:12)").expect("a Python function is tagged");
+    // After the name, on its row, inside the name's column.
+    assert!(tag.left() > name.left() + 40.0 && tag.right() <= name.right() + 0.5, "{tag:?} in {name:?}");
+    assert!((tag.center().y - name.center().y).abs() < 1.0);
+    // Native code has none, and neither has a native function that is
+    // only named the way a Python one is: the tag is what the service
+    // said of the frame, not a reading of its name.
+    assert!(page.rect_of("report:memcpy").is_some() && page.rect_of("language:memcpy").is_none());
+    assert!(page.rect_of("report:looks_like (python.py:3)").is_some());
+    assert!(page.rect_of("language:looks_like (python.py:3)").is_none());
+    // A name too long for the column is cut short of the tag, not over it.
+    let long = "a_function_with_a_name_that_goes_on_well_past_the_width_of_the_column_it_is_shown_in_and_then_some_more (models/transformer/blocks.py:1204)";
+    let (name, tag) = (page.rect_of(&format!("report:{long}")).unwrap(), page.rect_of(&format!("language:{long}")).unwrap());
+    assert!(tag.right() <= name.right() + 0.5 && tag.left() > name.center().x, "{tag:?} in {name:?}");
+    assert!(!page.shows(long), "the name was cut");
+}
+
+#[test]
+fn a_python_function_is_tagged_in_the_call_trees_too() {
+    let json = r#"{"mode":"top_down","samples":100,"roots":[{"kind":"thread","name":"Thread 7","inclusive":100,"inclusive_percent":100.0,"of_parent_percent":100.0,"children":[
+        {"kind":"function","name":"_PyEval_EvalFrameDefault","module":"python3.12","address":4096,"function_id":3,"inclusive":100,"inclusive_percent":100.0,"of_parent_percent":100.0,"children":[
+            {"kind":"function","name":"step (train.py:12)","module":"train.py","address":0,"function_id":0,"language":"python","inclusive":90,"exclusive":90,"inclusive_percent":90.0,"of_parent_percent":90.0,"children":[]}
+        ]}
+    ]}]}"#;
+    let tree = crate::net::parse_sampling_tree_json(json).unwrap();
+    assert_eq!(tree.roots[0].children[0].children[0].language, "python");
+    assert_eq!(tree.roots[0].children[0].language, "");
+    let mut page = Page::with(|app| {
+        app.apply_status(service_status(false));
+        app.apply_service_reports(None, Some(tree));
+        app.open_right_tab(ReportTab::TopDown);
+    });
+    page.frames(3);
+    let name = page.rect_of("tree:step (train.py:12)").expect("the tree is open down to it");
+    let tag = page.rect_of("language:step (train.py:12)").expect("a Python function is tagged");
+    assert!(tag.left() >= name.right() && tag.left() - name.right() < 16.0, "{tag:?} after {name:?}");
+    assert!(page.rect_of("tree:_PyEval_EvalFrameDefault").is_some());
+    assert!(page.rect_of("language:_PyEval_EvalFrameDefault").is_none());
+    assert!(page.rect_of("language:Thread 7").is_none());
 }

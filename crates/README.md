@@ -35,6 +35,7 @@ Where the events come from on Linux:
 | `perfr-maps` | Parsing of `/proc/<pid>/maps`. No dependencies. |
 | `perfr-pystack` | The Python call stacks of a Python target, read from outside with the `py-spy` crate without pausing it, and the rule by which one joins a native stack. Also who holds the GIL, and Python's names for its threads. |
 | `perfr-thread-states` | The per-thread state machine over the scheduler tracepoints. |
+| `perfr-diff` | What changed between two captures: the statistics, the comparison of functions, scopes and the call tree, and the report as text. `perfr diff`, `POST /api/diff` and the viewer's Compare tab all show its result. |
 | `perfr-tracing-state` | Bookkeeping that needs no kernel: pairing context switches, hooked calls, GPU samples. |
 | `perfr-gpu` | The NVIDIA telemetry helper, a separate process (see Distributing). |
 

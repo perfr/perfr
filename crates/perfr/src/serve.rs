@@ -4217,6 +4217,21 @@ pub fn run_on(
         Ok((bundle.to_zip().map_err(|e| e.to_string())?, bundle.to_stream()))
     }));
 
+    // What changed between a capture someone sends and this one. Read
+    // from a snapshot, as an export is: a capture that is running is
+    // compared as far as it has got.
+    let diff_bundle = bundle_for.clone();
+    service.set_capture_diff(Arc::new(move |bytes, request| {
+        let other = perfr_capture::CaptureBundle::from_zip(&bytes).map_err(|e| format!("not a capture: {e}"))?;
+        let name = if request.name.is_empty() { "baseline" } else { request.name.as_str() };
+        let other = crate::diff::input_of(name, other);
+        let current = crate::diff::input_of("this capture", diff_bundle(None));
+        let options = crate::diff::options(&request.per, request.confidence, request.threshold, request.min_share)?;
+        let (base, new) = if request.current == "base" { (current, other) } else { (other, current) };
+        let diff = perfr_diff::diff(&[base], &[new], &options)?;
+        serde_json::to_string(&diff).map_err(|e| e.to_string())
+    }));
+
     let export_bundle = bundle_for;
     service.set_capture_export(Arc::new(move |format, window| {
         // The ring, with each scope's name resolved from the intern table, as

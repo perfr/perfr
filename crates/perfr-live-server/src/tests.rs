@@ -958,6 +958,46 @@ fn opening_a_path_that_is_not_a_regular_file_is_refused_before_anything_reads_it
 }
 
 #[test]
+fn a_comparison_is_asked_with_a_capture_in_the_body_and_how_in_the_query() {
+    let (svc, served) = serve_small();
+    let (status, text) = send_json(&served, "POST", "/api/diff", "zip");
+    assert_eq!(status, 501, "{text}");
+
+    let asked = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<(Vec<u8>, crate::DiffRequest)>::new()));
+    let seen = asked.clone();
+    svc.set_capture_diff(std::sync::Arc::new(move |bytes, request| {
+        if bytes == b"not a capture" {
+            return Err("not a capture: no zip".to_string());
+        }
+        seen.lock().push((bytes, request.clone()));
+        Ok(r#"{"outcome":{}}"#.to_string())
+    }));
+    let query = "name=before.perfr.zip&per=frame&confidence=0.99&threshold=2.5&current=base";
+    let (status, text) = send_json(&served, "POST", &format!("/api/diff?{query}"), "PK-bytes");
+    assert_eq!((status, text.as_str()), (200, r#"{"outcome":{}}"#));
+    let wanted = crate::DiffRequest {
+        name: "before.perfr.zip".to_string(),
+        per: "frame".to_string(),
+        confidence: Some(0.99),
+        threshold: Some(2.5),
+        min_share: None,
+        current: "base".to_string(),
+    };
+    assert_eq!(asked.lock()[0], (b"PK-bytes".to_vec(), wanted));
+    // Nothing in the query is every default.
+    assert_eq!(send_json(&served, "POST", "/api/diff", "x").0, 200);
+    assert_eq!(asked.lock()[1].1, crate::DiffRequest::default());
+
+    // What the comparison refuses is the caller's mistake, and so is a
+    // query that is not one: that one never reaches it.
+    let (status, text) = send_json(&served, "POST", "/api/diff", "not a capture");
+    assert_eq!((status, text.as_str()), (400, "not a capture: no zip"));
+    assert_eq!(send_json(&served, "POST", "/api/diff?confidence=high", "x").0, 400);
+    assert_eq!(asked.lock().len(), 2);
+    assert_eq!(get(&served, "/api/diff").0, 405);
+}
+
+#[test]
 fn a_capture_file_over_the_import_limit_is_refused_by_its_size() {
     let dir = std::env::temp_dir().join(format!("perfr-open-size-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

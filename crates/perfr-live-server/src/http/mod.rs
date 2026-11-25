@@ -107,6 +107,7 @@ pub fn router(service: Arc<LiveService>) -> Router {
             "/api/capture/import",
             post(capture_import).layer(axum::extract::DefaultBodyLimit::max(IMPORT_BODY_LIMIT)),
         )
+        .route("/api/diff", post(capture_diff).layer(axum::extract::DefaultBodyLimit::max(IMPORT_BODY_LIMIT)))
         .route("/{*path}", get(static_asset))
         // In front of every route, the WebSocket upgrades included: there
         // is no authentication behind this, so who may call is decided
@@ -773,6 +774,27 @@ async fn capture_open(State(svc): State<Arc<LiveService>>, Json(body): Json<Open
             let status = if error.starts_with("busy") { StatusCode::CONFLICT } else { StatusCode::BAD_REQUEST };
             (status, error).into_response()
         }
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+/// `POST /api/diff` with a `.perfr.zip` body: what changed between that
+/// capture and the one the service holds, as JSON. The query says how
+/// ([`crate::DiffRequest`]). 501 when the service cannot, 400 when the
+/// body is not a capture or there is nothing to compare. The service's
+/// capture is left as it is, and may be running.
+async fn capture_diff(
+    State(svc): State<Arc<LiveService>>,
+    Query(request): Query<crate::DiffRequest>,
+    body: Bytes,
+) -> Response {
+    let hook = svc.capture_diff.lock().clone();
+    let Some(diff) = hook else {
+        return (StatusCode::NOT_IMPLEMENTED, "this service does not compare captures").into_response();
+    };
+    match tokio::task::spawn_blocking(move || diff(body.to_vec(), &request)).await {
+        Ok(Ok(json)) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
 }

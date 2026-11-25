@@ -2917,6 +2917,7 @@ dependencies = [
  "perfr-api",
  "perfr-build-info",
  "perfr-capture",
+ "perfr-diff",
  "perfr-etw",
  "perfr-frida-transport",
  "perfr-live-event",
@@ -2984,6 +2985,14 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "perfr-diff"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

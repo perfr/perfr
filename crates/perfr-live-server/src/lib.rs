@@ -161,6 +161,27 @@ pub struct ControlHooks {
     pub example_disassembly_json: std::sync::Arc<dyn Fn() -> Result<String, String> + Send + Sync>,
 }
 
+/// What `POST /api/diff` is asked beside the capture in its body: the
+/// query of the request. Everything left out is the comparison's default.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct DiffRequest {
+    /// What the capture in the body is called in the answer: its file name.
+    pub name: String,
+    /// What time is counted against: `sample`, `second`, `capture` or the
+    /// name of a scope or frame series.
+    pub per: String,
+    /// Of the intervals, as a fraction.
+    pub confidence: Option<f64>,
+    /// The change a verdict needs, in percent.
+    pub threshold: Option<f64>,
+    /// The share of a capture a row needs to be tested, in percent.
+    pub min_share: Option<f64>,
+    /// Which side the service's own capture is: `new` (the default: the
+    /// body is what it is judged against) or `base`.
+    pub current: String,
+}
+
 pub struct LiveService {
     pub config: Mutex<ServerConfig>,
     pub ring: Mutex<SharedRing>,
@@ -272,6 +293,12 @@ pub struct LiveService {
     /// store. The ring, names and viewers are the server's own business.
     #[allow(clippy::type_complexity)]
     pub capture_clear: Mutex<Option<std::sync::Arc<dyn Fn() -> Result<(), String> + Send + Sync>>>,
+    /// Optional: compares a capture given as `.perfr.zip` bytes with the
+    /// one the service holds, and answers with the comparison as JSON. Set
+    /// by the service, which owns the decoder and the statistics.
+    #[allow(clippy::type_complexity)]
+    pub capture_diff:
+        Mutex<Option<std::sync::Arc<dyn Fn(Vec<u8>, &DiffRequest) -> Result<String, String> + Send + Sync>>>,
     /// Optional: opens a bundle from a path on the service's machine,
     /// whole or cut to a window by the file's own row-group statistics.
     #[allow(clippy::type_complexity)]
@@ -509,6 +536,7 @@ impl LiveService {
             capture_share_export: Mutex::new(None),
             capture_import: Mutex::new(None),
             capture_open: Mutex::new(None),
+            capture_diff: Mutex::new(None),
             capture_clear: Mutex::new(None),
             agent_scope: Mutex::new(None),
             viewer_log: Mutex::new(None),
@@ -693,6 +721,13 @@ impl LiveService {
         open: std::sync::Arc<dyn Fn(&str, Option<(u64, u64)>) -> Result<String, String> + Send + Sync>,
     ) {
         *self.capture_open.lock() = Some(open);
+    }
+
+    pub fn set_capture_diff(
+        &self,
+        diff: std::sync::Arc<dyn Fn(Vec<u8>, &DiffRequest) -> Result<String, String> + Send + Sync>,
+    ) {
+        *self.capture_diff.lock() = Some(diff);
     }
 
     pub fn set_capture_import(

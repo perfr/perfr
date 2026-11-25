@@ -543,6 +543,21 @@ fn forget_previous_capture(service: &LiveService) {
     service.set_instrumentation_status("");
 }
 
+/// The processes a capture of `pid` and `also_pids` is of, `pid` first and
+/// each of them once: none when it has no target, whatever else was named.
+pub(crate) fn capture_targets(pid: i32, also_pids: &[i32]) -> Vec<u32> {
+    let mut targets: Vec<u32> = Vec::new();
+    if pid <= 0 {
+        return targets;
+    }
+    for pid in std::iter::once(pid).chain(also_pids.iter().copied()) {
+        if pid > 0 && !targets.contains(&(pid as u32)) {
+            targets.push(pid as u32);
+        }
+    }
+    targets
+}
+
 /// The index loaded for `pid`, if there is one, and the load's status word.
 ///
 /// Handed out as a clone so the caller works on it with the lock released: a
@@ -2490,13 +2505,8 @@ fn capture_loop(
     // functions are hooked, and the one the hook engines, auto-profiling
     // and the GPU helper are told; all of them are sampled, and so is what
     // they launch.
-    let mut targets: Vec<i32> = Vec::new();
-    for pid in std::iter::once(target_pid).chain(also_pids) {
-        if has_target && pid > 0 && !targets.contains(&pid) {
-            targets.push(pid);
-        }
-    }
-    let target_ids: Vec<u32> = targets.iter().map(|pid| *pid as u32).collect();
+    let target_ids = capture_targets(target_pid, &also_pids);
+    let targets: Vec<i32> = target_ids.iter().map(|pid| *pid as i32).collect();
     service.set_capture_targets(&target_ids);
     // The scope reader and epoch were established before Frida attachment.
     service.mark_capture_started(target_pid.max(0) as u32, capture_start_ns);
@@ -4365,6 +4375,10 @@ pub fn run_on(
             // showing it.
             forget_previous_capture(&start_service);
             start_pid.store(pid, Ordering::SeqCst);
+            // Said here and not left to the capture's thread: the status
+            // is asked for as soon as this returns, and until the thread
+            // had run it named the first process alone.
+            start_service.set_capture_targets(&capture_targets(pid, &request.also_pids));
             // Whatever the viewer ticked in the hook picker. The picker only
             // offers functions once symbols are ready, so an index is there
             // whenever the list is non-empty.
@@ -5742,6 +5756,12 @@ mod tests {
         assert_eq!(several(r#"{"pids":[9]}"#), (9, vec![]));
         assert_eq!(several(r#"{"pid":7,"pids":[0,-4,"9",4294967296,8]}"#), (7, vec![8]));
         assert_eq!(several(r#"{"pid":7,"pids":9}"#), (7, vec![]));
+        // What the status names from the moment the start is accepted:
+        // the target first, each process once, and nothing without one.
+        assert_eq!(capture_targets(7, &[9, 7, 9, -3, 0, 11]), [7, 9, 11]);
+        assert_eq!(capture_targets(7, &[]), [7]);
+        assert_eq!(capture_targets(0, &[9]), Vec::<u32>::new());
+        assert_eq!(capture_targets(-1, &[9]), Vec::<u32>::new());
         assert!(!StartRequest::parse(r#"{"pid":7,"sample_children":false}"#).sample_children);
         assert!(StartRequest::parse(r#"{"pid":7,"sample_children":0}"#).sample_children);
         // What an older viewer sends, and what is not a request at all.

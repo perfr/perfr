@@ -264,8 +264,7 @@ pub fn capture_loop(
         }
     }
     let mut last_alive_check_ns: u64 = 0;
-    let targets: Vec<u32> =
-        std::iter::once(target_pid).chain(also_pids).filter(|pid| has_target && *pid > 0).map(|pid| pid as u32).collect();
+    let targets = crate::serve::capture_targets(target_pid, &also_pids);
     service.set_capture_targets(&targets);
     let mut visible = VisibleProcesses::new(&targets, show_all_processes);
     visible.add_instrumented(std::process::id());

@@ -224,7 +224,8 @@ opens on first load with a service and closes with its ×. Its rows:
   `function (file.py:line)` with its source file as the module, in the Flat
   report, the trees, the flame graph, a sample's callstack and the saved
   capture; the interpreter's frames between one Python function and the
-  next are left out and what runs under the innermost one is kept. The
+  next are left out and what runs under the innermost one is kept. In the
+  Flat report and the trees a small `py` follows its name. The
   threads take the names Python gives them, and once the GIL has changed
   hands a **GIL** row of the process shows who held it. What a merged stack
   can claim, the limits and the measured cost (Linux only) are in

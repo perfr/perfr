@@ -246,7 +246,7 @@ mod tests {
             threads: vec![ThreadName { pid: 7, tid: 70, name: "a".into() }, ThreadName { pid: 7, tid: 71, name: "b".into() }],
             events,
             samples,
-            frames: (0..3).map(|i| FrameRow { id: i, name: format!("f{i}"), module: "m".into(), address: i as u64 }).collect(),
+            frames: (0..3).map(|i| FrameRow { id: i, name: format!("f{i}"), module: "m".into(), address: i as u64, language: 0 }).collect(),
             track_order: "[@7]\n@71\n@70\n".into(),
             cores: vec![perfr_live_event::CoreInfo { cpu: 0, kind: perfr_live_event::core_kind::PERFORMANCE, max_freq_khz: 5_800_000, l3_kb: 36_864 }],
             topology: Vec::new(),

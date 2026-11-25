@@ -156,6 +156,8 @@ pub struct FrameRow {
     pub name: String,
     pub module: String,
     pub address: u64,
+    /// What the frame is a function of (`perfr_live_event::language`).
+    pub language: u8,
 }
 
 // ---------------------------------------------------------------- events ---
@@ -489,6 +491,10 @@ pub fn frames_schema() -> Schema {
         Field::new("name", DataType::Utf8, false),
         Field::new("module", DataType::Utf8, false),
         Field::new("address", DataType::UInt64, false),
+        // The last column, and one a file written before there was one
+        // does not have: a reader takes the first four by their place and
+        // this one when it is there.
+        Field::new("language", DataType::UInt8, false),
     ])
 }
 
@@ -497,6 +503,7 @@ fn frames_batch(schema: &Arc<Schema>, frames: &[FrameRow]) -> Result<RecordBatch
     let name = StringArray::from(frames.iter().map(|f| f.name.as_str()).collect::<Vec<_>>());
     let module = StringArray::from(frames.iter().map(|f| f.module.as_str()).collect::<Vec<_>>());
     let address: UInt64Array = frames.iter().map(|f| f.address).collect();
+    let language: UInt8Array = frames.iter().map(|f| f.language).collect();
     RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -504,6 +511,7 @@ fn frames_batch(schema: &Arc<Schema>, frames: &[FrameRow]) -> Result<RecordBatch
             Arc::new(name),
             Arc::new(module),
             Arc::new(address),
+            Arc::new(language),
         ],
     )
 }
@@ -524,12 +532,16 @@ fn frame_rows_from_batch(batch: &RecordBatch, out: &mut Vec<FrameRow>) -> Result
     let name: &StringArray = column(batch, 1, "utf8")?;
     let module: &StringArray = column(batch, 2, "utf8")?;
     let address: &UInt64Array = column(batch, 3, "u64")?;
+    // A capture saved before frames said their language has four columns,
+    // and every frame of it is native code as far as anyone recorded.
+    let language: Option<&UInt8Array> = if batch.num_columns() > 4 { Some(column(batch, 4, "u8")?) } else { None };
     for r in 0..batch.num_rows() {
         out.push(FrameRow {
             id: id.value(r),
             name: name.value(r).to_string(),
             module: module.value(r).to_string(),
             address: address.value(r),
+            language: language.map_or(perfr_live_event::language::NATIVE, |column| column.value(r)),
         });
     }
     Ok(())
@@ -864,7 +876,7 @@ mod tests {
         // Delta encoding on the timestamps: well under 8 bytes a row.
         assert!(buf.len() < samples.len() * 6, "{} bytes for {} samples", buf.len(), samples.len());
         let frames: Vec<FrameRow> = (0..1000u32)
-            .map(|i| FrameRow { id: i, name: format!("fn{i}"), module: "libgame.so".into(), address: 0x1000 + u64::from(i) * 16 })
+            .map(|i| FrameRow { id: i, name: format!("fn{i}"), module: "libgame.so".into(), address: 0x1000 + u64::from(i) * 16, language: 0 })
             .collect();
         let mut buf = Vec::new();
         write_frames_parquet(&mut buf, &frames).unwrap();
@@ -918,13 +930,52 @@ mod tests {
     #[test]
     fn frames_round_trip() {
         let frames = vec![
-            FrameRow { id: 1, name: "main".into(), module: "app".into(), address: 0x1000 },
-            FrameRow { id: 2, name: "".into(), module: "".into(), address: 0 },
+            FrameRow { id: 1, name: "main".into(), module: "app".into(), address: 0x1000, language: 0 },
+            FrameRow { id: 2, name: "".into(), module: "".into(), address: 0, language: 0 },
         ];
         let mut buf = Vec::new();
         write_frames_ipc(std::io::Cursor::new(&mut buf), &frames).unwrap();
         let back = read_frames_ipc(std::io::Cursor::new(buf)).unwrap();
         assert_eq!(back, frames);
+    }
+
+    #[test]
+    fn a_frame_keeps_its_language_in_a_file_and_a_file_without_the_column_is_native_code() {
+        use perfr_live_event::language::{NATIVE, PYTHON};
+        let frames = vec![
+            FrameRow { id: 1, name: "main".into(), module: "app".into(), address: 0x1000, language: NATIVE },
+            FrameRow { id: 2, name: "step (train.py:12)".into(), module: "train.py".into(), address: 0, language: PYTHON },
+        ];
+        let mut ipc = Vec::new();
+        write_frames_ipc(std::io::Cursor::new(&mut ipc), &frames).unwrap();
+        assert_eq!(read_frames_ipc(std::io::Cursor::new(ipc)).unwrap(), frames);
+        let mut parquet = Vec::new();
+        write_frames_parquet(&mut parquet, &frames).unwrap();
+        assert_eq!(read_frames_parquet(bytes::Bytes::from(parquet)).unwrap(), frames);
+
+        // The table as it was written before frames said their language:
+        // the same first four columns, and no fifth.
+        let old = Arc::new(Schema::new(frames_schema().fields()[..4].to_vec()));
+        let batch = RecordBatch::try_new(
+            old.clone(),
+            vec![
+                Arc::new(UInt32Array::from(vec![7u32])) as Arc<dyn Array>,
+                Arc::new(StringArray::from(vec!["old"])),
+                Arc::new(StringArray::from(vec!["lib"])),
+                Arc::new(UInt64Array::from(vec![9u64])),
+            ],
+        )
+        .unwrap();
+        let mut file = Vec::new();
+        {
+            let mut writer = FileWriter::try_new(std::io::Cursor::new(&mut file), &old).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        assert_eq!(
+            read_frames_ipc(std::io::Cursor::new(file)).unwrap(),
+            [FrameRow { id: 7, name: "old".into(), module: "lib".into(), address: 9, language: NATIVE }]
+        );
     }
 
     #[test]
@@ -934,8 +985,8 @@ mod tests {
         let events = many(CHUNK_ROWS + 3);
         let samples = vec![SampleRow { timestamp_ns: 5, tid: 1, frames: vec![2, 1] }];
         let frames = vec![
-            FrameRow { id: 1, name: "main".into(), module: "app".into(), address: 1 },
-            FrameRow { id: 2, name: "work".into(), module: "app".into(), address: 2 },
+            FrameRow { id: 1, name: "main".into(), module: "app".into(), address: 1, language: 0 },
+            FrameRow { id: 2, name: "work".into(), module: "app".into(), address: 2, language: 0 },
         ];
         let written = write_dataset(&dir, &events, names, &samples, &frames).unwrap();
         assert_eq!(written.events, events.len() as u64);

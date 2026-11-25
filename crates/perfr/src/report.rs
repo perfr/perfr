@@ -69,6 +69,9 @@ pub struct FrameInfo {
     /// The function index's id for the function, so the row can be hooked
     /// from the report; 0 when unknown (vDSO, an imported capture).
     pub function_id: u64,
+    /// What the frame is a function of (`perfr_live_event::language`): a
+    /// report says so for a row that is not native code.
+    pub language: u8,
 }
 
 /// One captured stack, kept for later aggregation. Frames are innermost
@@ -336,6 +339,9 @@ struct FunctionRow<'a> {
     function_id: u64,
     inclusive: u64,
     inclusive_percent: f64,
+    /// Left out for native code, which is what a row is unless it says.
+    #[serde(skip_serializing_if = "str::is_empty")]
+    language: &'static str,
     module: &'a str,
     name: std::borrow::Cow<'a, str>,
     #[serde(rename = "self")]
@@ -571,6 +577,7 @@ impl SampleStore {
                     function_id: info.map(|f| f.function_id).unwrap_or(0),
                     inclusive: *inclusive,
                     inclusive_percent: percent(*inclusive),
+                    language: perfr_live_event::language::name(info.map(|f| f.language).unwrap_or(0)),
                     module: info.map(|f| f.module.as_str()).unwrap_or(""),
                     name: match info {
                         Some(f) => f.name.as_str().into(),
@@ -985,6 +992,12 @@ fn write_children(
         );
         write_kv_u64(out, "address", info.map(|f| f.address).unwrap_or(0));
         write_kv_u64(out, "function_id", info.map(|f| f.function_id).unwrap_or(0));
+        let language = perfr_live_event::language::name(info.map(|f| f.language).unwrap_or(0));
+        if !language.is_empty() {
+            out.push_str(",\"language\":\"");
+            out.push_str(language);
+            out.push('"');
+        }
         write_kv_u64(out, "inclusive", child.sample_count);
         write_kv_u64(out, "exclusive", child.exclusive_count);
         write_kv_f64(out, "inclusive_percent", percent_of(child.sample_count, total));
@@ -1093,7 +1106,7 @@ mod tests {
         // the text back into one and printing that must give the same bytes:
         // same key order, same number and string forms as before.
         let store = store();
-        store.record_frame(9, FrameInfo { name: "quote\"and\\slash \u{e9}".into(), module: "/lib/x.so".into(), address: 16, function_id: 77 });
+        store.record_frame(9, FrameInfo { name: "quote\"and\\slash \u{e9}".into(), module: "/lib/x.so".into(), address: 16, function_id: 77, language: 0 });
         store.push(StoredSample { timestamp_ns: 500, tid: 8, frames: vec![9, 44, 1] });
         for _ in 0..2 {
             store.push(StoredSample { timestamp_ns: 600, tid: 8, frames: vec![] });
@@ -1118,6 +1131,44 @@ mod tests {
         let quoted = all["functions"].as_array().unwrap().iter().find(|f| f["function_id"] == 77).unwrap();
         assert_eq!(quoted["name"], "quote\"and\\slash \u{e9}");
         assert_eq!(quoted["self"], 1);
+    }
+
+    #[test]
+    fn a_row_that_is_not_native_code_says_its_language_and_a_native_one_says_nothing() {
+        let store = store();
+        store.record_frame(
+            9,
+            FrameInfo {
+                name: "step (train.py:12)".into(),
+                module: "train.py".into(),
+                language: perfr_live_event::language::PYTHON,
+                ..FrameInfo::default()
+            },
+        );
+        store.push(StoredSample { timestamp_ns: 500, tid: 7, frames: vec![9, 1] });
+        let text = store.report_json(0, u64::MAX);
+        let report: serde_json::Value = serde_json::from_str(&text).unwrap();
+        // Still the bytes `serde_json` would write for the same value.
+        assert_eq!(text, report.to_string());
+        let rows = report["functions"].as_array().unwrap();
+        let row = |name: &str| rows.iter().find(|row| row["name"] == name).unwrap_or_else(|| panic!("{name} in {text}"));
+        assert_eq!(row("step (train.py:12)")["language"], "python");
+        assert_eq!(row("step (train.py:12)")["module"], "train.py");
+        for native in ["main", "work", "inner", "other"] {
+            assert!(row(native).get("language").is_none(), "{native}: {}", row(native));
+        }
+
+        // The trees say it of the same frame, wherever it is in them.
+        fn find<'a>(nodes: &'a serde_json::Value, name: &str) -> Option<&'a serde_json::Value> {
+            nodes.as_array()?.iter().find_map(|node| if node["name"] == name { Some(node) } else { find(&node["children"], name) })
+        }
+        for mode in [TreeMode::TopDown, TreeMode::BottomUp] {
+            let tree: serde_json::Value = serde_json::from_str(&store.tree_json(0, u64::MAX, mode)).unwrap();
+            let step = find(&tree["roots"], "step (train.py:12)").unwrap_or_else(|| panic!("{tree}"));
+            assert_eq!(step["language"], "python", "{step}");
+            let main = find(&tree["roots"], "main").unwrap_or_else(|| panic!("{tree}"));
+            assert!(main.get("language").is_none(), "{main}");
+        }
     }
 
     #[test]
@@ -1230,7 +1281,7 @@ mod tests {
         for (id, name) in [(1u32, "main"), (2, "work"), (3, "inner"), (4, "other")] {
             store.record_frame(
                 id,
-                FrameInfo { name: name.to_string(), module: "app".into(), address: 0x1000 + id as u64, function_id: 0 },
+                FrameInfo { name: name.to_string(), module: "app".into(), address: 0x1000 + id as u64, function_id: 0, language: 0 },
             );
         }
         store.push(StoredSample { timestamp_ns: 10, tid: 7, frames: vec![3, 2, 1] });

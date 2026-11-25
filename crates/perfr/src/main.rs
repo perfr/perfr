@@ -726,6 +726,7 @@ fn capture_file_linux(args: Args) {
                 name: String::new(),
                 module: String::new(),
                 address: *pc,
+                language: perfr_live_event::language::NATIVE,
             })
             .collect();
         frames.sort_by_key(|f| f.id);

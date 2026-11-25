@@ -213,6 +213,8 @@ pub struct ResolvedFrame {
     pub module: String,
     pub address: u64,
     pub function_id: u64,
+    /// What the frame is a function of (`perfr_live_event::language`).
+    pub language: u8,
 }
 
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
@@ -467,6 +469,7 @@ impl Symbolizer {
             module: module.map(|m| m.name.clone()).unwrap_or_default(),
             address,
             function_id: module.map(|m| m.function_id_at(address)).unwrap_or(0),
+            language: perfr_live_event::language::NATIVE,
         }
     }
 

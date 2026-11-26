@@ -147,7 +147,7 @@ if [[ "$SERVE" -eq 1 && "${#SUDO[@]}" -eq 0 ]]; then
 fi
 
 if [[ "$SERVE" -eq 0 ]]; then
-  exec "${SUDO[@]}" "$BIN" "${PASSTHROUGH[@]}"
+  exec ${SUDO[@]+"${SUDO[@]}"} "$BIN" ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
 fi
 
 cat <<BANNER
@@ -160,4 +160,4 @@ cat <<BANNER
 
 BANNER
 
-exec "${SUDO[@]}" "$BIN" --serve "$HTTP_PORT" "${PASSTHROUGH[@]}"
+exec ${SUDO[@]+"${SUDO[@]}"} "$BIN" --serve "$HTTP_PORT" ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
